@@ -64,22 +64,22 @@ Both upstreams are mirrored locally as siblings of this project folder. Study th
 
 The live deployment configurations for both personas are also on this system and are **required reading alongside the upstream code** — they show how the operator hardens each platform in practice:
 
-| Deployment | Location | What to study |
-|---|---|---|
-| **HobiBot** (OpenClaw) | `~/Development/HomeLab/Systems/hobibot` | Vault AppRole secret delivery, Docker userns-remap, auditd, fail2ban — the hardening overlay Maknae must make native |
-| **TaeBot** (Hermes) | `~/Development/HomeLab/Systems/taebot` | Same hardening pattern applied to a learning-loop platform; where the overlay strains against Hermes' architecture is exactly where Maknae's kernel must differ |
+| Deployment | Repo | Local | What to study |
+|---|---|---|---|
+| **HobiBot** (OpenClaw) | https://gitlab.com/private-gitlab/hobibot | `~/Development/HomeLab/Systems/hobibot` | Vault AppRole secret delivery, Docker userns-remap, auditd, fail2ban — the hardening overlay Maknae must make native |
+| **TaeBot** (Hermes) | https://gitlab.com/private-gitlab/taebot | `~/Development/HomeLab/Systems/taebot` | Same hardening pattern applied to a learning-loop platform; where the overlay strains against Hermes' architecture is exactly where Maknae's kernel must differ |
 
 ### 5.2 Operator projects — integration and pattern sources
 
-| Project | Location | What it is | What Maknae takes from it |
-|---|---|---|---|
-| **Knowledge Lake** | `~/knowledgebase` | Authority-tiered, deterministic markdown retrieval platform (anti-RAG, progressive disclosure, git-distributed, FIPS 140-3, portable architecture). Four-tier authority hierarchy, YAML frontmatter provenance, brain/organ/soul → PDP/PIP/authority.yaml model. | Maknae's lake IS a portable instance of this architecture, self-populated by the agent. Maknae's authority basis derives from the Lake's ADR-0004 authority-line model (domains/bands/natures, derived-only issuer registry, typed precedence edges — the #201 build-out); Maknae's lifecycle tiers are an orthogonal axis (KLC §7). The Tier 0/1/2 router pattern applies to retrieval. |
-| **Claude Memory** | `~/claude-memory` | The operator's own shared memory system (not a vendor product), with Lamis Mukta-style out-of-band "dreaming" consolidation. | Maknae's memory IS this system, wrapped in an LLM-efficient read path (bounded working set, FTS-style recall) — somewhere between Hermes' four-layer model and the operator's design. Trust model stays the operator's. |
-| **Security MCP Server** | `~/Development/MCP/security-mcp-server` | Security tooling exposed over MCP (Mozilla Observatory integration planned). | Runtime-plane integration (PIP); also informs kernel policy telemetry. Its live OAuth 2.1 + PKCE gateway with four-dimensional ABAC gating is prior art for the kernel's PDP. |
-| **STIG Remediation Loop** | `~/Development/stig-remediation-loop` | Compliance-ready loop design informed by HuaShu's Orange Book (loop engineering guide) and the operator's GitLab issue standards. | Directly feeds the gated learning loop and skill promotion criteria (contract §9); the compliance-automation skill domain Maknae will learn. |
-| **Microkosmos** | `~/Development/Containers/microkosmos` | FIPS 140-3 Rust webserver (`aws-lc-rs`, GET-only, NIST 800-53 aligned, hardened). | The Rust-perimeter precedent and FIPS story for the trust plane; likely serves maknae.io. |
-| **Microkosmos Test Sites** | `~/Development/MPE-ES/Capabilities/microkosmos-test-sites` | Test site content and deployment configurations for Microkosmos. | Hardened static-serving and deployment validation patterns; candidate harness for Maknae's web UI hosting. |
-| **VM HomeLab** | `~/Development/Containers/vmhomelab` | Microkosmos test site — VM/container homelab deployment environment. | Deployment-target realism: the container/VM patterns Maknae must install cleanly into. |
+| Project | Repo | Local | What it is | What Maknae takes from it |
+|---|---|---|---|---|
+| **Knowledge Lake** | https://github.com/mpe-es/knowledgebase | `~/knowledgebase` | Authority-tiered, deterministic markdown retrieval platform (anti-RAG, progressive disclosure, git-distributed, FIPS 140-3, portable architecture). Four-tier authority hierarchy, YAML frontmatter provenance, brain/organ/soul → PDP/PIP/authority.yaml model. | Maknae's lake IS a portable instance of this architecture, self-populated by the agent. Maknae's authority basis derives from the Lake's ADR-0004 authority-line model (domains/bands/natures, derived-only issuer registry, typed precedence edges — the #201 build-out); Maknae's lifecycle tiers are an orthogonal axis (KLC §7). The Tier 0/1/2 router pattern applies to retrieval. |
+| **Claude Memory** | https://github.com/darkhonor/claude-memory | `~/claude-memory` | The operator's own shared memory system (not a vendor product), with Lamis Mukta-style out-of-band "dreaming" consolidation. | Maknae's memory IS this system, wrapped in an LLM-efficient read path (bounded working set, FTS-style recall) — somewhere between Hermes' four-layer model and the operator's design. Trust model stays the operator's. |
+| **Security MCP Server** | https://gitlab.com/private-gitlab/security-mcp-server | `~/Development/MCP/security-mcp-server` | Security tooling exposed over MCP (Mozilla Observatory integration planned). | Runtime-plane integration (PIP); also informs kernel policy telemetry. Its live OAuth 2.1 + PKCE gateway with four-dimensional ABAC gating is prior art for the kernel's PDP. |
+| **STIG Remediation Loop** | https://github.com/darkhonor/stig-remediation-loop | `~/Development/stig-remediation-loop` | Compliance-ready loop design informed by HuaShu's Orange Book (loop engineering guide) and the operator's GitLab issue standards. | Directly feeds the gated learning loop and skill promotion criteria (contract §9); the compliance-automation skill domain Maknae will learn. |
+| **Microkosmos** | https://github.com/mpe-es/microkosmos | `~/Development/Containers/microkosmos` | FIPS 140-3 Rust webserver (`aws-lc-rs`, GET-only, NIST 800-53 aligned, hardened). | The Rust-perimeter precedent and FIPS story for the trust plane; likely serves maknae.io. |
+| **Microkosmos Test Sites** | https://gitlab.com/mpe-es-c3a-lab/microkosmos-test-sites | `~/Development/MPE-ES/Capabilities/microkosmos-test-sites` | Test site content and deployment configurations for Microkosmos. | Hardened static-serving and deployment validation patterns; candidate harness for Maknae's web UI hosting. |
+| **VM HomeLab** | https://github.com/darkhonor/vmhomelab | `~/Development/Containers/vmhomelab` | Microkosmos test site — VM/container homelab deployment environment. | Deployment-target realism: the container/VM patterns Maknae must install cleanly into. |
 
 The HobiBot and TaeBot deployment configurations (§5.1) embody the hardening patterns to preserve; the upstream mirrors are the code to study — including what NOT to inherit.
 
