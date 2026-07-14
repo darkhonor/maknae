@@ -71,7 +71,7 @@ id: doc-2026-0714-a3f9         # stable unique id
 type: document                 # document | skill | memory
 tier: 3                        # current lifecycle tier (integer)
 tier_ceiling: 1                # max tier this object may ever reach — derived: ceiling projection over (band, nature), §7.2
-classification: unclass        # DCS sensitivity label; vocabulary set by deployment
+classification: unclass        # DCS sensitivity label — a point in the deployment-declared lattice (§6 notes)
 handling: []                   # caveats, e.g. [no-egress, operator-only]
 provenance:
   source: https://access.redhat.com/documentation/...
@@ -98,6 +98,7 @@ Notes:
 - Skills additionally carry an execution manifest (declared capabilities, sandbox requirements). Skill signing is mandatory at Tier 1 and above; unsigned skills cannot execute regardless of tier.
 - Memories additionally carry `subject` scoping (which persona/operator the memory concerns) so cross-persona leakage is a policy decision, not an accident.
 - **Operators are the security subjects; personas are presentation.** Every interaction resolves to an authenticated operator (caller) carrying an operator-owner-assigned attribute set — e.g., level, communities/releasability, role — and every hook decision evaluates resource labels against those attributes, ABAC-style. One agent instance serves multiple operators with different entitlements: retrieval (hook B), skill execution (hook F), and outputs (hook E) are all filtered per subject. Autonomous work follows the same model — scheduler and dreaming tasks run under scoped task identities, which are just subjects with (narrow) attribute sets. **Recurring task definitions carry DCS labels at creation, bounded by the creating operator's attributes** — no escalation via scheduling — and endpoint eligibility is re-evaluated at fire time against current registrations and attributes, failing closed on drift. Unattended work can never route to a model its labels do not permit; data sovereignty holds when nobody is watching. Prior art: the Security MCP server's four-dimensional ABAC gate; sibling effort: knowledgebase #284 (identity-aware DCS retrieval filtering).
+- **Classification labels form a lattice with full Bell-LaPadula enforcement.** The deployment declares its classification vocabulary as an ordered lattice: levels plus category sets (compartments, multinational releasability, e.g., REL AUS,KOR). The kernel enforces dominance: **no read up** (hook B — a subject retrieves only objects whose classification its clearance and categories dominate) and **no write down** (hooks C/E — a derived object classifies at the **high-water mark** of its inputs, and a task context assumes the high-water mark of everything retrieved into it; its outputs inherit that mark). Downgrade/sanitization is a signed act by an authorized subject — never automated. This is the mirror of §11.1: authority ceilings take the min of inputs, classification takes the max, and automation crosses neither line. A single-level deployment (e.g., a homelab) declares a trivial lattice and BLP degenerates to a no-op — the structure ships from birth, the ceremony appears only when the lattice is real.
 - **Model endpoints are labeled resources.** Every registered LLM endpoint carries operator-signed DCS labels (jurisdiction/nationality, sanctioning authority, handling ceiling). The driver model for any request is itself a DCS decision at hook E: subject attributes × endpoint labels × payload labels — e.g., an AUS operator routes only to AUS-native registered models, a KOR operator to NAVER/Kakao, a US DoD operator to DoD-sanctioned endpoints. **Roles grant administrative actions; they never widen data or endpoint access beyond the subject's attributes** (the Security MCP's "I'm an admin, but it doesn't matter" model).
 
 ## 7. Authority map
@@ -235,12 +236,15 @@ When no authorized source is reachable (air-gapped host, network denial, degrade
 - Sneakernet ingest follows the identical pipeline: imported bundles enter at Tier 3 with provenance pointing to the signed transfer manifest instead of a URL.
 - Lake replication between sites uses the git-distributed model; labels and signatures travel with the content, and receiving sites re-verify signatures before honoring tiers. A tier claim without a valid signature degrades to quarantine on import.
 
+The maximal composition of this section with §6 is the north-star deployment: a classified, multinational, air-gapped enclave — many partner operators as attribute-bearing subjects, a full Bell-LaPadula lattice with releasability categories, and every model endpoint local and accredited. Nothing about that deployment is a special mode; it is the same kernel with a richer lattice and a stricter map.
+
 ## 13. Security control mapping (informative)
 
 | Contract element | NIST SP 800-53 (rev 5) |
 |---|---|
 | Deny-by-default policy engine, capability whitelists | AC-3, AC-6, CM-7 |
 | DCS labels bound to data, handling enforcement | AC-16, SC-16 |
+| Bell-LaPadula dominance (no read up / no write down), automated-downgrade prohibition | AC-3(3), AC-4, AC-16(6) |
 | Egress control via authority map | SC-7, AC-4 |
 | Provenance, lineage, audit events at every transition | AU-2, AU-10, SR-4 |
 | Skill signing, signature verification on import | SI-7, CM-14 |
@@ -278,6 +282,8 @@ klc_invariants:
   - missing_required_labels_at_ingest: reject
   - object_authority_fields: derived_only      # nature/domain/band/ceiling from the basis, never author-supplied
   - precedence_outside_typed_edges: never
+  - derived_classification: high_water_mark_of_inputs
+  - classification_downgrade_by_automation: never
   - every_transition: audited
 ```
 

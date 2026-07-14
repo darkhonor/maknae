@@ -20,6 +20,8 @@ The platform's defining feature is a **governed learning loop**: the agent is pe
 
 Deployment targets: Raspberry Pi (arm64), x64 Linux, and macOS hosts. Container-first with an OS-install path. STIG-hardened baselines. Single-binary is *not* a requirement; small-and-auditable is.
 
+The north-star deployment: a classified, multinational, air-gapped enclave — partner operators as attribute-bearing subjects, a full Bell-LaPadula classification lattice with releasability categories, and every model endpoint local and accredited. Not a special mode: the same kernel with a richer lattice and a stricter map, which a homelab runs with a trivial lattice at zero ceremony (KLC §6, §12).
+
 ## 2. Origin story
 
 Maknae began as a survey project: fork-and-merge the best of two open-source agent platforms the operator runs in production —
