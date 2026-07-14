@@ -270,6 +270,8 @@ Kernel-owned, append-only (existing `audit-log` volume; state-store audit tables
 
 Scope discipline: MVP ships the schema, RLS, and signed-git label integrity; OpenTDF lands immediately after as the binding/wrapping layer for objects that leave the platform boundary (egress, replication, sneakernet bundles) and as the candidate at-rest format for restricted-category payloads. Open design questions — KAS placement (in-kernel vs. trust-plane sidecar), nanoTDF for small payloads, and how far TDF wrapping extends inside the boundary — are Phase B design work (§17), informed by the operator's OpenTDF/DSP operational experience.
 
+**The Rust SDK gap (verified 2026-07-15).** The OpenTDF spec repository (github.com/opentdf/spec) specifies Java, JavaScript, and Go client SDKs; a crates.io search returns no OpenTDF/ZTDF implementation. The containers that must wrap and unwrap — `kernel` and `egress-proxy` — are the two 100%-Rust trusted containers, and moving label binding into a non-trust-plane language to dodge the gap is not acceptable. Consequence: **Maknae expects to build a Rust TDF implementation alongside Phase B** (working name `maknae-tdf`), scoped to what the platform needs first (ZTDF manifest read/write against the published spec; nanoTDF as a fast-follow; FIPS via `aws-lc-rs`, consistent with the trust-plane crypto story), validated against the OpenTDF spec's conformance materials, and **built in the open as a candidate community Rust SDK** — an upstream contribution posture consistent with the platform's open-standards stance and DoD OSS policy. Vendoring OpenTDF's Go platform services (KAS et al.) as *services* remains fine — the gap is client/library-side, in the trust plane, where Rust is non-negotiable.
+
 ## 12. Testing and conformance
 
 **Conformance vectors are the single spine.** Language-neutral golden vectors (KLC §15 invariants + lattice dominance cases + releasability/handling/NOFORN cases), seeded by harvesting the MCP's ABAC and SPIF test suites — they encode adjudicated real-world semantics, not invented examples. Every surface that touches labels passes the *identical* vectors in CI:
@@ -289,7 +291,7 @@ If the kernel and the database ever disagree about who sees a row, CI fails befo
 | Phase | Scope |
 |---|---|
 | **A (MVP)** | Full schema present (§6.1); core lattice + handling + subject scoping enforced at all three layers; RLS live with generated policies; boot-time validation; certification gate warning loudly; conformance vectors in CI |
-| **B (MVP close / post-MVP)** | OpenTDF binding layer (§11); STANAG 4774 `confidentiality_labels` + 4778 binding tables activated; KAS placement decided; ACP 240 gap analysis once the document is in hand |
+| **B (MVP close / post-MVP)** | OpenTDF binding layer (§11), including the `maknae-tdf` Rust implementation build-alongside (no Rust SDK exists upstream — §11); STANAG 4774 `confidentiality_labels` + 4778 binding tables activated; KAS placement decided; ACP 240 gap analysis once the document is in hand |
 | **C** | Coalition apparatus fully exercised (JOINT/FGI/tetragraph workflows); certification workflow tooling; cross-instance labeled replication at MLS |
 
 Phasing mirrors the MCP's migration strategy: schema early on empty tables, apparatus activated when the consuming code exists.
@@ -359,6 +361,7 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 4. **Internal service-to-service credential format** — kernel-minted subject contexts need a concrete envelope (JWT with RFC 8707 audience binding vs. a bespoke signed structure); leans JWT for tooling reuse, decide at kernel-skeleton time.
 5. **Audit store ceiling** — does the audit table inherit the instance ceiling, or is a dedicated lower-ceiling audit-export path needed for cross-domain review? North-star question; defer past MVP but leave the schema room.
 6. **TDF wrapping scope inside the boundary** — egress/replication only, or also at-rest for restricted-category payloads? Phase B, informed by measured cost.
+7. **`maknae-tdf` v0 scope and upstream posture** — ZTDF manifest subset first or nanoTDF first; and whether to propose the crate to the OpenTDF organization early (visibility, shared maintenance, spec-conformance review) or incubate in-tree until the API stabilizes (the `maknae-dcs-core` two-step precedent, container-architecture §6).
 
 ## 18. Revision history
 
@@ -367,3 +370,4 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 | 0.1 | 2026-07-15 | Initial rough architecture from operator-guided design session: ABAC decomposition, state-store container, subject attribute model + identity architecture, full DCS schema port, three-layer enforcement, fail-closed doctrine, OpenTDF adoption, conformance spine |
 | 0.2 | 2026-07-15 | Companion references imported in-repo (`design/references/`): full DCS schema design and NATO DCRA/ACP 240 findings, for reviewers without Security MCP repo access; retention before public release is an open decision. §14 ACP 240 status updated |
 | 0.3 | 2026-07-15 | Third companion imported: the OAuth 2.1 13-RFC compliance matrix (`references/oauth-compliance.md`) — the RFC set §5 inherits, now reviewable in-repo |
+| 0.4 | 2026-07-15 | OpenTDF Rust SDK gap recorded (spec SDKs: Java/JS/Go; crates.io empty — verified): `maknae-tdf` build-alongside expected at Phase B with upstream-contribution posture; §13 Phase B and §17 Q7 updated |
