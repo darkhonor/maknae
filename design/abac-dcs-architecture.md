@@ -270,7 +270,15 @@ Kernel-owned, append-only (existing `audit-log` volume; state-store audit tables
 
 Scope discipline: MVP ships the schema, RLS, and signed-git label integrity; OpenTDF lands immediately after as the binding/wrapping layer for objects that leave the platform boundary (egress, replication, sneakernet bundles) and as the candidate at-rest format for restricted-category payloads. Open design questions — KAS placement (in-kernel vs. trust-plane sidecar), nanoTDF for small payloads, and how far TDF wrapping extends inside the boundary — are Phase B design work (§17), informed by the operator's OpenTDF/DSP operational experience.
 
-**The Rust SDK gap (verified 2026-07-15).** The OpenTDF spec repository (github.com/opentdf/spec) specifies Java, JavaScript, and Go client SDKs; a crates.io search returns no OpenTDF/ZTDF implementation. The containers that must wrap and unwrap — `kernel` and `egress-proxy` — are the two 100%-Rust trusted containers, and moving label binding into a non-trust-plane language to dodge the gap is not acceptable. Consequence: **Maknae expects to build a Rust TDF implementation alongside Phase B** (working name `maknae-tdf`), scoped to what the platform needs first (ZTDF manifest read/write against the published spec; nanoTDF as a fast-follow; FIPS via `aws-lc-rs`, consistent with the trust-plane crypto story), validated against the OpenTDF spec's conformance materials, and **built in the open as a candidate community Rust SDK** — an upstream contribution posture consistent with the platform's open-standards stance and DoD OSS policy. Vendoring OpenTDF's Go platform services (KAS et al.) as *services* remains fine — the gap is client/library-side, in the trust plane, where Rust is non-negotiable.
+**The Rust SDK gap (verified 2026-07-15).** The OpenTDF spec repository (github.com/opentdf/spec) specifies Java, JavaScript, and Go client SDKs; a crates.io search returns no OpenTDF/ZTDF implementation. The containers that must wrap and unwrap — `kernel` and `egress-proxy` — are the two 100%-Rust trusted containers, and moving label binding into a non-trust-plane language to dodge the gap is not acceptable. Consequence: **Maknae builds a Rust TDF SDK alongside Phase B** (working name `maknae-tdf`), validated against the OpenTDF spec's conformance materials. Vendoring OpenTDF's Go platform services (KAS et al.) as *services* remains fine — the gap is client/library-side, in the trust plane, where Rust is non-negotiable.
+
+**Scoping ruling (operator, 2026-07-15): the SDK is built for official OpenTDF ecosystem inclusion, not as a Maknae-internal library.** Consequences, in force from the first commit:
+
+- **Standard Rust ecosystem guidelines throughout** — the Rust API Guidelines checklist, semver discipline, full rustdoc, a declared MSRV policy, `cargo-audit`/`cargo-deny` in CI, no `unsafe` without documented justification
+- **Zero Maknae coupling.** The crate implements the OpenTDF spec, period; Maknae consumes it as an ordinary dependency and never owns its API shape. No Maknae label vocabulary, no kernel types, nothing that would make the OpenTDF organization hesitate
+- **Pluggable crypto backend, feature-gated** — the upstream ecosystem should not be forced onto Maknae's FIPS choice; `aws-lc-rs` is the backend *Maknae selects* (trust-plane consistency), not the only one the crate permits
+- **Neutral naming for submission** — the working name is internal; the submitted crate takes an ecosystem-appropriate name coordinated with the OpenTDF organization
+- **Early coordination with the organization** — the operator has a contact; the approach is made early (spec-conformance review, contribution requirements, naming) rather than after the API fossilizes
 
 ## 12. Testing and conformance
 
@@ -352,6 +360,7 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 | D14 | OpenTDF named as the label-binding implementation standard, adopted at MVP close |
 | D15 | Conformance vectors (including RLS-in-CI against real PostgreSQL) are the single conformance spine |
 | D16 | ACP 240 added to normative guidance; §14 required-references list gates final design |
+| D17 | The Rust TDF SDK is scoped to standard Rust ecosystem guidelines for **official OpenTDF ecosystem submission**: zero Maknae coupling, pluggable crypto backend (FIPS `aws-lc-rs` as Maknae's selection), neutral naming, early coordination with the OpenTDF organization (2026-07-15) |
 
 ## 17. Open questions
 
@@ -361,7 +370,7 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 4. **Internal service-to-service credential format** — kernel-minted subject contexts need a concrete envelope (JWT with RFC 8707 audience binding vs. a bespoke signed structure); leans JWT for tooling reuse, decide at kernel-skeleton time.
 5. **Audit store ceiling** — does the audit table inherit the instance ceiling, or is a dedicated lower-ceiling audit-export path needed for cross-domain review? North-star question; defer past MVP but leave the schema room.
 6. **TDF wrapping scope inside the boundary** — egress/replication only, or also at-rest for restricted-category payloads? Phase B, informed by measured cost.
-7. **`maknae-tdf` v0 scope and upstream posture** — ZTDF manifest subset first or nanoTDF first; and whether to propose the crate to the OpenTDF organization early (visibility, shared maintenance, spec-conformance review) or incubate in-tree until the API stabilizes (the `maknae-dcs-core` two-step precedent, container-architecture §6).
+7. **Rust TDF SDK v0 scope** — ZTDF manifest subset first or nanoTDF first. (Upstream posture is resolved — D17: built for official OpenTDF inclusion with early organization coordination; only the technical starting point remains open.)
 
 ## 18. Revision history
 
@@ -371,3 +380,4 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 | 0.2 | 2026-07-15 | Companion references imported in-repo (`design/references/`): full DCS schema design and NATO DCRA/ACP 240 findings, for reviewers without Security MCP repo access; retention before public release is an open decision. §14 ACP 240 status updated |
 | 0.3 | 2026-07-15 | Third companion imported: the OAuth 2.1 13-RFC compliance matrix (`references/oauth-compliance.md`) — the RFC set §5 inherits, now reviewable in-repo |
 | 0.4 | 2026-07-15 | OpenTDF Rust SDK gap recorded (spec SDKs: Java/JS/Go; crates.io empty — verified): `maknae-tdf` build-alongside expected at Phase B with upstream-contribution posture; §13 Phase B and §17 Q7 updated |
+| 0.5 | 2026-07-15 | D17: SDK scoped for official OpenTDF ecosystem submission — standard Rust guidelines, zero Maknae coupling, pluggable crypto backend, neutral naming, early org coordination; §17 Q7 narrowed to v0 technical scope |
