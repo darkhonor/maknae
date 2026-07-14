@@ -92,9 +92,26 @@ Two standards on top of volume:
 1. **KLC §15 invariants become executable property tests** in every container that touches labels — the machine-readable block is the shared acceptance suite, implemented once per language and run in CI. A contract change without a corresponding test change fails review by definition.
 2. **Mutation testing is the gate on the tests themselves.** A metric ton of tests proves nothing if the tests are slop too; mutation runs (scheduled, not per-commit — they are expensive) verify the suite actually kills behavior changes. Surviving mutants in trust-plane code are release blockers; in runtime-plane code they are backlog items.
 
-## 6. Open items
+## 6. Shared DCS capability strategy — one engine, not eight
 
-1. Cedar vs. OPA spike (KLC §14 Q5) — now explicitly weighing the Rust-native pairing (§3.1).
+The risk: six containers in four languages each growing their own label/lattice/policy logic. The strategy defeats it in three layers, in priority order:
+
+1. **Architecture first: decisions are centralized, not distributed.** The kernel is the only decision-maker (PDP); every other container is a PEP that requests decisions and enforces outcomes. Five of six containers never evaluate policy — most of the duplication risk is eliminated by the plane model itself, not by libraries.
+2. **Representation is schema-first.** The `dcs_label` block and the kernel decision request/response protocol are versioned schemas (JSON Schema at MVP); per-language types are generated, never hand-rolled. Every container can *parse and carry* labels; parsing is not evaluating.
+3. **Local evaluation is one Rust crate with bindings — never a port.** `maknae-dcs-core` (label types, lattice math, dominance checks) is the single canonical implementation: consumed natively by `kernel` and `egress-proxy`, and via PyO3/maturin wheels by the Python containers where a hot path justifies local evaluation. The identified hot path is the lake's per-subject retrieval filtering; whether it uses a kernel bulk-decision API or local bindings is decided by measurement — both are permitted because both run the same crate against the same vectors.
+
+**Conformance vectors are the enforcement.** KLC §15 invariants plus lattice dominance cases ship as language-neutral golden test vectors in this repo; every implementation that touches labels — the kernel, every binding, any future port — must pass the identical vectors in CI. Bindings prevent re-implementation; vectors catch divergence anyway.
+
+**Provenance of the crate:** `maknae-dcs-core` is seeded by extracting the DCS-relevant elements from Microkosmos in two derisked steps: (a) convert the microkosmos repo to a Cargo workspace and factor the elements into an in-repo lib crate — binary behavior unchanged, existing suite proves it; (b) lift the crate to its shared home once the public API stabilizes (Cargo git dependencies; no registry needed while private). A survey of which Microkosmos elements are genuinely DCS versus server-specific precedes step (a) — a bounded, delegable task.
+
+**Security MCP harvest:** its Go ABAC gateway is the semantic reference — attribute schemas, gating semantics, and test cases port into kernel policy and the conformance vectors. Its gateway code is candidate vendoring for the Go `gateway` container (same language, same function); its decision logic is deliberately NOT linked as a library — decisions move to the kernel, and the Go code's job becomes enforcement and identity assertion.
+
+**Cedar interaction:** if Cedar wins the Q5 spike, the policy language itself becomes cross-language shared capability (official Rust core, official Go implementation, Python bindings) with upstream conformance testing — a further weight the spike must record.
+
+## 7. Open items
+
+1. Cedar vs. OPA spike (KLC §14 Q5) — now explicitly weighing the Rust-native pairing (§3.1) and the cross-language implementations (§6).
 2. Channel vote decides `gateway` SDK details and whether the TypeScript alternative is live (§3.3).
 3. Kubernetes profile specifics (PSA levels, NetworkPolicy set, operator vs. plain manifests) — after the Compose stack proves the shape.
 4. Whether `egress-proxy` and `kernel` share an image with distinct entrypoints or build separately — decide at kernel-skeleton time; trust-plane review treats them as one surface either way.
+5. Microkosmos DCS-element survey (pre-extraction scoping for `maknae-dcs-core`, §6) — bounded and delegable.
