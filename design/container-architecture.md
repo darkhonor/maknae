@@ -13,6 +13,7 @@
 2. **Language per action.** Precedent is the operator's Security MCP server (Go gateway/query services, Python parser, Rust proxy, TypeScript UI): pick the language whose ecosystem and guarantees fit the container's job, not a house language. Pattern inheritance from the upstreams is language-independent (autopsy, open item 3).
 3. **The runtime plane is untrusted by design** (KLC §3). Its containers get velocity-optimized languages; correctness is enforced at the kernel boundary, not assumed in the runtime.
 4. **Both deployment models from birth.** Every container ships with a Compose/Podman definition and a Kubernetes manifest, STIG-default configurations and baselines assumed. Volumes are declared per container (§4); in Kubernetes, kernel-mediated flows become NetworkPolicies; in Compose, internal networks + the egress proxy enforce the same shape (TaeBot's scoped nftables table is the host-level reference).
+5. **The runtime plane is stateless by declared design** ([abac-dcs-architecture §3.1](abac-dcs-architecture.md)). Untrusted containers hold no durable state; working sets check in and out through kernel-mediated access to the state store. Compromise of the runtime leaks only its current working set; a crash loses nothing; "no read up" is enforceable at rest, not merely at retrieval time.
 
 ## 2. Container inventory
 
@@ -26,8 +27,9 @@
 | 6 | `dreamer` | Runtime (scoped identity) | Untrusted by design | **Python** | Proposed |
 | 7 | `web-ui` | Interaction | Security-relevant | **TypeScript** | Proposed; post-MVP |
 | 8 | `vault-agent` | Cross-cutting | Vendor | n/a (HashiCorp image) | Ratified pattern |
+| 9 | `state-store` | Data | Untrusted-adjacent (enforces, never decides) | n/a (PostgreSQL vendor image + Maknae-owned SQL migrations) | **Ratified 2026-07-15** (abac-dcs-architecture D1) |
 
-MVP builds six images (1–6); `web-ui` is deferred per the roadmap; `vault-agent` is vendored. Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
+MVP builds six images (1–6); `web-ui` is deferred per the roadmap; `vault-agent` and `state-store` are vendored images (the state store ships with Maknae-owned migrations and generated RLS policies, and is part of the MVP stack — RLS is live from Phase A). Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
 
 ## 3. Per-container detail
 
@@ -63,6 +65,10 @@ Operator console: onboarding wizard (authority map authoring — emits operator-
 
 HashiCorp Vault Agent sidecar per service that needs secrets: AppRole auto-auth, short-TTL token to a tmpfs sink, services consume via native Vault API (no shell-outs, no templated files on disk) — the TaeBot `vault_bootstrap` pattern generalized, per the README's Vault-native ruling. Secrets engines are operator-configured, potentially independent per MLS secret target.
 
+### 3.9 `state-store` — PostgreSQL (vendor image; ratified 2026-07-15)
+
+The platform's labeled operational state: per-operator session/conversation state (born at the high-water mark of its inputs), scheduler task definitions, the memory recall (FTS) index, and the structured audit query surface. Knowledge stays in the Lake; Tier-0 config stays signed-git (the store may hold materialized copies for joins, never the authority). Every table carries the full DCS column set; label columns are `NOT NULL`; RLS policies are **generated from the SPIF** by trust-plane tooling and deployed with the migrations — `SET LOCAL` per-transaction subject attributes, `FORCE ROW LEVEL SECURITY`, non-superuser service roles without `BYPASSRLS`, deny-all default policies. Data plane, untrusted-adjacent: RLS *enforces* as the at-rest backstop (layer 3); the kernel remains the only decision-maker. Full design: [abac-dcs-architecture.md](abac-dcs-architecture.md) §3.1, §7.3. Precedent: the Security MCP's PostgreSQL engine, with the RLS layer that project consciously deferred built here from birth.
+
 ## 4. Volumes (both deployment models)
 
 | Volume | Mounted by | Notes |
@@ -73,6 +79,7 @@ HashiCorp Vault Agent sidecar per service that needs secrets: AppRole auto-auth,
 | `authority-config` | kernel (ro) | Tier 0: authority map, operator attributes, lattice + instance ceiling; changes arrive as signed commits, not writes |
 | `vault-sink` | per-service tmpfs | Never a named persistent volume |
 | `persona-workspace` | runtime (rw), gateway (ro) | Multi-file bundle, first-class (never runtime-flattened — the TaeBot/Hermes lesson) |
+| `state-data` | state-store (pgdata) | Labeled operational state; DCS columns + generated RLS travel with the data; no other container mounts it — access is SQL through layer-2 PEPs only |
 
 ## 5. TDD doctrine — tests as the mutation shield
 
@@ -101,6 +108,8 @@ The risk: six containers in four languages each growing their own label/lattice/
 3. **Local evaluation is one Rust crate with bindings — never a port.** `maknae-dcs-core` (label types, lattice math, dominance checks) is the single canonical implementation: consumed natively by `kernel` and `egress-proxy`, and via PyO3/maturin wheels by the Python containers where a hot path justifies local evaluation. The identified hot path is the lake's per-subject retrieval filtering; whether it uses a kernel bulk-decision API or local bindings is decided by measurement — both are permitted because both run the same crate against the same vectors.
 
 **Conformance vectors are the enforcement.** KLC §15 invariants plus lattice dominance cases ship as language-neutral golden test vectors in this repo; every implementation that touches labels — the kernel, every binding, any future port — must pass the identical vectors in CI. Bindings prevent re-implementation; vectors catch divergence anyway.
+
+**The state store's RLS predicates are a fourth projection of the same engine, not a new implementation:** generated from the SPIF by trust-plane tooling (never hand-written SQL), parity-checked at kernel boot, and run against the identical conformance vectors on a real PostgreSQL in CI (abac-dcs-architecture §6.4, §7.3, §12).
 
 **Provenance of the crate:** `maknae-dcs-core` is seeded by extracting the DCS-relevant elements from Microkosmos in two derisked steps: (a) convert the microkosmos repo to a Cargo workspace and factor the elements into an in-repo lib crate — binary behavior unchanged, existing suite proves it; (b) lift the crate to its shared home once the public API stabilizes (Cargo git dependencies; no registry needed while private). A survey of which Microkosmos elements are genuinely DCS versus server-specific precedes step (a) — a bounded, delegable task.
 
