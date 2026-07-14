@@ -8,7 +8,7 @@
 | **Audience** | Human reviewers and AI agents (dual-audience document) |
 | **Depends on** | [`knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) (KLC — label schema, hooks, invariants), [`container-architecture.md`](container-architecture.md) (plane model, one-engine DCS strategy), [`adr/ADR-0002-kernel-is-rust.md`](adr/ADR-0002-kernel-is-rust.md), [`adr/ADR-0003-cedar-policy-engine.md`](adr/ADR-0003-cedar-policy-engine.md) |
 | **Prior art** | Security MCP Server (`~/Development/MCP/security-mcp-server`) — working four-dimensional ABAC gateway, DCS schema, OAuth 2.1 compliance record |
-| **Companion references (in-repo)** | [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md) — the full DCS schema design (imported snapshot; the rationale this document cites instead of re-arguing); [`references/nato-dcra-acp240-findings.md`](references/nato-dcra-acp240-findings.md) — NATO DCRA v2 / ACP 240 findings extract |
+| **Companion references (in-repo)** | [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md) — the full DCS schema design (imported snapshot; the rationale this document cites instead of re-arguing); [`references/oauth-compliance.md`](references/oauth-compliance.md) — the 13-RFC OAuth 2.1 compliance matrix behind §5; [`references/nato-dcra-acp240-findings.md`](references/nato-dcra-acp240-findings.md) — NATO DCRA v2 / ACP 240 findings extract |
 
 ---
 
@@ -51,7 +51,7 @@ The MCP is the working reference for every semantic in this document. Specific a
 | SQL-injection PEP | `containers/security-query/internal/database/repository.go` (`injectABACClause`) | Layer-2 enforcement pattern (§7.2) |
 | ABAC test suites | `abac_test.go`, `abac_handlers_test.go`, SPIF tests | Seed corpus for the conformance vectors (§12) |
 | DCS schema | `docs/design/dcs-schema-migration.md` — **imported in-repo as [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md)** for reviewers without MCP repo access | Full label vocabulary port (§6.1); design rationale imported by reference, not re-argued |
-| OAuth 2.1 compliance record | `docs/security/OAUTH-COMPLIANCE.md` | The 13-RFC identity baseline (§5.1) and its operational scar tissue |
+| OAuth 2.1 compliance record | `docs/security/OAUTH-COMPLIANCE.md` — **imported in-repo as [`references/oauth-compliance.md`](references/oauth-compliance.md)** | The 13-RFC identity baseline (§5.1) and its operational scar tissue |
 
 The structural upgrade over the MCP, stated plainly: the MCP fuses PDP and PEP inside `security-query` — its WHERE clause *is* the policy — and delivers subject attributes as IdP-asserted JWT claims. Maknae splits decision from enforcement (Cedar decides; PEPs enforce; RLS backstops) and moves attribute binding out of the token entirely (§5.3). The MCP also consciously deferred PostgreSQL RLS; Maknae builds it from birth on empty tables — the MCP migration doc's own "cost if deferred" analysis is the argument.
 
@@ -113,7 +113,7 @@ Identity is the authentication front door that feeds §4. The design rule learne
 
 ### 5.1 Inherited RFC baseline
 
-Adopted wholesale from the MCP's compliance record (`docs/security/OAUTH-COMPLIANCE.md`, 13/13 RFCs implemented):
+Adopted wholesale from the MCP's compliance record (in-repo companion: [`references/oauth-compliance.md`](references/oauth-compliance.md), 13/13 RFCs implemented — per-RFC requirements, evidence, and NIST mappings live there):
 
 - **OAuth 2.1 consolidated requirements** — PKCE S256 mandatory for all clients; implicit and resource-owner-password grants prohibited; refresh token rotation; exact redirect URI matching; bearer tokens via `Authorization` header only (RFC 6750)
 - **RFC 8707 Resource Indicators** — audience binding on every token; the critical anti-replay control; validation is mandatory and construction-guarded
@@ -366,3 +366,4 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 |---|---|---|
 | 0.1 | 2026-07-15 | Initial rough architecture from operator-guided design session: ABAC decomposition, state-store container, subject attribute model + identity architecture, full DCS schema port, three-layer enforcement, fail-closed doctrine, OpenTDF adoption, conformance spine |
 | 0.2 | 2026-07-15 | Companion references imported in-repo (`design/references/`): full DCS schema design and NATO DCRA/ACP 240 findings, for reviewers without Security MCP repo access; retention before public release is an open decision. §14 ACP 240 status updated |
+| 0.3 | 2026-07-15 | Third companion imported: the OAuth 2.1 13-RFC compliance matrix (`references/oauth-compliance.md`) — the RFC set §5 inherits, now reviewable in-repo |
