@@ -116,6 +116,11 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 6. Gateway + web UI, onboarding wizard (CLI + web) for authority configuration, scheduler with scoped task identities.
 7. Persona layer (the hyungs move in).
 
+**MVP candidates (2026-07-14, operator-directed; specifics to follow):**
+
+1. **Model-layer registration, dual-mode from birth:** (a) OAuth subscription authentication (ChatGPT Pro — currently the only major subscription authorizing this use) and (b) OpenAI-compatible endpoint registration for generic model support, including self-hosted and air-gapped inference. Model provider endpoints are kernel-allowlisted egress destinations (KLC hook E); credentials and tokens are delivered via Vault, never plaintext config.
+2. **A single interaction channel** so the operator can converse with the agent (who states their own preferred form of address as persona configuration). Channel selection pending team vote.
+
 ---
 
 *The youngest one, raised by the best of both. 막내 화이팅.*
