@@ -18,7 +18,7 @@ Maknae is a personal AI agent platform built around a **security kernel**. Where
 
 The platform's defining feature is a **governed learning loop**: the agent is permitted to learn — generating skills from experience and ingesting documents into its own local Knowledge Lake when tasked work reveals a gap — but every piece of acquired knowledge flows through a single authority-tiered, provenance-stamped promotion pipeline before it can be trusted. The operator does not fill the agent's knowledge base; **the agent fills it himself, from operator-authorized sources only**, learning the "official way" to do things as defined by a signed authority map.
 
-Deployment targets: Raspberry Pi (arm64), x64 Linux, and macOS hosts. Container-first with an OS-install path. STIG-hardened baselines. Single-binary is *not* a requirement; small-and-auditable is.
+Deployment targets: Raspberry Pi (arm64), x64 Linux, and macOS hosts. Container-based for now, with two supported deployment models: a **Docker Compose stack** (or Podman equivalent) and a **full Kubernetes deployment**. Both assume STIG default configurations and baselines; volumes are mounted accordingly. Single-binary is *not* a requirement; small-and-auditable is.
 
 The north-star deployment: a classified, multinational, air-gapped enclave — partner operators as attribute-bearing subjects, a full Bell-LaPadula classification lattice with releasability categories, and every model endpoint local and accredited. Not a special mode: the same kernel with a richer lattice and a stricter map, which a homelab runs with a trivial lattice at zero ceremony (KLC §6, §12).
 
@@ -83,7 +83,7 @@ The live deployment configurations for both personas are also on this system and
 
 The HobiBot and TaeBot deployment configurations (§5.1) embody the hardening patterns to preserve; the upstream mirrors are the code to study — including what NOT to inherit.
 
-Operational context that applies platform-wide: HashiCorp Vault for all secrets (AppRole, Agent sidecar templating — no plaintext credentials, ever), Terraform/IaC-first, GitOps via Fleet where applicable, WireGuard mesh across sites, and the operator's GitLab issue standards (audit-grade, NIST control mappings, structured closing protocol).
+Operational context that applies platform-wide: HashiCorp Vault for all secrets — native Vault API integration (not shell-outs or wrappers), AppRole + Agent sidecar delivery, no plaintext credentials ever, with operator-configured secrets engines and potentially independent engine configurations per MLS secret target (each classification/enclave target gets its own engine, keeping secret material DCS-scoped like everything else). Terraform/IaC-first, GitOps via Fleet where applicable, WireGuard mesh across sites, and the operator's GitLab issue standards (audit-grade, NIST control mappings, structured closing protocol).
 
 ## 6. Orientation protocol for AI agents (read carefully, Fable 🐰)
 
