@@ -119,7 +119,8 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 **MVP candidates (2026-07-14, operator-directed; specifics to follow):**
 
 1. **Model-layer registration, dual-mode from birth:** (a) OAuth subscription authentication (ChatGPT Pro — currently the only major subscription authorizing this use) and (b) OpenAI-compatible endpoint registration for generic model support, including self-hosted and air-gapped inference. Model provider endpoints are kernel-allowlisted egress destinations (KLC hook E); credentials and tokens are delivered via Vault, never plaintext config.
-2. **A single interaction channel** so the operator can converse with the agent (who states their own preferred form of address as persona configuration). Channel selection pending team vote.
+2. **Task-class model assignment:** classes of work route to designated registered models — e.g., heartbeat/scheduler ticks to the cheapest registered model, the interactive channel to the flagship, the dreaming cycle to its designated model. Routing is label-aware, not just cost-aware: a prompt to a model API is outbound data flow, so a task's resource labels constrain eligible endpoints (no-egress or classified-labeled context may only route to endpoints authorized for those labels, e.g., local/air-gapped inference) — enforced at hook E, same table as the cost policy.
+3. **A single interaction channel** so the operator can converse with the agent (who states their own preferred form of address as persona configuration). Channel selection pending team vote.
 
 ---
 
