@@ -8,6 +8,7 @@
 | **Audience** | Human reviewers and AI agents (dual-audience document) |
 | **Depends on** | [`knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) (KLC — label schema, hooks, invariants), [`container-architecture.md`](container-architecture.md) (plane model, one-engine DCS strategy), [`adr/ADR-0002-kernel-is-rust.md`](adr/ADR-0002-kernel-is-rust.md), [`adr/ADR-0003-cedar-policy-engine.md`](adr/ADR-0003-cedar-policy-engine.md) |
 | **Prior art** | Security MCP Server (`~/Development/MCP/security-mcp-server`) — working four-dimensional ABAC gateway, DCS schema, OAuth 2.1 compliance record |
+| **Companion references (in-repo)** | [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md) — the full DCS schema design (imported snapshot; the rationale this document cites instead of re-arguing); [`references/nato-dcra-acp240-findings.md`](references/nato-dcra-acp240-findings.md) — NATO DCRA v2 / ACP 240 findings extract |
 
 ---
 
@@ -49,7 +50,7 @@ The MCP is the working reference for every semantic in this document. Specific a
 | PEP entry point | `containers/security-query/internal/handlers/abac.go` | Subject-context pattern; the `NormalizeClearance()` taxonomy-mismatch lesson (§4 rule 4) |
 | SQL-injection PEP | `containers/security-query/internal/database/repository.go` (`injectABACClause`) | Layer-2 enforcement pattern (§7.2) |
 | ABAC test suites | `abac_test.go`, `abac_handlers_test.go`, SPIF tests | Seed corpus for the conformance vectors (§12) |
-| DCS schema | `docs/design/dcs-schema-migration.md` | Full label vocabulary port (§6.1); design rationale imported by reference, not re-argued |
+| DCS schema | `docs/design/dcs-schema-migration.md` — **imported in-repo as [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md)** for reviewers without MCP repo access | Full label vocabulary port (§6.1); design rationale imported by reference, not re-argued |
 | OAuth 2.1 compliance record | `docs/security/OAUTH-COMPLIANCE.md` | The 13-RFC identity baseline (§5.1) and its operational scar tissue |
 
 The structural upgrade over the MCP, stated plainly: the MCP fuses PDP and PEP inside `security-query` — its WHERE clause *is* the policy — and delivers subject attributes as IdP-asserted JWT claims. Maknae splits decision from enforcement (Cedar decides; PEPs enforce; RLS backstops) and moves attribute binding out of the token entirely (§5.3). The MCP also consciously deferred PostgreSQL RLS; Maknae builds it from birth on empty tables — the MCP migration doc's own "cost if deferred" analysis is the argument.
@@ -133,7 +134,7 @@ Adopted wholesale from the MCP's compliance record (`docs/security/OAUTH-COMPLIA
 
 ### 6.1 Full DCS schema port
 
-The complete `dcs` schema from the MCP ports as Maknae's label vocabulary — this is a port of a built artifact, not a new design. Inventory: classification ENUM (5-level, orderable for RLS), CUI columns (categories, specified flag, the complete NARA LDC vocabulary, DI-block fields), classified dissemination controls, `rel_to_nations` / `display_only_nations` (GENC trigraphs + coalition tetragraph tables), the `noforn` fast-predicate boolean, JOINT/FGI ownership (`document_type`, `owner_nations`, `fgi_source_nations`, concealed-source support), distribution statements (DoDI 5230.24 A–F), marking abbreviation registry, the 14-framework international classification systems registry, the 16-law data privacy frameworks registry, `classification_confidence` (spillage detection), atomic-energy/SAP/SCI and declassification fields (Phase B `confidentiality_labels`), and the STANAG 4774 `label_id` placeholder. Design rationale imports by reference to `dcs-schema-migration.md` §4–§22; this document does not re-argue it.
+The complete `dcs` schema from the MCP ports as Maknae's label vocabulary — this is a port of a built artifact, not a new design. Inventory: classification ENUM (5-level, orderable for RLS), CUI columns (categories, specified flag, the complete NARA LDC vocabulary, DI-block fields), classified dissemination controls, `rel_to_nations` / `display_only_nations` (GENC trigraphs + coalition tetragraph tables), the `noforn` fast-predicate boolean, JOINT/FGI ownership (`document_type`, `owner_nations`, `fgi_source_nations`, concealed-source support), distribution statements (DoDI 5230.24 A–F), marking abbreviation registry, the 14-framework international classification systems registry, the 16-law data privacy frameworks registry, `classification_confidence` (spillage detection), atomic-energy/SAP/SCI and declassification fields (Phase B `confidentiality_labels`), and the STANAG 4774 `label_id` placeholder. Design rationale imports by reference to the in-repo companion [`references/dcs-schema-migration.md`](references/dcs-schema-migration.md) §4–§22; this document does not re-argue it.
 
 ### 6.2 One logical schema, two physical projections
 
@@ -299,7 +300,7 @@ Rough design binds to none of these documents' unread details; final design revi
 
 | Reference | Status | Feeds |
 |---|---|---|
-| ACP 240 | Acquisition pending (operator) | Coalition DCS conformance (§2.1, §13 Phase B) |
+| ACP 240 | Findings extract in-repo ([`references/nato-dcra-acp240-findings.md`](references/nato-dcra-acp240-findings.md)); full text acquisition pending (operator) | Coalition DCS conformance (§2.1, §13 Phase B) |
 | NIST SP 800-162 (ABAC) | Downloaded; lake ingestion pending | §2.1 conformance claims |
 | NIST SP 800-205 / NISTIR 8112 | Downloaded; lake ingestion pending | Attribute metadata/assurance details (§4) |
 | ICTS UIAS v2.1 | Not held | The UIAS mapping profile (§4) |
@@ -364,3 +365,4 @@ All decisions operator-ratified 2026-07-14/15 during design review:
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-07-15 | Initial rough architecture from operator-guided design session: ABAC decomposition, state-store container, subject attribute model + identity architecture, full DCS schema port, three-layer enforcement, fail-closed doctrine, OpenTDF adoption, conformance spine |
+| 0.2 | 2026-07-15 | Companion references imported in-repo (`design/references/`): full DCS schema design and NATO DCRA/ACP 240 findings, for reviewers without Security MCP repo access; retention before public release is an open decision. §14 ACP 240 status updated |
