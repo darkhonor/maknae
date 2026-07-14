@@ -110,7 +110,7 @@ The risk: six containers in four languages each growing their own label/lattice/
 
 ## 7. Open items
 
-1. Cedar vs. OPA spike (KLC §14 Q5) — now explicitly weighing the Rust-native pairing (§3.1) and the cross-language implementations (§6).
+1. Cedar vs. OPA spike (KLC §14 Q5) — Cedar is the leading candidate per ADR-0003 (Rust-native pairing §3.1, cross-language implementations §6, formally verified core); the spike confirms or overturns.
 2. Channel vote decides `gateway` SDK details and whether the TypeScript alternative is live (§3.3).
 3. Kubernetes profile specifics (PSA levels, NetworkPolicy set, operator vs. plain manifests) — after the Compose stack proves the shape.
 4. Whether `egress-proxy` and `kernel` share an image with distinct entrypoints or build separately — decide at kernel-skeleton time; trust-plane review treats them as one surface either way.

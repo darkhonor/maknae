@@ -103,6 +103,7 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
     ├── knowledge-lifecycle-contract.md        # KLC v0.2 — governance spec (RFC)
     ├── reference-implementation-autopsy.md    # upstream survey evidence + build scope
     ├── container-architecture.md              # container decomposition + language calls
+    ├── adr/                                   # architecture decision records (ADR-0001 explains the practice)
     └── diagrams/
         ├── plane-architecture.svg
         ├── knowledge-lifecycle.svg
@@ -112,7 +113,7 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 ## 8. Roadmap sketch (pre-implementation, subject to team review)
 
 1. KLC v0.2 team review (authority basis aligned to the Lake's ADR-0004 authority-line model; open questions in KLC §14).
-2. Policy language spike: Cedar vs. OPA evaluated against the six enforcement hooks (KLC §10) as the acceptance test.
+2. Policy language spike: Cedar vs. OPA evaluated against the six enforcement hooks (KLC §10) as the acceptance test. Cedar is the leading candidate (ADR-0003: Rust-native, formally verified core, cedar-go for the Go plane); the spike confirms or overturns.
 3. Trust plane kernel skeleton: policy engine + label schema validation + audit events.
 4. Lake integration: portable lake instance, authority map v0.1 (egress allowlist + authority basis; USG sample profile as "easy mode"), quarantine ingest path.
 5. Learning loop MVP: gap detection → authorized fetch → quarantine → dreaming cycle → gated promotion.
