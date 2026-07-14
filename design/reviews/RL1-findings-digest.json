@@ -1,0 +1,1181 @@
+{
+ "meta": {
+  "round": "RL#1",
+  "mode": "audit",
+  "date": "2026-07-14",
+  "corpus_commit": "5e76b96",
+  "counts": {
+   "confirmed": 72,
+   "refuted": 5,
+   "nits": 7
+  }
+ },
+ "confirmed": [
+  {
+   "severity": "blocker",
+   "file": "container-architecture.md",
+   "section": "\u00a74 Volumes (lake-data), \u00a73.6 dreamer \u2014 vs KLC \u00a73, \u00a711, \u00a715",
+   "class": "trust-boundary-bypass",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "codex",
+    "baseline-xcheck"
+   ],
+   "summary": "Untrusted lake and dreamer containers hold rw mounts on the governed corpus, so the runtime plane can perform tier transitions, label forgery, and content mutation by direct file write \u2014 bypassing hooks A/C/D, the \u00a711 anti-poisoning guardrails, and every_transition:audited.",
+   "detail": "Volume table: \"lake-data | lake (rw), dreamer (rw), kernel (label verification, ro)\" \u2014 the only trusted container is read-only on the files whose YAML frontmatter IS the tier state, while KLC \u00a73 says \"the runtime plane cannot perform a transition, only request one.\" Signatures are required only for tier <= 1 (\u00a76), so a compromised lake/dreamer edits tier: 3 -> 2 in frontmatter \u2014 gaining \"may inform work\" standing \u2014 with no hook transit, no audit event, and no signature to fail. The dreamer's \"scoped identity with no interactive privileges\" (\u00a73.6) is moot: the filesystem path bypasses identity-aware kernel decisions entirely. Baseline precedent: openclaw D13 (self-config poisoning) and D17a (\"the directory boundary IS the control\") \u2014 maknae applies that split to authority-config but not to the corpus whose tier labels are policy-bearing hook-B inputs.",
+   "recommendation": "Make the kernel the integrity root for label state at ALL tiers: kernel-signed/HMACed frontmatter or a kernel-held tier ledger/hash index stamped at every hook A/C/D transition and verified at every hook B/C/D read, so a runtime-plane frontmatter edit is detected as forgery; or remove the direct rw mounts and broker all lake/dreamer writes through a kernel API. Record the storage-integrity model as an ADR.",
+   "relocated_class": "Trust-plane invariants asserted over state whose write path and enforcement locus live in the untrusted runtime plane, with no kernel-held integrity root \u2014 other masks: lake performs label stamping at hook A (untrusted writer of hook-A outputs), lake is the hook-B enforcement locus via 'retrieval serving (per-subject filtered context assembly)' with \u00a76.3 permitting local dominance evaluation in the untrusted Python container, and dreamer's consolidation writes; the kernel decides but cannot detect divergence between its decisions and the on-disk reality it never anchors.",
+   "verifier": "Verified against both documents. Container-architecture \u00a74 volume table is quoted accurately: lake (rw) and dreamer (rw) \u2014 both 'Untrusted by design' per \u00a72 \u2014 hold write authority on lake-data, while the kernel is ro. KLC \u00a76 confirms signatures are required only for tier <= 1, so a direct frontmatter edit of tier: 3 -> 2 by a compromised runtime-plane container produces a label indistinguishable f"
+  },
+  {
+   "severity": "blocker",
+   "file": "container-architecture.md",
+   "section": "\u00a73.5 lake, \u00a76.3 hook-B hot path \u2014 vs \u00a71.1 principle 1, KLC \u00a710.B",
+   "class": "enforcement-in-untrusted-plane",
+   "adr_candidate": true,
+   "dimensions": [
+    "baseline-xcheck",
+    "codex"
+   ],
+   "summary": "Hook B's per-subject retrieval filtering and non-disclosing context assembly execute inside the untrusted-by-design lake container (the 'local bindings' option), turning the core BLP disclosure decision into an untrusted self-assertion and contradicting the claim that only kernel and egress-proxy compromise defeats the architecture.",
+   "detail": "\u00a73.5 assigns the untrusted lake \"retrieval serving (per-subject filtered context assembly)\"; \u00a76.3 lets the hook-B hot path run as \"local bindings\" inside it. The PEP that decides which bytes enter a subject's context \u2014 the mechanism behind \"content the subject cannot see never enters the context serving them\" \u2014 is a runtime-plane container holding all data at all classifications; a compromised lake assembles anything into any subject's context regardless of kernel decisions, and local evaluation also uses potentially stale attributes/policies with no decision audit. Both hardened baselines converged on the opposite placement: hermes SECURITY-MODEL \u2014 \"Nothing inside the agent process constitutes containment.\"",
+   "recommendation": "Move the final disclosure gate into the trust plane: kernel bulk-decision with verify-on-delivery (kernel checks each included object's label against the hook-B decision before release), or a trusted retrieval broker with the lake demoted to a dumb store. Reclassify 'local bindings' as a performance pre-filter whose output the kernel still verifies. Record the placement as an ADR and fix \u00a71.1 so the trust claim matches the data path.",
+   "relocated_class": "kernel-attributed enforcement whose data path executes in the untrusted runtime plane \u2014 other masks: lake performs label stamping the kernel merely 'directs' (untrusted writer of trust-plane inputs); task-context high-water mark consumed by hook E is tracked runtime-side; memory subject-scoping enforcement co-located in the same untrusted lake container",
+   "verifier": "Verified every cited passage: container-architecture.md line 12 (principle 1: only kernel+egress-proxy compromise defeats the architecture), line 25/50-52 (lake is untrusted-by-design yet owns per-subject filtered context assembly and label stamping, with rw mount of the full corpus per \u00a74), line 101 (\u00a76 item 3 permits hook-B dominance evaluation as 'local bindings' inside the lake, justified only"
+  },
+  {
+   "severity": "blocker",
+   "file": "container-architecture.md",
+   "section": "\u00a74 Volumes (skill-registry) \u2014 vs KLC \u00a710 hook F",
+   "class": "unauthorized-code-execution",
+   "adr_candidate": true,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "The untrusted runtime can read the entire skill registry and execute skill code without invoking hook F \u2014 a read-only mount prevents modification, not unauthorized disclosure or execution.",
+   "detail": "\"skill-registry | kernel (rw), runtime (ro via kernel grants)\" gives the runtime direct filesystem access to skill code, while KLC \u00a710 requires hook F evaluation (\"Skill signed and at executable tier; declared capabilities \u2286 persona + task whitelist\") before execution. Nothing in the mount enforces that the grant/decision precedes the read.",
+   "recommendation": "Remove the runtime's direct filesystem access to the skill registry. Skills are retrieved through the kernel, with hook F evaluation occurring before skill content is made available to the runtime.",
+   "relocated_class": "Kernel mediation asserted without an enforceable locus: \u00a74 volume mounts give untrusted-plane containers direct filesystem access to governed stores while KLC hooks assign enforcement to the kernel \u2014 same shape in the lake-data row (lake rw + dreamer rw on the governed corpus, hooks A/B/C left with no data-path locus; kernel mount is post-hoc \"label verification, ro\") as in the skill-registry row.",
+   "verifier": "Verified against container-architecture.md \u00a74 line 72 and KLC \u00a710/\u00a715. The quoted mount row is real and the qualifier \"ro via kernel grants\" names no mechanism: in both declared deployment models (Compose, K8s) a volume mount is static filesystem access, so the untrusted Python runtime can read every skill and execute its content without any hook F decision. This defeats stated properties: KLC \u00a74 "
+  },
+  {
+   "severity": "blocker",
+   "file": "container-architecture.md",
+   "section": "\u00a73.3 gateway, \u00a71 principle 1, \u00a73.2 \u2014 vs KLC \u00a76 subject model",
+   "class": "trust-boundary-misclassification",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model"
+   ],
+   "summary": "The gateway asserts operator identity for the entire ABAC/BLP model and is externally connected, so its compromise defeats the architecture via subject impersonation \u2014 contradicting the claim that only kernel and egress-proxy compromise is architecture-defeating.",
+   "detail": "\u00a73.3: \"The gateway asserts operator identity; the kernel binds subject attributes\" \u2014 so a compromised or spoofed gateway asserts the operator-owner's identity and receives everything that clearance dominates; no-read-up is defeated end-to-end. The gateway also hosts the scheduler minting scoped task identities (creation-time bounding keys off gateway-asserted creator identity), and in Compose it is externally connected. The only stated authentication is a channel-platform \"fail-closed allowlist,\" whose strength is never bounded despite a SECRET//REL north-star lattice.",
+   "recommendation": "ADR: either (a) admit the gateway into the TCB and harden/review it to trust-plane standard, amending principle 1; or (b) bound trust in the assertion \u2014 kernel-verifiable operator credentials (Tier-0-registered channel-identity bindings, per-operator authenticated sessions, step-up auth for high-attribute subjects) so gateway compromise degrades to DoS plus channel exposure. State an authentication-strength floor as a function of the deployment lattice.",
+   "relocated_class": "PDP decision inputs sourced from less-trusted planes without kernel-verifiable binding \u2014 identity asserted by gateway (this finding), labels physically stamped by the untrusted lake container, hook F sandbox strength \"declared, attested\" with no stated verifier, payload high-water marks carried through untrusted runtime containers",
+   "verifier": "Verified against the actual text: \u00a71 principle 1 claims kernel+egress-proxy are the ONLY architecture-defeating containers; \u00a73.3 has the gateway asserting operator identity (sole auth: channel fail-closed allowlist) and hosting the scheduler whose task identities are bounded by gateway-asserted creator attributes (KLC \u00a76); \u00a73.2 makes the gateway externally connected in Compose. KLC \u00a76's entire ABA"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 handling notes, \u00a710 hooks B/E",
+   "class": "content-based-enforcement-over-transformed-text",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "codex"
+   ],
+   "summary": "The no-egress guarantee is specified as content-matching over runtime-composed payloads \u2014 defeated by paraphrase \u2014 and handling caveats have no context-taint/high-water propagation semantics and no defined combination/dominance model, so the stated absolute property is unenforceable as written.",
+   "detail": "\u00a76: \"no-egress content can never appear in an outbound request body\"; hook E's rule is \"payload contains no no-egress labeled content.\" Labels attach to knowledge objects; payloads are free text composed by the LLM \u2014 detecting a paraphrased/summarized derivative is not decidable by label matching. The contract solves exactly this taint problem for classification (\"a task context assumes the high-water mark of everything retrieved into it\") but states no equivalent for handling. Hook B likewise only requires handling labels \"compatible with subject\" with no schema for how caveats combine, dominate, or conflict. This is the primary prompt-injection exfil path the architecture claims to close.",
+   "recommendation": "Specify handling-caveat propagation as context taint mirroring the classification rule: the task context's handling set is the union of everything retrieved; hook E denies outbound flows from a no-egress-tainted context except to destinations explicitly authorized for that caveat (forcing a definition of whether local inference counts as egress). Define caveat combination/dominance semantics for hook B. State that payload content-matching is defense-in-depth only. Add handling_caveats: context_union_sticky to \u00a715.",
+   "relocated_class": "content-recognition enforcement over LLM-transformed text without taint propagation \u2014 classification got context/high-water semantics but handling (hook E no-egress, hook E \"Tier \u2264 1 content quoted outbound\", hook B handling \"compatibility\", egress-proxy \"payload label screening\") did not; same structural defect in each mask",
+   "verifier": "Verified against the actual text: KLC line 97 (\"no-egress content can never appear in an outbound request body\") and hook E line 210 (\"payload contains no no-egress labeled content\") state the guarantee as content-matching over runtime-composed payloads; handling is a freeform list (line 75) outside the classification lattice, so \u00a76's dominance and high-water-mark context-taint rule (line 101) exp"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a74/\u00a76/\u00a79.1 memories and self-generated objects \u2014 vs \u00a710 hooks A/C, \u00a715 derived_ceiling",
+   "class": "lifecycle-coverage-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "lifecycle",
+    "codex"
+   ],
+   "summary": "Internal-origin objects (session-derived memories, self-generated skills) fit neither hook A nor hook C, have no issuer/(band,nature) and hence no derivable tier_ceiling, and min(inputs) is undefined over unlabeled sessions or empty lineage \u2014 under deny-by-default they cannot be written at all, or the implementer invents unstated policy.",
+   "detail": "Hook A requires \"source matched by authority map\" \u2014 a session has no URL and the issuer registry has no entry for a conversation. Hook C requires labeled inputs with ceilings \u2014 sessions are not labeled objects, and a skill \"generated in sandbox\" with lineage: [] has no inputs to min over. \u00a76's provenance is fetch-shaped (issuer \"bound by the egress rule that admitted the fetch\") and required labels are \"rejected, not defaulted\"; the fallback {default: 3} would make the \u00a79.1 memory 3->2->1(->0) path permanently unreachable since tier_ceiling is \"max tier this object may ever reach.\" The autopsy explicitly rejects Hermes' provenance-free memory writes \u2014 this gap is the contract failing its own bar.",
+   "recommendation": "Define the internal-origin ingest path: synthetic issuers in the registry (self-generated, session-distilled) with stated ceiling projections; issuer = the authenticated operator subject or scoped task identity, issuance_type = session/consolidation; classification = high-water of the contributing session contexts; ceiling for self-generated objects = min over lineage when non-empty, else a declared self-generation ceiling. Decide which hook mediates the write (extend A to internal origins or C to session inputs) and make hook C reject derivations containing any input with undefined ceiling.",
+   "relocated_class": "fetch-shaped provenance monoculture: the label/ceiling derivation machinery models exactly one origin type (external fetch via egress-bound issuers), so every internal-origin write path \u2014 consolidation-distilled memories, self-generated skills, dreaming-cycle authority-map change proposals, learning-request records \u2014 lacks a defined issuer/(band,nature)/ceiling derivation; \u00a712's sneakernet transfer-manifest extension shows the pattern for closing it that internal origins never received",
+   "verifier": "Verified against the text: hook A (KLC line 206) requires \"Source matched by authority map\" \u2014 the map (\u00a77) binds URL patterns to registry issuers, so sessions/sandbox generations cannot satisfy it. Hook C (line 208) requires min over labeled inputs' ceilings \u2014 sessions are not labeled objects (and treating session-record memories as inputs only regresses the gap to their own undefined write), and "
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 signatures, \u00a79.2, \u00a712 replication",
+   "class": "signature-semantics-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle",
+    "codex"
+   ],
+   "summary": "What a detached signature covers is undefined on objects with mutable frontmatter: either signatures break on every tier transition, or they cannot attest tiers at all \u2014 and stale signed states are replayable at \u00a712 import (tier resurrection with a cryptographically valid claim).",
+   "detail": "\u00a76: \"signatures: [] # required for tier <= 1; detached sigs, operator or CI key\" \u2014 the signed byte range is never defined while tier, last_validated, and signatures itself all mutate by design (\u00a79.2 demotion is automatic). If the signature covers tier, every automatic demotion orphans it AND a demoted object retains a valid old signature attesting its former tier, replayable at \u00a712 (\"receiving sites re-verify signatures before honoring tiers\") \u2014 no anti-replay binding (counter, freshness window, revocation) is specified. If it covers content only, \u00a712's tier-honoring is hollow: a valid signature over content does not prevent tier/ceiling/classification/provenance substitution.",
+   "recommendation": "Define the signed payload as a canonical structure: (content hash, id, type, tier, tier_ceiling, classification, key id, monotonic revision counter or signing timestamp). Promotions re-sign; automatic demotions revoke or supersede the prior signature (kernel-countersigned demotion record). \u00a712 honors a tier only from the LATEST signature for that object id under the receiving site's trust anchors. Specify algorithm policy and binding to object ID.",
+   "relocated_class": "signature-as-control with undefined payload/key-trust/lifecycle semantics \u2014 recurs across \u00a76 object signatures, \u00a76 skill-manifest signing, \u00a712 sneakernet signed transfer manifest, \u00a76 operator-signed model-endpoint labels, and the \u00a76/ADR-0002 signed downgrade authorization; only the authority-map's git-signed commits name a concrete mechanism",
+   "verifier": "Verified against the actual text. (1) The quoted \u00a76 line 90 is exact (\"required for tier <= 1; detached sigs, operator or CI key\") and no document in the corpus \u2014 KLC, container-architecture.md, ADR-0001/2/3, autopsy \u2014 defines the signed payload/byte range. (2) The dilemma is real: \u00a79.2 demotion is \"automatic and is a feature,\" and the stale-source demotion path (revalidate elapsed, source re-chec"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 hook E ('task-scoped allowlist') vs \u00a77.1 and \u00a715",
+   "class": "policy-bypass",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "codex"
+   ],
+   "summary": "Hook E's undefined 'task-scoped allowlist' silently creates a second egress authority that can bypass the Tier-0 authority map \u2014 no minting authority, signer, scope ceiling, issuer binding, or creation hook is defined.",
+   "detail": "\u00a77.1 is absolute (\"A fetch to any URL not matched by an allow pattern is denied... the runtime does not decide where to learn from, the map does\") and \u00a715 says fetch_outside_authority_map: deny \u2014 yet hook E permits \"Destination on authority map or task-scoped allowlist,\" a term defined nowhere. If the runtime can request one, it is a map bypass; if the operator grants it per task, the contract should say so. TM9 additionally showed nothing requires the destination's label to dominate the requesting context's high-water mark, so even a SECRET-tainted context may fetch from an UNCLASS source.",
+   "recommendation": "Define task-scoped allowlists (operator-granted at task creation, signed, always a subset of the map, bound to the task's DCS labels and ceiling, kernel as creation point, audited) or delete the phrase. Add a hook-E rule that the destination must be authorized for the requesting context's high-water mark.",
+   "relocated_class": "Undefined task-scoped grant authority at the enforcement seam: hook-table permit conditions reference task-scope machinery the contract never defines or gives a creation point \u2014 hook E's \"task-scoped allowlist\" and hook F's \"task whitelist\" (\"declared capabilities \u2286 persona + task whitelist\") are two masks of the same class; \u00a78's lifecycle protocol contains no step that mints, signs, or bounds any task-scoped grant.",
+   "verifier": "Verified against the text: \"task-scoped allowlist\" appears exactly once in the corpus (knowledge-lifecycle-contract.md line 210, hook E) with no definition of minting authority, signer, scope ceiling, issuer binding, or creation hook anywhere (grep across README, all design docs, ADRs). The contradiction is direct: \u00a77.1 states the egress allowlist is \"enforced at hooks A and E\" and \"the runtime do"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a78 step 3, \u00a710 hooks E/F \u2014 quarantine 'inform but not authorize'",
+   "class": "taint-tracking-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "codex"
+   ],
+   "summary": "The core quarantine constraint \u2014 Tier-3 content may inform reasoning but not privileged actions \u2014 has no enforceable semantics: hooks track classification taint but not epistemic-tier/integrity taint, so injected quarantined content steers already-authorized privileged actions (the confused-deputy residual).",
+   "detail": "Hook F checks the skill (signed, tier, capabilities, sandbox) \u2014 never the arguments or the integrity provenance of the context that composed them; hook E checks destination and data labels. A prompt-injected Tier-3 document cannot authorize anything but can steer an authorized Tier-1 infrastructure-writing skill into attacker-chosen parameters. BLP gives a confidentiality direction; there is no Biba-style integrity counterpart (no rule that quarantined influence degrades what the task may execute). The ingredients exist \u2014 autopsy \u00a73.2 inherits OpenClaw's exact-argv/pinned-executable binding as \"Hook F's primitive\" \u2014 but the KLC never binds them into hook F's minimum rules.",
+   "recommendation": "ADR: give hook F a context-integrity input. Options: (a) taint-aware execution \u2014 a context containing Tier-3 content gets a reduced execution whitelist or requires operator approval for state-changing skills while tainted; (b) a reasoning_sources field so hooks F/E verify influencing sources meet the action's required tier; (c) adopt exact-argv/approval binding for high-consequence capability classes; at minimum reword \u00a78 step 3 to stop promising an unenforced property. Resolve jointly with \u00a714 Q6.",
+   "relocated_class": "Integrity-direction constraints stated without an enforcement locus: the BLP/confidentiality direction is fully bound to hooks (B/C/E dominance, high-water mark), but its Biba-style integrity dual \u2014 tier/epistemic influence limits \u2014 is prose-only in \u00a72 axiom 4, \u00a75 Tier 2 and Tier 3, and \u00a78 step 3, with no hook rule consuming context tier composition (also visible in hook F's undefined \"executable tier\" term).",
+   "verifier": "Verified against the actual text. (1) KLC \u00a78 step 3 states the property verbatim: quarantined content \"may inform the current task's reasoning but not privileged actions\"; \u00a75 makes the same promise for Tier 2 (\"may not authorize privileged action\"); \u00a72 axiom 4 goes further, extending deny-by-default \"equally... to epistemics (what knowledge may influence what decisions)\". (2) \u00a710 hook F's minimum "
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 classification-lattice note, \u00a715 derived_classification \u2014 hooks A/B/E",
+   "class": "releasability-antitone-dominance",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp",
+    "lifecycle"
+   ],
+   "summary": "Releasability categories (REL AUS,KOR) order OPPOSITE to compartments, so the contract's single uniform dominance/high-water rule is ill-defined or inverted for the REL dimension \u2014 a uniform max/union implementation silently widens releasability of derived objects, an automated write-down.",
+   "detail": "Compartments are monotone (more categories = more restricted; HWM = union); releasability is antitone (larger REL set = LESS restricted; eligibility = membership; correct combine = INTERSECTION). Under the contract's max/union HWM rule, deriving from REL AUS + REL KOR inputs yields REL AUS,KOR \u2014 releasable to both nations when the correct result is releasable to neither (\u2229 = \u2205, US-only) \u2014 defeating the stated BLP property with the doc's own example, while appearing to implement derived_classification: high_water_mark_of_inputs faithfully and violating classification_downgrade_by_automation: never. Every quoted dominance check (hook B subject dominance, hook A instance ceiling, \u00a712 import, hook E endpoint 'above') inherits the ambiguity; no definition of dominance for category sets appears anywhere.",
+   "recommendation": "Write the lattice formally as an ADR and encode it in maknae-dcs-core + conformance vectors: level (total order, join = max); compartments (\u2286-ordered, join = \u222a); releasability (\u2287-ordered or complement-compartments, join = \u2229, with explicit 'no REL marking' vs 'REL \u2205' representation and empty-intersection mapping to most-restrictive); dominance = conjunction across dimensions; REL eligibility = nation \u2208 object's REL set. Ship golden vectors for the AUS/KOR derivation case so inverted implementations cannot pass CI.",
+   "relocated_class": "undefined-order comparisons: normative checks stated as comparisons over orders the corpus never defines (label dominance over category sets here; hook F's \"sandbox strength of host \u2265 skill's declared requirement\" is the same shape) \u2014 formal machinery named in prose, deferred to a not-yet-existing artifact (maknae-dcs-core + conformance vectors) with no authored definition for that artifact to encode",
+   "verifier": "Verified against the actual text. KLC \u00a76 (line 101) lumps compartments and multinational releasability together as \"category sets,\" states the derive rule as \"high-water mark of its inputs,\" and glosses it as \"authority ceilings take the min of inputs, classification takes the max\" \u2014 explicit max/union language with no per-dimension ordering defined anywhere in the corpus (grep across README, cont"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 hook E vs \u00a76 multi-operator note; README \u00a78 MVP #3/#4",
+   "class": "output-interface-unmodeled",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp",
+    "codex"
+   ],
+   "summary": "No-write-down has no enforced rule on the agent's replies to operators: hook E's rule list covers destinations and model endpoints only \u2014 no requirement that the recipient operator's clearance dominate the reply's high-water mark, and shared-channel context fork/merge semantics are unspecified.",
+   "detail": "\u00a76 claims outputs are \"filtered per subject\" via hook E, but hook E's enforced-rules minimum contains no recipient-dominance check. In the deployment the docs explicitly target (single shared channel, multiple operators with different attribute sets from birth), a context floated to SECRET//REL by a high operator's retrieval produces a reply rendered where lower-cleared operators read it \u2014 a direct BLP write-down. The contract claims \"full Bell-LaPadula enforcement\" while the normative hook table ships without the subject-facing half; hook B's non-disclosing framing implies per-subject contexts but never specifies how conversation context forks/merges across subjects.",
+   "recommendation": "Model channel output as a first-class MLS interface: hook E (or a distinct output hook) requires every authenticated recipient's clearance/categories to dominate the reply payload's HWM \u2014 for shared channels, bind the channel to a floor label (GLB of member clearances) capping what any serving context may contain, or fork context and reply per subject. Specify conversation-context ownership explicitly; add the multi-operator reply case to the conformance vectors.",
+   "relocated_class": "Enforcement stated without a locus \u2014 security properties asserted in \u00a76 prose/\u00a715 invariants with no corresponding rule in the \u00a710 hook table's \"enforced rules (minimum)\", which is the declared acceptance test; three representations of enforcement that must agree. Second confirmed instance: hook C (line 208) omits derived classification = HWM(inputs), asserted in \u00a76 line 101 and the \u00a715 derived_classification invariant.",
+   "verifier": "Verified against the actual text. KLC \u00a710 hook E's enforced-rules minimum (design/knowledge-lifecycle-contract.md line 210) contains only destination-allowlist, no-egress screening, tier-quote, and model-endpoint eligibility rules \u2014 no requirement that a recipient operator's clearance/categories dominate the reply payload's high-water mark. Yet \u00a76 line 100 claims \"outputs (hook E) are all filtered"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 (schema + derived-only note), \u00a712, \u00a79.1; container-architecture \u00a73.5",
+   "class": "label-origination-unspecified",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp"
+   ],
+   "summary": "No component is specified as the trusted authority that MINTS classification labels: the derived-only lock covers authority fields but excludes classification, ingest rejects unlabeled objects yet nothing says who assigns the label, operator conversational input is unlabeled, and sneakernet import is silent on unsigned classification claims.",
+   "detail": "The derivation note covers only authority fields (\"stamped at ingest, gate-verified, never author-supplied\") \u2014 classification has no analogous origination rule; hook A only checks the label is within the instance ceiling (a bound, not a source). Container-architecture \u00a73.5 puts \"label stamping\" in the untrusted lake. Three unspecified paths: (1) fetched web content \u2014 nothing says what classifies it; (2) \u00a712 sneakernet \u2014 the unsigned-tier rule handles TIER only; for an unsigned CLASSIFICATION claim, honoring it trusts an unverified label while auto-lowering violates classification_downgrade_by_automation: never \u2014 the contract corners itself; (3) operator input/sessions never transit hook A, so HWM over unclassified inputs makes every conversation-derived memory's classification undefined.",
+   "recommendation": "Specify classification origination per entry path, kernel-enforced: (a) each egress allow rule carries a default/maximum classification stamped on admitted content; (b) sneakernet import REQUIRES a signed classification or refuses; (c) operator input inherits a session label = declared channel/session level bounded by the operator's attributes; (d) only the kernel writes the field. Add 'classification origination: kernel-stamped per entry-path rule, never runtime-supplied' to \u00a715.",
+   "relocated_class": "label-origination-unspecified beyond classification: the derived-only lock is the corpus's one origination rule (authority fields only); other security-load-bearing labels \u2014 `handling` (no-egress caveat minting) and memory `subject` scoping \u2014 likewise have enforcement loci (hooks B/E) but no specified minting authority. Structural class: gates verify bounds/consistency of labels, never their origination, everywhere outside the authority-field lock.",
+   "verifier": "Verified every cited passage against the actual text. \u00a76's derived-only note and \u00a715's object_authority_fields invariant enumerate nature/domain/band/ceiling only \u2014 classification is excluded, and its presence as plain frontmatter in the \u00a76 schema implies by omission that it is author-supplied, the opposite of what BLP requires. Hook A's check is a ceiling dominance bound, not an origination rule;"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 hook C vs \u00a76 and \u00a715",
+   "class": "two-representations-drift",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp",
+    "codex"
+   ],
+   "summary": "Hook C's enforced-rules row omits the classification high-water-mark stamp and handling-caveat propagation that \u00a76 and \u00a715 assign to it \u2014 an implementer coding from the normative hook table ships without the confidentiality half of derivation, and derivatives launder no-egress caveats.",
+   "detail": "\u00a76: no-write-down is enforced at \"hooks C/E \u2014 a derived object classifies at the high-water mark of its inputs\"; \u00a715: derived_classification: high_water_mark_of_inputs. But hook C's minimum rules list only tier = 3, tier_ceiling = min(inputs), and lineage \u2014 classification is absent, and nothing states a derivative of no-egress content inherits no-egress: a summary with fresh empty handling passes hook E's payload screen legitimately.",
+   "recommendation": "Amend hook C's row: tier = 3; tier_ceiling = min(inputs); classification = HWM(inputs) per the \u00a76 lattice; handling = union(inputs); full lineage. Add derived_handling: union_of_inputs to \u00a715 so the caveat-laundering path is closed by the conformance vectors.",
+   "relocated_class": "derivation-inheritance rules split across three normative surfaces that must agree (\u00a76 prose notes, \u00a710 hook table, \u00a715 invariants) \u2014 each inheritance rule (ceiling / classification / handling) lives in a different subset, so the surfaces have already diverged; same two-representations-drift shape as the \u00a710-vs-\u00a76 hook coverage generally",
+   "verifier": "Verified against the text: hook C's row (line 208) lists only tier=3, ceiling=min(inputs), lineage \u2014 while \u00a76 line 101 explicitly assigns the classification high-water-mark stamp to \"hooks C/E\" and \u00a715 carries derived_classification: high_water_mark_of_inputs, confirming the drift between normative surfaces. Worse, grep across the entire corpus (contract, README, container-architecture, autopsy, A"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a79.1 (Memory 2\u21921) vs \u00a711.2",
+   "class": "corroboration-loophole",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "The memory promotion path reaches Tier 1 on the strength of a single sub-Tier-1 source: three sessions that each retrieve the same poisoned document satisfy 'confirmed across \u22653 independent sessions', bypassing the document corroboration requirement \u00a711.2 claims closes the poisoning path.",
+   "detail": "\u00a711.2: \"Nothing promotes to Tier 1 on the strength of a single sub-Tier-1 source.\" But the \u00a79.1 memory 2\u21921 gate is \"Confirmed across \u22653 independent sessions or operator confirmation; signed\" \u2014 session count measures repetition, not source independence, and \"independent sessions\" is undefined. With the CI-key signing path, no human is in the loop; the laundered memory can then reinforce its own source document (circularity between memory confirmation and document corroboration).",
+   "recommendation": "Define session independence in evidentiary-lineage terms: counted sessions must trace to disjoint source closures (record which retrievals informed each session so the gate checks mechanically). Alternatively make memory 2\u21921 inherit the document rule \u2014 second independent source or operator confirmation \u2014 and drop the purely session-count-based automated path.",
+   "relocated_class": "Guardrail-prose vs gate-table divergence (\"two representations that must agree\"): \u00a711's load-bearing guardrails restate \u00a79.1's promotion machinery in prose, and \u00a711.2's universal corroboration claim has an enforcement locus only in the document column \u2014 the skill 2\u21921 gate (N supervised executions + signature, no second independent source) exhibits the same divergence, so the memory loophole is one mask of a column-by-column failure to give \u00a711.2 a mechanical locus in hook D.",
+   "verifier": "Verified against the file: \u00a79.1's memory 2\u21921 gate (\"Confirmed across \u22653 independent sessions or operator confirmation; signed\") is quoted accurately, \"independent sessions\" is undefined anywhere in the corpus (the independence pointer to \u00a714 Q8 is attached only to the document column, and Q8 addresses source/peer-domain independence, not sessions), and \u00a76 permits CI-key signatures, so the path is "
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a78 step 3 vs \u00a710 hook B",
+   "class": "tier-gating-model-conflation",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "Hook B's 'task's minimum tier satisfied' rule makes \u00a78 step 3's promise (quarantined content may inform the current task) unfulfillable for exactly the tasks that trigger the learning loop \u2014 two conflated gating models (per-task floor vs per-action-class tiers).",
+   "detail": "\u00a78 defines a gap as retrieval returning nothing above the task's minimum tier, then promises freshly quarantined content is \"immediately usable\" \u2014 but hook B enforces the minimum tier on every retrieval, so for any task excluding Tier 3 the new object can never enter that task's context; for a task whose minimum IS 3, the gap trigger is incoherent. Compounding: \"above the task's minimum tier\" inverts numerically (Tier 0 is highest authority), so the comparison direction is itself ambiguous.",
+   "recommendation": "Pick one model and state it: tier floors per action class (a reasoning-context floor and a stricter privileged-action floor, which \u00a75 and \u00a78.3 already imply), or keep a per-task floor with an explicit fetch-task-affinity exception at hook B (content ingested for task T retrievable by T at Tier 3, flagged untrusted). Define the numeric comparison direction once. This also bounds \u00a714 Q6.",
+   "relocated_class": "two-representations-of-gating-semantics: the lifecycle prose (\u00a74/\u00a75/\u00a78) and the \u00a710 enforcement hook table each independently restate tier-privilege/retrieval rules and must stay in agreement \u2014 the \u00a78-step-3 vs hook-B conflict is one seam of that duplication, and any other place \u00a78's narrative paraphrases a hook's rule carries the same divergence risk",
+   "verifier": "Verified against the text: \u00a78 step 1 (line 171) triggers learning exactly for tasks whose minimum tier is stricter than lake contents; \u00a78 step 3 (line 173) promises the freshly-quarantined Tier-3 object \"may inform the current task's reasoning\"; hook B (line 207) enforces \"Task's minimum tier satisfied\" on every retrieval, which excludes Tier-3 content from any task with minimum tier 0-2 \u2014 precise"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a715 vs \u00a77 and \u00a712",
+   "class": "invariant-scope-mismatch",
+   "adr_candidate": false,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "Invariant all_new_knowledge_enters_at_tier: 3 is contradicted twice \u2014 by Tier-0 doctrine authoring (\u00a77) and by \u00a712's signed-tier replication import \u2014 with no stated exemption; an implementer encoding it literally quarantines all imports and cannot represent the authority map.",
+   "detail": "\u00a77 has the authority map entering at Tier 0 (\"authored by the operator during onboarding\"); \u00a712 implies validly signed imports are honored above Tier 3 (\"receiving sites re-verify signatures before honoring tiers\"). The README makes invariants acceptance criteria, so either literal reading violates the acceptance suite \u2014 misleading implementation of the exact block the Rust kernel encodes per ADR-0002.",
+   "recommendation": "Scope the invariant with its two enumerated exceptions: operator-signed Tier-0 writes per tier_0_writes, and \u00a712 imports whose tier claim carries a signature valid under the receiving site's trust anchors \u2014 so the machine-readable block matches \u00a77 and \u00a712 exactly.",
+   "relocated_class": "machine-readable invariant block as second representation of sectional prose \u2014 \u00a715 restates prose rules as unqualified universals that drop the exceptions the prose sections themselves create (\u00a75's Tier-3 row carries the same unscoped \"All new knowledge starts here\"), and the corpus multiplies that representation into golden conformance vectors, Cedar policy tests, and Rust type encodings that must all agree (two-representations-must-agree class, \u00a715 as the pivot)",
+   "verifier": "Verified against the actual text. \u00a715's `all_new_knowledge_enters_at_tier: 3` is unqualified. \u00a77 (line 106) has the authority map \u2014 a Tier 0 artifact \u2014 \"authored by the operator during onboarding,\" and \u00a75's Tier-0 row makes direct operator placement the rule (\"Operator signature only. Never automated.\"), so Tier-0 doctrine demonstrably enters the system above Tier 3. \u00a712's replication bullet (line"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a79.1 (Skill 2\u21921) vs \u00a74, \u00a75, \u00a76, \u00a710 hook F",
+   "class": "gate-deadlock",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "The skill 2\u21921 gate requires N supervised executions the rest of the contract forbids: a Tier-2 skill may not authorize privileged action, execution is privileged, and it is not yet signed \u2014 so no skill can ever legally reach Tier 1.",
+   "detail": "\u00a74: execution is a privileged act. \u00a75 Tier 2: \"may not authorize privileged action.\" \u00a76: \"unsigned skills cannot execute regardless of tier\" (\u00a715: unsigned_skill_execution: deny), and \"executable tier\" (hook F) is never defined. The escape hatch everyone will assume \u2014 a distinct operator-supervised execution mode with provisional signing below Tier 1 \u2014 is nowhere specified; if Tier 2 IS an executable tier instead, \u00a75's Tier-2 constraint is contradicted.",
+   "recommendation": "Define \"executable tier\" and add an explicit supervised-execution mode to hook F: a Tier-2 skill executes only under per-run operator authorization or a narrowly-scoped supervision grant, with the provisional signature requirement stated (who signs a Tier-2 candidate, with which key). State that Tier 2's constraint excludes these explicitly-authorized supervised runs.",
+   "relocated_class": "Gates/hooks that depend on a permission mode or authority the contract references but never explicitly grants \u2014 fatal under its own deny-by-default axiom (other masks: undefined \"executable tier\" in hook F; unspecified signer/criteria for sub-Tier-1 skill and memory signatures incl. the \"CI key\"; hook E's once-mentioned, never-defined \"task-scoped allowlist\")",
+   "verifier": "Every quoted clause verified against the text: \u00a74 line 43 (\"execution is a privileged act\"), \u00a75 line 58 (Tier 2 \"may not authorize privileged action\"), \u00a76 line 98 (\"unsigned skills cannot execute regardless of tier\") + \u00a715 line 279 (unsigned_skill_execution: deny), \u00a79.1 line 185 (2\u21921 requires \"N successful supervised executions \u2026 signed\" with NO operator-sign-off alternative, unlike the Document a"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a79.2 (Contradicted) vs \u00a75, \u00a77.2, \u00a715",
+   "class": "tier-authority-conflation",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle",
+    "lake-align",
+    "codex"
+   ],
+   "summary": "The contradiction-demotion rule ranks precedence by lifecycle-tier number \u2014 which \u00a77.2 and invariant precedence_outside_typed_edges: never forbid \u2014 produces an undefined 'below Tier 3' outcome for fresh contradictors, auto-resolves cross-peer conflicts the inherited lake model says must surface, and leaves adjudication to the untrusted dreamer.",
+   "detail": "\u00a79.2: \"a higher-authority source contradicts the content \u2192 demote below the contradicting source's tier.\" This (a) conflates the two axes the \u00a75 resolution just declared orthogonal, violating the contract's own invariant; (b) a freshly-fetched genuinely-higher-authority (e.g. SUPRA-nature) source sits at lifecycle Tier 3 \u2014 \"below tier 3\" does not exist except purge, so validated content is purged on the word of quarantined input; (c) ADR-0004 D10 requires unconnected cross-peer conflicts to SURFACE to the operator, never auto-resolve \u2014 \u00a79.2 demotes automatically, re-importing the exact precedence-from-tier class ADR-0004 exists to kill; (d) contradiction detection is a semantic judgment only the untrusted dreamer can make, opening a denial-of-knowledge path (injected content asserting contradictions strips healthy Tier-1 knowledge automatically).",
+   "recommendation": "Restate the trigger in basis terms: contradiction is adjudicated by the \u00a77.2 resolution machinery (supra > non-supra; controlling nature; typed edge among peers; otherwise SURFACE to operator, no automatic demotion); the contradicting source must itself have passed a validation gate (\u2265 Tier 2) before automatic effect; express the demotion outcome in lifecycle terms (demote to quarantine pending re-consolidation), never relative tier arithmetic. Record auto-demote-vs-surface as an ADR.",
+   "relocated_class": "v0.1 single-axis authority residue: the v0.2 rework of \u00a76\u2013\u00a77 to the ADR-0004 basis was not propagated into downstream lifecycle rules, leaving precedence re-encoded in a second representation (lifecycle-tier arithmetic) beside the canonical typed-edge representation \u2014 the \"two representations that must agree\" drift class ADR-0004 D10 exists to kill, relocated into the KLC's demotion rules.",
+   "verifier": "Verified against <repo>/design/knowledge-lifecycle-contract.md line 195 and the lake's ADR-0004. (a) \u00a79.2's \"demote below the contradicting source's tier\" is lifecycle-tier arithmetic driven by an authority-axis trigger, violating the \u00a75 orthogonality resolution, \u00a77.2 (\"never inferred from tier numbers\"), and \u00a715 `precedence_outside_typed_edges: never` \u2014"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a79.1 / \u00a711.2 / \u00a714 Q8 \u2014 corroboration independence",
+   "class": "corroboration-loophole",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle",
+    "cross-doc",
+    "codex"
+   ],
+   "summary": "Corroboration 'independence' has no stated floor and Q8 is explicitly unresolved ('Operator: undecided') while \u00a79.1 cites it as a definition \u2014 same-issuer pairs and lineage-sharing derived objects both qualify as the 'second independent source', so the Tier-1 gate is not an implementable security property.",
+   "detail": "Under the weakest reading, two pages admitted by the same allow pattern (same issuer redhat) corroborate each other \u2014 one compromised issuer publishes two pages and defeats \u00a711.2's claim. Nothing requires the corroborator to be lineage-disjoint: by \u00a711.1's arithmetic a summary of a ceiling-1 document is itself ceiling-1, so a derivative (or memory distilled from the document) can corroborate its own ancestor \u2014 content laundered through derivation corroborates itself. Meanwhile \u00a79.1's \"(independence definition: \u00a714 Q8)\" points at an open question, inviting silent resolution in violation of README \u00a76 rule 6; the 2\u21921 gate is not implementable until Q8 resolves.",
+   "recommendation": "State a mechanical independence floor now, independent of Q8's domain-level question: corroborating objects must (a) have distinct registry issuers, (b) have disjoint full lineage closures, (c) not be derived from each other or a common non-Tier-\u22641 ancestor. Q8 then only decides whether to strengthen (a) to distinct peer domains. Change \u00a79.1's parenthetical to '(independence: OPEN \u2014 \u00a714 Q8)' until resolved.",
+   "relocated_class": "Promotion-gate predicates whose security-bearing terms are cited but never mechanically defined \u2014 same class recurs in \u00a79.1's memory 2\u21921 gate (\"Confirmed across \u22653 independent sessions\": session-independence is equally undefined, so one poisoned interaction pattern spawning N sessions satisfies it), and partially in the skill gate's tunable-N deferral; the corpus pattern is security claims (\u00a711.2) resting on open-question-referenced definitions.",
+   "verifier": "Verified against the text: (1) KLC \u00a79.1 line 185 cites \"(independence definition: \u00a714 Q8)\" while Q8 (line 265) is explicitly operator-undecided \u2014 an open question presented as a definition. (2) Q8's scope covers only the peer-domain question; no text in the maknae corpus or the Lake's ADR-0004 (grepped: zero hits for independence/corroboration) supplies an issuer-distinctness or lineage-disjointne"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a711.2 vs \u00a79.1 promotion table",
+   "class": "two-representations-drift",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "The 2\u21921 corroboration rule is stated twice with substantively different bars: \u00a79.1 requires a ceiling-1 corroborator, \u00a711.2 accepts any 'authorized source' \u2014 a reading that lets an allowlisted ceiling-2 community blog corroborate content into Tier 1, reopening the poisoning path \u00a711.2 claims to close.",
+   "detail": "\u00a79.1: \"Corroborated by a second independent ceiling-1 source... or operator sign-off.\" \u00a711.2: \"Either a second independent authorized source agrees, or a human signs.\" An 'authorized source' is anything admitted by the egress allowlist \u2014 the \u00a77.2 sample map authorizes community-blogs (ceiling 2). Planting one post on an allowlisted community domain then corroborates a compromised primary into Tier 1. An implementer cannot tell which statement is canonical; the weaker one defeats a stated load-bearing property.",
+   "recommendation": "Make \u00a79.1 the single canonical statement; rewrite \u00a711.2 to point at \u00a79.1 instead of restating it (one representation, nothing to diverge), and state explicitly that the corroborating source must itself derive tier_ceiling: 1 from the authority basis.",
+   "relocated_class": "Normative rule restated in multiple representations with no declared canonical locus \u2014 the 2\u21921 corroboration bar exists in three copies (\u00a79.1 table, \u00a711.2 prose, \u00a715 invariants): \u00a711.2 weakens it and \u00a715 omits it entirely; same structural shape latent in the derived-only lock, stated three times (\u00a76 line 96, \u00a77.2 line 119, \u00a77 rules line 164).",
+   "verifier": "Both quotes verified against the file. \u00a79.1 (line 185) requires the corroborator to be a \"second independent ceiling-1 source\"; \u00a711.2 (line 223) requires only \"a second independent authorized source.\" Under the \u00a77.2 sample map, community-blogs is an allowlisted (authorized) issuer deriving tier_ceiling 2, so \u00a711.2's wording admits a planted ceiling-2 blog post as corroboration for a compromised ce"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 issuance_type comment, \u00a77.1\u2013\u00a77.2",
+   "class": "authority-ceiling-forgery",
+   "adr_candidate": true,
+   "dimensions": [
+    "lake-align",
+    "codex"
+   ],
+   "summary": "issuance_type \u2014 half the derivation key for nature and therefore tier_ceiling \u2014 is 'authored at ingest' with no trusted derivation source: the allowlist binds only the issuer, so the untrusted ingest path (or fetched content) can select a more authoritative type, a self-served ceiling raise that honors the derived-only lock in letter while defeating it.",
+   "detail": "\u00a77.1 binds only the issuer per allow pattern; \u00a77.2 derives nature via \"(issuer, issuance type) \u2192 nature\" and claims authority fields are \"never author-supplied\" \u2014 but the sample registry maps the same redhat issuer to product-doc, kb-article, AND blog, with no URL rule or signed metadata binding a response to one. Classifying a fetched page as product-doc (\u2192 standard \u2192 ceiling 1) instead of blog (\u2192 default ceiling 3) is attacker-influenceable. In the lake this input is authored by a trusted human curator and FK-validated (ADR-0004 D8); maknae inherited the lock without carrying the trust analysis of its inputs across the trust-model change.",
+   "recommendation": "Bind issuance_type at the same trust point as issuer: in the allow pattern itself (pattern \u2192 (issuer, issuance_type), e.g. separate patterns for the docs tree vs blog tree) or via kernel-side classification rules in the signed authority map. State in \u00a77.1 that BOTH derivation inputs are map-bound, never runtime-supplied; extend \u00a715 (derivation_inputs: map_bound_only).",
+   "relocated_class": "ingest-authored derivation inputs across the lake\u2192maknae trust-model change: fields the lake trusts because a human curator authors them (issuer/issuance_type per ADR-0004 D8/D11) become runtime-authored at maknae's automated ingest with no kernel-bound derivation rule \u2014 issuance_type is one mask; the initial `classification` label stamped at ingest (\u00a76) is a sibling (under-classification = the BLP-side analog of a ceiling raise)",
+   "verifier": "Verified against the actual text: \u00a76 line 79 comments issuance_type \"authored at ingest\"; \u00a77.1 and the sample map bind allow patterns to issuer only (both redhat patterns admit content eligible for product-doc/kb-article/blog with no URL-tree or metadata rule selecting among them); the derived-only lock's three statements (\u00a76 note, \u00a77.2 rules, \u00a715 invariant comment) each enumerate nature/domain/ba"
+  },
+  {
+   "severity": "blocker",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 hook D vs \u00a78 step 4 and \u00a73",
+   "class": "unverifiable-gate-criteria",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "Several \u00a79 promotion criteria are semantic judgments only the untrusted dreamer can make ('agrees', 'dedup complete', 'confirmed across sessions'); hook D's 'criteria of \u00a79 met' is unimplementable by the kernel for those without a stated attestation model \u2014 the trusted plane rubber-stamps the untrusted requester's assertion.",
+   "detail": "The kernel can mechanically verify hashes, signatures, ceilings, tier arithmetic, lineage \u2014 not semantic agreement. The contract never partitions kernel-verifiable from dreamer-attested criteria, so a prompt-injected fetched document can steer the dreamer into asserting corroboration, re-opening the \u00a711.2 poisoning path from inside the pipeline.",
+   "recommendation": "Partition each \u00a79 criterion into kernel-verifiable vs dreamer-attested; for the attested set require kernel-checkable supporting evidence (corroboration claims must name corroborating object ids so the kernel verifies issuer-distinctness and lineage-disjointness mechanically); semantic assertions recorded as attestations in the audit event; Tier-1 promotions whose evidence is attestation-only fall back to operator sign-off. ADR material \u2014 defines the promotion pipeline's trust boundary.",
+   "relocated_class": "Trusted-plane gates conditioned on untrusted-plane semantic judgments with no evidence/attestation model \u2014 also present in \u00a79.2 \"Contradicted\" demotion (semantic contradiction detection unassigned; a poisoned dreamer could weaponize demotion), \u00a79.1 skill gate's \"capability set minimal (least privilege review)\" (reviewer unstated), and \u00a79.1 memory gate's session-independence judgment; hook F's \"declared, attested host property\" shows the corpus applies the attestation pattern only to sandbox strength.",
+   "verifier": "Verified against the actual text. (1) \u00a79.1 criteria genuinely partition into kernel-verifiable (hash, ceiling, signatures, zero policy denials) and semantic-only (\"dedup complete\", corroborating source \"agrees\" per \u00a711.2, \"confirmed across \u22653 independent sessions\", \"capability set minimal\"); hook D (\u00a710) says only \"Criteria of \u00a79 met\" with no partition, evidence schema, or attestation model \u2014 \"att"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a7\u00a71.4, 3.2 \u2014 NetworkPolicy/internal-network enforcement claim",
+   "class": "network-enforcement-incomplete",
+   "adr_candidate": true,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "Network topology alone does not force application traffic through the proxy or prevent tunneling through an allowed peer \u2014 no transparent redirection, proxy authentication, workload identity, or anti-tunneling mechanism is specified.",
+   "detail": "\"in Kubernetes, kernel-mediated flows become NetworkPolicies; in Compose, internal networks + the egress proxy enforce the same shape\" and \"NetworkPolicies force all egress through it\" are asserted without the mechanisms that make them true: egress deny-all rules, proxy authentication, mTLS between workloads, or prevention of direct/tunneled flows via an allowed peer container.",
+   "recommendation": "Define the specific NetworkPolicy set (egress deny-all, exception for egress-proxy only) and Compose network configuration that enforce proxy transit; specify proxy authentication and mutual TLS to prevent peer-to-peer bypass.",
+   "relocated_class": "enforcement-stated-without-binding-mechanism: plane-level security properties asserted (kernel mediates every flow, proxy is the single PEP, gateway asserts operator identity) without specifying the inter-container mechanism that binds subject to request (workload identity, container-to-kernel/proxy authentication) \u2014 recurs at the gateway\u2192kernel identity-assertion seam (\u00a73.3) and the runtime\u2192kernel grant path (\u00a73.4)",
+   "verifier": "Partially refuted, core confirmed. Refuted parts: (1) the demand for \"egress deny-all rules\" ignores that the corpus doctrine is explicit deny-by-default (README lines 17, 92; KLC principle 4) and that container-architecture open item 3 (line 115) already defers the Kubernetes NetworkPolicy set as acknowledged pending work; (2) the external claim that \"network topology alone does not force applica"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a73.2 egress-proxy TLS termination \u2014 vs KLC \u00a710 hook E",
+   "class": "opaque-tunnel-blindness",
+   "adr_candidate": true,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "Hook E's payload label screening is only mechanically possible if the egress-proxy re-originates outbound requests; 'it terminates TLS' leaves open the CONNECT-tunnel implementation under which the baselines proved payload inspection receives zero bytes.",
+   "detail": "\"Terminates TLS\" is ambiguous between a re-originating forward gateway (bodies visible) and an HTTPS_PROXY/CONNECT design. Openclaw D16 measured the latter's failure: \"the 'in-transit DLP body-scan'... receive zero bytes of provider traffic\" through an opaque CONNECT tunnel. If maknae's proxy is built the obvious way (standard SDKs + proxy env vars), payload screening and no_egress_label_outbound: deny become theater on exactly the flows that matter. Re-origination in turn raises cert-pinning endpoints and inspection-key custody.",
+   "recommendation": "State normatively: runtime-plane containers never open external TLS; all outbound flows are submitted as structured requests to the egress-proxy, which re-originates them after kernel decision (API gateway, not CONNECT tunnel). Add the cert-pinning caveat and a conformance test ('proxy sees plaintext of every outbound body') to the spike acceptance criteria.",
+   "relocated_class": "enforcement-locus-named-without-enabling-mechanism \u2014 the corpus repeatedly names WHERE a control is enforced without stating the mechanism that makes enforcement mechanically possible; sibling instance: KLC \u00a710 hook F's \"sandbox strength is a declared, attested host property\" with no attestation mechanism specified.",
+   "verifier": "Attack attempted and the finding survives on its substance. (1) Text check: container-architecture.md \u00a73.2 says the egress-proxy \"Holds the Hook E data path: destination allowlisting from the authority map, payload label screening, model-endpoint dominance checks\" and, in the Rust-rationale clause, \"it terminates TLS with FIPS requirements.\" Nowhere in \u00a73.2, \u00a71.4, the volumes table, KLC \u00a77.1/\u00a710 h"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 signatures / \u00a79.1 / \u00a712 \u2014 plus container-architecture \u00a73.7, ADR-0002",
+   "class": "unstated-key-infrastructure",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "lifecycle"
+   ],
+   "summary": "The entire architecture rests on signatures, but no document defines the key model: what the once-mentioned 'CI key' is and may sign, who provisions/holds/rotates/revokes operator keys, what trust anchors receiving sites honor for \u00a712 imports, how the web-ui produces operator signatures, or what verifies the kernel itself.",
+   "detail": "\"Operator or CI key\" is the entire key-management model. An automation-held CI key that may sign Tier-1 promotions creates a fully automated path to executable Tier-1 authority whose compromise mints signed skills \u2014 the highest-value artifact \u2014 ungoverned. \u00a712 trust anchors are unaddressed: if a peer site's key is trusted, a foreign signature places content at Tier 1 locally, bypassing the receiving pipeline. Rotation/revocation effects on the signed corpus, key custody in the browser-facing web-ui, kernel bootstrap trust-anchor provisioning, and container-image/policy-bundle verification are all absent.",
+   "recommendation": "Write the key-management ADR: key hierarchy (operator root; CI key scope explicitly bounded \u2014 recommend it may never satisfy any gate worded 'operator sign-off', and Tier-1 SKILL signatures require the operator key); trust-anchor provisioning at install via the onboarding wizard; rotation/revocation semantics including replicated lakes; custody (Vault transit/hardware-backed; the wizard signs via the operator's key, never holds it); \u00a712 receiving-site key allowlist with a maximum honored tier per foreign key; image/policy-bundle verification for kernel and egress-proxy at deploy.",
+   "relocated_class": "ungrounded trust primitives \u2014 cryptographic/identity mechanisms (signatures, attestation, minted identities, authenticated operators) invoked as enforcement primitives without a defined root of trust or provisioning locus; sibling masks: hook F's \"declared, attested host property\" with no attestation model, gateway operator authentication with no credential/enrollment substrate, kernel-minted scoped task identities with no identity substrate, ADR-0002's \"consumed signed authorization\" for downgrades",
+   "verifier": "Verified directly against the text: (1) KLC \u00a76 line 90 is the corpus's only \"CI key\" mention (grep-confirmed), with no scope/custody/rotation definition; (2) \u00a79.1's skill 2\u21921 gate says only \"signed\" \u2014 no operator-key requirement \u2014 so a CI-held key satisfying Tier-1 executable-skill signatures is a conforming reading, creating the fully automated path the finding describes; (3) \u00a712 names no trust a"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a71.4 and \u00a72 \u2014 inter-container communication model",
+   "class": "unstated-authn-model",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model"
+   ],
+   "summary": "No document states how the kernel authenticates which container/subject calls its decision API, or how the egress-proxy verifies decisions genuinely came from the kernel \u2014 network reachability is the only stated boundary.",
+   "detail": "Every hook decision presupposes the kernel knows who is asking, yet nothing prevents the untrusted runtime from presenting itself as gateway (asserting operator identities) or dreamer (consolidation privileges), or from calling the egress-proxy data path with a fabricated 'kernel said yes.' Service identity (mTLS/SPIFFE/Vault-issued certs), decision-response integrity, and per-caller API authorization are all unstated.",
+   "recommendation": "Specify service identity and channel model in the kernel-skeleton work: per-container cryptographic identity (Vault-issued short-TTL certs fits the existing vault-agent pattern), mutually authenticated channels, kernel decisions bound to (request, caller, expiry) and verified by the egress-proxy before enforcement. Containers without valid service identity get denials, not trust-by-network-position.",
+   "relocated_class": "identity-consumed-but-never-established: subject/service identity appears as a decision input throughout the corpus (gateway asserts operator identity, scheduler mints scoped task identities, dreamer runs under scoped identity, lake acts as directed by kernel decisions) while the mechanism that establishes/verifies that identity across container boundaries is stated nowhere \u2014 a variant of 'enforcement stated without a locus'",
+   "verifier": "Verified against container-architecture.md \u00a71.4/\u00a72/\u00a73 and the full KLC. No document states an inter-container authentication mechanism: \u00a71.4 explicitly makes NetworkPolicies (K8s) / internal networks (Compose) the enforcement analogue of kernel-mediated flows, so network reachability is indeed the only stated boundary. KLC \u00a72.3 Zero Trust presupposes subject identity as a decision input but never "
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77 authority map, \u00a715 \u2014 plus container-architecture \u00a74 authority-config, README \u00a78",
+   "class": "hook-coverage-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model"
+   ],
+   "summary": "Security-relevant control-plane changes \u2014 authority-map activation, operator attribute grants, model-endpoint registration, lattice/instance-ceiling changes \u2014 transit none of the six hooks and have no stated validation/activation/audit locus, despite the 'every transition audited' invariant.",
+   "detail": "Nothing defines who verifies the authority-map commit-signature chain against the trust anchor, what prevents direct volume writes bypassing the git story, when the running kernel activates a new map version, or what audit event records activation. Model-endpoint registration/relabeling/deregistration has no defined path despite hook-E fire-time re-evaluation; operator attribute assignment has no write path or audit locus. \u00a79.2's demotion cascade for map removals proves config changes have live effects \u2014 but the change event itself is unhooked.",
+   "recommendation": "Add a seventh enforcement point (or extend hook D) for Tier-0/config activation: kernel verifies the signature chain at load, refuses unsigned/out-of-chain config, and emits an audit event with old/new config hashes and the triggering commit. Define endpoint registration and attribute grants as Tier-0 changes through that point. Extend \u00a715: config_activation: signature_verified_and_audited.",
+   "relocated_class": "Governed-act asserted without an enforcement locus: security-critical acts the corpus declares governed ('signed', 'attested', 'append-only') that map to none of the six hooks \u2014 Tier-0/config activation (this finding), classification downgrade/sanitization (\u00a76: signed act, but hook D covers tier changes only), hook F's 'attested' sandbox strength (no attestor/verification point), the append-only audit log (no mechanism), and skill-signing key/trust-anchor management. A seventh enforcement point for privileged non-lifecycle acts would absorb most of the class.",
+   "verifier": "Verified against the actual text. The six-hook table (KLC \u00a710) covers only knowledge-object lifecycle acts; no hook covers Tier-0/config change events, yet the corpus asserts they are governed: KLC \u00a77 'changed only by operator-signed commits', \u00a715 'tier_0_writes: operator_signature_only' and 'every_transition: audited', container-architecture \u00a74 'changes arrive as signed commits, not writes'. Noth"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a73.2 egress-proxy vs \u00a73.8 vault-agent \u2014 plus README \u00a75.2/\u00a78 MVP 1",
+   "class": "credential-possession-boundary",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "baseline-xcheck"
+   ],
+   "summary": "Vault traffic and secret custody sit outside the trust plane's coverage: sidecar-to-Vault flows don't transit the 'single enforcement point', no document states which container may hold which secrets, and if the untrusted runtime holds provider credentials, maknae inherits the baselines' documented irreducible exfil primitive.",
+   "detail": "\u00a73.8 deploys \"Vault Agent sidecar per service that needs secrets\" \u2014 Vault's location is never stated and sidecar traffic cannot transit the egress-proxy; \"per service that needs secrets\" is unbounded. If the runtime holds the model-provider key (README MVP-1), a compromised runtime possesses a credential it can exfiltrate through any authorized flow \u2014 hermes THREAT-MODEL residual #6 verbatim; both baselines' top-ranked follow-up is the key-injecting broker, and maknae's egress-proxy is already positioned to BE that broker natively. Secret access also transits no hook and produces no audit event.",
+   "recommendation": "State Vault's topology position and route or explicitly exempt (with rationale) its traffic relative to the egress-proxy. Publish a deny-by-default secrets entitlement map. Terminate provider credentials at the egress-proxy \u2014 proxy injects auth on kernel-approved requests; the runtime authenticates with a scoped internal identity and never possesses an outbound credential. Add an invariant: runtime-plane containers hold no egress credentials.",
+   "relocated_class": "Asserted-total mediation without an enumerated flow/exemption inventory \u2014 \u00a73.2 claims the egress-proxy is the single enforcement point for ALL outbound flows (README: 'every network flow') while the topology contains unenumerated non-transiting flows: Vault sidecar traffic (this finding) and the gateway's direct external connection in Compose despite 'channel egress all transit it' (second symptom, same section).",
+   "verifier": "Verified against the corpus text: (1) \u00a73.2's egress-proxy transit set enumerates model calls, learning fetches, and channel egress only \u2014 Vault traffic is absent, Vault's topology position is stated nowhere in container-architecture.md, README, KLC, or ADRs, and \u00a73.2's Compose claim that the proxy is 'the only externally-connected service besides gateway' conflicts with \u00a73.8's per-service vault-ag"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77.1 egress allowlist / \u00a710 hook E \u2014 fetch URL as payload",
+   "class": "covert-channel-via-authorized-flow",
+   "adr_candidate": true,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "Runtime-composed fetch URLs (paths/query strings under wildcard allow patterns) are an unlabeled covert egress channel to every allowlisted host \u2014 label-based hook-E screening covers only request bodies, so injection-steered context exfiltrates via GET query strings to low-authority mapped domains.",
+   "detail": "The map deliberately admits non-authoritative destinations (sysadmin-notes.example.net/**); quarantined Tier-3 content that steers the runtime can exfiltrate via GET https://host/?q=<data> \u2014 destination on map, body empty, every stated check passes. The baselines elevated exactly this to a design precondition: \"each non-provider host... is a sanctioned exfil sink... do not widen domain_allowlist beyond the model provider without a body-inspection control \u2014 bind the two changes together.\" Maknae's authority map accumulates hosts by design (that IS the learning loop), yet no doc acknowledges the sink property.",
+   "recommendation": "Acknowledge the residual in the KLC and bind mitigations to the mechanism: kernel-canonicalized fetch construction (runtime proposes a knowledge gap; kernel/proxy resolves it to a URL from map-declared roots), treat the full URL as payload for handling/classification screening, URL length/entropy bounds, GET-only learning fetches, per-destination volume/rate alarms in audit. ADR material \u2014 trades learning-loop flexibility against exfil surface.",
+   "relocated_class": "Hook-E enforcement scoped narrower than the channel it claims to cover: content screening binds to one payload representation (the request body) while the authorized egress flow carries data in a second, unscreened representation (the fetch URL path/query, and by extension endpoint-call URL params/headers) \u2014 a \"the transition says 'any outbound data flow' but the enforced rules only match destination-host and screen the body\" gap that can recur at every egress kind (learning fetch and model-endpoint call).",
+   "verifier": "Verified against the actual text. Hook E (KLC \u00a710, line 210) enumerates its egress checks as: destination-on-authority-map, payload contains no `no-egress` content, Tier\u22641 quoting rule, and model-endpoint dominance. Line 97 explicitly scopes `no-egress` enforcement to \"an outbound request **body**,\" and container-architecture.md \u00a73.2 distinguishes \"destination allowlisting\" (host match) from \"payl"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a713 AU-10 row; container-architecture \u00a74 audit-log; ADR-0003 decision-auditability row",
+   "class": "audit-integrity-unspecified",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "control-map",
+    "codex"
+   ],
+   "summary": "AU-10 (non-repudiation) is claimed for an audit trail whose only stated mechanism is an append-only volume annotation: no signing/hash-chaining, no tamper evidence, AU-9 absent from the mapping, and no kernel-mediated read path for the operator-review flows the contract depends on.",
+   "detail": "AU-10 requires 'irrefutable evidence' with mechanisms like digital signatures; append-only is an integrity posture Compose/K8s volumes don't even provide, and a compromised host fabricates or truncates records undetectably. ADR-0003's parallel AU-10 claim has the same gap (no event signature, trusted timestamp, or verifier). Meanwhile \u00a78 step 2 learning-request review, \u00a79 demotion review, and promotion-queue review all consume the audit log, yet no container besides the kernel mounts it and no read API is defined \u2014 the review workflows gating the learning loop have no stated path at MVP.",
+   "recommendation": "Either hedge to ADR-0003's original discipline ('supports AU-10') and add AU-9 as the honest control, or make the claim true: hash-chain or countersign kernel audit records at write time (cheap in Rust; the kernel already holds signing machinery). Define the kernel-mediated audit read API in the kernel skeleton (the CLI needs it at MVP). ADR-worthy: audit-record integrity shapes the accreditation story.",
+   "relocated_class": "enforcement/consumption stated without a locus \u2014 the corpus names an enforcement point for every write/decision path (six hooks) but asserts integrity-at-rest and operator-read/review properties with no container or API providing them (append-only as volume annotation; \"logged for operator review\" with the review surface post-MVP; audit export deferred past the flows that need it)",
+   "verifier": "Verified against the texts: (1) KLC \u00a713 line 249 maps audit events to AU-10 unhedged; (2) AU-9 is absent from the entire \u00a713 control set (enumerated every control); (3) the only audit-integrity mechanism anywhere is the container-architecture \u00a74 annotation \"audit-log | kernel (append-only)\" \u2014 no signing/hash-chaining/tamper evidence, and Compose/K8s volume mounts genuinely provide no append-only e"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 note \u2014 sandbox strength 'attested'; container-architecture \u00a71.4",
+   "class": "asserted-not-verified-host-properties",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "baseline-xcheck"
+   ],
+   "summary": "Hook F keys on sandbox strength as a 'declared, attested host property' with no attestation mechanism anywhere in the corpus, and the deployment contract has no empirical verification gate \u2014 the baselines' verify-before-bring-up discipline has no maknae counterpart.",
+   "detail": "Nothing states who attests, what it binds to, or how the kernel verifies; a drifted host (macOS box declared 'hardened Linux') runs skills its isolation cannot contain. Nothing verifies the deployment substrate either: that NetworkPolicies actually force egress through the proxy, that volumes carry declared ro/rw postures. Baseline lesson (openclaw D15): \"confidently-stated security claims need empirical scope-checking\" \u2014 the PORTING contract gates bring-up on verify passing.",
+   "recommendation": "Define attestation minimally and honestly: the host hardening profile is an operator-signed Tier-0 artifact, spot-verified by kernel startup probes (namespace/seccomp checks), re-run after host updates; if genuine attestation is out of scope, downgrade the wording to 'operator-declared and signed.' Ship a deployment verify suite per deployment model (egress-funnel enforcement, mount postures, kernel-unavailable=deny) as a bring-up gate. Mechanism choice is ADR-worthy.",
+   "relocated_class": "declared-vs-actual substrate divergence: the corpus verifies content trust inputs (hashes, signatures, conformance vectors) but only declares host/deployment substrate properties (sandbox strength, STIG baselines \"assumed\", NetworkPolicy egress shape, volume ro/rw postures, Compose\u2261K8s enforcement equivalence) with no read-reality verification gate \u2014 a two-representations-that-must-agree class solved for content but relocated unsolved to the substrate",
+   "verifier": "Verified against the text: KLC \u00a710 line 213 says \"Sandbox strength is a declared, attested host property\" and nothing in the corpus defines the attester, the binding, or a kernel-side check \u2014 the closest elaboration (autopsy \u00a75.5) calls only for \"declared host hardening profiles.\" Container-architecture \u00a71.4 says STIG baselines are \"assumed,\" and the NetworkPolicy/egress-funnel and \u00a74 volume ro/rw"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a73.4 runtime (tools, MCP) \u2014 vs KLC \u00a710 hook F scope",
+   "class": "unmediated-tool-surface",
+   "adr_candidate": true,
+   "dimensions": [
+    "trust-model",
+    "baseline-xcheck"
+   ],
+   "summary": "Hook F governs skill invocation only, but the runtime also performs tool invocation and MCP client calls \u2014 no hook or capability model covers non-skill tool actions, and a stdio-transport MCP server spawned inside the runtime bypasses both the egress-proxy and the kernel entirely.",
+   "detail": "Atomic tools and MCP calls are neither signed skills (no manifest, no tier) nor plainly hook-E egress; 'kernel-mediated grants' has no defined enforcement point. The Hermes baseline proved transport is load-bearing: a stdio-transport MCP server bypasses the network path entirely, so an MCP server launched as a child process of the Python runtime (the default SDK pattern) executes tools with runtime privileges and never transits the proxy. The autopsy rejects Hermes' 'MCP trust = presence in config' but the KLC never says what replaces it.",
+   "recommendation": "State the tool model before the kernel skeleton: either every tool is a (possibly Tier-0 core) skill with a manifest so hook F uniformly governs invocation, or add explicit hook coverage for kernel-issued tool grants with per-MCP-server capability declarations. Rule stdio/child-process MCP servers out by contract (or in, with explicit sandboxing); require MCP servers to be network-attached services reached through the egress-proxy under hook E. Record the transport decision as an ADR before the Security MCP integration lands.",
+   "relocated_class": "enforcement stated without a locus \u2014 kernel mediation asserted with no named hook/mechanism; other masks: \u00a73.3 scoped task identities 'minted through the kernel' (no minting hook), hook E's 'task-scoped allowlist' (creation/bounding undefined)",
+   "verifier": "Core defect verified against text: KLC \u00a72.4 claims deny-by-default applies to tool calls, but the \u00a710 hook table (the stated-complete enforcement spec) covers only skill invocation (F) and outbound flows (E) \u2014 a non-skill, non-egress tool action has no checkpoint. Container-architecture \u00a73.4's 'tool invocation (via kernel-mediated grants)' names a mechanism defined nowhere (not in the hook table, "
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 classification-lattice note; README \u00a78 MVP #2",
+   "class": "floating-label-creep",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp"
+   ],
+   "summary": "The task-context high-water mark is monotone with no defined context boundary, reset, or compartmentation story \u2014 long-lived sessions float irreversibly upward, over-classifying every distilled memory and locking model routing to high-accredited endpoints for mundane follow-ups.",
+   "detail": "Nothing defines what a 'task context' IS (per message? task? session?) and nothing ever lowers it. Consequences: (1) the classic label-creep failure that killed historical HWM systems; (2) every memory distilled from a floated session inherits the session HWM \u2014 a mundane preference learned during a SECRET//REL task becomes SECRET//REL forever and invisible (non-disclosingly) to the same operator's low-side sessions; (3) one high retrieval permanently re-routes the session off the flagship endpoint under MVP #2's label routing. Conservative direction, but the dominant usability/cost failure mode of the lattice design.",
+   "recommendation": "ADR on context lifecycle: context granularity (per-task contexts keyed to the \u00a78 task id, fresh floor at task start), when the HWM resets, whether an operator can open a deliberately-low compartmented session, and the dreaming cycle's obligation to distill memories at the classification of the specific inputs actually used (per-object lineage) rather than whole-session HWM.",
+   "relocated_class": "Undefined lifecycle for implicit runtime accumulators: the contract governs knowledge OBJECTS rigorously (labels, tiers, lineage, six hooks) but the accumulators they flow through \u2014 \"task context\" (\u00a76/\u00a710), \"session\" (\u00a79.1 memory gates; gateway session routing), \"task\" (\u00a78, defined only by usage), quarantine usability window (\u00a714 Q6) \u2014 have no identity, labels, boundary, or reset semantics anywhere in the corpus.",
+   "verifier": "Verified against the text: KLC \u00a76 (line 101) is the only definition of the task-context HWM \u2014 \"a task context assumes the high-water mark of everything retrieved into it; its outputs inherit that mark\" \u2014 with no context granularity, boundary, reset, or compartmentation defined anywhere in the corpus (checked KLC, README, container-architecture, autopsy, ADR-0001/2/3 via grep). Downgrade is never-a"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 downgrade sentence vs \u00a710 hook table and \u00a79",
+   "class": "downgrade-path-unspecified",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp"
+   ],
+   "summary": "Downgrade/sanitization \u2014 the manual escape valve the system's usability depends on given monotone label creep \u2014 is promised as 'a signed act by an authorized subject' with no enforcement hook, no audit shape, no criteria, and no definition of which subject attribute authorizes it.",
+   "detail": "That sentence is the entire specification. No hook covers relabeling (hook D is tier-only); \u00a715 constrains only the negative. Unanswered: who is 'authorized' given \u00a76's own rule that roles never widen data access (downgrade authority fits neither the role nor the clearance axis); whether downgrade is in-place relabeling (collides with hook C's HWM invariant on later derivations) or a new sanitized derivative (needs a lineage rule that doesn't drag the high original's labels back in via min/max propagation); what audit event records before/after labels.",
+   "recommendation": "Extend hook D (or add hook G) for classification transitions: kernel consumes a single-use signed downgrade authorization (the ADR-0002 'downgrade constructible only from a consumed signed authorization' type gestures at this), emits an audit event with before/after labels, produces a NEW sanitized object whose lineage records act and authorizer; define the downgrader attribute as distinct from both role and clearance.",
+   "relocated_class": "enforcement stated without a locus \u2014 kernel-mediated privileged acts promised in prose but absent from the \u00a710 hook table (also: authority-map mutation signature verification, \u00a77, bound to no hook)",
+   "verifier": "Verified directly against <repo>/design/knowledge-lifecycle-contract.md: the \u00a76 sentence (line 101) is the entire positive specification of downgrade; hook D (line 209) is tier-only; \u00a715 (line 286) constrains only the automation-negative; \u00a713 maps only the prohibition; \u00a714 does not track the question. ADR-0002 line 18 and container-architecture line 36 c"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a78 step 2, \u00a710 audit/hook B, \u00a711.1, \u00a712 \u2014 metadata surfaces",
+   "class": "unlabeled-metadata-channel",
+   "adr_candidate": true,
+   "dimensions": [
+    "mls-blp"
+   ],
+   "summary": "System-generated metadata \u2014 audit events, learning requests, lineage frontmatter \u2014 necessarily encodes high-context facts but carries no classification and has no read-path dominance check, so the 'non-disclosing' guarantee is bypassed by the system's own records.",
+   "detail": "(1) Audit events about SECRET objects carry labels, ids, provenance, yet have no classification and the audit review path has no reviewer-dominance filter \u2014 an admin-role low-clearance operator reviewing audit is an unmediated read-up. (2) Learning requests logged from high task contexts name what the high side is missing, readable by whoever reviews the queue. (3) A sanitized low derivative's lineage lists the ids of its high inputs, confirming to low retrievers the existence of objects hook B hides. All three are existence/attribute inference channels the doc's strongest claim asserts away.",
+   "recommendation": "Treat system metadata as labeled data: stamp audit events and learning requests with the classification of their generating context (audit store effectively system-high, review filtered by reviewer attributes like any retrieval); define lineage-visibility rules (ids readable only by subjects dominating the referenced objects, opaque hashes otherwise). State in \u00a710 that the non-disclosing property extends to metadata surfaces, or scope the claim honestly.",
+   "relocated_class": "control-plane exhaust outside the labeled-object model \u2014 the label/dominance regime governs only the three declared knowledge types, while every artifact the enforcement machinery itself emits (audit events, gap logs, learning requests, lineage/frontmatter, dreaming-cycle authority-map change proposals, the promotion queue) is unlabeled yet has human review surfaces attached",
+   "verifier": "All three sub-claims verified against the actual text. (1) Audit: \u00a710 says every hook decision produces an audit event and \u00a78 step 5 says transitions are audited \"with before/after labels\" \u2014 the events carry label data as content but have no classification of their own; container-architecture.md ships \"audit review\" in the web-ui with no reviewer-dominance rule, and audit-log is a kernel append-on"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a78 MVP #2 vs KLC \u00a76 model-endpoint note",
+   "class": "dominance-vs-membership-conflation",
+   "adr_candidate": false,
+   "dimensions": [
+    "mls-blp"
+   ],
+   "summary": "Endpoint eligibility conflates two different relations under one 'dominance' framing \u2014 accreditation (lattice dominance) and jurisdiction/releasability (membership) \u2014 and the README's nationality-routing examples are subject-driven where the security-relevant check must be payload-driven.",
+   "detail": "The purely subject-driven examples would route an AUS operator's US-only (non-REL-AUS) payload to an AUS-native endpoint: the subject rule passes, the payload releasability is violated, and 'dominate the payload's high-water mark' doesn't catch it because jurisdiction is defined beside the lattice, not as a dimension of the dominance check. The formula 'subject attributes \u00d7 endpoint labels \u00d7 payload labels' names all three inputs but never states the checks are conjunctive or which relation applies per dimension.",
+   "recommendation": "Specify hook E endpoint eligibility as an explicit conjunction with the relation named per dimension: (a) endpoint accredited level/compartments dominate payload HWM; (b) endpoint jurisdiction \u2208 payload REL set; (c) subject-attribute routing as a further restriction, never a substitute for (b). Rewrite the MVP #2 examples to show a case where the subject rule passes and the payload rule refuses. Folds under the lattice ADR.",
+   "relocated_class": "named-mechanism-without-defined-semantics: \"dominance\" is invoked at hooks A/B/C/E, in the maknae-dcs-core crate spec, and in the conformance vectors, but the lattice's per-category-type ordering (compartments = superset vs releasability = inverted subset) is never defined anywhere in the corpus \u2014 the defect lives in the \u00a76 lattice definition and propagates to every consumer, not just hook E endpoint eligibility",
+   "verifier": "Partially misread, but the operative defect survives verification. What the finding gets wrong: (1) KLC \u00a76's lattice bullet explicitly declares \"multinational releasability, e.g., REL AUS,KOR\" as category sets *inside* the deployment lattice, and the model-endpoint bullet places the endpoint's \"accredited classification level and releasability categories (a point in the deployment lattice)\" inside"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77.2 ceiling_projection YAML",
+   "class": "ceiling-projection-semantics",
+   "adr_candidate": false,
+   "dimensions": [
+    "lifecycle",
+    "codex"
+   ],
+   "summary": "The ceiling_projection table has no defined matching semantics (ordering, specificity, overlap resolution), and under any plausible algorithm the worked example inverts authority: a Red Hat blog is capped at quarantine-forever while a community blog may reach Provisional.",
+   "detail": "Rows mix band-only, band+natures, and default shapes with no stated algorithm \u2014 first-match? most-specific? overlapping natures lists are not forbidden. Concrete defect regardless: redhat blog (band peer) matches no peer row's natures, falling to {default: 3}, while a community-blogs blog hits {band: non-authoritative, ceiling: 2} \u2014 the more authoritative issuer's content is capped strictly below the less authoritative one's in the document's own example.",
+   "recommendation": "Specify the projection algorithm normatively (most-specific match \u2014 band+nature beats band-only beats default; overlapping equally-specific rows are a validation error at map load, enforceable by Cedar/schema validation). Fix the sample: add blog to a peer-band row deliberately, or a {band: peer, ceiling: 3} catch-all so the fallthrough is visibly intentional; annotate the inversion hazard for map authors.",
+   "relocated_class": "Operator-authored rule tables with unspecified match-resolution semantics \u2014 \u00a77.1's egress allowlist shares the defect (two allow patterns can match one URL while binding different issuers, changing every derived authority field, with no stated winner); ADR-0004 D10 shows the lake already killed this exact class for precedence (\"exactly one canonical representation\", deterministic resolution order), and the KLC reintroduces it in both new rule tables.",
+   "verifier": "Verified against the actual text of design/knowledge-lifecycle-contract.md \u00a77.2 (lines 126-159). The inversion trace is exact: redhat blog derives (band: peer, nature: blog) via the issuer registry, matches no peer row's natures list, and falls to {default: 3} \u2014 quarantine-forever, since tier_ceiling is \"max tier this object may ever reach\" (\u00a76 line 73). A community-blogs blog derives (band: non-a"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77.2 allowlist 'match' field",
+   "class": "schema-coherence",
+   "adr_candidate": false,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "The match field is described as a knowledge domain but is neither connected to basis.domains nor defined as a request attribute, making allowlist evaluation incoherent.",
+   "detail": "The example uses \"match: 'rhel/**'\" commented \"knowledge domain the fetch serves,\" while declared authority domains are vendor-official and community. The rules only say URLs must match an allow pattern and never define who supplies or authenticates match.",
+   "recommendation": "Clarify that match is a URL pattern, not an authority-basis domain \u2014 or, if it is a knowledge-domain tag, define who supplies it (derive it from the URL and issuer registry without runtime input, never runtime-supplied).",
+   "relocated_class": null,
+   "verifier": "Verified against <repo>/design/knowledge-lifecycle-contract.md. Line 132 uses match: \"rhel/**\" commented \"knowledge domain the fetch serves\"; basis.domains (lines 140-141) declare only vendor-official and community \u2014 rhel/** matches neither id nor shape. The rules (lines 112, 163-165) define allowlist evaluation solely as URL-vs-pattern and bind allowlis"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a76 tier_ceiling vs \u00a79.1 (1\u21920) and \u00a77.2",
+   "class": "ceiling-authority-boundary-undefined",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "Whether tier_ceiling binds the operator is undefined: no projection row can emit ceiling 0, so the \u00a79.1 1\u21920 gate is unreachable for every ingested object unless operator signature silently overrides the ceiling \u2014 contradicting 'max tier this object may ever reach.'",
+   "detail": "The sample projection's best output is ceiling 1 and no rule derives ceiling 0, yet \u00a79.1 defines a 1\u21920 gate for all three types. Either the ceiling binds everyone (1\u21920 row is dead code; Tier-0-from-birth artifacts have no schema-conformant ceiling derivation) or operator signature overrides it (contradicting the definition). 'Within tier_ceiling' also appears only in the Document 2\u21921 cell \u2014 whether ceilings constrain skill/memory promotions and 1\u21920 is unstated.",
+   "recommendation": "State the rule: tier_ceiling binds all automated transitions absolutely; an operator-signed promotion above the ceiling is either forbidden (Tier 0 reserved for operator-authored artifacts \u2014 say so in the 1\u21920 rows) or a distinct signed ceiling-raise act with its own audit event. Extend 'within tier_ceiling' to every promotion cell or hoist it into hook D's rule list.",
+   "relocated_class": "operator-override semantics undefined for automation-locked invariants \u2014 the corpus states ceilings/limits as \"never by automation\" (tier_ceiling raise \u00a76/\u00a715, ADR-0002 type encoding) without defining the operator-signed counterpart act, whereas sibling invariants (classification downgrade \u00a76, authority-map changes \u00a77) do define it; same shape recurs in \u00a75's unstated rule for whether operators may place content directly at Tier 2",
+   "verifier": "Verified all textual claims against knowledge-lifecycle-contract.md: (1) the \u00a77.2 sample projection's rows emit ceilings 1/1/2/2/default-3 \u2014 no rule derives 0; (2) \u00a79.1 line 186 defines a 1\u21920 gate for all three types (\"Operator signature only\"); (3) \"within tier_ceiling\" appears only in the Document 2\u21921 cell, not in Skill/Memory 2\u21921 or any 1\u21920 cell; (4) \u00a76 line 73 defines tier_ceiling as \"max tier"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a79.2 (Stale) / \u00a711.3 vs \u00a712",
+   "class": "degraded-mode-interaction",
+   "adr_candidate": true,
+   "dimensions": [
+    "lifecycle"
+   ],
+   "summary": "The freshness rule doesn't distinguish 'source unreachable' from 're-check fails': on the air-gapped north-star deployment either the whole validated corpus decays to quarantine on revalidate_after lapse, or staleness enforcement silently vanishes \u2014 neither semantic is stated.",
+   "detail": "On an air-gapped host every source re-check trivially fails (the fetch is denied by construction per \u00a712). Read literally, once revalidate_after elapses every object demotes one tier per dreaming cycle and the enclave's lake bleeds to quarantine on a timer; read leniently, freshness enforcement disappears on exactly the deployments with the strictest assurance requirements. \u00a712 is silent on revalidation.",
+   "recommendation": "Define three re-check outcomes: verified (refresh last_validated), drifted/gone (demote), unreachable (no demotion; log a revalidation learning-request per \u00a712, optionally flag stale-unverified as retrieval-visible). Sneakernet re-validation bundles are the air-gapped freshness path and belong in \u00a712.",
+   "relocated_class": "connected-mode verification verbs with undefined degraded-mode outcomes \u2014 \u00a712 defines degraded ingest and replication but no degraded counterpart for any verification obligation (\u00a79.2 stale re-check, \u00a78 step 4 / \u00a79.1 3\u21922 \"source hash verified\", \u00a79.1/\u00a711.2 corroboration fetches)",
+   "verifier": "Verified against the actual text: \u00a79.2's Stale rule (\"revalidate_after elapsed and source re-check fails or content drifted \u2192 demote one tier\") does not distinguish source-unreachable from source-gone/drifted, and \u00a712's three bullets (learning requests, sneakernet ingest, replication) contain nothing about revalidating already-resident objects \u2014 container-architecture.md line 56 assigns \"source re"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a710 (all hooks) / container-architecture \u00a72\u20133",
+   "class": "unstated-failure-mode",
+   "adr_candidate": false,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "The contract never defines fail-closed behavior when a trust-plane component is unavailable (kernel unreachable, decision timeout, egress-proxy down) or startup preconditions \u2014 the single most recurring defect class in both hardened baselines.",
+   "detail": "Openclaw LESSONS-LEARNED: \"Every 'load-bearing layer absent' branch must FAIL CLOSED... the recurring defect was a control that degraded silently\"; hermes D21 documents the upstream fail-OPEN default that had to be overridden. Maknae states nothing about: PEP behavior on kernel timeout, runtime/lake/dreamer startup with kernel absent, refusing to serve before a verified policy load, or the proxy losing its kernel decision channel mid-session. Under deny-by-default the answer is obvious \u2014 which is why it will be assumed rather than implemented uniformly across six containers in four languages unless it is contract text.",
+   "recommendation": "Add a normative availability clause to KLC \u00a710: any hook decision that cannot be obtained is a deny; PEPs refuse to serve until a kernel session with verified policy load is established; degraded operation is only an explicit, audited operator act. Add decision_unavailable: deny to \u00a715 invariants/conformance vectors.",
+   "relocated_class": "Control-plane failure semantics unspecified: the corpus exhaustively specifies decision logic but never behavior when the enforcement machinery itself is degraded \u2014 same class covers kernel audit-write failure mid-decision, vault-agent secret unavailability, and lake-data volume loss; \u00a712 defines degraded semantics for the data plane only.",
+   "verifier": "Verified directly against KLC and container-architecture text: no normative clause anywhere defines PEP behavior on kernel unavailability/decision timeout, startup preconditions (refuse-to-serve before verified policy load), or egress-proxy loss of its decision channel. Refutation attempts fail: \u00a72's deny-by-default governs rule absence inside the PDP, not PDP unreachability at a PEP; \u00a712's degrad"
+  },
+  {
+   "severity": "should-fix",
+   "file": "reference-implementation-autopsy.md",
+   "section": "\u00a77 open item 3, \u00a76.2 agent-core row; README \u00a74",
+   "class": "superseded-open-item",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc",
+    "codex"
+   ],
+   "summary": "Autopsy open item 3 still lists component language selection as open ('kernel: Rust/Go candidates') while ADR-0002 (Accepted, operator-ratified 2026-07-14), container-architecture \u00a72, and README \u00a74 all record the kernel as ratified Rust \u2014 the living document asserts more openness than the corpus's decision state.",
+   "detail": "Related staleness: \u00a76.2's \"@openclaw/agent-core... directly vendorable if the runtime lands on TypeScript\" \u2014 container-architecture \u00a73.4 proposes Python for the runtime.",
+   "recommendation": "Update autopsy \u00a77 item 3: kernel ratified Rust per ADR-0002; remaining containers proposed per container-architecture \u00a72 pending team review. Annotate the \u00a76.2 agent-core row as moot-unless-gateway-goes-TypeScript.",
+   "relocated_class": "Decision-state restated across living documents instead of pointed at the ADR of record (\"two representations that must agree\"): kernel ratification appears in ~5 restatements plus this stale one, and the Cedar-vs-OPA spike status has the identical multi-document restatement shape (README \u00a78, container-architecture \u00a73.1/\u00a77-1, autopsy \u00a76.1/\u00a76.2, ADR-0003) \u2014 currently in-sync but structurally poised to diverge the same way. Convention fix: docs cite the ADR for status rather than restating it.",
+   "verifier": "Verified directly against the texts: autopsy \u00a77 item 3 (line 130) lists the kernel language as open (\"kernel: Rust/Go candidates\") while ADR-0002 is Accepted/operator-ratified 2026-07-14, container-architecture \u00a72 marks kernel Rust \"Ratified\", and README \u00a74 states \"The kernel is 100% Rust (operator-ratified 2026-07-14)\". The contradiction is even intra-document: autopsy \u00a76.4 (line 112) already say"
+  },
+  {
+   "severity": "should-fix",
+   "file": "tier-state-machine.svg",
+   "section": "Caption text (line 45), embedded in KLC \u00a75",
+   "class": "stale-derivative-artifact",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "The tier-state-machine diagram \u2014 embedded directly beneath the KLC \u00a75 resolution callout \u2014 still carries the v0.1 caption 'Tier names are placeholders \u2014 align with Knowledge Lake authority hierarchy during review', instructing exactly the action the v0.2 resolution rejected.",
+   "detail": "KLC \u00a75 resolution note, immediately above the embed: lifecycle tiers are \"orthogonal to the Knowledge Lake's authority model, not a renaming of it... Numeric lifecycle tiers stay.\" The diagram is a second representation not updated at v0.2.",
+   "recommendation": "Regenerate the SVG: drop the placeholder caption (or replace with 'Lifecycle tiers \u2014 orthogonal to the Lake authority model, KLC \u00a75'), and rename the SVG title if the \u00a75 rename lands.",
+   "relocated_class": "stale-derivative-artifact: hand-maintained diagram text restating spec decision/status state (a second representation that must agree with the canonical doc and silently diverges on revision)",
+   "verifier": "Verified directly: <repo>/design/diagrams/tier-state-machine.svg line 45 contains the verbatim caption 'Tier names are placeholders \u2014 align with Knowledge Lake authority hierarchy during review', and knowledge-lifecycle-contract.md embeds this SVG at line 52, two lines below the \u00a75 resolution callout (line 50) stating the tiers are 'orthogonal to the Kno"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a74 Architecture paragraph; design/diagrams/plane-architecture.svg",
+   "class": "two-representations-drift",
+   "adr_candidate": true,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "README \u00a74 and the plane-architecture diagram define the trust plane as 'the kernel, and the only trusted code', but container-architecture ratifies a second architecture-defeating trusted container (egress-proxy) \u2014 the trust-boundary statements disagree at exactly the place two representations must agree.",
+   "detail": "container-architecture \u00a71.1/\u00a73.2 name the egress-proxy as \"the one other container whose compromise is architecture-defeating\" and place it in plane Trust; neither the README claim nor the diagram reflects the two-container trust plane. Container-arch open item 4 (one surface vs two) is unresolved.",
+   "recommendation": "Amend README \u00a74 to name both trusted containers (or define 'the kernel' as the two-container trust surface per open item 4), add the egress-proxy PEP to the diagram. Resolving open item 4 is ADR material since it defines the trust boundary.",
+   "relocated_class": "summary-restates-canon: README \u00a74 prose and the design/diagrams/ SVGs each restate the canonical container inventory / plane assignments / trust boundary (container-architecture.md, KLC) instead of pointing to them \u2014 N derived representations that must be hand-synced, and they diverged same-day (both dated 2026-07-14) at the trust boundary; the same class threatens the tier-state-machine and knowledge-lifecycle diagrams vs KLC \u00a77-\u00a78",
+   "verifier": "Verified all three legs against actual text. README line 50: \"The trust plane \u2014 the kernel, and the only trusted code \u2014 holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log\" \u2014 no egress enforcement point. plane-architecture.svg text extraction: trust plane labeled \"Trust plane \u2014 the kernel (PDP)\" with only policy engine/skill registry/audit"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a72 inventory / \u00a73.2 \u2014 vs ADR-0002 Decision",
+   "class": "decision-status-desync",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "Container-architecture marks the egress-proxy's Rust call 'Proposed' while ADR-0002 (Accepted) ratifies it in its Decision text \u2014 the ratification record is ambiguous for one of the two architecture-defeating containers.",
+   "detail": "ADR-0002: \"The kernel container (and the egress-proxy, per container-architecture \u00a73.2) is written in 100% Rust\" vs the \u00a72 table row \"egress-proxy | Trust | Trusted | Rust | Proposed\" and the doc's own rule that language calls are \"operator-ratified where marked, proposed otherwise.\"",
+   "recommendation": "Pick one: flip container-architecture \u00a72/\u00a73.2 to 'Ratified (ADR-0002)', or amend ADR-0002 (append-only per ADR-0001) to scope ratification to the kernel and mark the egress-proxy as a consequence-level proposal.",
+   "relocated_class": "decision-status duplicated across representations that must agree (ADR ledger vs. container-architecture \u00a72 Status column vs. Doctrine header line \u2014 three copies of the same ratification state; ADR-0003/Cedar has the identical exposure, currently in sync). Corpus fix: make non-ADR status fields pointers to ADR numbers, not restated values.",
+   "verifier": "Verified against both files. ADR-0002 (Status: Accepted, operator-ratified 2026-07-14) includes the egress-proxy in its Decision sentence (\"The kernel container (and the egress-proxy, per container-architecture \u00a73.2) is written in 100% Rust\") and its boundary note calls kernel+egress-proxy \"the two Rust containers.\" container-architecture.md line 22 marks egress-proxy `Proposed`, \u00a73.2 heading says"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a714 Q5 vs autopsy \u00a76.1/\u00a76.2, ADR-0003, README \u00a78",
+   "class": "superseded-open-item",
+   "adr_candidate": true,
+   "dimensions": [
+    "cross-doc",
+    "codex"
+   ],
+   "summary": "The Q5 policy-engine spike shape drifted across four docs \u2014 KLC Q5 still lists 'bespoke' (foreclosed by the autopsy, absent from ADR-0003), README frames a comparative 'Cedar vs. OPA' evaluation while ADR-0003 makes OPA conditional \u2014 and the Cedar-first stop-at-first-success procedure cannot substantiate a comparative selection.",
+   "detail": "KLC Q5: \"Cedar vs. embedded OPA vs. bespoke\"; autopsy \u00a76.1: \"never written from scratch\"; ADR-0003: \"OPA is evaluated only if Cedar fails a hook or the team overturns the lean.\" The spike engineer gets three different instructions; and the conditional procedure cannot ground a comparative claim on assurance, operational complexity, or policy-analysis quality (codex).",
+   "recommendation": "Update KLC Q5 to drop 'bespoke' and reference ADR-0003's spike design as operative; align README \u00a78 item 2 wording. Then either present the decision honestly as Cedar-first-with-fallback (not comparative), or define a genuinely comparative spike evaluating both engines against the six hooks \u2014 pick one and record it.",
+   "relocated_class": "Decision status restated in prose across README/KLC/autopsy instead of referenced from the ADR of record \u2014 multiple representations of one decision that must stay in sync manually (the two-representations-must-agree class; same exposure exists for the ADR-0002 Rust decision restated in README \u00a74 and autopsy \u00a76.4).",
+   "verifier": "Verified against actual text: KLC \u00a714 Q5 (knowledge-lifecycle-contract.md:262) still lists 'Cedar vs. embedded OPA vs. bespoke' while autopsy \u00a76.1 (reference-implementation-autopsy.md:91) states the engine is 'never written from scratch', \u00a76.2 (line 97) lists 'building a policy language' as cost avoided, and ADR-0003 (line 9) names only Cedar and OPA/Rego as candidates \u2014 'bespoke' is foreclosed ev"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a76 'Cedar interaction' \u2014 vs ADR-0003 cross-language bullet",
+   "class": "two-representations-drift",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc",
+    "feasibility",
+    "codex"
+   ],
+   "summary": "Container-architecture \u00a76 lists Cedar 'Python bindings' as existing cross-language capability while ADR-0003 states there is no official Python library (non-blocking because Python containers never evaluate policy) \u2014 the same fact stated oppositely in two docs that cite each other.",
+   "detail": "A spike engineer reading \u00a76 budgets for Python Cedar bindings that don't officially exist (only unofficial community bindings \u2014 (verify) current cedar-policy org state). Secondary: ADR-0003 cites cedar-go as decision evidence, but under \u00a76 the Go gateway is a PEP that never evaluates policy \u2014 so cedar-go coverage is contingency value and should be labeled as such. Other ADR-0003 external claims (cedar-policy crate, cedar-go official, cedar-spec Lean formalization, AVP, CNCF Sandbox) check out.",
+   "recommendation": "Correct \u00a76 to match ADR-0003: '(official Rust core, official Go implementation; no official Python library \u2014 non-blocking, Python containers are PEPs)'. Downgrade the cedar-go bullet in ADR-0003 to contingency framing.",
+   "relocated_class": "cross-doc restatement of ADR-owned external facts \u2014 architecture docs duplicate ADR-0003 evidence summaries (container-architecture \u00a76 line 109, \u00a77 open item 1) instead of citing the ADR as single owner; each copy is a second representation that must agree and here drifted",
+   "verifier": "Verified both passages directly. container-architecture.md \u00a76 line 109 states Cedar cross-language capability as \"(official Rust core, official Go implementation, Python bindings) with upstream conformance testing\"; ADR-0003 line 17 states \"the absence of an official Python library is non-blocking by architecture\" \u2014 the same fact stated oppositely in two same-dated, mutually-citing docs. The chari"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a75 Related projects \u2014 REQUIRED exploration (with \u00a76 rule 2)",
+   "class": "environment-coupled-public-doc",
+   "adr_candidate": false,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "README \u00a75 makes review of operator-machine-local mirrors and private GitLab repos REQUIRED for its stated audience (teammates, public-repo AI agents), while the autopsy frames the corpus as public \u2014 the orientation protocol is unsatisfiable for anyone but the operator on the operator's own machine.",
+   "detail": "Paths include ../openclaw, ~/Development/..., ~/knowledgebase, plus private-namespace GitLab URLs; \u00a76 rule 2 hardens it (\"do not reason about them from this README alone\"). The autopsy's file-level evidence exists precisely as the portable substitute, but \u00a75/\u00a76 never authorize falling back to it.",
+   "recommendation": "Mark \u00a75 paths as operator-environment-specific and add an explicit degradation path to \u00a76 rule 2: when mirrors/private repos are unreachable, the autopsy is the authoritative evidence record. Decide before publishing whether private GitLab URLs belong in a public README.",
+   "relocated_class": "operator-environment-coupled evidence chain: normative claims across the corpus ground their authority in artifacts resolvable only in the operator's environment with no portable fallback \u2014 README \u00a75 local mirrors/private repos, the autopsy's \"verified against the local mirrors\" evidence basis (line 14), and KLC/README reliance on private knowledgebase artifacts (Lake ADR-0004, issues #201/#280/#284) that are 404 to the public audience the docs are framed for",
+   "verifier": "CONFIRMED against the actual text plus empirical reachability tests. (1) README \u00a75 header literally says \"REQUIRED exploration for AI agents ... Before proposing designs or correlating overlap, review each of these at the paths below,\" and \u00a75.1 calls the HobiBot/TaeBot deployment configs \"required reading.\" \u00a76 rule 2 hardens it exactly as quoted: \"Explore the related projects (\u00a75) before correlati"
+  },
+  {
+   "severity": "should-fix",
+   "file": "ADR-0003-cedar-policy-engine.md",
+   "section": "Control mapping \u2014 SA-17(1) row (and ADR-0002 SDLC row)",
+   "class": "claim-discipline-drift",
+   "adr_candidate": true,
+   "dimensions": [
+    "control-map",
+    "codex"
+   ],
+   "summary": "SA-17(1) is claimed as 'implemented, not approximated' (ADR-0003) and 'implement its intent' (ADR-0002), but neither mechanism meets SA-17(1)'s two-part requirement \u2014 the Lean proof covers Cedar's evaluator, not Maknae's authored policy model or its sufficiency \u2014 and the two ADRs double-claim the same enhancement.",
+   "detail": "SA-17(1) requires producing a formal policy model of the organization-defined policy elements AND proving it internally consistent and sufficient. ADR-0003's own boundary concedes \"Cedar's formal verification covers the evaluator, not the operator's authored policies\" \u2014 the authored policies ARE the elements SA-17(1)(a) addresses. rustc proves type safety, not policy-model consistency. Both docs already contain the correct discipline one line later (SA-17(3) 'claimed only as' evidence toward).",
+   "recommendation": "Rephrase both SA-17(1) claims to the SA-17(3) discipline ('evidence toward'), cross-reference the two ADRs so RMF sees one composite story. Worth discussing: KLC \u00a715's machine-readable invariants + conformance vectors are the natural seed of a genuine SA-17(1) formal policy model \u2014 formalizing that is ADR material and would let a future amendment upgrade the claim honestly.",
+   "relocated_class": "preamble-hedge vs row-level claim-strength divergence in control-mapping tables (two representations of claim strength that must agree), with a secondary flavor of mechanism-assurance transferred to content-assurance (proof about the tool cited for a property of the artifact it processes)",
+   "verifier": "Verified against the lake's authoritative SP 800-53r5 text (lines 41447-41454): SA-17(1) requires (a) a formal policy model of organization-defined policy elements and (b) proof of internal consistency and sufficiency. ADR-0003 line 37 claims \"implemented, not approximated\" on the strength of cedar-spec, but ADR-0003's own boundary (line 41) concedes the Lean proof covers the evaluator, not the au"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a713 \u2014 BLP/automated-downgrade row (AC-16(6))",
+   "class": "control-scope-mismatch",
+   "adr_candidate": false,
+   "dimensions": [
+    "control-map"
+   ],
+   "summary": "AC-16(6) is the wrong enhancement for the automated-downgrade prohibition: it requires PERSONNEL to maintain attribute associations \u2014 the opposite of Maknae's system-stamped derived-only labels; the right controls are AC-16(9) (regrading mechanisms) plus AC-16(2)/(3).",
+   "detail": "AC-16(6) discussion states it 'requires individual users (as opposed to the system) to maintain associations'; Maknae's labels are 'stamped at ingest, gate-verified, never author-supplied' (AC-16(3) territory). The element the row is about \u2014 signed, never-automated downgrade \u2014 is squarely AC-16(9) with AC-16(2) covering the human-only aspect. Citing AC-16(6) hands an assessor a control whose stated intent the architecture deliberately does not meet.",
+   "recommendation": "Replace AC-16(6) with AC-16(9) (and optionally AC-16(2)) for the downgrade prohibition; add AC-16(3) if the row also covers the automated high-water-mark stamping.",
+   "relocated_class": "control-map rows asserted from control-family recall rather than derived from the control text \u2014 the \u00a713 table is a second representation of the contract's security properties that must agree with 800-53's actual enhancement wording (the doc half-flags this itself with 'SI-2 (concept)'); the durable fix is deriving the eventual RMF matrix by reading the control text, not patching single rows",
+   "verifier": "Verified against the actual texts, not recall. Contract line 247 cites AC-16(6) for the automated-downgrade prohibition row; lines 96/164 establish system-stamped, gate-verified, never-author-supplied labels; line 101 makes downgrade a signed, never-automated act. The lake's NIST.SP.800-53r5.md confirms AC-16(6) (lines 14350-14357) requires PERSONNEL \u2014 'individual users (as opposed to the system)'"
+  },
+  {
+   "severity": "should-fix",
+   "file": "ADR-0002-kernel-is-rust.md",
+   "section": "Control mapping \u2014 Memory safety row (SI-16)",
+   "class": "control-scope-mismatch",
+   "adr_candidate": false,
+   "dimensions": [
+    "control-map"
+   ],
+   "summary": "SI-16 is runtime memory protection (DEP/ASLR); source-language memory safety neither implements nor strengthens an SI-16 implementation \u2014 the row's own parenthetical ('complements') concedes the mismatch while the control id still lands in the matrix.",
+   "detail": "DEP/ASLR must still be implemented by the host/container runtime regardless of kernel language, so the language choice makes SI-16 neither cheaper nor stronger \u2014 failing the mapping table's own stated inclusion test. The memory-safety story is fully carried by SA-8 and the NSA CSI/CISA citations in the same row.",
+   "recommendation": "Drop SI-16 from the row, or reword to state explicitly that host/container runtime protections remain the SI-16 implementation and Rust is defense-in-depth against the same exploit class.",
+   "relocated_class": "parenthetical-hedged control-id inclusion \u2014 a 800-53 control id lands in a harvestable mapping matrix while an attached parenthetical concedes it is not actually implemented/cheapened (ADR-0002 SI-16 \"complements\"; KLC \u00a713 SI-2 \"(concept)\"; ADR-0002 SA-17(1) \"implement its intent\" vs ADR-0003's stronger claim)",
+   "verifier": "Verified against the actual texts. ADR-0002 line 35 includes SI-16 in the memory-safety row with the parenthetical \"complements, at the source level, the runtime protections the control contemplates.\" The lake's authoritative SP 800-53r5 (NIST.SP.800-53r5.md:49497-49502) confirms SI-16 is runtime memory protection \u2014 \"protect the system memory from unauthorized code execution,\" discussion examples "
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a713 \u2014 Scoped identities row (AC-5, IA-2)",
+   "class": "control-scope-mismatch",
+   "adr_candidate": false,
+   "dimensions": [
+    "control-map",
+    "codex"
+   ],
+   "summary": "IA-2 covers organizational users and on-behalf-of processes \u2014 the autonomous dreaming cycle is a system service (IA-9); and AC-5 is separation of duties among individuals, while scoped task identities are process-level least privilege (AC-6) with no divided-duty mechanism.",
+   "detail": "The dreamer 'runs under its own scoped identity with no interactive privileges' \u2014 a non-person entity, IA-9 territory. AC-5's discussion frames it around individuals and roles; the design's genuine AC-5 story is elsewhere: automation proposes, operator signs (\u00a79.1/\u00a77) \u2014 a real human/automation duty separation the row does not point at.",
+   "recommendation": "Remap to IA-9 (primary; dreamer and scheduler as services) + AC-6, keeping IA-2 only if the on-behalf-of chain for operator-created scheduled tasks is stated. If AC-5 stays in \u00a713, re-anchor it to the propose-vs-sign gate.",
+   "relocated_class": "keyword-affinity control mapping \u2014 \u00a713 crosswalk rows chosen by topical resonance rather than control applicability scope (same pattern in line 251's \"SI-2 (concept), CM-3\" for freshness/demotion, where SI-2 is software flaw remediation and CM-3 is config change control)",
+   "verifier": "Verified against the document: line 252 maps \"Scoped identities for scheduler and dreaming cycle\" to AC-5, IA-2; line 174 establishes the dreamer as a non-interactive service identity (a non-person entity). Per 800-53 rev 5 scope: IA-2 covers organizational users and on-behalf-of processes, IA-9 covers system services authenticating as themselves, AC-5 is duty separation among individuals/roles, A"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a713 \u2014 Freshness revalidation row (SI-2, CM-3)",
+   "class": "control-scope-mismatch",
+   "adr_candidate": false,
+   "dimensions": [
+    "control-map",
+    "codex"
+   ],
+   "summary": "SI-2 (flaw remediation/patching) maps to knowledge-freshness demotion only by loose analogy, and the '(concept)' hedge will be lost when transcribed into downstream matrices; CM-3 (configuration change control) is similarly strained.",
+   "detail": "Demoting stale knowledge objects is epistemic hygiene, not remediation of system flaws; no rev 5 control cleanly covers knowledge-corpus freshness. It is the only row in the table that needs a disclaimer to survive.",
+   "recommendation": "Either drop SI-2 (CM-3 alone or nothing is defensible), expand the hedge inline so it survives extraction ('analogy only \u2014 not a claimed SI-2 implementation'), or consider SI-5-adjacent monitoring framing / a custom control for source revalidation.",
+   "relocated_class": null,
+   "verifier": "Row verified verbatim at knowledge-lifecycle-contract.md:251 and confirmed as the table's only hedged entry. SI-2's scope verified against the lake's authoritative NIST.SP.800-53r5.md (lines 46894-46922): flaw remediation is software/firmware patching (patches, service packs, malware signatures) \u2014 knowledge-object freshness demotion (\u00a711.3) falls outside it; the mapping is analogy only, as the '(c"
+  },
+  {
+   "severity": "should-fix",
+   "file": "ADR-0002-kernel-is-rust.md",
+   "section": "Control mapping \u2014 Supply chain row (SR-4, SR-11)",
+   "class": "control-mapping-overreach",
+   "adr_candidate": false,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "A Cargo lockfile is mischaracterized as component provenance and authenticity evidence: a registry checksum verifies fetched bytes against registry metadata \u2014 it does not establish producer, build process, source-to-binary correspondence, or authorized supplier.",
+   "detail": "\"Cargo.lock cryptographic checksum pinning\" is mapped to \"SR-4 (provenance \u2014 the lockfile is a machine-verifiable provenance record)\" and SR-11 component authenticity.",
+   "recommendation": "Correct the mapping: Cargo.lock supports SI-7 (software integrity verification), not SR-4/SR-11. Provenance requires build/producer attestation; authenticity requires verifying the supplier relationship.",
+   "relocated_class": "nearest-named-control overreach: mechanisms mapped by control-title resemblance rather than the control's assessment-objective evidence demand \u2014 same table's SI-16 (compile-time property vs runtime memory-protection control, hedged) and SA-17(1) (type-encoded invariants claimed to implement a formal-policy-model control's intent) are milder masks; SR-4/SR-11 is the least-hedged member",
+   "verifier": "Verified against ADR-0002 line 37 (quote is accurate) and the lake's NIST.SP.800-161r1-upd1.md (SR-4 at line 8494ff, SR-11 at line 8594ff). SR-4 provenance doctrine expects supplier/producer documentation with signed SBOM-class evidence; a Cargo.lock checksum is TOFU integrity against registry metadata \u2014 SI-7 territory, already listed in the same row. SR-11 is anti-counterfeit (authorized supplier"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77 lead-in / \u00a77.2 'Ceiling projection' bullet, \u00a76 label comment",
+   "class": "misattributed-inheritance",
+   "adr_candidate": true,
+   "dimensions": [
+    "lake-align"
+   ],
+   "summary": "The (band, nature) \u2192 tier_ceiling projection is presented as part of the inherited ADR-0004 authority-line model, but ADR-0004 defines no ceiling concept at all \u2014 the projection is maknae's own bridge invention sitting unmarked among four genuinely inherited bullets.",
+   "detail": "ADR-0004 (read in full, D8\u2013D11 plus amendments) contains no ceiling, no (band,nature) projection, no lifecycle-tier mapping. A reviewer verifying \u00a77.2 against ADR-0004 finds no such projection, and future lake evolution will never update a mechanism the lake doesn't own. The \u00a75 note actually frames it correctly as maknae's own derivation contract \u2014 two representations of the projection's provenance already disagree.",
+   "recommendation": "Mark the Ceiling projection bullet explicitly as a Maknae extension, and own the derivation contract (authority basis \u2192 tier_ceiling, including extending the derived-only lock to tier_ceiling) in a maknae ADR so its provenance and rationale are on record separate from the inherited model.",
+   "relocated_class": "inherited-vs-extended misattribution at the lake-alignment seam: bridge mechanisms maknae invented are left unmarked inside inheritance-framed passages, producing two disagreeing provenance representations (\u00a75/\u00a714-Q1 'maknae bridge' vs \u00a77 lead-in/\u00a76 note/rev-history 'part of ADR-0004 rework'); lighter instance in the \u00a77 lead-in attributing the egress-vs-basis split itself to ADR-0004, which has no egress concern",
+   "verifier": "Verified against both texts. ADR-0004 (D8-D11 plus all amendments through 2026-07-08) contains no ceiling concept: D11's derived-only lock covers authority_category/tier/issuance_nature (the lake's intra-domain authority tier), not a (band, nature) -> tier_ceiling projection onto maknae's 4-state lifecycle machine. Meanwhile the KLC presents the Ceiling projection bullet (line 121) unmarked among "
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77.2 'Natures gate officialness' bullet",
+   "class": "two-representations-drift",
+   "adr_candidate": false,
+   "dimensions": [
+    "lake-align"
+   ],
+   "summary": "'Distinct controlling natures stack, they do not compete' misstates ADR-0004 D9: stacking is between the two controlling REGISTERS, not between natures \u2014 standard and guidance share one register and CAN conflict, so an implementation built from maknae's phrasing silently suppresses an operator-surfacing event the inherited model requires.",
+   "detail": "ADR-0004's statement is register-scoped: directive vs standard \"stack, they do not compete.\" standard and guidance are two controlling natures within ONE register, resolved by D10's machinery (typed edges \u2192 tie predicate \u2192 surface-to-human).",
+   "recommendation": "Restate at register granularity \u2014 'the two controlling registers stack and are never ranked; natures within a register conflict normally and resolve via edges or surface to the operator' \u2014 or replace the paraphrase with a pointer to ADR-0004 D9.",
+   "relocated_class": "two-representations-drift: maknae \u00a77.2 wholesale PARAPHRASES the lake's ADR-0004 D8\u2013D11 machinery (domains/bands, derived-only lock, nature gate, edges) instead of pointing to it \u2014 this finding is one mask of that section-wide restatement pattern, the exact \"prose that restates canonical machinery silently diverges\" class the lake doctrine names; other \u00a77.2 bullets carry the same risk.",
+   "verifier": "Verified against both texts. ADR-0004 D9 (knowledgebase/design/adr/ADR-0004-authority-line-model.md:42) scopes the stacking claim to REGISTERS: the standard/guidance row is \"Controlling in a **distinct register** from `directive` (a directive mandates a program; a standard sets the specific control/setting) \u2014 they **stack, they do not compete**.\" The antecedent of \"they\" is the two controlling reg"
+  },
+  {
+   "severity": "should-fix",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a77.2 'Typed precedence edges' bullet",
+   "class": "stale-copy-of-canonical-machinery",
+   "adr_candidate": false,
+   "dimensions": [
+    "lake-align"
+   ],
+   "summary": "The cross-peer surfacing predicate is restated in its pre-amendment 'no connecting edge' form; ADR-0004's 2026-07-06 amendment (#297) replaced it with connected-component semantics after identifying a false-negative that suppresses conflicts when \u22653 peer domains claim.",
+   "detail": "The literal any-edge reading has a false-negative for \u22653 claimant domains (one edge suppresses an unreconciled third domain's conflict); the amendment's principle: \"Fail-safe: surface more, never fewer.\" A fresh kernel/Cedar implementation built from the KLC text reintroduces a known, upstream-fixed defect in a fail-safe.",
+   "recommendation": "State the connected-component form ('cross-peer claimants whose domain graph is not connected by typed edges surface to the operator') or cite the D10 tie predicate by pointer. Audit \u00a77.2's other restated D10 fragments against ADR-0004's amendment history.",
+   "relocated_class": "restated-upstream-machinery drift: KLC \u00a77.2 restates multiple ADR-0004/D10 fragments (bands, derived-only issuer lock, natures, ceiling projection, tie predicate) as prose copies of a lake ADR that evolves via append-only amendments \u2014 every restated fragment is a second representation that must be manually re-synced and can silently go stale; prefer pointers to the canonical machinery over restatements",
+   "verifier": "Verified against both texts. KLC \u00a77.2 line 122 states the predicate in the literal any-edge form (\"Cross-peer conflicts with no connecting edge surface to the operator\"). ADR-0004's 2026-07-06 amendment (#297) refined exactly that wording to connected-component semantics, documenting the false-negative for >=3 claimant domains and the \"surface more, never fewer\" fail-safe principle, and noting the"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a75.2 Operator projects \u2014 Knowledge Lake row",
+   "class": "stale-inherited-summary",
+   "adr_candidate": false,
+   "dimensions": [
+    "lake-align"
+   ],
+   "summary": "The Knowledge Lake is characterized as a 'Four-tier authority hierarchy' \u2014 the superseded ladder model ADR-0004 explicitly replaced with a peer-domain DAG \u2014 in the same cell that cites ADR-0004; the brain/organ/soul mapping is unverifiable from the cited authority.",
+   "detail": "ADR-0004's Context opens by rejecting the ladder ('deterministically-wrong answers'); D8 rules \"Authority is a peer-domain DAG, not a ladder.\" Since \u00a75 makes this table REQUIRED exploration for AI agents, the stale headline actively misleads exactly the readers it targets. The brain/organ/soul \u2192 PDP/PIP/authority.yaml mapping (also in KLC \u00a73) appears nowhere in ADR-0004.",
+   "recommendation": "Rewrite the cell to the current model (SUPRA band + peer-domain DAG + non-authoritative band, derived-only issuer registry, typed precedence edges), disambiguate which 'tier' concept the router reference means, and cite the lake doc that defines brain/organ/soul or mark it (verify).",
+   "relocated_class": "duplicated-summary drift (\"two representations that must agree\"): prose summaries restate the Lake's canonical model instead of pointing to it \u2014 the README \u00a75.2 cell was half-updated (right column reworked to ADR-0004, left cell left at v0.1-era prose), and KLC \u00a73's uncited brain/organ/soul assertion is another instance of the same class",
+   "verifier": "Verified every sub-claim directly: (1) README.md line 76 contains the exact \"Four-tier authority hierarchy ... brain/organ/soul \u2192 PDP/PIP/authority.yaml model\" text in the same table cell that cites ADR-0004's authority-line model; (2) ADR-0004's Context (\"monolithic federal-dod authority ladder gives deterministically-wrong answers\") and D8 (\"Authority is a peer-domain DAG, not a ladder\") are quo"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a78 MVP #1 \u2014 OAuth subscription authentication",
+   "class": "unverified-tos-dependency",
+   "adr_candidate": true,
+   "dimensions": [
+    "feasibility",
+    "baseline-xcheck"
+   ],
+   "summary": "MVP mode (a) rests on the bare assertion that ChatGPT Pro is 'currently the only major subscription authorizing this use' \u2014 uncited, undated, time-sensitive, and contestable \u2014 against the baselines' D18 lesson that subscription-vs-API ToS lines are load-bearing, version-dated design inputs with real ban risk.",
+   "detail": "Whether OpenAI's terms authorize arbitrary third-party agent platforms (vs its own Codex surfaces and enrolled pilot partners) is a program-terms question, not settled fact; 'only major subscription' also has to survive Google's personal-account OAuth tier. Both baselines dedicate a decision record to this class and close with 're-verify before relying on it (verify)'. If the claim is wrong, MVP #1(a) collapses to zero lawful users; mode (b) OpenAI-compatible endpoints bounds the blast radius.",
+   "recommendation": "Write the model-backend registration decision as an ADR in D18 form: quote the exact ToS/program language, date it, mark it (verify)-on-drift, and state the fallback posture (mode (b) is the floor; mode (a) severable). Do not let an MVP pillar rest on an uncited licensing claim.",
+   "relocated_class": "Two evidence regimes for the same session's operator rulings: architectural decisions promoted into design/adr/ get ADR-0001's dated evidence-of-record discipline (ADR-0002/0003), while equally architectural rulings parked as README \u00a78 MVP prose (model-backend registration, task-class routing at hook E, multi-operator subject model) escape it \u2014 uncited external-fact assertions are the symptom of that promotion gap.",
+   "verifier": "Verified against <repo>/README.md line 125: the exact uncited parenthetical \"(ChatGPT Pro \u2014 currently the only major subscription authorizing this use)\" is present, with no ToS/program language quoted, no citation, and no (verify) marker; the block's 2026-07-14 dateline dates the decision, not the licensing claim. Grep across design/ confirms no other do"
+  },
+  {
+   "severity": "should-fix",
+   "file": "ADR-0002-kernel-is-rust.md",
+   "section": "Control mapping \u2014 Cryptography row (aws-lc-rs); container-architecture \u00a73.1",
+   "class": "fips-validation-scope-overclaim",
+   "adr_candidate": false,
+   "dimensions": [
+    "feasibility"
+   ],
+   "summary": "'aws-lc-rs \u2014 FIPS 140-3 validated module' is stated without version/certificate/operating-environment scope, and the declared deployment targets (Raspberry Pi arm64, macOS) are almost certainly outside the CMVP-tested operating environments of the AWS-LC FIPS module.",
+   "detail": "What is validated is the AWS-LC Cryptographic Module at specific versions on specific tested OEs (Linux-centric); aws-lc-rs must build the pinned FIPS-feature module version to inherit the claim. macOS is not a tested environment; Raspberry Pi OS rests at best on vendor/user affirmation \u2014 materially weaker to assessors (verify against the current CMVP certificate). Two of three declared targets sit outside the clean claim.",
+   "recommendation": "Amend the row to name module version, CMVP certificate number, and tested OEs, and state per deployment target whether the claim is tested-OE, vendor-affirmed, or unavailable \u2014 mirroring the 'two honest boundaries' pattern the same ADR uses for memory safety.",
+   "relocated_class": "precedent-inherited assurance claims restated without their validation envelope (version/certificate/operating-environment scope) \u2014 Microkosmos FIPS inheritance across ADR-0002, container-architecture \u00a73.1/\u00a73.2, README",
+   "verifier": "Textual defect verified against the file: ADR-0002 line 38 states \"aws-lc-rs \u2014 FIPS 140-3 validated module\" mapped to SC-13 \"FIPS-validated mechanisms\" with no module version, CMVP certificate number, or tested-OE scope; README line 21 declares Raspberry Pi (arm64), x64 Linux, and macOS as deployment targets; nothing in the corpus scopes the claim (the \"two honest boundaries\" paragraph covers memo"
+  },
+  {
+   "severity": "should-fix",
+   "file": "README.md",
+   "section": "\u00a71 deployment targets; container-architecture \u00a71.4",
+   "class": "assumed-baseline-does-not-exist",
+   "adr_candidate": false,
+   "dimensions": [
+    "feasibility"
+   ],
+   "summary": "'Both assume STIG default configurations and baselines' asserts baselines that do not exist for several declared targets: no DISA STIG for Raspberry Pi OS, none for Docker CE/Compose or Podman (the Docker STIG is Enterprise-only and aging) \u2014 the assumption is undefined exactly where the platform says it will run.",
+   "detail": "Kubernetes, macOS, RHEL/Ubuntu STIGs exist; Raspberry Pi OS has none, and container runtimes otherwise fall to the Container Platform SRG. On the Pi + Compose path \u2014 plausibly the most common homelab deployment \u2014 'STIG default configurations assumed' has no referent; an implementer cannot mount volumes 'accordingly' against a baseline that doesn't exist. (verify current cyber.mil catalog.)",
+   "recommendation": "Replace the blanket assumption with a per-target baseline table (macOS STIG vN, RHEL/Ubuntu STIG, Kubernetes STIG, Container Platform SRG for Compose/Podman) marking gaps honestly (Raspberry Pi OS: nearest-equivalent hardening profile), each entry (verify) against the current catalog.",
+   "relocated_class": "prose duplicating a mechanism the design already models \u2014 blanket 'STIG assumed' restates host-hardening posture that KLC Hook F / the autopsy define as a declared, attested per-host hardening profile; two representations of host posture that must agree (and already diverge)",
+   "verifier": "Verified against text: README line 21 and container-architecture line 15 both assert blanket 'STIG default configurations and baselines assumed' for targets that include Raspberry Pi (arm64) and a Compose/Podman deployment model. Live web check (2026-07-14) confirms the external facts: no DISA STIG for Debian/Raspberry Pi OS (DISA only STIGs vendor-sponsored OSes), no STIG for Docker CE/Compose/Po"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a71.4 principle 4 vs \u00a77 open item 3; README \u00a71/\u00a76.5",
+   "class": "scope-doctrine-contradiction",
+   "adr_candidate": true,
+   "dimensions": [
+    "feasibility",
+    "codex"
+   ],
+   "summary": "'Both deployment models from birth' (every container ships Compose AND Kubernetes manifests) contradicts the same document's open item 3 (K8s profile specifics deferred until Compose proves the shape) and is a standing 2x-artifact maintenance cost the docs' own YAGNI doctrine and scope-killer list never name.",
+   "detail": "An implementer reading \u00a71.4 writes K8s manifests for all six MVP containers now; one reading \u00a77.3 defers them \u2014 and the K8s security profile (PSA levels, NetworkPolicy set) needed to make the isolation claims true is itself deferred, so the 'STIG-default' K8s claim precedes its own prerequisite. Nothing in the stated security invariants requires K8s at MVP; dual-model parity testing across arm64/x64/macOS is a comparable burden to the named scope-killers for three nights-and-weekends architects.",
+   "recommendation": "Resolve explicitly: Compose is the MVP deployment model; the container decomposition is designed to be K8s-expressible; K8s manifests land when \u00a77.3 executes with the minimum security posture (PSA level, deny-all NetworkPolicies, RBAC) defined as a prerequisite. Record deployment-model sequencing as an ADR; if dual-model-from-birth stays, add it to the scope-killer list.",
+   "relocated_class": "settled-voice doctrine duplicated across README \u00a71 and a principles section while its prerequisite lives only in an open-items ledger \u2014 two representations that must agree (principle/summary vs. open-item list), prone to silent divergence when the open item resolves",
+   "verifier": "Verified against the actual text: container-architecture \u00a71.4 mandates shipped K8s manifests per container \"from birth\" with STIG-default posture, while \u00a77.3 defers PSA levels, the NetworkPolicy set, and even the manifest form (operator vs. plain) until \"after the Compose stack proves the shape\" \u2014 a direct internal contradiction, since \u00a71.4/\u00a73.2 make NetworkPolicies the K8s isolation mechanism yet"
+  },
+  {
+   "severity": "should-fix",
+   "file": "reference-implementation-autopsy.md",
+   "section": "\u00a76.4 Effort realism (with container-architecture \u00a75\u2013\u00a76)",
+   "class": "effort-model-omission",
+   "adr_candidate": false,
+   "dimensions": [
+    "feasibility"
+   ],
+   "summary": "The effort estimate prices the novel blocks but omits the standing polyglot QA/infrastructure matrix the other docs mandate: 4-language test+property+mutation toolchains, per-language \u00a715 invariant suites, conformance-vector harnesses, JSON-Schema codegen for 4 languages, and PyO3/maturin wheels across three architectures \u2014 plus go-mutesting is effectively unmaintained.",
+   "detail": "Container-architecture \u00a75\u2013\u00a76 mandate the full matrix including a TypeScript toolchain row for a post-MVP container (speculative scope by the README's own rule). Collectively this is a CI/infrastructure program comparable to the kernel itself, absent from \u00a76.4's calculus. go-mutesting has been essentially dormant upstream for years \u2014 (verify) before ratifying it as the Go mutation gate.",
+   "recommendation": "Add the QA/codegen/bindings matrix to \u00a76.4 as a named line item; drop or defer the TypeScript toolchain row until web-ui lands; re-verify go-mutesting and name a fallback (e.g. gremlins); phase invariant-suite languages with container delivery rather than 'from the first commit' across all four.",
+   "relocated_class": "cross-document obligation without cost reconciliation \u2014 mandates minted in one doc (container-architecture \u00a75\u2013\u00a76, KLC \u00a715 per-language duty) never reconciled into the doc owning the effort ledger (autopsy \u00a76.4); an instance of the 'two representations that must agree' class",
+   "verifier": "Verified against the actual text: autopsy \u00a76.4 prices only the kernel/lake/learning-loop blocks and names two scope killers, while container-architecture \u00a75\u2013\u00a76 mandate a standing polyglot QA program (per-language toolchains, \u00a715 invariant suites once-per-language in CI, scheduled mutation gates, language-neutral conformance vectors, JSON-Schema codegen per language, PyO3/maturin wheels for the REA"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "\u00a73.5 lake \u2014 knowledgebase tooling dependency (README license header, autopsy \u00a76.2)",
+   "class": "unstated-dependency-licensing",
+   "adr_candidate": false,
+   "dimensions": [
+    "feasibility"
+   ],
+   "summary": "The MVP lake container consumes the operator's Knowledge Lake tooling 'as the same artifact, not a port', but that repo's license/distribution status is never stated \u2014 load-bearing for a public, MIT-leaning Maknae repo whose MVP cannot ship without it.",
+   "detail": "If the knowledgebase repo is private or incompatibly licensed, the public repo has an MVP-critical dependency it cannot redistribute \u2014 the 'cost avoided' line becomes a relicensing negotiation or the very port \u00a73.5 forbids. Autopsy open item 2 covers vendoring diligence for the upstreams but not this in-family dependency. (Verify the knowledgebase repo's actual license.)",
+   "recommendation": "Extend autopsy open item 2 to cover the knowledgebase tooling explicitly: record its license and distribution mode (public dependency, vendored subtree, or private git dependency), and settle Maknae's own license before the public-repo push since the vendoring answer constrains it.",
+   "relocated_class": "in-family dependency licensing/distribution unstated \u2014 license diligence applied only to external upstreams, never to operator-owned repos (knowledgebase, microkosmos, claude-memory, stig-remediation-loop) that the public MIT-leaning repo consumes as artifacts",
+   "verifier": "Attacked and failed to refute. (1) Quoted evidence is accurately read: container-architecture.md \u00a73.5 line 52 states the lake tooling is consumed 'as the same artifact, not a port'; autopsy \u00a76.2 line 99 lists the knowledgebase #201 build-out as MVP-critical cost-avoided leverage. (2) The corpus does not address the concern elsewhere: autopsy \u00a71 line 14 verifies MIT only for the two external upstre"
+  },
+  {
+   "severity": "should-fix",
+   "file": "container-architecture.md",
+   "section": "(absent section) \u2014 supply chain beyond the Rust kernel; ADR-0002 supply-chain row",
+   "class": "supply-chain-coverage-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "Supply-chain doctrine exists only for the Rust kernel; the four non-Rust containers \u2014 including the Python lake that stamps labels and the Go gateway that asserts operator identity \u2014 have no pinning/hash-lock/vendoring/image-provenance contract at all, despite the air-gapped north star.",
+   "detail": "ADR-0002's honest boundary concedes 'the guarantees are per-language, not per-system.' The baselines rank this a primary control with directly transferable lessons for exactly maknae's stack: the LiteLLM 'TeamPCP' PyPI backdoor lived in the Python LLM-shim tree the runtime will draw from; the guardrails-ai name-confusion compromise (CVE-2026-45758, CVSS 9.6) is the package-collision class. Mitigations are concrete: pip --require-hashes, npm --ignore-scripts, digest-pinned base images, internal mirrors.",
+   "recommendation": "Add a platform-wide supply-chain section (or ADR): hash-locked dependency trees per language, digest-referenced base images, vendored artifacts for air-gap, name-confusion review for security-adjacent packages \u2014 scoped per trust level, with the untrusted plane still getting the floor (a poisoned lake dependency sits on the hook-B data path).",
+   "relocated_class": "trust-plane-only security floors \u2014 \"untrusted by design\" silently exempts runtime/interaction-plane containers from baseline controls even where they sit on enforcement data paths (lake's hook-B retrieval filtering, gateway's identity assertion); \u00a75's per-plane mutation-testing floor shows the corpus knows the pattern but applies it inconsistently",
+   "verifier": "Verified against the actual text: ADR-0002's supply-chain control row (line 37) is exclusively Rust mechanisms (Cargo.lock checksum pinning, cargo-audit/cargo-deny, vendorable crates, distroless static binary), and its honest boundary (line 40) explicitly concedes 'the guarantees are per-language, not per-system.' A corpus-wide grep finds no pinning/hash-lock/vendoring/image-provenance contract fo"
+  },
+  {
+   "severity": "should-fix",
+   "file": "reference-implementation-autopsy.md",
+   "section": "Corpus-level \u2014 no threat-model artifact; README \u00a71",
+   "class": "missing-residual-register",
+   "adr_candidate": false,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "The corpus has no threat-model or accepted-residuals artifact; the baselines' irreducible residuals \u2014 an injected agent can fully exercise everything policy permits, and authorized content can still exfiltrate to an accredited endpoint \u2014 apply verbatim to maknae and are nowhere acknowledged against the 'Deny by default, everywhere, always' framing.",
+   "detail": "The kernel bounds a compromised runtime to its authorized envelope, but that envelope IS the residual, and no doc says so. Promotion criteria (hook F's N supervised runs, \u00a79 corroboration gates) are calibrated against threats never enumerated anywhere. Both baselines pair every control doc with a THREAT-MODEL.md carrying an explicit 'what is NOT claimed' register.",
+   "recommendation": "Add a threat-model/residuals document to design/ (assets, adversaries with indirect prompt injection primary, per-hook residuals, explicitly-not-claimed list), seeded from the baselines' registers \u2014 allowed-envelope abuse, authorized-endpoint exfil, compromised-PIP behavior, host-0day out-of-scope line \u2014 so KLC gates can be argued against named threats at team review.",
+   "relocated_class": "positive-claims-only security narrative \u2014 enforcement claims asserted corpus-wide (README \u00a71 'everywhere, always', KLC \u00a711.2 'closes the poisoning path', autopsy \u00a74.2's promised-but-absent 'inverse document') without the complementary not-claimed/residual representation",
+   "verifier": "Verified against the full corpus: no threat-model or residuals artifact exists (design/ contains only KLC, autopsy, container-architecture, 3 ADRs, diagrams), and a corpus-wide grep for threat/residual/not-claimed/exfil/limitation language returns only quotes about the upstreams. The two named residuals are structurally real and unstated: a policy-bounded injected runtime can exercise everything t"
+  },
+  {
+   "severity": "discussion",
+   "file": "knowledge-lifecycle-contract.md",
+   "section": "\u00a75 heading 'Authority tiers' / Tier 1 'Authoritative' \u2014 vs autopsy \u00a77 item 1",
+   "class": "naming-collision-unresolved",
+   "adr_candidate": true,
+   "dimensions": [
+    "cross-doc"
+   ],
+   "summary": "KLC v0.2 resolves tiers as lifecycle tiers orthogonal to Lake authority, yet the section is still headed 'Authority tiers' with Tier 1 named 'Authoritative' \u2014 the collision the autopsy flags as a rename candidate is invisible to a KLC-only reader.",
+   "detail": "A reader of the governance contract alone sees a section titled 'Authority tiers' declared orthogonal to 'authority' with no explanation. The SVG title and \u00a76/\u00a715 field vocabulary would all ride on the rename.",
+   "recommendation": "Team resolves the rename in one decision (e.g. 'Lifecycle tiers' / Tier 1 'Validated') and records it \u2014 ADR fits since it commits shared vocabulary across KLC, diagrams, label schema, invariants. Until then add a one-line pointer in KLC \u00a75 to autopsy \u00a77 item 1.",
+   "relocated_class": "Open-item resolution state duplicated across representations that must agree (KLC \u00a75 callout, KLC \u00a714 Q1 'Resolved', autopsy \u00a77 residual open item) \u2014 split open-item ledger / two-representations class; the residual question lives only in the document a KLC-only reader never sees.",
+   "verifier": "Verified against the files: KLC line 48 heading is '## 5. Authority tiers' and line 57 names Tier 1 'Authoritative', while the line 50 callout declares the tiers orthogonal to Lake authority and explicitly 'not shared vocabulary' \u2014 contradicting the heading directly above it. Autopsy line 128 flags this as a rename candidate for team review, but no rename/collision mention exists anywhere in the K"
+  },
+  {
+   "severity": "discussion",
+   "file": "container-architecture.md",
+   "section": "\u00a75 TDD doctrine ('the mutation shield') with autopsy \u00a76.4\u20136.5",
+   "class": "ai-workforce-threat-model-gap",
+   "adr_candidate": true,
+   "dimensions": [
+    "feasibility",
+    "codex"
+   ],
+   "summary": "The safety argument for AI-implemented trust-plane code rests on mutation testing, which measures test-suite sensitivity to random syntactic mutants \u2014 it does not defend against the actual adversary: an agent that authors both code and tests, or an evidence-gathering agent prompt-injected by the untrusted upstream repos it is tasked to read.",
+   "detail": "(1) If the same agent writes code and tests, mutation scores stay green while code+tests jointly diverge from spec \u2014 mutation testing catches weak tests, not co-authored wrong ones; the docs never state who holds the test pen. (2) HobiBot does upstream evidence gathering while running on a platform the same corpus classifies as structurally ungated, whose upstream rules prompt-injection findings out of scope \u2014 a poisoned upstream can inject the evidence stream feeding design decisions, and 'the operator signs' does not help because humans sign conclusions, not file:line claims at scale. Rust types and tests reduce memory/type-safety defects; they do not make delegation 'safe' \u2014 the corpus itself concedes logic/policy errors remain in scope.",
+   "recommendation": "Team discussion \u2192 ADR defining the threat model for the AI workforce itself: trust-plane acceptance tests authored or independently reviewed by a human/second model family (never the implementing agent alone); HobiBot evidence claims spot-verified independently before grounding decisions; reframe the claim \u2014 mutation testing gates test strength; name what gates test intent.",
+   "relocated_class": "development-pipeline meta-threat-model gap: the corpus applies deny-by-default/provenance rigor to the runtime product but not to the AI workforce that builds it \u2014 implementing agents and HobiBot's red-team/evidence/documentation roles (\u00a76.5) operate outside any stated threat model with 'the operator signs' as the sole unexamined control; the mutation-shield overclaim and the evidence-stream injection exposure are two symptoms of this one class",
+   "verifier": "Verified against the actual text: container-architecture.md \u00a75 (line 79, line 93) and autopsy \u00a76.4 (line 112) do rest the delegation-safety claim on mutation testing/test volume verbatim; no document in the corpus states who authors tests or that test authorship is independent of the implementing agent (grep across README, KLC, ADRs confirms). The finding's technical premise is correct \u2014 mutation "
+  },
+  {
+   "severity": "discussion",
+   "file": "README.md",
+   "section": "\u00a71 north-star deployment claim",
+   "class": "scope-overreach",
+   "adr_candidate": true,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "Claiming the same kernel suffices for a classified multinational enclave ('Not a special mode') ignores cross-domain, trusted-downgrader, accreditation, audit-export, key-management, and failure-domain requirements that remain unspecified or deferred elsewhere in the corpus.",
+   "detail": "Downgrade is only 'a signed act'; audit export, replication hardening, K8s profile, signature semantics, and MLS secret-target isolation are all open \u2014 yet the claim is repeated in the KLC.",
+   "recommendation": "Either narrow the north-star claim to a single-classification-level air-gapped deployment, or enumerate the additional components (accreditation, trusted downgrader, audit export, key management, cross-domain isolation) required for a true multinational MLS system and mark them as such.",
+   "relocated_class": "claim-strength outruns specification-status: universal structural claims (\"not a special mode\", \"from birth\", \"data sovereignty holds when nobody is watching\") whose enabling machinery is elsewhere marked proposed/open/deferred (container-architecture \u00a74 audit export, \u00a77 open items, KLC \u00a714)",
+   "verifier": "Verified against text. The claim appears in deployment-sufficiency register in both places: README \u00a71 (\"Not a special mode: the same kernel with a richer lattice and a stricter map, which a homelab runs with a trivial lattice at zero ceremony\") and KLC \u00a712 (\"Nothing about that deployment is a special mode\") \u2014 scoped to the deployment, not merely the kernel, defeating the 'architectural-invariance-"
+  },
+  {
+   "severity": "discussion",
+   "file": "reference-implementation-autopsy.md",
+   "section": "\u00a76.1 kernel scope estimate",
+   "class": "scope-estimate-unsupported",
+   "adr_candidate": false,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "The 'thousands of lines, not hundreds of thousands' kernel claim is unsupported by the listed responsibilities and appears to exclude architecture-defeating enforcement work assigned outside the kernel (the egress-proxy's hook E implementation).",
+   "detail": "The stated scope includes six hooks, label/schema enforcement, policy compilation, signing, audit, scoped identities, promotion, lattice behavior, and coordination with a TLS-terminating egress PEP \u2014 while core schemas and enforcement semantics remain unresolved.",
+   "recommendation": "Revise the estimate after the Cedar spike, once hook enforcement semantics and signature bindings are defined; account for the egress-proxy's hook E implementation explicitly.",
+   "relocated_class": "trust-plane synecdoche: \"kernel\" used in prose (KLC \u00a710 preamble, \u00a711.4, autopsy \u00a76.1\u20136.4) for the kernel+egress-proxy PDP/PEP pair, so proxy-side enforcement work and claims silently drop out of kernel-scoped statements",
+   "verifier": "The finding's central verifiable claim survives: autopsy \u00a76.1 scopes the line-count claim to \"the trust plane kernel,\" and the egress-proxy \u2014 designated in container-architecture \u00a72/\u00a73.2 as the second trusted, architecture-defeating container holding the Hook E data path (TLS termination, payload label screening, destination allowlisting) \u2014 is absent from the autopsy's entire build-scope accountin"
+  },
+  {
+   "severity": "discussion",
+   "file": "reference-implementation-autopsy.md",
+   "section": "\u00a72\u2013\u00a75 claim cross-check vs two hardened-baseline repos",
+   "class": "baseline-corroboration",
+   "adr_candidate": false,
+   "dimensions": [
+    "baseline-xcheck"
+   ],
+   "summary": "Positive evidence, not a defect: both independent hardened-baseline efforts corroborate every checkable autopsy \u00a72\u2013\u00a75 claim about the upstream trust models and the overlay ceiling \u2014 with one sharpening nuance: the overlay floor is higher than the \u00a75 record alone suggests, which narrows maknae's differentiator to the semantic layer.",
+   "detail": "The Hermes 'only security boundary is the OS' thesis, the OpenClaw/Hermes reject tables (default-allow exec, unsigned skills, fail-open policy engine, cron-inherits-authority, MCP-trust-by-presence), and the overlay-ceiling claims are all independently confirmed, several against live vendor docs. Nuance: the baselines achieved MORE as overlay than \u00a75's deployment evidence suggests (kernel-MAC egress deny, credential-read deny, self-poisoning write-walls, fail-closed launch gates) \u2014 what overlay provably could NOT reach is per-subject/per-request authorization, tool-call granularity, labeled knowledge with provenance-gated promotion, payload-content decisions: exactly maknae's claimed differentiator.",
+   "recommendation": "Feed to synthesis as corroborating evidence for autopsy \u00a72\u2013\u00a75. Optionally cite the two baselines in autopsy \u00a75 as a second, independent overlay record \u2014 stronger evidence than the HobiBot/TaeBot configs for the ceiling argument because they document both what overlay achieved and where it provably stopped.",
+   "relocated_class": "same-operator corroboration presented as independent \u2014 one mask of the corpus's open KLC \u00a714 Q8 corroboration-independence class (autopsy \u00a77 item 4); any \u00a75 citation of the baselines should credit them as a second same-operator artifact record, not independent teams",
+   "verifier": "Verified against actual text on all checkable points. (1) The autopsy (design/reference-implementation-autopsy.md) genuinely makes each claim the finding says is corroborated: \u00a72 lines 20-24 (OS-only-boundary thesis from both upstreams), \u00a73.1 reject table (default-allow exec, unsigned skills, break-glass, per-host trust), \u00a74.1 reject table (self-generated skills with guard off by default, cron-inh"
+  },
+  {
+   "severity": "nit",
+   "file": "ADR-0001-adopt-architecture-decision-records.md",
+   "section": "Control mapping \u2014 CA-2 row",
+   "class": "control-mapping-overreach",
+   "adr_candidate": false,
+   "dimensions": [
+    "codex"
+   ],
+   "summary": "CA-2 is overstated as a mapping for maintaining ADRs: ADRs may be assessment evidence but do not implement control assessment (which requires conducting and reporting assessments under an assessment plan).",
+   "detail": "\"ADRs are the primary artifact an assessor reads... | CA-2 (control assessments \u2014 evidence quality).\"",
+   "recommendation": "Reframe: ADRs are assessment input (supporting CA-2 by clarifying design and control intent), not implementation. Map to SA-5 (system documentation) instead.",
+   "relocated_class": "support-vs-implement attribution in informative control mappings \u2014 four ad-hoc hedging conventions across the corpus (KLC \u00a713 \"(concept)\", ADR-0002 prose \"complements\", ADR-0003 \"claimed as support only\", ADR-0001 bare parenthetical) that must agree but have no shared convention",
+   "verifier": "Verified against ADR-0001 lines 17, 28-34. The external fact holds: CA-2 (rev 5) is the conduct of control assessments (plan, assess, report); an ADR practice is an assessment OBJECT (documentation examined under 800-53A), not an implementation of CA-2. The table's own contract (line 17: cited controls are ones the decision \"implements or strengthens\") makes the bare CA-2 citation the loosest mapp"
+  }
+ ],
+ "refuted": [
+  {
+   "summary": "The claimed single egress enforcement point is contradicted by an independently externally-connected gateway: channel replies are outbound flows that route around hook E.",
+   "reasoning": "The blocker claim is a misread of \u00a73.2. The finding asserts channel replies have \"no defined hook E enforcement or audit,\" but \u00a73.2's first sentence explicitly enumerates channel egress as one of the three outbound flow classes that transit the egress-proxy, which \"holds the Hook E data path\"; KLC \u00a710 defines hook E over \"any outbound data flow\" with every decision producing an audit event. The finding's own recommendation (\"route all gateway channel egress through the egress-proxy\") restates the document's stated design verbatim \u2014 strong evidence the \"channel egress all transit it\" clause was skipped. The Compose sentence (\"only externally-connected service besides gateway\") does not contradict this: the gateway's external attachment is the interaction plane's channel-side connectivity, and the Kubernetes model explicitly forces ALL egress (gateway's included) through the proxy, making the intended shape unambiguous. What survives is only a small residual: the Compose description does not state the mechanism preventing the gateway's bidirectional external attachment from carrying direct outbound flows (principle 4 defers to the TaeBot nftables host-level reference without detail), so the Compose shape reads looser than the K8s shape. That is a one-sentence clarity/consistency fix, not a defeated security property \u2014 the enforcement path for channel replies IS defined in the text. Verdict: refuted as filed (blocker/contradiction/no-defined-enforcement); the residual warrants a should-fix clarification aligning the Compose wording with the K8s \"force all egress through it\" shape."
+  },
+  {
+   "summary": "Skill promotion rewards executions with zero policy denials, encouraging skills to avoid attempted denials rather than proving intended behavior: a correctly constrained skill that triggers a denial on hostile input is penalized, while a no-op or narrowly exercised malicious skill accumulates clean runs.",
+   "reasoning": "The finding imports an enforcement model this architecture does not use, and the \"inversion\" dissolves once the denial semantics are read in context.\n\n1. Who fires the denial. In this contract, skills are *subjects*, not policy enforcers. Denials are emitted by the trust-plane kernel against the skill's own action attempts (\u00a710 hooks E/F: egress and execute are deny-by-default decisions over the skill's requests; \u00a711.4: \"The runtime's good behavior is never the control; the kernel is\"). There is no event in this architecture where a \"correctly constrained skill triggers a denial on hostile input\" as intended behavior \u2014 a skill refusing hostile input produces no denial at all (it simply doesn't attempt the action); a *denial* means the skill itself attempted something outside its whitelist. So \"zero policy denials\" = \"the skill never attempted an unauthorized action during supervised runs,\" which is a least-privilege behavioral-conformance check, exactly aligned with the deny-by-default doctrine (\u00a72.4) \u2014 not inverted.\n\n2. The doc already equates denial with violation \u2014 the recommendation's distinction doesn't exist here. \u00a79.2 line 197: \"**Policy violation at runtime:** a skill whose execution triggers a policy denial is demoted to quarantine pending review.\" In this model a runtime denial *is* the definition of a policy violation by the skill-as-subject. The recommendation to \"change the metric to zero policy violations (denials of intended capabilities)\" is asking for what the text already means; \"denial of an intended capability\" can't occur mid-run for declared capabilities because hook F gates invocation on declared capabilities \u2286 persona + task whitelist before execution starts.\n\n3. The hostile-input scenario is actually the case where non-promotion is correct. If hostile input can drive a skill to attempt a denied action, the skill is injectable \u2014 the kernel denying is the defense working, and refusing to raise that skill's trust tier (demote-pending-review, \u00a79.2) is the right response, not a penalty error.\n\n4. The residual half-truth \u2014 \"clean-run counts measure exercise breadth, not safety\" (a narrowly-exercised or dormant-malicious skill accumulates clean runs) \u2014 is real but bounded by the architecture and already tracked: (a) promotion never exempts a skill from the kernel \u2014 hooks E/F enforce the declared-minimal capability whitelist at *every* invocation at every tier, so a time-bomb skill's blast radius is bounded by its least-privilege capability set regardless of tier; (b) any later denial demotes to quarantine automatically (\u00a79.2); (c) the gate also requires supervised execution, least-privilege capability review, and signature \u2014 the run count is not the sole control; (d) how N should scale per capability class is an explicitly open review item (\u00a714 Q2, cross-referenced from \u00a79.1's own text at line 188). Suggesting adversarial/edge-case test coverage as part of N's definition is legitimate input to \u00a714 Q2 \u2014 a discussion contribution, not a defect in the stated metric.\n\nOne genuine residual edge survives at low grade: context-dependent denials (e.g., a task-scoped egress allowlist differing between runs) could demote a behaviorally-correct skill \u2014 but that fails conservative (false-positive demotion \"pending review,\" recoverable), which is the safe direction in this threat model, not a security inversion.\n\nVerdict: refuted \u2014 the quoted evidence is misread (denial \u2260 a skill's successful defensive act here; it is by the doc's own definition a violation by the skill), and the residual coverage concern is already addressed by continuing runtime enforcement (\u00a710), automatic demotion (\u00a79.2), and the tracked open question (\u00a714 Q2)."
+  },
+  {
+   "summary": "The two docs state materially different bounds on HobiBot's role \u2014 container-architecture authorizes 'delegating large implementation segments... including HobiBot at will' while the autopsy bounds it to a review-and-evidence portfolio 'kept off Tier 0 decisions by construction' \u2014 and the Tier-0 metaphor names no actual mechanism in the development process.",
+   "reasoning": "The finding's inter-document divergence claim is a misread: the \"delegating large implementation segments (including HobiBot at will)\" language originates in the autopsy's own \u00a76.4 (line 112), and container-architecture \u00a75 explicitly cites and faithfully restates it \u2014 so the autopsy cannot be read as bounding HobiBot to non-implementation work when it grants the delegation itself three paragraphs above \u00a76.5. \u00a76.5 is a portfolio enumeration plus a sign-off rule (\"all its output enters review as proposals; the operator signs\"), with no exclusivity language, and is consistent with \u00a76.4's gauntlet terminating in human merge. The claim that \"the only stated mechanism is the operator signs\" is false: the corpus states human merge (\u00a76.4), KLC \u00a715 invariants as executable CI property tests, language-neutral conformance vectors (CA \u00a76), and mutation testing where \"surviving mutants in trust-plane code are release blockers\" (CA \u00a75) \u2014 the latter being exactly the plane-differentiated bound on AI-written trust-plane code the finding says is missing. The Tier-0 reference is also not mechanism-free: KLC \u00a75 defines Tier 0 as \"Operator signature only. Never automated,\" and HobiBot's \u00a76.5 portfolio artifacts (KLC, design docs, authority-map profiles) are Tier-0-class doctrine, so the bullet names a defined signature gate. The \"partial gates are theater\" thesis is about runtime hardening overlays on deployed agents, not dev-pipeline human review. Residual: \u00a76.5 could add one line clarifying its portfolio is additive to \u00a76.4's delegation and that \"Tier 0\" is used in its KLC sense \u2014 polish, not a trust-model gap; the recommended ADR content substantively already exists in \u00a76.4 + CA \u00a75."
+  },
+  {
+   "summary": "(verify) The load-bearing leverage claim \u2014 'the entire authority-basis engine' exists as the #201 build-out, already built, gate-tested, Python, consumable as the same artifact \u2014 cannot be corroborated from ADR-0004, which never references #201, 'identity spine', 'families', or 'query contracts'.",
+   "reasoning": "The finding's factual observation is narrowly true \u2014 ADR-0004's traceability line cites #299/#194/#294/#297/#202/#200/#288/#295/#280 and never the literal string \"#201\" \u2014 but its conclusion (\"cannot be corroborated\", \"unverifiable-external-dependency\", \"if the correct anchor is the #294/#295/#297/#288 family, fix the citations\") is refuted by direct verification against the knowledgebase repo itself:\n\n1. #201 exists and IS the build-out epic. STANDARDS.md line 22 names it explicitly: \"#201 typed authority edges (references/lake/edges.yaml + edges.schema.json, families.yaml, field-ownership.yaml, precedence compiled into AUTHORITY_MAP.md)\" together with the gates \"edge_graph_gate, label_injection_gate, vendor_exclusion_gate, identity_gate, issuer_registry_gate via scripts/validate_lake.py --strict\".\n\n2. The claimed components exist on disk in consumable form: references/lake/{edges.yaml, families.yaml, field-ownership.yaml, identity.yaml, issuers.yaml, schemas/} and scripts/validate_lake.py containing identity_gate (line 2256), edge_graph_gate (line 3198-3199), issuer_registry_gate (line 3242-3243) \u2014 i.e., built, gate-tested, Python, exactly as the autopsy claims.\n\n3. \"Identity spine\" is corroborated verbatim: design/2026-07-01-issue-293-document-identity-spine-design.md is titled \"Document-identity spine (#201-A)\" with header \"Decomposed from: #201\". The issues ADR-0004 cites (#293/#294/#295/#297/#288, ratified basis #299) are the DECOMPOSITION CHILDREN of #201 (dependency chain \"#200 -> #201 -> #288\" in the issue-200 spec; DECISIONS-NEEDED.md repeatedly routes decisions \"to #201\"). So citing #201 is not a wrong anchor needing replacement by the #294/#295/#297/#288 family \u2014 #201 IS that family's parent, and the maknae KLC already states this precisely: changelog line 295 says \"mpe-es/knowledgebase #201 and children\".\n\n4. The finding's method error: it demanded corroboration of an epic-level anchor from a single child-level ADR (ADR-0004), the one file the review packet supplied as lake proxy. Absence there is expected \u2014 ADRs trace to their implementing child issues, not upward to the epic number. Per the verifier rules, the claim \"misstates an external fact\" that I verified directly.\n\nResidue: the recommendation to cite concrete artifact paths alongside the issue number for readers without knowledgebase repo access is mild polish (nit at most); and \"consumable as the same artifact\" as a package-boundary/visibility question for a private repo is a real but separate integration concern the autopsy's roadmap framing does not misrepresent. Neither sustains the finding as written."
+  },
+  {
+   "summary": "(verify) The claims that maknae inherits #280's 'two-level model (enclave ceiling + per-document dcs_label)' by construction \u2014 'same schema, not a parallel invention' \u2014 and that #284 is a sibling effort cannot be corroborated: ADR-0004 ties #280 only to typed edges/in_scope_domains and never mentions #284.",
+   "reasoning": "The finding's premise \u2014 that the #280/#284 claims \"cannot be corroborated\" because ADR-0004 ties #280 only to typed edges \u2014 fails on direct verification. I pulled both issues from the live knowledgebase repo (gh issue view, mpe-es/knowledgebase):\n\n(1) Issue #280 is titled \"feat(memory/security): per-document DCS labeling scheme + per-enclave lake classification ceiling\" and its body explicitly states: \"This makes classification a **two-level model**: 1. Lake ceiling (per-instance)... 2. Per-document label (the dcs_label block)\". The KLC \u00a76 wording (\"#280's two-level model (enclave ceiling + per-document dcs_label)\") is a near-verbatim accurate citation. The schema details also match: KLC's instance ceiling (\"level, releasability set, CUI categories, with an accreditation reference... hook A refuses ingest of any object whose label exceeds it \u2014 a dominance check in every dimension\") maps field-for-field to #280's handling.ceiling strawman (classification, releasable_to, cui_categories_permitted, accreditation_ref) and its generalized refusal gate (\"doc_label > lake.handling.ceiling \u2192 refuse \u2014 a dominance check... in every dimension: classification level, releasability set, CUI category\"). \"Same schema, not a parallel invention\" is corroborated, not overclaimed.\n\n(2) Issue #284 is titled \"feat(brain/security): identity-aware DCS retrieval filtering \u2014 clearance + nationality (session tags) gate lake content\" \u2014 the KLC's parenthetical \"sibling effort: knowledgebase #284 (identity-aware DCS retrieval filtering)\" is literally the issue title, and #284's model (dominance filter at retrieval per authenticated subject, fail-closed on absent/malformed labels) is precisely the ABAC-at-hook-B pattern KLC \u00a76 describes. ADR-0004's silence on #284 proves nothing \u2014 ADR-0004 is about the authority-line model; #284 lives under epic #194's security workstream.\n\nThe finding thus misstates the corroboration situation: ADR-0004's D10 row is a different facet of #280 (lake.yaml applicability config), not the whole of #280, and absence-from-ADR-0004 was never evidence of absence. Residual nuance: both issues are OPEN, and #280 marks its schema \"GROUNDWORK... starting positions, not decisions\" \u2014 so the schema could still evolve before landing. But KLC \u00a76 already answers that drift risk in the cited sentence itself: maknae inherits the model \"by construction as a portable lake instance\" \u2014 inheritance through being an instance of the framework, not a frozen copy that must be re-synced. If #280's schema evolves, the instance inherits the evolution; that is the opposite of a parallel invention. The recommendation's useful kernel (re-check field names at hook-A implementation time, since #280 hasn't landed) is ordinary implementation-time diligence, at most a nit, not an open design question."
+  }
+ ],
+ "nits": [
+  {
+   "file": "knowledge-lifecycle-contract.md",
+   "summary": "'Transitions are unidirectional steps' is confusing for a state machine that defines both promotion and demotion in the same sentence, and the 'no Tier 3 \u2192 Tier 0' callout understates the rule (all multi-tier promotions are already forbidden)."
+  },
+  {
+   "file": "knowledge-lifecycle-contract.md",
+   "summary": "\u00a713 says 'Mappings are informative in v0.1' inside the v0.2 document \u2014 a hardcoded version reference that has already drifted once and will drift again at v0.3."
+  },
+  {
+   "file": "README.md",
+   "summary": "Roadmap item 6 bundles 'Gateway + web UI, onboarding wizard (CLI + web)' into one phase while the other two docs assert CLI-first/web-later \u2014 and container-architecture attributes the deferral to 'the roadmap', which doesn't actually state it."
+  },
+  {
+   "file": "reference-implementation-autopsy.md",
+   "summary": "\u00a76.5's unqualified 'which its ADR-0004 record already validates' reads as a local reference, but this repo holds only ADR-0001..0003 \u2014 the referent is the knowledgebase repo's ADR-0004."
+  },
+  {
+   "file": "knowledge-lifecycle-contract.md",
+   "summary": "Every maknae summary of the lake model says 'domains/bands/natures', omitting its fourth component \u2014 intra-domain tiers \u2014 muddying the orthogonality claim (orthogonal to which tiers?) and leaving unstated that the ceiling projection deliberately consumes only (band, nature)."
+  },
+  {
+   "file": "ADR-0003-cedar-policy-engine.md",
+   "summary": "'Formally verified core' slightly overstates: what is proven in Lean is the specification/model; the production Rust evaluator is differentially tested against it, not itself proven \u2014 the ADR's own SA-17 row already states this correctly."
+  },
+  {
+   "file": "reference-implementation-autopsy.md",
+   "summary": "The autopsy's file:line evidence is never pinned to upstream commit SHAs, so the evidence base drifts with the mirrors and cannot be re-verified by reviewers without the operator's machine \u2014 a provenance gap in the one document whose purpose is 'so the team argues from evidence'."
+  }
+ ]
+}
