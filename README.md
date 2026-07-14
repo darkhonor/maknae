@@ -47,7 +47,7 @@ Design extensions beyond both upstreams:
 
 ## 4. Architecture in one paragraph
 
-Three planes. The **interaction plane** (gateway + web UI, multi-channel, scheduler with scoped task identities) accepts work. The **trust plane** — the kernel, and the only trusted code — holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log; nothing touches anything without transiting it. The **runtime plane** (agent runtime with the gated learning loop, plus integrations acting as PIPs) does the work under constraint. Kernel candidates favor Rust/Go with a policy language (Cedar vs. OPA — open question). Runtime-plane languages are deliberately unsettled: the container-first, multi-component architecture lets each component use the language that does its job well, with discipline and rigor calibrated to the layer — affordable precisely because the kernel, not the runtime's good behavior, is the control. Diagrams live in [`design/diagrams/`](design/diagrams/).
+Three planes. The **interaction plane** (gateway + web UI, multi-channel, scheduler with scoped task identities) accepts work. The **trust plane** — the kernel, and the only trusted code — holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log; nothing touches anything without transiting it. The **runtime plane** (agent runtime with the gated learning loop, plus integrations acting as PIPs) does the work under constraint. **The kernel is 100% Rust** (operator-ratified 2026-07-14): memory-safety CSI alignment makes the language choice a citable control, KLC §15 invariants encode into the type system, and Microkosmos supplies the in-house FIPS 140-3 Rust precedent. The policy engine remains the Cedar-vs-OPA spike (KLC §14 Q5), noting Cedar is Rust-native. All other containers pick the language that best fits the action being done — see [`design/container-architecture.md`](design/container-architecture.md) — with discipline and rigor calibrated to the layer, affordable precisely because the kernel, not the runtime's good behavior, is the control. Test-driven development applies to every container in every language; the test suite doubles as mutation-proofing for AI-implemented segments (see the autopsy §6.4). Diagrams live in [`design/diagrams/`](design/diagrams/).
 
 ## 5. Related projects — REQUIRED exploration for AI agents
 
@@ -102,6 +102,7 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 └── design/
     ├── knowledge-lifecycle-contract.md        # KLC v0.2 — governance spec (RFC)
     ├── reference-implementation-autopsy.md    # upstream survey evidence + build scope
+    ├── container-architecture.md              # container decomposition + language calls
     └── diagrams/
         ├── plane-architecture.svg
         ├── knowledge-lifecycle.svg
