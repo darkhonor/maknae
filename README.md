@@ -6,7 +6,7 @@
 |---|---|
 | **Status** | Pre-implementation. Architecture and governance specs under team review. |
 | **Domain** | https://maknae.io (registered, Cloudflare; holding page pending) |
-| **Core spec** | [`knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) — read this first |
+| **Core spec** | [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — read this first |
 | **Team** | Alex (architect/owner) + two engineers |
 | **License** | TBD (MIT leaning, pending team decision) |
 
@@ -45,7 +45,7 @@ Design extensions beyond both upstreams:
 
 ## 4. Architecture in one paragraph
 
-Three planes. The **interaction plane** (gateway + web UI, multi-channel, scheduler with scoped task identities) accepts work. The **trust plane** — the kernel, and the only trusted code — holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log; nothing touches anything without transiting it. The **runtime plane** (agent runtime with the gated learning loop, plus integrations acting as PIPs) does the work under constraint. Kernel candidates favor Rust/Go with a policy language (Cedar vs. OPA — open question); the runtime plane is free to be TypeScript/Python for velocity because the kernel, not the runtime's good behavior, is the control. Diagrams live in [`diagrams/`](diagrams/).
+Three planes. The **interaction plane** (gateway + web UI, multi-channel, scheduler with scoped task identities) accepts work. The **trust plane** — the kernel, and the only trusted code — holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log; nothing touches anything without transiting it. The **runtime plane** (agent runtime with the gated learning loop, plus integrations acting as PIPs) does the work under constraint. Kernel candidates favor Rust/Go with a policy language (Cedar vs. OPA — open question). Runtime-plane languages are deliberately unsettled: the container-first, multi-component architecture lets each component use the language that does its job well, with discipline and rigor calibrated to the layer — affordable precisely because the kernel, not the runtime's good behavior, is the control. Diagrams live in [`design/diagrams/`](design/diagrams/).
 
 ## 5. Related projects — REQUIRED exploration for AI agents
 
@@ -71,9 +71,9 @@ The live deployment configurations for both personas are also on this system and
 
 | Project | Location | What it is | What Maknae takes from it |
 |---|---|---|---|
-| **Knowledge Lake** | `~/knowledgebase` | Authority-tiered, deterministic markdown retrieval platform (anti-RAG, progressive disclosure, git-distributed, FIPS 140-3, portable architecture). Four-tier authority hierarchy, YAML frontmatter provenance, brain/organ/soul → PDP/PIP/authority.yaml model. | Maknae's lake IS a portable instance of this architecture, self-populated by the agent. Tier vocabulary must align (open question #1 in the contract). The Tier 0/1/2 router pattern applies to retrieval. |
+| **Knowledge Lake** | `~/knowledgebase` | Authority-tiered, deterministic markdown retrieval platform (anti-RAG, progressive disclosure, git-distributed, FIPS 140-3, portable architecture). Four-tier authority hierarchy, YAML frontmatter provenance, brain/organ/soul → PDP/PIP/authority.yaml model. | Maknae's lake IS a portable instance of this architecture, self-populated by the agent. Maknae's authority basis derives from the Lake's ADR-0004 authority-line model (domains/bands/natures, derived-only issuer registry, typed precedence edges — the #201 build-out); Maknae's lifecycle tiers are an orthogonal axis (KLC §7). The Tier 0/1/2 router pattern applies to retrieval. |
 | **Claude Memory** | `~/claude-memory` | The operator's own shared memory system (not a vendor product), with Lamis Mukta-style out-of-band "dreaming" consolidation. | Maknae's memory IS this system, wrapped in an LLM-efficient read path (bounded working set, FTS-style recall) — somewhere between Hermes' four-layer model and the operator's design. Trust model stays the operator's. |
-| **Security MCP Server** | `~/Development/MCP/security-mcp-server` | Security tooling exposed over MCP (Mozilla Observatory integration planned). | Runtime-plane integration (PIP); also informs kernel policy telemetry. |
+| **Security MCP Server** | `~/Development/MCP/security-mcp-server` | Security tooling exposed over MCP (Mozilla Observatory integration planned). | Runtime-plane integration (PIP); also informs kernel policy telemetry. Its live OAuth 2.1 + PKCE gateway with four-dimensional ABAC gating is prior art for the kernel's PDP. |
 | **STIG Remediation Loop** | `~/Development/stig-remediation-loop` | Compliance-ready loop design informed by HuaShu's Orange Book (loop engineering guide) and the operator's GitLab issue standards. | Directly feeds the gated learning loop and skill promotion criteria (contract §9); the compliance-automation skill domain Maknae will learn. |
 | **Microkosmos** | `~/Development/Containers/microkosmos` | FIPS 140-3 Rust webserver (`aws-lc-rs`, GET-only, NIST 800-53 aligned, hardened). | The Rust-perimeter precedent and FIPS story for the trust plane; likely serves maknae.io. |
 | **Microkosmos Test Sites** | `~/Development/MPE-ES/Capabilities/microkosmos-test-sites` | Test site content and deployment configurations for Microkosmos. | Hardened static-serving and deployment validation patterns; candidate harness for Maknae's web UI hosting. |
@@ -85,7 +85,7 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 
 ## 6. Orientation protocol for AI agents (read carefully, Fable 🐰)
 
-1. **Read [`knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) in full.** The machine-readable invariants in §15 are acceptance criteria for anything you build or propose. Violating an invariant is a wrong answer even if the code works.
+1. **Read [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) in full.** The machine-readable invariants in §15 are acceptance criteria for anything you build or propose. Violating an invariant is a wrong answer even if the code works.
 2. **Explore the related projects (§5) before correlating.** Your task is to map overlap and opportunity across the operator's AI project portfolio; do not reason about them from this README alone.
 3. **Deny by default applies to you.** When designing, absence of an explicit permission is a denial. Never propose a "permissive mode," a bypass flag, or a default-allow fallback.
 4. **Nothing self-promotes.** Any design where generated content, skills, or configuration gains authority without transiting the promotion pipeline is architecturally rejected.
@@ -96,22 +96,24 @@ Operational context that applies platform-wide: HashiCorp Vault for all secrets 
 
 ```
 .
-├── README.md                          # this file
-├── knowledge-lifecycle-contract.md    # KLC v0.1 — governance spec (RFC)
-└── diagrams/
-    ├── plane-architecture.svg
-    ├── knowledge-lifecycle.svg
-    └── tier-state-machine.svg
+├── README.md                                  # this file
+└── design/
+    ├── knowledge-lifecycle-contract.md        # KLC v0.2 — governance spec (RFC)
+    ├── reference-implementation-autopsy.md    # upstream survey evidence + build scope
+    └── diagrams/
+        ├── plane-architecture.svg
+        ├── knowledge-lifecycle.svg
+        └── tier-state-machine.svg
 ```
 
 ## 8. Roadmap sketch (pre-implementation, subject to team review)
 
-1. KLC v0.1 team review → v0.2 with tier vocabulary aligned to Knowledge Lake.
+1. KLC v0.2 team review (authority basis aligned to the Lake's ADR-0004 authority-line model; open questions in KLC §14).
 2. Policy language spike: Cedar vs. OPA evaluated against the six enforcement hooks (KLC §10) as the acceptance test.
 3. Trust plane kernel skeleton: policy engine + label schema validation + audit events.
-4. Lake integration: portable lake instance, authority map v0.1, quarantine ingest path.
+4. Lake integration: portable lake instance, authority map v0.1 (egress allowlist + authority basis; USG sample profile as "easy mode"), quarantine ingest path.
 5. Learning loop MVP: gap detection → authorized fetch → quarantine → dreaming cycle → gated promotion.
-6. Gateway + web UI, scheduler with scoped task identities.
+6. Gateway + web UI, onboarding wizard (CLI + web) for authority configuration, scheduler with scoped task identities.
 7. Persona layer (the hyungs move in).
 
 ---

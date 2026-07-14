@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 0.1 (draft) |
+| **Version** | 0.2 (draft) |
 | **Status** | RFC — open for team review |
 | **Date** | 2026-07-14 |
 | **Scope** | Maknae agent platform — trust plane knowledge governance |
@@ -47,7 +47,7 @@ All three types share the same label schema (§6), the same tier state machine (
 
 ## 5. Authority tiers
 
-> **Review note:** tier names and count below are placeholders. Align with the Knowledge Lake four-tier authority hierarchy during review so both systems use identical vocabulary.
+> **Resolved (2026-07-14, operator):** these lifecycle tiers are orthogonal to the Knowledge Lake's authority model, not a renaming of it. Lifecycle tiers answer "how far through the trust lifecycle is this object"; the Lake's domains/bands/natures answer "who outranks whom about what." Alignment is the derivation contract in §7.2 (authority basis → `tier_ceiling`), not shared vocabulary. Numeric lifecycle tiers stay.
 
 ![Authority tier state machine](diagrams/tier-state-machine.svg)
 
@@ -66,16 +66,20 @@ Every knowledge object carries YAML frontmatter. Required keys are enforced at i
 
 ```yaml
 ---
-klc: 0.1                       # contract version this object conforms to
+klc: 0.2                       # contract version this object conforms to
 id: doc-2026-0714-a3f9         # stable unique id
 type: document                 # document | skill | memory
-tier: 3                        # current authority tier (integer)
-tier_ceiling: 1                # max tier this object may ever reach (from source authority)
+tier: 3                        # current lifecycle tier (integer)
+tier_ceiling: 1                # max tier this object may ever reach — derived: ceiling projection over (band, nature), §7.2
 classification: unclass        # DCS sensitivity label; vocabulary set by deployment
 handling: []                   # caveats, e.g. [no-egress, operator-only]
 provenance:
   source: https://access.redhat.com/documentation/...
-  source_authority: 1          # authority tier of the source per the authority map
+  issuer: redhat               # bound by the egress rule that admitted the fetch (§7.1)
+  issuance_type: product-doc   # authored at ingest
+  nature: standard             # derived: (issuer, issuance_type) -> nature per the basis (§7.2)
+  domain: vendor-official      # derived from the issuer registry
+  band: peer                   # derived from the domain
   fetched: 2026-07-14T09:12:00+09:00
   sha256: <content hash at fetch time>
   fetch_task: task-2026-0714-runbook-kvm   # learning lineage: which task caused ingestion
@@ -89,41 +93,73 @@ signatures: []                 # required for tier <= 1; detached sigs, operator
 
 Notes:
 
-- `tier_ceiling` is inherited from the source's authority map entry and can never be raised by automation. A blog post with ceiling 2 stays ceiling 2 no matter how useful it proves.
+- `tier_ceiling` and the derived provenance fields (`nature`, `domain`, `band`) come from the authority basis (§7.2) under its derived-only lock — stamped at ingest, gate-verified, never author-supplied — and automation can never raise a ceiling. A community blog post with ceiling 2 stays ceiling 2 no matter how useful it proves.
 - `handling` labels are enforced by the policy engine at every read: e.g. `no-egress` content can never appear in an outbound request body.
 - Skills additionally carry an execution manifest (declared capabilities, sandbox requirements). Skill signing is mandatory at Tier 1 and above; unsigned skills cannot execute regardless of tier.
 - Memories additionally carry `subject` scoping (which persona/operator the memory concerns) so cross-persona leakage is a policy decision, not an accident.
 
 ## 7. Authority map
 
-The authority map is the agent's epistemic policy: which sources are authoritative for which knowledge domains. It is a Tier 0 document, versioned in git, portable with the Lake. It also doubles as the **network egress allowlist** for learning fetches (§10, hook E).
+The authority map is the agent's epistemic policy. It is a Tier 0 artifact, versioned in git and portable with the Lake, authored by the operator during onboarding — a CLI wizard or the web UI, in the same spirit as OpenClaw's and Hermes' onboarding flows — and changed only by operator-signed commits thereafter. Operator-configurable never means runtime-mutable.
+
+Following the Knowledge Lake's authority-line model (ADR-0004; the #201 build-out), the map separates two concerns the v0.1 draft conflated:
+
+### 7.1 Egress allowlist — where the agent may learn from
+
+The kernel's fetch-permission table, enforced at hooks A and E. A fetch to any URL not matched by an `allow` pattern is denied and logged as a learning request; the runtime does not decide where to learn from, the map does. Each allow pattern binds the content it admits to an issuer in the authority basis (§7.2).
+
+### 7.2 Authority basis — how much to trust what came back
+
+The basis is a **schema, not a fixed hierarchy**:
+
+- **Domains with bands.** Operator-defined knowledge domains, each in one of three bands: `supra` (binds everything), `peer` (no intrinsic precedence between peers), `non-authoritative` (informs, never controls). Authority is a peer DAG, not a ladder.
+- **Issuer registry (derived-only lock).** The single source from which every authority property derives: (issuer, issuance type) → nature. Authority fields are never author-supplied per object.
+- **Natures gate officialness.** A source's issuance nature (directive, standard, guidance, doctrine, guide, blog, ...) determines whether its content can ever become "the official way" — and distinct controlling natures stack, they do not compete.
+- **Ceiling projection.** `tier_ceiling` = projection(band, nature), operator-tunable per deployment. Automation may never raise a ceiling (§15).
+- **Typed precedence edges.** Precedence between sources lives in exactly one representation: authored, typed edges. It is never inferred from tier numbers, fetch order, publication date, or lexical sort. Cross-peer conflicts with no connecting edge surface to the operator.
+
+**Portability rule: no baked-in hierarchy.** Maknae ships no default authority content. The federal/DoD hierarchy (SUPRA, the dod/nist/cnss peer domains, DISA/NIST issuers) is packaged as a **sample profile** — the "easy mode" onboarding choice and the worked example in the documentation — alongside deliberately non-governmental samples (e.g., a homelab profile). A deployment's authority content is the operator's statement about their world, not the platform's.
 
 ```yaml
 # authority-map.yaml  (Tier 0 — operator signed)
-klc: 0.1
-domains:
-  - match: "rhel/**"
-    sources:
-      - pattern: "https://access.redhat.com/**"
-        authority: 1
-      - pattern: "https://public.cyber.mil/stigs/**"
-        authority: 1
-      - pattern: "https://*.blogspot.com/**"
-        authority: 2        # may inform, never becomes official
-  - match: "kubernetes/**"
-    sources:
-      - pattern: "https://kubernetes.io/docs/**"
-        authority: 1
-default:
-  authority: 3               # unknown source -> quarantine ceiling, fetch requires
-  fetch: deny                # explicit rule; default fetch posture is DENY
+klc: 0.2
+egress:
+  default: deny                        # explicit; unmatched fetch is denied + logged
+  allow:
+    - match: "rhel/**"                 # knowledge domain the fetch serves
+      pattern: "https://access.redhat.com/**"
+      issuer: redhat
+    - match: "rhel/**"
+      pattern: "https://sysadmin-notes.example.net/**"
+      issuer: community-blogs
+basis:
+  domains:
+    - {id: vendor-official, band: peer}
+    - {id: community, band: non-authoritative}
+  issuers:                             # derived-only lock: the single derivation source
+    - key: redhat
+      domain: vendor-official
+      issuance_types:
+        - {code: product-doc, nature: standard}
+        - {code: kb-article, nature: guidance}
+        - {code: blog, nature: blog}
+    - key: community-blogs
+      domain: community
+      issuance_types:
+        - {code: blog, nature: blog}
+  ceiling_projection:                  # (band, nature) -> tier_ceiling; operator-tunable
+    - {band: supra, ceiling: 1}
+    - {band: peer, natures: [directive, standard, guidance], ceiling: 1}
+    - {band: peer, natures: [doctrine, guide, admin], ceiling: 2}
+    - {band: non-authoritative, ceiling: 2}   # may inform, never becomes official
+    - {default: 3}                            # unknown -> quarantine ceiling
 ```
 
 Rules:
 
-- A fetch to any URL not matched by an `allow` pattern is denied by the kernel. The runtime does not decide where to learn from; the map does.
-- `authority` on a source sets the `tier_ceiling` of everything ingested from it.
-- Map changes are operator-signed commits. The dreaming cycle may *propose* map additions (as Tier 3 change requests); it may never apply them.
+- A fetch to any URL not matched by an `allow` pattern is denied by the kernel.
+- Everything ingested through an allow pattern gets its authority properties (domain, band, nature) derived from the issuer registry and its `tier_ceiling` from the projection — stamped at ingest, gate-verified, never author-supplied.
+- Map changes are operator-signed commits, whether authored by hand, the CLI wizard, or the web UI. The dreaming cycle may *propose* map additions (as Tier 3 change requests); it may never apply them.
 
 ## 8. Lifecycle protocol
 
@@ -131,7 +167,7 @@ Rules:
 
 1. **Gap detection.** During a task, the runtime determines it lacks required knowledge (retrieval from the Lake returns nothing above the task's minimum tier). The gap is logged with the task id.
 2. **Authorized fetch.** The runtime requests a fetch. The kernel evaluates the request against the authority map. Denied fetches are logged as learning requests for operator review; on air-gapped or degraded hosts this is the *only* outcome (§12).
-3. **Quarantine ingest.** Fetched content is normalized to Lake format, labeled per §6 (tier 3, ceiling from map, provenance and hash stamped), and stored. Quarantined content is immediately usable *within the constraints of §10* — it may inform the current task's reasoning but not privileged actions.
+3. **Quarantine ingest.** Fetched content is normalized to Lake format, labeled per §6 (tier 3, ceiling and authority fields derived per §7.2, provenance and hash stamped), and stored. Quarantined content is immediately usable *within the constraints of §10* — it may inform the current task's reasoning but not privileged actions.
 4. **Consolidation ("dreaming").** An out-of-band, scheduled process — never the in-band task — reviews quarantined content: deduplicates, validates against source, checks corroboration, distills memories, refines candidate skills. Consolidation runs under its own scoped identity with no interactive privileges.
 5. **Promotion.** Objects meeting the criteria in §9 move up exactly one tier. Promotions to Tier 1 require signatures. All transitions are audit events with before/after labels.
 6. **Retrieval.** Future tasks retrieve locally, filtered by tier and labels. The loop closes: no repeated round trips to the Internet for knowledge the agent already validated.
@@ -143,7 +179,7 @@ Rules:
 | Gate | Document | Skill | Memory |
 |---|---|---|---|
 | **3 → 2** | Source hash verified; content parsed clean; no handling conflicts; dedup complete | Generated in sandbox; manifest declares capabilities; static checks pass; dry-run in sandbox succeeds | Consolidation distilled from ≥1 session; no sensitive-label conflicts |
-| **2 → 1** | Corroborated by a second authority-1 source **or** operator sign-off; within `tier_ceiling` | Passed N successful supervised executions with zero policy denials; capability set minimal (least privilege review); **signed** | Confirmed across ≥3 independent sessions **or** operator confirmation; **signed** |
+| **2 → 1** | Corroborated by a second independent ceiling-1 source (independence definition: §14 Q8) **or** operator sign-off; within `tier_ceiling` | Passed N successful supervised executions with zero policy denials; capability set minimal (least privilege review); **signed** | Confirmed across ≥3 independent sessions **or** operator confirmation; **signed** |
 | **1 → 0** | Operator signature only. Automation may propose, never apply | Same | Same (rare; e.g. standing operator directives) |
 
 `N` for skills is a tunable per capability class — a read-only skill might need 3 supervised runs; a skill that writes to infrastructure might need 10 plus explicit operator approval. **Open question for review (§14).**
@@ -213,13 +249,15 @@ Mappings are informative in v0.1; a full control matrix belongs in the RMF packa
 
 ## 14. Open questions for team review
 
-1. **Tier vocabulary.** Adopt Knowledge Lake tier names verbatim, or keep numeric with per-system aliases?
+1. **Tier vocabulary.** *Resolved 2026-07-14 (operator):* lifecycle tiers and Lake authority are orthogonal axes; numeric lifecycle tiers stay, and alignment is the §7.2 derivation contract (lake authority basis → `tier_ceiling`), not shared vocabulary.
 2. **Supervised-run counts (N) per capability class** for skill promotion (§9.1) — propose initial values.
 3. **Corroboration for niche domains** where only one authoritative source exists (e.g., a vendor's sole KB) — is operator sign-off the only 2→1 path, or do we define a "sole-source" exception with tighter freshness?
 4. **Memory consolidation cadence** — nightly dreaming vs. event-driven, and interaction with operator's existing memory subsystem consolidation.
 5. **Policy language selection** for the kernel — Cedar vs. embedded OPA vs. bespoke; evaluate against hook table (§10) as the acceptance test.
 6. **Quarantine usability window** — how long may Tier 3 content inform in-band reasoning before consolidation must adjudicate it?
 7. **Cross-persona memory rules** — default deny with explicit share grants, or persona-group scoping?
+8. **Corroboration independence.** Under the peer-domain basis (§7.2), does "second independent source" (§9.1, §11.2) require a *different peer domain* — e.g., a DISA STIG corroborated by a NIST publication rather than by another DoD document? Stronger guarantee, but harsher on single-domain deployments. *Operator: undecided as of 2026-07-14.* Interacts with #3 (sole-source domains).
+9. **Generation pressure for the dreaming cycle.** Hermes' background review is deliberately aggressive ("a pass that does nothing is a missed learning opportunity"); Maknae's consolidation is out-of-band and gated. Should the cycle be candidate-generative with the promotion pipeline as the filter, or conservative with a high bar to even draft? Interacts with #6 (quarantine usability window).
 
 ## 15. Machine-readable invariants
 
@@ -236,6 +274,8 @@ klc_invariants:
   - fetch_outside_authority_map: deny
   - no_egress_label_outbound: deny
   - missing_required_labels_at_ingest: reject
+  - object_authority_fields: derived_only      # nature/domain/band/ceiling from the basis, never author-supplied
+  - precedence_outside_typed_edges: never
   - every_transition: audited
 ```
 
@@ -244,3 +284,4 @@ klc_invariants:
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-07-14 | Initial draft for team RFC |
+| 0.2 | 2026-07-14 | Authority model reworked to the Knowledge Lake ADR-0004 authority-line basis (mpe-es/knowledgebase #201 and children): §7 split into egress allowlist + authority basis (domains/bands, derived-only issuer registry, natures, ceiling projection, typed precedence edges); §6 provenance fields derived, `source_authority` retired; portability rule — no baked-in hierarchy, USG ships as a sample profile; onboarding via CLI wizard or web UI; open question 1 resolved (orthogonal axes), questions 8–9 added; invariants extended (derived-only authority fields, typed-edge-only precedence) |
