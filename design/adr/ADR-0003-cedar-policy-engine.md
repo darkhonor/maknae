@@ -25,3 +25,17 @@ Known concerns, recorded honestly: community adoption is modest (the operator wo
 - The Q5 spike proceeds as designed — Cedar first, evaluated against all six hooks; OPA is evaluated only if Cedar fails a hook or the team overturns the lean.
 - Acceptance: this ADR moves to Accepted when the spike demonstrates all six hooks expressible and testable in Cedar, with the KLC §15 invariants encoded as Cedar policy tests or kernel-side type guarantees.
 - The authority map and operator-attribute configuration compile to Cedar entities/policies at kernel load; schema for that compilation is part of the kernel skeleton work.
+
+## Security control mapping (informative; added 2026-07-14 at operator direction)
+
+Same framing as ADR-0002: the engine choice satisfies no control — it determines the *assurance class* of the access-enforcement implementation at the heart of the platform. Full matrix belongs in the RMF package.
+
+| Concern | Cedar property | NIST SP 800-53 rev 5 | Authoritative guidance |
+|---|---|---|---|
+| Access enforcement, deny-by-default | A dedicated, single-purpose authorization engine implementing the PDP; default-deny with explicit permits; forbid overrides permit | AC-3 (access enforcement); AC-6 (least privilege); CM-7 (least functionality — capability whitelisting as the decision model) | NIST SP 800-207 (Zero Trust — the PDP/PEP separation this kernel implements) |
+| Attribute/label-based decisions | Native (principal, action, resource, context) evaluation over typed entities and attributes — symbol-for-symbol the KLC hook signature; carries the DCS label and operator-attribute model without translation | AC-16 (security and privacy attributes — policy bound to attributes); AC-4 (information flow enforcement — hook E decisions) | NIST SP 800-162 (ABAC — Cedar's model is the guide's model) |
+| Formal assurance of the decision core | The `cedar-spec` project: evaluator semantics specified and proven in Lean, differential-tested against the production Rust implementation | SA-17(1) (formal policy model — implemented, not approximated); differential testing is evidence *toward* SA-17(3) formal correspondence, claimed only as that | `cedar-spec` (github.com/cedar-policy/cedar-spec) |
+| Policy quality as a testable artifact | Schema-based policy validation (malformed or ill-typed policies rejected before load); policies are data, testable in CI against the KLC §15 conformance vectors | SA-11 (developer testing applied to policy-as-code); SI-10 (validity checking on the policy inputs the kernel loads) | — |
+| Decision auditability | Deterministic, reproducible decisions with structured diagnostics (which policies determined the outcome) — the kernel's hook audit events carry engine-grade rationale | AU-2 (event logging — decision events with determining-policy detail); AU-10 (supports non-repudiation of the decision record, claimed as support only) | — |
+
+Boundaries on the claim: (1) Cedar's formal verification covers the *evaluator*, not the operator's authored policies — bad policy is still bad policy, which is what the §15 conformance vectors and the spike's hook tests exist to catch; (2) the mapping is contingent on this ADR reaching Accepted — if the spike overturns the lean, the successor engine must re-earn every row of this table before adoption.
