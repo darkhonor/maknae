@@ -1,0 +1,47 @@
+<svg width="680" height="490" viewBox="0 0 680 490" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae plane architecture</title>
+  <desc>Three stacked planes: interaction plane on top, trust plane kernel in the middle mediating everything, runtime plane below.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="680" height="490" fill="#FFFFFF"/>
+
+  <!-- Interaction plane -->
+  <rect x="40" y="40" width="600" height="110" rx="16" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="60" y="66" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Interaction plane</text>
+  <rect x="70" y="80" width="250" height="56" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="195" y="102" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Gateway + web UI</text>
+  <text x="195" y="122" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Channels, chat, API</text>
+  <rect x="360" y="80" width="250" height="56" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="485" y="102" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Scheduler</text>
+  <text x="485" y="122" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Cron, scoped task identities</text>
+
+  <line x1="340" y1="150" x2="340" y2="186" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Trust plane -->
+  <rect x="40" y="190" width="600" height="110" rx="16" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="60" y="216" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Trust plane — the kernel (PDP)</text>
+  <rect x="70" y="232" width="170" height="56" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="155" y="254" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Policy engine</text>
+  <text x="155" y="274" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Deny by default</text>
+  <rect x="262" y="232" width="170" height="56" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="347" y="254" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Skill registry</text>
+  <text x="347" y="274" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Signed, tiered</text>
+  <rect x="454" y="232" width="170" height="56" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="539" y="254" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Audit log</text>
+  <text x="539" y="274" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Provenance trail</text>
+
+  <line x1="340" y1="300" x2="340" y2="336" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Runtime plane -->
+  <rect x="40" y="340" width="600" height="110" rx="16" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="60" y="366" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Runtime plane (untrusted by design)</text>
+  <rect x="70" y="380" width="250" height="56" rx="8" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="195" y="402" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Agent runtime</text>
+  <text x="195" y="422" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Gated learning loop</text>
+  <rect x="360" y="380" width="250" height="56" rx="8" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="485" y="402" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Integrations (PIPs)</text>
+  <text x="485" y="422" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Lake, memory, security MCP</text>
+</svg>

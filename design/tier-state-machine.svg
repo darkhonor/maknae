@@ -1,0 +1,46 @@
+<svg width="680" height="280" viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Authority tier state machine</title>
+  <desc>Four tiers from quarantine to doctrine. Promotion moves right through validation gates; demotion moves left when knowledge goes stale, is contradicted, or a source is revoked. Quarantined content can be purged.</desc>
+  <defs>
+    <marker id="fwd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="back" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="680" height="280" fill="#FFFFFF"/>
+
+  <rect x="30" y="90" width="140" height="64" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+  <text x="100" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Tier 3</text>
+  <text x="100" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">Quarantine</text>
+
+  <rect x="190" y="90" width="140" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="260" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Tier 2</text>
+  <text x="260" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Provisional</text>
+
+  <rect x="350" y="90" width="140" height="64" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="420" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 1</text>
+  <text x="420" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Authoritative</text>
+
+  <rect x="510" y="90" width="140" height="64" rx="8" fill="#CECBF6" stroke="#3C3489" stroke-width="0.75"/>
+  <text x="580" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 0</text>
+  <text x="580" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#3C3489">Doctrine</text>
+
+  <!-- Promotion arrows (upper lane) -->
+  <line x1="172" y1="104" x2="186" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
+  <line x1="332" y1="104" x2="346" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
+  <line x1="492" y1="104" x2="506" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
+
+  <!-- Demotion arrows (lower lane) -->
+  <line x1="186" y1="140" x2="172" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
+  <line x1="346" y1="140" x2="332" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
+  <line x1="506" y1="140" x2="492" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
+
+  <!-- Purge exit from quarantine -->
+  <line x1="100" y1="154" x2="100" y2="196" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
+  <text x="100" y="218" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">Purge</text>
+
+  <text x="340" y="248" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Solid arrows: promotion through validation gates &#183; Dashed arrows: demotion (stale, contradicted, source revoked)</text>
+  <text x="340" y="52" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Tier names are placeholders — align with Knowledge Lake authority hierarchy during review</text>
+</svg>

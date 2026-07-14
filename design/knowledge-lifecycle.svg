@@ -1,0 +1,40 @@
+<svg width="680" height="560" viewBox="0 0 680 560" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae self-learning knowledge lifecycle</title>
+  <desc>Five stage flow: task gap detected, fetch from authorized source, quarantine tier, consolidation and promotion, trusted local retrieval. Retrieved knowledge serves future tasks without internet round trips.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="680" height="560" fill="#FFFFFF"/>
+
+  <rect x="200" y="40" width="280" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="340" y="62" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Task gap detected</text>
+  <text x="340" y="82" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Agent lacks the how-to</text>
+
+  <line x1="340" y1="96" x2="340" y2="132" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="200" y="136" width="280" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="340" y="158" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Authorized fetch</text>
+  <text x="340" y="178" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Authority map picks sources</text>
+
+  <line x1="340" y1="192" x2="340" y2="228" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="200" y="232" width="280" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="340" y="254" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Quarantine tier</text>
+  <text x="340" y="274" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Labeled, provenance stamped</text>
+
+  <line x1="340" y1="288" x2="340" y2="324" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="200" y="328" width="280" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="340" y="350" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Consolidation + promotion</text>
+  <text x="340" y="370" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Dreaming, validation, tiering</text>
+
+  <line x1="340" y1="384" x2="340" y2="420" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="200" y="424" width="280" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="340" y="446" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Trusted local retrieval</text>
+  <text x="340" y="466" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Serves all future tasks</text>
+
+  <text x="340" y="520" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">&#8635; next gap starts the loop again — no repeated internet round trips</text>
+</svg>

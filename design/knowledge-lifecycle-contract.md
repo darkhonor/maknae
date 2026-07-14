@@ -1,0 +1,246 @@
+# Maknae Knowledge Lifecycle Contract (KLC)
+
+| | |
+|---|---|
+| **Version** | 0.1 (draft) |
+| **Status** | RFC — open for team review |
+| **Date** | 2026-07-14 |
+| **Scope** | Maknae agent platform — trust plane knowledge governance |
+| **Audience** | Human reviewers and AI agents (dual-audience document) |
+
+---
+
+## 1. Purpose
+
+This contract defines how knowledge enters, lives in, and leaves the Maknae agent platform. It governs three knowledge types — documents, skills, and memories — under a single authority-tiered, provenance-stamped, deny-by-default lifecycle enforced by the trust plane kernel.
+
+The contract exists because Maknae's agent runtime is permitted to **learn**: it may generate skills from experience (Hermes-style learning loop) and ingest documents into its local Knowledge Lake when tasked work reveals a knowledge gap. Self-directed learning without governance is configuration drift by design. This document is the governance.
+
+This is a specification, not an implementation guide. Anything not explicitly permitted by this contract is denied.
+
+## 2. Design doctrine
+
+Four axioms apply to every requirement in this document. They are not configurable.
+
+1. **Secure by Design and by Default.** Security properties are structural, not optional settings. There is no "permissive mode."
+2. **Data Centric Security (DCS).** Security metadata travels *with* the data as labels, not around it as perimeter configuration. Every knowledge object carries its labels for its entire life, and policy binds to those labels.
+3. **Zero Trust.** Every access decision evaluates (subject identity, action, resource labels, context). No subject — including the agent runtime itself — is implicitly trusted. Retrieved content is treated as input from an untrusted principal until promoted.
+4. **Deny by default.** The policy engine whitelists capabilities. Absence of a rule is a denial. This applies equally to actions (tool calls, egress) and to epistemics (what knowledge may influence what decisions).
+
+## 3. Architecture context
+
+The platform is organized into three planes. All knowledge lifecycle transitions defined in this contract are enforced at the trust plane; the runtime plane cannot perform a transition, only request one.
+
+![Maknae plane architecture](diagrams/plane-architecture.svg)
+
+The mapping to the Knowledge Lake governance model is deliberate: the policy engine is the PDP, integrations (Lake, memory subsystem, Security MCP) are PIPs, and the skill registry plus authority map fill the `authority.yaml` role. Maknae is the executable implementation of the Lake's brain/organ/soul model.
+
+## 4. Knowledge types
+
+| Type | Nature | Examples | Storage | Executable |
+|---|---|---|---|---|
+| **Document** | Declarative — what is true, what is official | Vendor docs, STIG guidance, runbooks, ingested references | Knowledge Lake (markdown, YAML frontmatter) | No |
+| **Skill** | Procedural — how to do a thing | Generated task procedures, tool wrappers, playbooks | Skill registry (signed manifests) | Yes — execution is a privileged act |
+| **Memory** | Episodic and semantic — what happened, what was learned about the operator and environment | Session records, consolidated preferences, environment facts | Memory subsystem (operator-owned store, LLM-efficient read path) | No |
+
+All three types share the same label schema (§6), the same tier state machine (§5), and the same promotion pipeline (§8–9). They differ only in promotion criteria and in the privileges each tier grants.
+
+## 5. Authority tiers
+
+> **Review note:** tier names and count below are placeholders. Align with the Knowledge Lake four-tier authority hierarchy during review so both systems use identical vocabulary.
+
+![Authority tier state machine](diagrams/tier-state-machine.svg)
+
+| Tier | Name | Meaning | Who can place content here |
+|---|---|---|---|
+| **0** | Doctrine | Sealed, operator-signed truth. Constitution-level content: this contract, the authority map, core skills. | Operator signature only. Never automated. |
+| **1** | Authoritative | Validated official knowledge. The "official way to do things." | Promotion pipeline with corroboration or operator sign-off (§9). |
+| **2** | Provisional | Useful but unproven. May inform work; may not authorize privileged action. | Consolidation ("dreaming") cycle. |
+| **3** | Quarantine | Freshly ingested, self-generated, or demoted content. Actively constrained (§10). | Any authorized ingest. All new knowledge starts here. |
+
+Transitions are unidirectional steps: promotion moves exactly one tier per validation gate; demotion may move one or more tiers or purge. There is no path from Tier 3 directly to Tier 0.
+
+## 6. Label schema
+
+Every knowledge object carries YAML frontmatter. Required keys are enforced at ingest — an object missing required labels is rejected, not defaulted.
+
+```yaml
+---
+klc: 0.1                       # contract version this object conforms to
+id: doc-2026-0714-a3f9         # stable unique id
+type: document                 # document | skill | memory
+tier: 3                        # current authority tier (integer)
+tier_ceiling: 1                # max tier this object may ever reach (from source authority)
+classification: unclass        # DCS sensitivity label; vocabulary set by deployment
+handling: []                   # caveats, e.g. [no-egress, operator-only]
+provenance:
+  source: https://access.redhat.com/documentation/...
+  source_authority: 1          # authority tier of the source per the authority map
+  fetched: 2026-07-14T09:12:00+09:00
+  sha256: <content hash at fetch time>
+  fetch_task: task-2026-0714-runbook-kvm   # learning lineage: which task caused ingestion
+lineage: []                    # for derived objects: list of input ids (see §11.1)
+freshness:
+  revalidate_after: P90D       # ISO 8601 duration; source re-checked by dreaming cycle
+  last_validated: 2026-07-14T09:12:00+09:00
+signatures: []                 # required for tier <= 1; detached sigs, operator or CI key
+---
+```
+
+Notes:
+
+- `tier_ceiling` is inherited from the source's authority map entry and can never be raised by automation. A blog post with ceiling 2 stays ceiling 2 no matter how useful it proves.
+- `handling` labels are enforced by the policy engine at every read: e.g. `no-egress` content can never appear in an outbound request body.
+- Skills additionally carry an execution manifest (declared capabilities, sandbox requirements). Skill signing is mandatory at Tier 1 and above; unsigned skills cannot execute regardless of tier.
+- Memories additionally carry `subject` scoping (which persona/operator the memory concerns) so cross-persona leakage is a policy decision, not an accident.
+
+## 7. Authority map
+
+The authority map is the agent's epistemic policy: which sources are authoritative for which knowledge domains. It is a Tier 0 document, versioned in git, portable with the Lake. It also doubles as the **network egress allowlist** for learning fetches (§10, hook E).
+
+```yaml
+# authority-map.yaml  (Tier 0 — operator signed)
+klc: 0.1
+domains:
+  - match: "rhel/**"
+    sources:
+      - pattern: "https://access.redhat.com/**"
+        authority: 1
+      - pattern: "https://public.cyber.mil/stigs/**"
+        authority: 1
+      - pattern: "https://*.blogspot.com/**"
+        authority: 2        # may inform, never becomes official
+  - match: "kubernetes/**"
+    sources:
+      - pattern: "https://kubernetes.io/docs/**"
+        authority: 1
+default:
+  authority: 3               # unknown source -> quarantine ceiling, fetch requires
+  fetch: deny                # explicit rule; default fetch posture is DENY
+```
+
+Rules:
+
+- A fetch to any URL not matched by an `allow` pattern is denied by the kernel. The runtime does not decide where to learn from; the map does.
+- `authority` on a source sets the `tier_ceiling` of everything ingested from it.
+- Map changes are operator-signed commits. The dreaming cycle may *propose* map additions (as Tier 3 change requests); it may never apply them.
+
+## 8. Lifecycle protocol
+
+![Knowledge lifecycle](diagrams/knowledge-lifecycle.svg)
+
+1. **Gap detection.** During a task, the runtime determines it lacks required knowledge (retrieval from the Lake returns nothing above the task's minimum tier). The gap is logged with the task id.
+2. **Authorized fetch.** The runtime requests a fetch. The kernel evaluates the request against the authority map. Denied fetches are logged as learning requests for operator review; on air-gapped or degraded hosts this is the *only* outcome (§12).
+3. **Quarantine ingest.** Fetched content is normalized to Lake format, labeled per §6 (tier 3, ceiling from map, provenance and hash stamped), and stored. Quarantined content is immediately usable *within the constraints of §10* — it may inform the current task's reasoning but not privileged actions.
+4. **Consolidation ("dreaming").** An out-of-band, scheduled process — never the in-band task — reviews quarantined content: deduplicates, validates against source, checks corroboration, distills memories, refines candidate skills. Consolidation runs under its own scoped identity with no interactive privileges.
+5. **Promotion.** Objects meeting the criteria in §9 move up exactly one tier. Promotions to Tier 1 require signatures. All transitions are audit events with before/after labels.
+6. **Retrieval.** Future tasks retrieve locally, filtered by tier and labels. The loop closes: no repeated round trips to the Internet for knowledge the agent already validated.
+
+## 9. Promotion and demotion criteria
+
+### 9.1 Promotion (per type)
+
+| Gate | Document | Skill | Memory |
+|---|---|---|---|
+| **3 → 2** | Source hash verified; content parsed clean; no handling conflicts; dedup complete | Generated in sandbox; manifest declares capabilities; static checks pass; dry-run in sandbox succeeds | Consolidation distilled from ≥1 session; no sensitive-label conflicts |
+| **2 → 1** | Corroborated by a second authority-1 source **or** operator sign-off; within `tier_ceiling` | Passed N successful supervised executions with zero policy denials; capability set minimal (least privilege review); **signed** | Confirmed across ≥3 independent sessions **or** operator confirmation; **signed** |
+| **1 → 0** | Operator signature only. Automation may propose, never apply | Same | Same (rare; e.g. standing operator directives) |
+
+`N` for skills is a tunable per capability class — a read-only skill might need 3 supervised runs; a skill that writes to infrastructure might need 10 plus explicit operator approval. **Open question for review (§14).**
+
+### 9.2 Demotion and purge
+
+Demotion is automatic and is a feature, not a failure:
+
+- **Stale:** `revalidate_after` elapsed and source re-check fails or content drifted (hash mismatch) → demote one tier, flag for re-consolidation.
+- **Contradicted:** a higher-authority source contradicts the content → demote below the contradicting source's tier.
+- **Source revoked:** the authority map entry that admitted the object is removed or downgraded → object's `tier_ceiling` recomputed; demote to comply.
+- **Policy violation at runtime:** a skill whose execution triggers a policy denial is demoted to quarantine pending review.
+- **Purge:** quarantined content that fails validation, ages out, or is operator-rejected is deleted; the audit record of its existence and rejection is retained.
+
+## 10. Policy enforcement hooks
+
+The kernel enforces this contract at six checkpoints. Each is a deny-by-default decision over (subject, action, resource labels, context), producing an audit event.
+
+| Hook | Transition / action | Enforced rules (minimum) |
+|---|---|---|
+| **A. Ingest** | External content → Tier 3 | Source matched by authority map; required labels present; ceiling stamped; hash recorded |
+| **B. Retrieve** | Knowledge → runtime context | Task's minimum tier satisfied; classification and handling labels compatible with subject; cross-persona memory access requires explicit rule |
+| **C. Derive** | Runtime creates new object from existing ones | New object tier = 3; `tier_ceiling` = min(ceiling of all inputs); full input lineage recorded (§11.1) |
+| **D. Promote / demote** | Tier change | Criteria of §9 met; one tier per gate; signature requirements; audit before/after |
+| **E. Egress** | Any outbound data flow | Destination on authority map or task-scoped allowlist; payload contains no `no-egress` labeled content; Tier ≤ 1 content quoted outbound requires explicit rule |
+| **F. Execute** | Skill invocation | Skill signed and at executable tier; declared capabilities ⊆ persona + task whitelist; sandbox strength of host ≥ skill's declared requirement |
+
+Hook F's host-sandbox condition makes portability a policy input: the same skill may be permitted on a hardened Linux node (namespaces, seccomp) and denied on a macOS host with weaker isolation primitives. Sandbox strength is a declared, attested host property.
+
+## 11. Anti-poisoning guardrails
+
+An agent that feeds itself has failure modes a curated lake does not. These four rules are load-bearing.
+
+### 11.1 No provenance laundering
+Derived objects inherit `tier_ceiling = min(inputs)` and record full lineage. A summary of a Tier 2 blog post is Tier 3 content with a Tier 2 ceiling — it can never out-rank its weakest source. Lineage includes the triggering task id ("learning lineage") so any belief can be traced to the work that produced it.
+
+### 11.2 Corroboration before authority
+Nothing promotes to Tier 1 on the strength of a single sub-Tier-1 source. Either a second independent authorized source agrees, or a human signs. This closes the single-compromised-source poisoning path.
+
+### 11.3 Freshness is a label
+Every object carries `revalidate_after`. The dreaming cycle re-verifies against sources and demotes on drift. Stale doctrine is worse than no doctrine; demotion is the immune response.
+
+### 11.4 The fetch is a privileged act
+Learning fetches are agent-initiated network egress, gated by the kernel against the authority map (hooks A and E). The runtime's good behavior is never the control; the kernel is.
+
+## 12. Degraded and air-gapped operation
+
+When no authorized source is reachable (air-gapped host, network denial, degraded links):
+
+- Gap detection still runs; gaps are logged as **learning requests** with domain, task lineage, and proposed sources for operator action.
+- Sneakernet ingest follows the identical pipeline: imported bundles enter at Tier 3 with provenance pointing to the signed transfer manifest instead of a URL.
+- Lake replication between sites uses the git-distributed model; labels and signatures travel with the content, and receiving sites re-verify signatures before honoring tiers. A tier claim without a valid signature degrades to quarantine on import.
+
+## 13. Security control mapping (informative)
+
+| Contract element | NIST SP 800-53 (rev 5) |
+|---|---|
+| Deny-by-default policy engine, capability whitelists | AC-3, AC-6, CM-7 |
+| DCS labels bound to data, handling enforcement | AC-16, SC-16 |
+| Egress control via authority map | SC-7, AC-4 |
+| Provenance, lineage, audit events at every transition | AU-2, AU-10, SR-4 |
+| Skill signing, signature verification on import | SI-7, CM-14 |
+| Freshness revalidation, demotion | SI-2 (concept), CM-3 |
+| Scoped identities for scheduler and dreaming cycle | AC-5, IA-2 |
+
+Mappings are informative in v0.1; a full control matrix belongs in the RMF package, not this contract.
+
+## 14. Open questions for team review
+
+1. **Tier vocabulary.** Adopt Knowledge Lake tier names verbatim, or keep numeric with per-system aliases?
+2. **Supervised-run counts (N) per capability class** for skill promotion (§9.1) — propose initial values.
+3. **Corroboration for niche domains** where only one authoritative source exists (e.g., a vendor's sole KB) — is operator sign-off the only 2→1 path, or do we define a "sole-source" exception with tighter freshness?
+4. **Memory consolidation cadence** — nightly dreaming vs. event-driven, and interaction with operator's existing memory subsystem consolidation.
+5. **Policy language selection** for the kernel — Cedar vs. embedded OPA vs. bespoke; evaluate against hook table (§10) as the acceptance test.
+6. **Quarantine usability window** — how long may Tier 3 content inform in-band reasoning before consolidation must adjudicate it?
+7. **Cross-persona memory rules** — default deny with explicit share grants, or persona-group scoping?
+
+## 15. Machine-readable invariants
+
+For AI agents operating on this repository: the following invariants MUST hold in any implementation and MAY be used as acceptance criteria.
+
+```yaml
+klc_invariants:
+  - all_new_knowledge_enters_at_tier: 3
+  - promotion_step_size_max: 1
+  - tier_ceiling_raised_by_automation: never
+  - derived_ceiling: min_of_inputs
+  - tier_0_writes: operator_signature_only
+  - unsigned_skill_execution: deny
+  - fetch_outside_authority_map: deny
+  - no_egress_label_outbound: deny
+  - missing_required_labels_at_ingest: reject
+  - every_transition: audited
+```
+
+## 16. Revision history
+
+| Version | Date | Change |
+|---|---|---|
+| 0.1 | 2026-07-14 | Initial draft for team RFC |
