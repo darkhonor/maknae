@@ -1,0 +1,21 @@
+[package]
+name = "maknae"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "maknae"
+path = "src/main.rs"
+
+[dependencies]
+maknae-proto = { path = "../../crates/maknae-proto" }
+maknae-config = { path = "../../crates/maknae-config" }
+maknae-mcp = { path = "../../crates/maknae-mcp" }
+maknae-vault = { path = "../../crates/maknae-vault" }
+# NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.

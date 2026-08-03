@@ -1,0 +1,16 @@
+# cargo-deny >= 0.19 required — the scope-valued `unmaintained = "all"` is rejected by 0.17.x
+# (validated against 0.19.8; CI pins ^0.19 to match).
+[advisories]
+unmaintained = "all"          # spec §5/§6: escalate archived/unmaintained deps to error, incl. transitive
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

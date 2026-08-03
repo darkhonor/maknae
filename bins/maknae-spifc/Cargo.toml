@@ -1,0 +1,17 @@
+[package]
+name = "maknae-spifc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "maknae-spifc"
+path = "src/main.rs"
+
+[dependencies]
+maknae-spif-compile = { path = "../../crates/maknae-spif-compile" }
