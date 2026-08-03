@@ -103,5 +103,39 @@ tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC/.github/workflows/bad.yml"
 expect_reject "build-invocation/workspace-build" "$here/build-invocation-lint.sh" "$tmpC"
 
+# Fixture D — artifact INVENTORY witness (the reliable P2b half): a CLI that links a privileged
+# crate must be caught by p2-artifact-witness via the cargo-auditable inventory. CI-gated: the
+# inventory needs cargo-auditable + rust-audit-info; skipped locally (matches the witness itself).
+if command -v rust-audit-info >/dev/null 2>&1 && cargo auditable --version >/dev/null 2>&1; then
+  tmpD="$(mktemp -d)"; mkdir -p "$tmpD/crates/maknae-kernel/src" "$tmpD/bins/maknae/src"
+  cat > "$tmpD/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "3"
+members = ["crates/maknae-kernel", "bins/maknae"]
+EOF
+  cat > "$tmpD/crates/maknae-kernel/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-kernel"
+version = "0.0.0"
+edition = "2021"
+EOF
+  echo 'pub const M: &str = "x";' > "$tmpD/crates/maknae-kernel/src/lib.rs"
+  cat > "$tmpD/bins/maknae/Cargo.toml" <<'EOF'
+[package]
+name = "maknae"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "maknae"
+path = "src/main.rs"
+[dependencies]
+maknae-kernel = { path = "../../crates/maknae-kernel" }
+EOF
+  echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$tmpD/bins/maknae/src/main.rs"
+  expect_reject "p2/artifact-inventory-witness" "$here/p2-artifact-witness.sh" "$tmpD"
+else
+  echo "neg-skip: [p2/artifact-inventory-witness] deferred to CI (needs cargo-auditable + rust-audit-info)"
+fi
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]
