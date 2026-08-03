@@ -1,0 +1,42 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (pinned)
+        run: rustup show   # honors rust-toolchain.toml
+      - name: Install gate tooling (BEFORE the auditable builds that need it)
+        run: |
+          cargo install cargo-deny --version "^0.17" --locked
+          cargo install cargo-auditable --locked
+          cargo install rust-audit-info --locked
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy (per-package, all bins)
+        run: |
+          for p in maknaed maknae maknae-spifc; do cargo clippy -p "$p" -- -D warnings; done
+      - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
+        run: |
+          for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
+      - name: Tests (workspace test IS permitted; does NOT establish isolation)
+        run: cargo test --workspace
+      - name: cargo-deny
+        run: cargo deny check
+      - name: P1 manifest lint
+        run: ci/gates/p1-manifest-lint.sh
+      - name: P2 invert-tree witness
+        run: ci/gates/p2-invert-tree.sh
+      - name: P2 artifact witness
+        run: ci/gates/p2-artifact-witness.sh
+      - name: Build-invocation lint
+        run: ci/gates/build-invocation-lint.sh
+      - name: Negative-control (gates must fire)
+        run: ci/gates/negative-control.sh
+      - name: Isolation-contract lint
+        run: ci/gates/isolation-contract-lint.sh
