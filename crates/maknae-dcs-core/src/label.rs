@@ -83,7 +83,13 @@ impl Releasability {
                         nations.insert(token.clone());
                     } else {
                         match spif.expand_tetra(token) {
-                            TetraExpansion::Nations(members) => nations.extend(members),
+                            // belt-and-braces: the builder already filters
+                            // members to trigraphs; re-filter here so a
+                            // malformed expansion can never enter the nations
+                            // namespace and widen through the join round-trip
+                            TetraExpansion::Nations(members) => {
+                                nations.extend(members.into_iter().filter(|m| is_trigraph(m)));
+                            }
                             TetraExpansion::NonDecomposable => {
                                 coalitions.insert(token.clone());
                             }
@@ -107,8 +113,11 @@ impl Releasability {
     ///
     /// Precondition: `e` was produced by [`Releasability::eligible`] or
     /// [`EligibleNations::join`] with the same `origin` (every non-empty such
-    /// set contains the origin). A caller-constructed set violating this would
-    /// round-trip wider.
+    /// set contains the origin). A caller-constructed set violating the
+    /// precondition FAILS CLOSED to `Empty` (deny-all) — never a panic (the
+    /// crate is pure/total) and never a silent round-trip widening (`eligible`
+    /// re-adds the origin, so representing the violating set as a `Grant`
+    /// would make the origin eligible when it was not).
     pub fn from_eligible(e: &EligibleNations, origin: &str) -> Releasability {
         match e {
             EligibleNations::Universe => Releasability::Public,
@@ -116,11 +125,11 @@ impl Releasability {
                 nations,
                 coalitions,
             } => {
-                debug_assert!(
-                    (nations.is_empty() && coalitions.is_empty()) || nations.contains(origin),
-                    "from_eligible precondition: input must come from eligible()/join()"
-                );
                 if nations.is_empty() && coalitions.is_empty() {
+                    return Releasability::Empty;
+                }
+                if !nations.contains(origin) {
+                    // precondition violated: degenerate input → deny-all
                     return Releasability::Empty;
                 }
                 let mut grant: BTreeSet<String> = nations.clone();
@@ -844,6 +853,32 @@ mod tests {
             Releasability::Grant(g) => assert_eq!(g, set(&["NKIC"])), // coalition survives canonicalization
             other => panic!("expected Grant, got {other:?}"),
         }
+        // precondition violation (origin absent from a non-empty set) FAILS
+        // CLOSED to Empty — no panic, no round-trip widening
+        assert!(matches!(
+            Releasability::from_eligible(&s(&[], &["NKIC"]), origin),
+            Releasability::Empty
+        ));
+        assert!(matches!(
+            Releasability::from_eligible(&s(&["AUS"], &[]), origin),
+            Releasability::Empty
+        ));
+    }
+
+    #[test]
+    fn malformed_spif_member_cannot_widen_through_join() {
+        // CR-impl C1 regression: a decomposable tetragraph whose SPIF entry
+        // (somehow) listed a nested tetragraph must not widen a∨a beyond a
+        let spif = Spif::builder("US")
+            .tetragraph("CFCK", Some(&["USA", "FVEY", "KOR"])) // FVEY filtered by builder
+            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
+            .build();
+        let e = Releasability::Grant(set(&["CFCK"])).eligible("USA", &spif);
+        assert!(e.permits("KOR", &set(&[])));
+        assert!(!e.permits("GBR", &set(&[]))); // FVEY member never leaked in
+                                               // idempotent round-trip: canonical → eligible is stable
+        let canon = Releasability::from_eligible(&e, "USA");
+        assert_eq!(canon.eligible("USA", &spif), e);
     }
 
     #[test]

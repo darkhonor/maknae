@@ -417,6 +417,22 @@ mod tests {
     }
 
     #[test]
+    fn second_restrictive_tag_gates_independently() {
+        // two-tag conjunction: holding SCI does not satisfy SAP — the per-tag
+        // loop's short-circuit is load-bearing
+        let mut r = mk_resource("SECRET");
+        r.categories
+            .insert("SAP".into(), set(&["BUTTERED_POPCORN"]));
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &r, Action::Read),
+            Decision::Deny(DenyReason::Compartment)
+        );
+        let mut s = mk_subject("TOP_SECRET");
+        s.read_ins.insert("SAP".into(), set(&["BUTTERED_POPCORN"]));
+        assert_eq!(run(&s, &r, Action::Read), Decision::Permit);
+    }
+
+    #[test]
     fn unknown_category_tag_deny() {
         let mut r = mk_resource("SECRET");
         r.categories.insert("MYSTERY".into(), set(&["X"]));

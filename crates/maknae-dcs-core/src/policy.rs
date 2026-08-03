@@ -97,6 +97,7 @@ impl Spif {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SpifBuilder {
     policy: PolicyId,
     levels: Vec<String>,
@@ -105,8 +106,9 @@ pub struct SpifBuilder {
 }
 
 /// True iff `token` has the shape of a bare nation trigraph
-/// (exactly 3 uppercase ASCII characters).
-pub(crate) fn is_trigraph(token: &str) -> bool {
+/// (exactly 3 uppercase ASCII characters). Exported so consumers (the kernel)
+/// can pre-validate a label's `origin` before calling `⊑`/`join`.
+pub fn is_trigraph(token: &str) -> bool {
     token.len() == 3 && token.bytes().all(|b| b.is_ascii_uppercase())
 }
 
@@ -125,19 +127,33 @@ impl SpifBuilder {
     /// `Some(&[])` is SKIPPED (an empty coalition is not a coalition), and a
     /// 3-uppercase-ASCII token is SKIPPED (it would collide with the trigraph
     /// nation namespace) — both then resolve to `TetraExpansion::Unknown`.
+    ///
+    /// MEMBERS are shape-validated too: a decomposable expansion may contain
+    /// ONLY nation trigraphs. A non-trigraph member (a nested tetragraph, a
+    /// typo) is dropped, and if nothing valid remains the registration is
+    /// skipped entirely. Without this mirror guard, a malformed SPIF member
+    /// would enter the `nations` namespace, and the `from_eligible → eligible`
+    /// round-trip would re-expand it — WIDENING releasability through the
+    /// derivation-join (the exact issue-#6 failure class).
     pub fn tetragraph(mut self, token: &str, members: Option<&[&str]>) -> Self {
         if is_trigraph(token) {
             return self;
         }
-        if let Some(m) = members {
-            if m.is_empty() {
-                return self;
+        let members: Option<BTreeSet<String>> = match members {
+            None => None,
+            Some(m) => {
+                let filtered: BTreeSet<String> = m
+                    .iter()
+                    .filter(|t| is_trigraph(t))
+                    .map(|s| s.to_string())
+                    .collect();
+                if filtered.is_empty() {
+                    return self; // nothing valid → not a coalition
+                }
+                Some(filtered)
             }
-        }
-        self.tetragraphs.insert(
-            token.to_string(),
-            members.map(|m| m.iter().map(|s| s.to_string()).collect()),
-        );
+        };
+        self.tetragraphs.insert(token.to_string(), members);
         self
     }
 
@@ -214,6 +230,24 @@ mod tests {
             TetraExpansion::NonDecomposable
         ));
         assert!(matches!(spif.expand_tetra("ZZZZ"), TetraExpansion::Unknown));
+    }
+
+    #[test]
+    fn builder_filters_non_trigraph_members() {
+        // CR-impl C1: a decomposable expansion may contain ONLY trigraphs — a
+        // nested tetragraph/typo member must never enter the nations namespace
+        let spif = Spif::builder("US")
+            .tetragraph("CFCK", Some(&["USA", "FVEY", "KOR"])) // FVEY dropped
+            .tetragraph("BADD", Some(&["FVEY"])) // nothing valid → skipped
+            .build();
+        match spif.expand_tetra("CFCK") {
+            TetraExpansion::Nations(n) => {
+                assert!(n.contains("USA") && n.contains("KOR"));
+                assert!(!n.contains("FVEY"));
+            }
+            other => panic!("expected Nations, got {other:?}"),
+        }
+        assert!(matches!(spif.expand_tetra("BADD"), TetraExpansion::Unknown));
     }
 
     #[test]

@@ -236,8 +236,10 @@ fn dominance_monotonicity() {
     let u = universe();
 
     // subject panel: clearance {S,TS} × read_ins {∅, {A}, {A,B}} × purposes
-    // {∅, {OPLAN}} — 12 subjects; × action {Read, Export} (Export makes the
-    // caveats-⊑ clause load-bearing under DisplayOnly)
+    // {∅, {OPLAN}} — 12 US subjects; × action {Read, Export} (Export makes the
+    // caveats-⊑ clause load-bearing under DisplayOnly). Plus one AUS-national
+    // subject so the releasability clause of ⊑ is load-bearing (gate 4
+    // distinguishes NoMarking/Grant states only for a non-origin nationality).
     let mut panel: Vec<Subject> = Vec::new();
     for clearance in ["S", "TS"] {
         let read_in_states: [Option<&[&str]>; 3] = [None, Some(&["A"]), Some(&["A", "B"])];
@@ -257,7 +259,17 @@ fn dominance_monotonicity() {
             }
         }
     }
-    assert_eq!(panel.len(), 12);
+    panel.push(Subject {
+        clearance: class("TS"),
+        nationality: "AUS".into(),
+        read_ins: [("SCI".to_string(), set(&["A", "B"]))]
+            .into_iter()
+            .collect(),
+        coalition_memberships: BTreeSet::new(),
+        affiliation: Affiliation::Foreign,
+        purposes: set(&["OPLAN"]),
+    });
+    assert_eq!(panel.len(), 13);
     let purpose = Purpose("OPLAN".to_string());
     let actions = [Action::Read, Action::Export];
 
