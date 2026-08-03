@@ -153,7 +153,7 @@ mod tests {
     use crate::label::Releasability;
     use crate::policy::{Classification, PolicyId};
     use crate::subject::Affiliation;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
