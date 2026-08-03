@@ -18,9 +18,9 @@ jobs:
           cargo install rust-audit-info --locked
       - name: fmt
         run: cargo fmt --all --check
-      - name: clippy (per-package, all bins)
+      - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc; do cargo clippy -p "$p" -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-dcs-core; do cargo clippy -p "$p" --all-targets -- -D warnings; done
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
