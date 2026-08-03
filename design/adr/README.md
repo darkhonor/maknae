@@ -9,20 +9,20 @@ This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers a
 | 0001 | Adopt architecture decision records | — | Accepted |
 | 0002 | Kernel is Rust | — | Accepted |
 | 0003 | Cedar policy engine | — | Accepted (re-decision pending D17/native-Rust pivot — see topology spec) |
-| 0004 | Storage / label integrity model | docket | Owed |
+| 0004 | Storage / label integrity model | docket | Proposed (docket) |
 | 0005 | Enforcement locus & TCB boundary | #3 | Accepted (operator-ratified 2026-08-03) |
-| 0006 | Single-source-of-truth doctrine for the corpus | docket | Owed |
-| 0007 | Key & signature model (STANAG 4778 binding) | #5 | Owed — first among the remaining semantic ADRs |
+| 0006 | Single-source-of-truth doctrine for the corpus | docket | Proposed (docket) |
+| 0007 | Key & signature model (STANAG 4778 binding) | #5 | Proposed (docket) — first among the remaining semantic ADRs |
 | 0008 | Classification lattice & dominance engine | #6 | Proposed (implemented in `maknae-dcs-core`; ratification gated on EPIC #33 Day-1 marking completeness) |
-| 0009 | Output-interface MLS | #7 | Owed |
-| 0010 | Quarantine taint | #8 | Deferred (moot at MVP — consumer-only lake; owed at constellation) |
+| 0009 | Output-interface MLS | #7 | Proposed (docket) |
+| 0010 | Quarantine taint | #8 | Deferred (moot at MVP — consumer-only lake; re-validated at constellation) |
 | 0011 | Promotion | #9 | Deferred (moot until constellation) |
-| 0012 | Residual-risk register | docket | Owed |
-| 0013 | Oracle independence / SELinux lane / D4-collapse remediation | #18 | Owed |
-| 0014 | Subject-context envelope (max-TTL, revocation) | docket | Owed |
-| 0015 | Vendor substrate / `untrusted-adjacent` | #20 | Owed |
+| 0012 | Residual-risk register | docket | Proposed (docket) |
+| 0013 | Oracle independence / SELinux lane / D4-collapse remediation | #18 | Proposed (docket) |
+| 0014 | Subject-context envelope (max-TTL, revocation) | docket | Proposed (docket) |
+| 0015 | Vendor substrate / `untrusted-adjacent` | #20 | Proposed (docket) |
 
-Claiming a new number: next unallocated integer, recorded here in the same commit that adds the ADR (or that reserves the slot with an `Owed` row and its driving issue). Statuses use the ADR-0001 vocabulary: `Proposed` (awaiting team review or a confirming spike), `Accepted` (operator- or team-ratified), plus `Owed`/`Deferred` for allocated-but-unwritten slots.
+Claiming a new number: next unallocated integer, recorded here in the same commit that adds the ADR (or that reserves the slot with a `Proposed (docket)` row and its driving issue). Statuses use the ADR-0001 vocabulary: `Proposed` (awaiting team review or a confirming spike), `Accepted` (operator- or team-ratified), plus `Proposed (docket)`/`Deferred` for allocated-but-unwritten slots. A docket slot's `Proposed` is weaker than a written ADR's `Proposed`: the RL#1 docket SUGGESTED these decisions — the review generated proposed content, not validated content — and each slot's problem statement is re-validated against the current corpus when its work cycle arrives. A number is a bookmark, not a commitment; slots may be collapsed, merged, or struck at validation.
 
 ## Authority rule: external ADRs are not authoritative here
 
