@@ -314,6 +314,172 @@ pub struct ResourceLabel {
     pub need_to_know: Option<String>,
 }
 
+/// Fail-closed precheck shared by `⊑` and `∨`: every category tag must be
+/// registered, must not be `Permissive` (its polarity is ⊇/∩, not the ⊆/∪
+/// this generic path applies), and must carry a non-empty value-set (the
+/// degenerate state `decide()` denies must poison the lattice ops, never be
+/// silently normalized away).
+fn categories_comparable(label: &ResourceLabel, spif: &Spif) -> bool {
+    label.categories.iter().all(|(tag, values)| {
+        !values.is_empty()
+            && matches!(
+                spif.category_kind(tag),
+                Some(
+                    crate::policy::CategoryKind::Restrictive
+                        | crate::policy::CategoryKind::RestrictivePredicate
+                        | crate::policy::CategoryKind::Informative
+                )
+            )
+    })
+}
+
+/// The rank `decide()` actually enforces: `max(level, compilation-or-level)`.
+/// `None` = any present rank unknown → indeterminate.
+fn effective_rank(label: &ResourceLabel, spif: &Spif) -> Option<usize> {
+    let base = spif.rank(&label.classification)?;
+    match &label.compilation_level {
+        None => Some(base),
+        Some(c) => {
+            let comp = spif.rank(c)?;
+            Some(base.max(comp))
+        }
+    }
+}
+
+impl ResourceLabel {
+    /// Restriction order: `self ⊑ other` iff `other` is at least as
+    /// restrictive on EVERY dimension `decide()` reads:
+    ///
+    /// - level rank ≤ AND effective rank ≤ (effective = max(level,
+    ///   compilation-or-level));
+    /// - categories: for every `(tag, sv)` in `self.categories`,
+    ///   `other.categories.get(tag).is_some_and(|ov| sv.is_subset(ov))`
+    ///   (quantified over SELF's tags; a tag present only in self makes self
+    ///   strictly more marked — absent-in-other = holds nothing = not ⊑);
+    /// - `eligible(other) ⊆ eligible(self)` (fewer eligible = more
+    ///   restrictive);
+    /// - caveats ⊆;
+    /// - need-to-know: `(None, _)` ok; `(Some(a), Some(b))` ok iff `a == b`;
+    ///   `(Some, None)` → NOT ⊑.
+    ///
+    /// `None` = indeterminate — fail closed on: unknown rank; policy or
+    /// origin mismatch; malformed origin (not exactly 3 uppercase ASCII) in
+    /// either label; or any category tag in EITHER label that is
+    /// unregistered, `Permissive`, or empty-valued.
+    pub fn at_most_as_restrictive_as(&self, other: &ResourceLabel, spif: &Spif) -> Option<bool> {
+        if self.classification.policy != other.classification.policy
+            || self.origin != other.origin
+            || !is_trigraph(&self.origin)
+            || !is_trigraph(&other.origin)
+            || !categories_comparable(self, spif)
+            || !categories_comparable(other, spif)
+        {
+            return None;
+        }
+        let (self_rank, other_rank) = (
+            spif.rank(&self.classification)?,
+            spif.rank(&other.classification)?,
+        );
+        let (self_eff, other_eff) = (effective_rank(self, spif)?, effective_rank(other, spif)?);
+        let levels_ok = self_rank <= other_rank && self_eff <= other_eff;
+        let categories_ok = self
+            .categories
+            .iter()
+            .all(|(tag, sv)| other.categories.get(tag).is_some_and(|ov| sv.is_subset(ov)));
+        let releasability_ok = other
+            .releasability
+            .eligible(&other.origin, spif)
+            .is_subset_of(&self.releasability.eligible(&self.origin, spif));
+        let caveats_ok = self.caveats.is_subset(&other.caveats);
+        let ntk_ok = match (&self.need_to_know, &other.need_to_know) {
+            (None, _) => true,
+            (Some(a), Some(b)) => a == b,
+            (Some(_), None) => false,
+        };
+        Some(levels_ok && categories_ok && releasability_ok && caveats_ok && ntk_ok)
+    }
+
+    /// Derivation-join `∨` = least-upper-bound = the MORE-restrictive combine:
+    /// max rank; ∪ categories per-tag; ∩ releasability re-canonicalized via
+    /// [`Releasability::from_eligible`]; ∪ caveats; compilation
+    /// `(None, x) | (x, None) → x`, `(Some, Some)` → higher rank;
+    /// need-to-know `(None, None) → None`, one `Some` → that `Some`, equal
+    /// `Some`s → keep, differing `Some`s → keep self's (conservative MVP
+    /// scalar rule — non-commutative for differing tokens, recorded in the
+    /// ADR as an open question; it never widens access since the decision
+    /// gate still requires an exact match on whichever token is kept).
+    ///
+    /// `None` (fail closed) if policies differ, origins differ (cross-origin
+    /// derivation deferred), either origin is malformed, any present rank is
+    /// unknown, or any category tag in either label is unregistered,
+    /// `Permissive`, or empty-valued (dropping an empty-valued tag would
+    /// derive a Permit from a label `decide()` denies — the degenerate state
+    /// must poison the join, never be normalized).
+    pub fn join(&self, other: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
+        if self.classification.policy != other.classification.policy
+            || self.origin != other.origin
+            || !is_trigraph(&self.origin)
+            || !categories_comparable(self, spif)
+            || !categories_comparable(other, spif)
+        {
+            return None;
+        }
+        let (self_rank, other_rank) = (
+            spif.rank(&self.classification)?,
+            spif.rank(&other.classification)?,
+        );
+        let classification = if self_rank >= other_rank {
+            self.classification.clone()
+        } else {
+            other.classification.clone()
+        };
+        // Per-tag ∪ over the union of key-sets. For invariant-honoring inputs
+        // this can never produce an empty value-set (∪ of non-empties is
+        // non-empty; a tag absent in both is never iterated), and
+        // invariant-violating inputs never reach here (poisoned above).
+        let mut categories = self.categories.clone();
+        for (tag, values) in &other.categories {
+            categories
+                .entry(tag.clone())
+                .and_modify(|v| v.extend(values.iter().cloned()))
+                .or_insert_with(|| values.clone());
+        }
+        let releasability = Releasability::from_eligible(
+            &self
+                .releasability
+                .eligible(&self.origin, spif)
+                .join(&other.releasability.eligible(&other.origin, spif)),
+            &self.origin,
+        );
+        let caveats: BTreeSet<Caveat> = self.caveats.union(&other.caveats).copied().collect();
+        let compilation_level = match (&self.compilation_level, &other.compilation_level) {
+            (None, None) => None,
+            (Some(c), None) | (None, Some(c)) => {
+                spif.rank(c)?; // present-but-unknown poisons the join
+                Some(c.clone())
+            }
+            (Some(a), Some(b)) => {
+                let (ra, rb) = (spif.rank(a)?, spif.rank(b)?);
+                Some(if ra >= rb { a.clone() } else { b.clone() })
+            }
+        };
+        let need_to_know = match (&self.need_to_know, &other.need_to_know) {
+            (None, None) => None,
+            (Some(t), None) | (None, Some(t)) => Some(t.clone()),
+            (Some(a), Some(_)) => Some(a.clone()), // equal → keep; differing → keep self's (recorded)
+        };
+        Some(ResourceLabel {
+            classification,
+            origin: self.origin.clone(),
+            categories,
+            releasability,
+            caveats,
+            compilation_level,
+            need_to_know,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +510,212 @@ mod tests {
         // unreachable from decide() — gate 3's precheck denies Indeterminate first
         assert!(restrictive_dominates(&set(&[]), &set(&[])));
         assert!(restrictive_dominates(&set(&["SI"]), &set(&[])));
+    }
+
+    use crate::policy::{CategoryKind, Classification, PolicyId};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn join_takes_max_level_union_categories_intersection_releasability() {
+        // "SCI" MUST be registered — join fails closed (None) on unregistered tags
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
+            .category("SCI", CategoryKind::Restrictive)
+            .build();
+        let mk = |lvl: &str, rel: Releasability, sci: &[&str]| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: lvl.into(),
+            },
+            origin: "USA".into(),
+            categories: if sci.is_empty() {
+                BTreeMap::new()
+            } else {
+                [("SCI".to_string(), set(sci))].into_iter().collect()
+            },
+            releasability: rel,
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        let a = mk("SECRET", Releasability::Grant(set(&["AUS"])), &["SI"]);
+        let b = mk("TOP_SECRET", Releasability::Grant(set(&["KOR"])), &["TK"]);
+        let j = a.join(&b, &spif).unwrap();
+        assert_eq!(j.classification.name, "TOP_SECRET"); // max level
+        assert_eq!(j.categories["SCI"], set(&["SI", "TK"])); // ∪ per-tag
+        assert!(matches!(j.releasability, Releasability::NoMarking)); // ∩ → {USA} → canonical NoMarking
+        let e = j.releasability.eligible("USA", &spif);
+        assert!(
+            e.permits("USA", &set(&[]))
+                && !e.permits("AUS", &set(&[]))
+                && !e.permits("KOR", &set(&[]))
+        );
+    }
+
+    #[test]
+    fn join_carries_caveats_by_union_and_max_compilation() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
+            .build();
+        let base = |cavs: &[Caveat], comp: Option<&str>| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "SECRET".into(),
+            },
+            origin: "USA".into(),
+            categories: BTreeMap::new(),
+            releasability: Releasability::Public,
+            caveats: cavs.iter().cloned().collect(),
+            compilation_level: comp.map(|n| Classification {
+                policy: PolicyId("US".into()),
+                name: n.into(),
+            }),
+            need_to_know: None,
+        };
+        let a = base(&[Caveat::NoEgress], Some("SECRET"));
+        let b = base(&[Caveat::OperatorOnly], Some("TOP_SECRET"));
+        let j = a.join(&b, &spif).unwrap();
+        assert!(j.caveats.contains(&Caveat::NoEgress) && j.caveats.contains(&Caveat::OperatorOnly)); // ∪ carried
+        assert_eq!(j.compilation_level.unwrap().name, "TOP_SECRET"); // max floor
+    }
+
+    #[test]
+    fn join_preserves_lone_compilation_floor() {
+        // (Some, None) keeps the Some — the OCA floor must survive derivation
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
+            .build();
+        let mk = |comp: Option<&str>| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "SECRET".into(),
+            },
+            origin: "USA".into(),
+            categories: BTreeMap::new(),
+            releasability: Releasability::NoMarking,
+            caveats: BTreeSet::new(),
+            compilation_level: comp.map(|n| Classification {
+                policy: PolicyId("US".into()),
+                name: n.into(),
+            }),
+            need_to_know: None,
+        };
+        let a = mk(Some("TOP_SECRET"));
+        let b = mk(None);
+        assert_eq!(
+            a.join(&b, &spif).unwrap().compilation_level.unwrap().name,
+            "TOP_SECRET"
+        );
+        assert_eq!(
+            b.join(&a, &spif).unwrap().compilation_level.unwrap().name,
+            "TOP_SECRET"
+        ); // symmetric
+    }
+
+    #[test]
+    fn join_and_order_handle_need_to_know() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET"])
+            .build();
+        let mk = |ntk: Option<&str>| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "SECRET".into(),
+            },
+            origin: "USA".into(),
+            categories: BTreeMap::new(),
+            releasability: Releasability::NoMarking,
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: ntk.map(|s| s.to_string()),
+        };
+        let none = mk(None);
+        let oplan = mk(Some("OPLAN"));
+        assert_eq!(
+            none.join(&oplan, &spif).unwrap().need_to_know.as_deref(),
+            Some("OPLAN")
+        ); // Some wins
+        assert_eq!(
+            oplan.join(&none, &spif).unwrap().need_to_know.as_deref(),
+            Some("OPLAN")
+        ); // symmetric
+        assert_eq!(none.at_most_as_restrictive_as(&oplan, &spif), Some(true)); // None ⊑ Some (NTK restricts)
+        assert_eq!(oplan.at_most_as_restrictive_as(&none, &spif), Some(false)); // Some ⋢ None
+    }
+
+    #[test]
+    fn join_refuses_cross_policy_and_cross_origin() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET"])
+            .build();
+        let us = ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "SECRET".into(),
+            },
+            origin: "USA".into(),
+            categories: BTreeMap::new(),
+            releasability: Releasability::NoMarking,
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        let mut aus_origin = us.clone();
+        aus_origin.origin = "AUS".into();
+        assert!(us.join(&aus_origin, &spif).is_none()); // cross-origin deferred → None, fail closed
+        let mut aus_policy = us.clone();
+        aus_policy.classification.policy = PolicyId("AUS".into());
+        assert!(us.join(&aus_policy, &spif).is_none()); // cross-policy → None
+    }
+
+    #[test]
+    fn order_and_join_fail_closed_on_permissive_and_unknown_tags() {
+        // ⊑ and ∨ must be incomparable/undefined on the same dimensions decide() denies
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET"])
+            .category("EYES", CategoryKind::Permissive)
+            // MUST be registered — so the empty-value-set assertions below can
+            // ONLY pass via the empty clause, not the unregistered clause
+            .category("SCI_LIKE_TAG", CategoryKind::Restrictive)
+            .build();
+        let mk = |tag: Option<&str>| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "SECRET".into(),
+            },
+            origin: "USA".into(),
+            categories: tag
+                .map(|t| [(t.to_string(), set(&["USA"]))].into_iter().collect())
+                .unwrap_or_default(),
+            releasability: Releasability::NoMarking,
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        let plain = mk(None);
+        let permissive = mk(Some("EYES")); // registered Permissive
+        let unknown = mk(Some("MYSTERY")); // unregistered
+        assert!(plain.join(&permissive, &spif).is_none());
+        assert!(plain.join(&unknown, &spif).is_none());
+        assert_eq!(plain.at_most_as_restrictive_as(&permissive, &spif), None);
+        assert_eq!(unknown.at_most_as_restrictive_as(&plain, &spif), None);
+        let mut bad_origin = mk(None);
+        bad_origin.origin = "".into(); // malformed origin
+        assert!(bad_origin.join(&bad_origin.clone(), &spif).is_none()); // equal-but-malformed → None
+        assert_eq!(
+            bad_origin.at_most_as_restrictive_as(&bad_origin.clone(), &spif),
+            None
+        );
+        let mut empty_vals = mk(None); // empty value-set tag
+        empty_vals
+            .categories
+            .insert("SCI_LIKE_TAG".into(), BTreeSet::new()); // registered Restrictive above
+        assert!(plain.join(&empty_vals, &spif).is_none()); // never dropped/normalized → None
+        assert_eq!(empty_vals.at_most_as_restrictive_as(&plain, &spif), None); // degenerate as self
+                                                                               // BOTH directions — a self-quantified-only check would return Some(true)
+                                                                               // here (plain has no tags), i.e. "a label decide() permits ⊑ a label
+                                                                               // decide() denies" — the exact widening the poison rule forbids
+        assert_eq!(plain.at_most_as_restrictive_as(&empty_vals, &spif), None);
     }
 
     #[test]
