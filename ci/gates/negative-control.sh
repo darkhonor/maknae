@@ -43,6 +43,33 @@ EOF
 echo '' > "$tmpA/crates/shared/src/lib.rs"
 expect_reject "p1/optional-priv-dep" "$here/p1-manifest-lint.sh" "$tmpA"
 
+# Fixture A2 — TABLE-form optional privileged dep (`[dependencies.<crate>]`) → must also trip p1.
+tmpA2="$(mktemp -d)"; mkdir -p "$tmpA2/crates/shared/src" "$tmpA2/crates/maknae-kernel/src"
+cat > "$tmpA2/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "3"
+members = ["crates/shared", "crates/maknae-kernel"]
+EOF
+cat > "$tmpA2/crates/maknae-kernel/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-kernel"
+version = "0.0.0"
+edition = "2021"
+EOF
+echo '' > "$tmpA2/crates/maknae-kernel/src/lib.rs"
+cat > "$tmpA2/crates/shared/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-config"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies.maknae-kernel]
+path = "../maknae-kernel"
+optional = true
+EOF
+echo '' > "$tmpA2/crates/shared/src/lib.rs"
+expect_reject "p1/optional-priv-dep-TABLE-form" "$here/p1-manifest-lint.sh" "$tmpA2"
+
 # Fixture B — CLI normally links a privileged crate → must trip p2-invert-tree.sh
 tmpB="$(mktemp -d)"; mkdir -p "$tmpB/crates/maknae-kernel/src" "$tmpB/bins/maknae/src"
 cat > "$tmpB/Cargo.toml" <<'EOF'
