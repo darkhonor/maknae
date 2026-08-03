@@ -14,5 +14,7 @@ pub mod label;
 pub mod policy;
 pub mod subject;
 
-pub use label::{validate_rel, EligibleNations, RelValidationError, Releasability};
+pub use label::{
+    restrictive_dominates, validate_rel, Caveat, EligibleNations, RelValidationError, Releasability,
+};
 pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};

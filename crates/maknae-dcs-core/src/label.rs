@@ -259,6 +259,33 @@ pub fn validate_rel(
     Ok(())
 }
 
+/// Handling caveats carried on a label. `decide()` enforces ONLY
+/// `DisplayOnly` (blocks `Action::Export`); `NoEgress` and `OperatorOnly` are
+/// carried label data — joined by ∪, preserved through derivation — whose
+/// enforcement locus is the kernel hooks (hook-E egress screen / session
+/// gating), not this crate's read decision. Deliberate MVP division of labor,
+/// recorded in ADR-0008.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Caveat {
+    NoEgress,
+    OperatorOnly,
+    DisplayOnly,
+}
+
+/// Restrictive (containment) dominance: subject holds ⊇ resource, per tag.
+/// Hierarchy via `PARENT//CHILD` path-encoded nodes treated as opaque distinct
+/// tokens — exactness IS the hierarchy rule (holding `SI` does not contain
+/// `SI//G`).
+///
+/// Empty-set polarity (pinned): `required = ∅` → `true` (vacuous ⊇) — but
+/// UNREACHABLE from `decide()`, whose gate-3 precheck denies `Indeterminate`
+/// on any empty required-set before dispatch. Contrast
+/// [`crate::subject::affiliation_satisfies`], whose `∅` → `false`. Callers
+/// outside `decide()` must precheck, per the gate-3 pattern.
+pub fn restrictive_dominates(held: &BTreeSet<String>, required: &BTreeSet<String>) -> bool {
+    required.is_subset(held)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +293,29 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn restrictive_requires_superset() {
+        assert!(restrictive_dominates(
+            &set(&["SI", "TK", "HCS"]),
+            &set(&["SI", "TK"])
+        )); // ⊇ permit
+        assert!(!restrictive_dominates(&set(&["SI"]), &set(&["SI", "TK"]))); // missing TK → deny
+    }
+
+    #[test]
+    fn restrictive_hierarchy_parent_does_not_grant_child() {
+        assert!(!restrictive_dominates(&set(&["SI"]), &set(&["SI//G"]))); // parent ≠ sub-compartment
+        assert!(restrictive_dominates(&set(&["SI//G"]), &set(&["SI//G"]))); // exact
+    }
+
+    #[test]
+    fn restrictive_empty_required_is_vacuously_true_but_unreachable_from_decide() {
+        // pinned ∅-polarity: vacuous ⊇ (contrast affiliation_satisfies ∅ → false);
+        // unreachable from decide() — gate 3's precheck denies Indeterminate first
+        assert!(restrictive_dominates(&set(&[]), &set(&[])));
+        assert!(restrictive_dominates(&set(&["SI"]), &set(&[])));
     }
 
     #[test]
