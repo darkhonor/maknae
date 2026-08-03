@@ -3,13 +3,15 @@
 - **Status:** Accepted (operator-ratified 2026-08-03)
 - **Date:** 2026-08-03
 - **Deciders:** Alex Ackerman (operator), Byeori (Claude Fable 5, pair)
-- **Issue:** github.com/darkhonor/maknae#3 (docket ADR-0005 — Enforcement-locus & TCB boundary)
+- **Addresses:** review issue github.com/darkhonor/maknae#3 (Enforcement-locus & TCB boundary), raised by an independent reviewer
 - **Supersedes:** Extends ADR-0002 (kernel is Rust) to all Maknae-authored components. Full container-architecture / abac supersession list is in the source spec header.
 - **Source spec:** `~/claude-memory/maknae/specs/2026-08-03-maknae-rust-workspace-topology-design.md` (v6.1; converged through the team's critical-review loop + operator review)
 
 ## Context
 
-RL#1/RL#2 (issues #1–#21) repeatedly asked "where does enforcement actually live?" A design whose enforcement is a function call inside one address space cannot answer it. Maknae is being built as a native, all-Rust application (RPM/DEB/macOS + OCI) so the process boundary can *be* the trust boundary.
+A Multi-Level Secure system must be able to answer "where does enforcement actually live?" — the reference-monitor question (NIST SP 800-53 AC-25; DoD Zero Trust Reference Architecture's policy-decision/enforcement split). Enforcement that is only a function call inside a single address space has no locus a defender can point at: one memory-safety defect or dependency compromise in the untrusted agent loop reaches the decision logic directly. Maknae is therefore built as a native, all-Rust application (RPM/DEB/macOS + OCI) so the **process boundary can *be* the trust boundary**.
+
+(An independent design review is running against this corpus on the repo issue tracker; those are the reviewers' findings, tracked separately. This ADR records the operator's architecture decision on its own terms.)
 
 ## Decision
 
@@ -24,7 +26,7 @@ RL#1/RL#2 (issues #1–#21) repeatedly asked "where does enforcement actually li
 
 ## Consequences
 
-- Enforcement has a physical locus reviewers can point at; the topology answers #3 directly and provides the MVP-scale mechanism for the #18 enforcement-locus strand (full docket coverage map in the source spec §9).
+- Enforcement has a physical locus a defender can point at (the `maknaed` process boundary), which is what the reference-monitor / TCB-boundary property requires.
 - The near-term posture is honestly *weaker* than the ratified end-state (D4 Layer-2 collapse: at MVP the PDP and sole PEP are one process); this is stated, not hidden, and the ratified shape returns at constellation.
 - Semantic contracts (lattice ADR-0008, keys ADR-0007, subject-context ADR-0014, GUC/write-path, audit) remain owed and gate later component work; this ADR fixes only topology and the trust boundary.
 - This deliverable is the **scaffold**: every crate is a documented stub. Component bodies land in later spec→plan→implement cycles.
