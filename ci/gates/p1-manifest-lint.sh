@@ -10,7 +10,7 @@ grep -qE '^[[:space:]]*default-members' "$root/Cargo.toml" && { echo "FAIL: root
 # No optional privileged dep anywhere; only trust-plane consumers (lib.sh TRUST_CONSUMERS)
 # and the privileged crates themselves may depend on a privileged crate.
 if ! cargo metadata --manifest-path "$root/Cargo.toml" --no-deps --format-version 1 2>/dev/null \
-     | python3 "$here/p1_check.py" "${PRIVILEGED_CRATES[*]}" "${TRUST_CONSUMERS[*]}"; then
+     | python3 "$here/p1_check.py" "${PRIVILEGED_CRATES[*]}" "${TRUST_CONSUMER_ALLOW[*]}"; then
   fail=1
 fi
 
