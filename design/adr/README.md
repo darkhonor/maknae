@@ -1,6 +1,6 @@
 # Architecture Decision Records — registry
 
-This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers are **allocated, not sequential-by-authoring-date**: the RL#1 design review (2026-07-14, `design/reviews/`) pre-assigned a stable number to each owed decision, mapped to its review issue, so cross-references in the docket, specs, and issues stay valid regardless of the order the work lands. **A gap in the sequence is a reserved slot, not a lost number.**
+This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers are **allocated, not sequential-by-authoring-date**: the RL#1 design review (2026-07-14, `design/reviews/`) pre-assigned a stable number to each decision it proposed, mapped to its review issue, so cross-references in the docket, specs, and issues stay valid regardless of the order the work lands. **A gap in the sequence is a reserved slot, not a lost number.**
 
 ## Allocation
 
