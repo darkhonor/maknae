@@ -1,0 +1,10 @@
+# Maknae maknae image (spec §6). SCAFFOLD STUB.
+FROM rust:1.94.1 AS build
+WORKDIR /src
+COPY . .
+RUN cargo install cargo-auditable --locked
+# single-package AUDITABLE build (spec §3 build-invocation discipline + §6 inventory-in-artifact)
+RUN cargo auditable build -p maknae --release
+FROM scratch
+COPY --from=build /src/target/release/maknae /maknae
+ENTRYPOINT ["/maknae"]
