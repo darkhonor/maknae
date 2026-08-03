@@ -17,7 +17,7 @@ fi
 for p in "${PRIVILEGED_CRATES[@]}"; do
   grep -q "\"$p\"" "$out" && { echo "FAIL: inventory lists privileged '$p'"; fail=1; }
 done
-# (3) Linker-truth symbol scan (meaningful once markers are #[used] statics; stub-era: clean).
+# (3) Linker-truth symbol scan (markers are #[used] statics so this is meaningful now; stub tree: clean).
 for m in PRIVILEGED_MAKNAE_KERNEL PRIVILEGED_MAKNAE_SUBJECT_CTX_MINT PRIVILEGED_MAKNAE_AUDIT_APPEND PRIVILEGED_MAKNAE_SPIF_COMPILE; do
   strings -a "$bin" | grep -q "$m" && { echo "FAIL: privileged marker '$m' in $UNTRUSTED_BIN binary"; fail=1; }
 done
