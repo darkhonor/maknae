@@ -19,7 +19,8 @@ while IFS= read -r line; do
     i=$((i+1))
     echo "$cell" | grep -q "deferred" && continue
     echo "$cell" | grep -q "✓" && continue
-    [ -z "$(echo "$cell" | tr -d ' ')" ] && continue
+    # A blank cell is NOT acceptable — that would silently drop an enforcement requirement.
+    if [ -z "$(echo "$cell" | tr -d ' ')" ]; then echo "FAIL: cell $i is EMPTY (must carry a ✓check or 'deferred')"; fail=1; continue; fi
     echo "FAIL: cell $i has neither a ✓check nor 'deferred': ${cell}"; fail=1
   done
 done < "$f"
