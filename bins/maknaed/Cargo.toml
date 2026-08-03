@@ -1,0 +1,20 @@
+[package]
+name = "maknaed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "maknaed"
+path = "src/main.rs"
+
+[dependencies]
+maknae-kernel = { path = "../../crates/maknae-kernel" }
+maknae-llm = { path = "../../crates/maknae-llm" }
+maknae-mcp = { path = "../../crates/maknae-mcp" }
+maknae-vault = { path = "../../crates/maknae-vault" }

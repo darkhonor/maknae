@@ -1,0 +1,21 @@
+[package]
+name = "maknae-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-dcs-core = { path = "../maknae-dcs-core" }
+maknae-proto = { path = "../maknae-proto" }
+maknae-spif = { path = "../maknae-spif" }
+maknae-subject-ctx = { path = "../maknae-subject-ctx" }
+maknae-audit = { path = "../maknae-audit" }
+maknae-vault = { path = "../maknae-vault" }
+maknae-config = { path = "../maknae-config" }
+maknae-subject-ctx-mint = { path = "../maknae-subject-ctx-mint" }
+maknae-audit-append = { path = "../maknae-audit-append" }
