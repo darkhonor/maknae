@@ -103,6 +103,11 @@ tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC/.github/workflows/bad.yml"
 expect_reject "build-invocation/workspace-build" "$here/build-invocation-lint.sh" "$tmpC"
 
+# Fixture C2 — MULTILINE (backslash-continued) workspace build → must also trip build-invocation-lint.
+tmpC2="$(mktemp -d)"; mkdir -p "$tmpC2/.github/workflows"
+printf 'jobs:\n  b:\n    steps:\n      - run: |\n          cargo build \\\n            --workspace --release\n' > "$tmpC2/.github/workflows/bad.yml"
+expect_reject "build-invocation/multiline-workspace-build" "$here/build-invocation-lint.sh" "$tmpC2"
+
 # Fixture D — artifact INVENTORY witness (the reliable P2b half): a CLI that links a privileged
 # crate must be caught by p2-artifact-witness via the cargo-auditable inventory. CI-gated: the
 # inventory needs cargo-auditable + rust-audit-info; skipped locally (matches the witness itself).
