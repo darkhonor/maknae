@@ -13,7 +13,7 @@ jobs:
         run: rustup show   # honors rust-toolchain.toml
       - name: Install gate tooling (BEFORE the auditable builds that need it)
         run: |
-          cargo install cargo-deny --version "^0.17" --locked
+          cargo install cargo-deny --version "^0.19" --locked
           cargo install cargo-auditable --locked
           cargo install rust-audit-info --locked
       - name: fmt
