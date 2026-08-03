@@ -1,0 +1,11 @@
+# Maknae maknae image (spec §6). SCAFFOLD STUB.
+# Static musl target so the FROM scratch stage (no libc/loader) can actually run the binary.
+FROM rust:1.94.1 AS build
+WORKDIR /src
+COPY . .
+RUN rustup target add x86_64-unknown-linux-musl && cargo install cargo-auditable --locked
+# single-package AUDITABLE static build (spec §3 build-invocation discipline + §6 inventory + musl)
+RUN cargo auditable build -p maknae --release --target x86_64-unknown-linux-musl
+FROM scratch
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/maknae /maknae
+ENTRYPOINT ["/maknae"]

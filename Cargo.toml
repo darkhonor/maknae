@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/maknae-audit",
+  "crates/maknae-audit-append",
+  "crates/maknae-config",
+  "crates/maknae-dcs-core",
+  "crates/maknae-kernel",
+  "crates/maknae-llm",
+  "crates/maknae-mcp",
+  "crates/maknae-proto",
+  "crates/maknae-spif",
+  "crates/maknae-spif-compile",
+  "crates/maknae-subject-ctx",
+  "crates/maknae-subject-ctx-mint",
+  "crates/maknae-vault",
+  "bins/maknaed",
+  "bins/maknae",
+  "bins/maknae-spifc",
+]
+# NO default-members — spec §3. A virtual workspace with 2021+ members silently
+# defaults to resolver v1 without the resolver line above.
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/darkhonor/maknae"
+rust-version = "1.94.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
