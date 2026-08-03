@@ -286,6 +286,34 @@ pub fn restrictive_dominates(held: &BTreeSet<String>, required: &BTreeSet<String
     required.is_subset(held)
 }
 
+/// A resource's confidentiality label. No `Default` — there is no
+/// access-granting default label.
+///
+/// The LDC predicate-tag convention: an LDC lives in `categories` under a tag
+/// registered as `RestrictivePredicate` (e.g. `"LDC"`), with the control
+/// tokens as the values — `{"LDC": {"FEDCON"}}`. The values are what the
+/// predicate evaluates; they are never compared against read-ins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceLabel {
+    pub classification: crate::policy::Classification,
+    /// Originating nation trigraph (3 uppercase ASCII; malformed → `decide()`
+    /// denies `Indeterminate`, and `⊑`/`join` are incomparable/undefined).
+    pub origin: String,
+    /// tag → required values; the tag's SPIF-declared `CategoryKind` decides
+    /// the satisfaction rule. INVARIANT: no empty value-sets stored (an
+    /// empty-valued tag poisons `⊑`/`join` to `None` and `decide()` to
+    /// `Deny(Indeterminate)` — never silently normalized).
+    pub categories: std::collections::BTreeMap<String, BTreeSet<String>>,
+    pub releasability: Releasability,
+    pub caveats: BTreeSet<Caveat>,
+    /// Raise-above-join floor (OCA compilation determination); `None` = no
+    /// floor. A compilation at-or-below the level is semantically identical
+    /// to `None` (both enforce the same effective rank).
+    pub compilation_level: Option<crate::policy::Classification>,
+    /// Optional purpose token that must match exactly at decision time.
+    pub need_to_know: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
