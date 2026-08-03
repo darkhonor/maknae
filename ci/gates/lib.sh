@@ -2,6 +2,8 @@
 # Shared constants for the capability-separation gates (spec §3 P1/P2).
 PRIVILEGED_CRATES=(maknae-kernel maknae-subject-ctx-mint maknae-audit-append maknae-spif-compile)
 UNTRUSTED_BIN="maknae"
-# Trust-plane consumers that MAY depend on privileged crates (the daemon + the setup tool).
-# Everything else — shared library crates AND the untrusted CLI — must not.
-TRUST_CONSUMERS=(maknaed maknae-spifc)
+# Per-consumer allowlist: which privileged crate each trust-plane binary may DIRECTLY depend on
+# (mirrors packaging/isolation-contract.md crate×binary matrix). maknaed gets the kernel (which
+# itself carries mint/append transitively); the setup-only tool gets ONLY the compiler. Anything
+# else — incl. maknaed pulling the compiler, or spifc pulling kernel — fails P1.
+TRUST_CONSUMER_ALLOW=("maknaed=maknae-kernel" "maknae-spifc=maknae-spif-compile")
