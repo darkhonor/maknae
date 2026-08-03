@@ -13,3 +13,5 @@ pub mod decide;
 pub mod label;
 pub mod policy;
 pub mod subject;
+
+pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};
