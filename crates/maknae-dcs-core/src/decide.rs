@@ -369,6 +369,20 @@ mod tests {
             run(&s, &mk_resource("SECRET"), Action::Read),
             Decision::Deny(DenyReason::PolicyMismatch)
         );
+        // mutation-gate: EACH disjunct of gate 1 must deny ALONE (an ||→&&
+        // mutant would fall through to gate 2 and mislabel as Indeterminate)
+        let mut r = mk_resource("SECRET");
+        r.classification.policy = PolicyId("AUS".into()); // resource ≠ spif, subject == spif
+        assert_eq!(
+            run(&mk_subject("SECRET"), &r, Action::Read),
+            Decision::Deny(DenyReason::PolicyMismatch)
+        );
+        let mut both_aus = mk_subject("SECRET");
+        both_aus.clearance.policy = PolicyId("AUS".into()); // subject == resource ≠ spif
+        assert_eq!(
+            run(&both_aus, &r, Action::Read),
+            Decision::Deny(DenyReason::PolicyMismatch)
+        );
     }
 
     #[test]

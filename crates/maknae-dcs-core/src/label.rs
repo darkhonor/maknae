@@ -378,8 +378,10 @@ impl ResourceLabel {
     pub fn at_most_as_restrictive_as(&self, other: &ResourceLabel, spif: &Spif) -> Option<bool> {
         if self.classification.policy != other.classification.policy
             || self.origin != other.origin
+            // one shape check covers both labels: origins are already proven
+            // equal by the clause above (a second check would be a provably
+            // equivalent mutant — untestable dead logic)
             || !is_trigraph(&self.origin)
-            || !is_trigraph(&other.origin)
             || !categories_comparable(self, spif)
             || !categories_comparable(other, spif)
         {
@@ -413,10 +415,13 @@ impl ResourceLabel {
     /// [`Releasability::from_eligible`]; ∪ caveats; compilation
     /// `(None, x) | (x, None) → x`, `(Some, Some)` → higher rank;
     /// need-to-know `(None, None) → None`, one `Some` → that `Some`, equal
-    /// `Some`s → keep, differing `Some`s → keep self's (conservative MVP
-    /// scalar rule — non-commutative for differing tokens, recorded in the
-    /// ADR as an open question; it never widens access since the decision
-    /// gate still requires an exact match on whichever token is kept).
+    /// `Some`s → keep, DIFFERING `Some`s → `None` (fail closed — codex P1:
+    /// keeping either token would let a subject holding it read derived
+    /// content whose other source demanded the discarded token, and the
+    /// discarded side would violate the upper-bound property `b ⊑ a∨b`; a
+    /// scalar NTK cannot represent both requirements, so cross-NTK derivation
+    /// is deferred exactly like cross-origin — set-valued NTK is the
+    /// recorded follow-up).
     ///
     /// `None` (fail closed) if policies differ, origins differ (cross-origin
     /// derivation deferred), either origin is malformed, any present rank is
@@ -475,7 +480,15 @@ impl ResourceLabel {
         let need_to_know = match (&self.need_to_know, &other.need_to_know) {
             (None, None) => None,
             (Some(t), None) | (None, Some(t)) => Some(t.clone()),
-            (Some(a), Some(_)) => Some(a.clone()), // equal → keep; differing → keep self's (recorded)
+            (Some(a), Some(b)) => {
+                if a != b {
+                    // codex P1: a scalar NTK cannot represent both
+                    // requirements — discarding either widens access to the
+                    // other source's material; fail closed like cross-origin
+                    return None;
+                }
+                Some(a.clone())
+            }
         };
         Some(ResourceLabel {
             classification,
@@ -650,6 +663,12 @@ mod tests {
         ); // symmetric
         assert_eq!(none.at_most_as_restrictive_as(&oplan, &spif), Some(true)); // None ⊑ Some (NTK restricts)
         assert_eq!(oplan.at_most_as_restrictive_as(&none, &spif), Some(false)); // Some ⋢ None
+                                                                                // codex P1: DIFFERING tokens fail closed — a scalar NTK cannot
+                                                                                // represent both requirements, and keeping either would widen access
+                                                                                // to the other source's material (and break b ⊑ a∨b)
+        let conop = mk(Some("CONOP"));
+        assert!(oplan.join(&conop, &spif).is_none());
+        assert!(conop.join(&oplan, &spif).is_none()); // symmetric
     }
 
     #[test]
@@ -672,6 +691,11 @@ mod tests {
         let mut aus_origin = us.clone();
         aus_origin.origin = "AUS".into();
         assert!(us.join(&aus_origin, &spif).is_none()); // cross-origin deferred → None, fail closed
+                                                        // ⊑ poisons on origin mismatch ALONE (mutation-gate: this single
+                                                        // assertion kills every ||→&& mutant in the poison disjunction —
+                                                        // under any such mutant this case escapes the poison and computes
+                                                        // Some(false) instead of None)
+        assert_eq!(us.at_most_as_restrictive_as(&aus_origin, &spif), None);
         let mut aus_policy = us.clone();
         aus_policy.classification.policy = PolicyId("AUS".into());
         assert!(us.join(&aus_policy, &spif).is_none()); // cross-policy → None

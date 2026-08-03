@@ -26,7 +26,7 @@ One STANAG-4774-shaped label per resource: one ordinal `Classification` + **type
 ### Recorded MVP simplifications (open questions)
 
 - `DisplayOnly` permits `Read`/`Display` and blocks only `Export`; for an LLM-endpoint principal, read-into-context is a copy — revisit.
-- Scalar `need_to_know` join keeps self's token on conflict (non-commutative for differing tokens; a set-valued NTK is the follow-up).
+- Scalar `need_to_know`: equal tokens join; DIFFERING tokens fail the join closed (`None`) — a scalar cannot represent both requirements, and keeping either would grant access to the other source's material and break the upper-bound property (codex finding, remediated). A set-valued NTK is the follow-up that would make such joins representable.
 - `NoEgress`/`OperatorOnly` are carried (∪-joined), enforced by kernel hooks, not the read decision.
 - No ingest-time nations registry: a typo'd trigraph fails closed at decide time only.
 - `restrictive_dominates` is exported with vacuous-⊇ empty-required semantics; callers outside `decide()` must precheck (the gate-3 pattern).
