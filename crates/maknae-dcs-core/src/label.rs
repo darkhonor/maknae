@@ -702,7 +702,10 @@ mod tests {
             display: None,
             exclusions: BTreeSet::new(),
         };
-        assert_eq!(d.eligible_release(&base, &spif), d.eligible_display(&base, &spif));
+        assert_eq!(
+            d.eligible_release(&base, &spif),
+            d.eligible_display(&base, &spif)
+        );
         assert!(d.display_covers_release(&base, &spif));
 
         // explicit display ⊇ release holds; display ⊂ release violates the invariant
@@ -856,7 +859,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: lvl.into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: if sci.is_empty() {
                 BTreeMap::new()
             } else {
@@ -878,7 +883,9 @@ mod tests {
         assert_eq!(j.classification.name, "TOP_SECRET"); // max level
         assert_eq!(j.categories["SCI"], set(&["SI", "TK"])); // ∪ per-tag
         assert!(matches!(j.disclosure.release, Releasability::NoMarking)); // ∩ → {USA} → canonical NoMarking
-        let e = j.disclosure.eligible_release(&j.ownership.base_set(), &spif);
+        let e = j
+            .disclosure
+            .eligible_release(&j.ownership.base_set(), &spif);
         assert!(
             e.permits("USA", &set(&[]))
                 && !e.permits("AUS", &set(&[]))
@@ -896,7 +903,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: BTreeMap::new(),
             disclosure: Disclosure {
                 release: Releasability::Public,
@@ -929,7 +938,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: BTreeMap::new(),
             disclosure: Disclosure {
                 release: Releasability::NoMarking,
@@ -966,7 +977,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: BTreeMap::new(),
             disclosure: Disclosure {
                 release: Releasability::NoMarking,
@@ -1008,7 +1021,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: BTreeMap::new(),
             disclosure: Disclosure {
                 release: Releasability::NoMarking,
@@ -1021,7 +1036,9 @@ mod tests {
             need_to_know: None,
         };
         let mut aus_origin = us.clone();
-        aus_origin.ownership = Ownership::Owned { owner: "AUS".into() };
+        aus_origin.ownership = Ownership::Owned {
+            owner: "AUS".into(),
+        };
         assert!(us.join(&aus_origin, &spif).is_none()); // cross-origin deferred → None, fail closed
                                                         // ⊑ poisons on origin mismatch ALONE (mutation-gate: this single
                                                         // assertion kills every ||→&& mutant in the poison disjunction —
@@ -1048,7 +1065,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: tag
                 .map(|t| [(t.to_string(), set(&["USA"]))].into_iter().collect())
                 .unwrap_or_default(),

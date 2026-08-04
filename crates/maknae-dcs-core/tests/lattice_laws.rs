@@ -196,11 +196,17 @@ fn order_and_join_laws() {
                 assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
             }
             // releasability never widens on join (∩ only narrows)
-            let e_ab = ab.disclosure.eligible_release(&ab.ownership.base_set(), &spif);
-            assert!(e_ab
-                .is_subset_of(&a.disclosure.eligible_release(&a.ownership.base_set(), &spif)));
-            assert!(e_ab
-                .is_subset_of(&b.disclosure.eligible_release(&b.ownership.base_set(), &spif)));
+            let e_ab = ab
+                .disclosure
+                .eligible_release(&ab.ownership.base_set(), &spif);
+            assert!(e_ab.is_subset_of(
+                &a.disclosure
+                    .eligible_release(&a.ownership.base_set(), &spif)
+            ));
+            assert!(e_ab.is_subset_of(
+                &b.disclosure
+                    .eligible_release(&b.ownership.base_set(), &spif)
+            ));
         }
     }
     assert_eq!(join_some_count, 576 * 576);
@@ -324,7 +330,9 @@ fn v2_axes_order_and_join_laws() {
     let mut antisymmetry_fires: usize = 0; // structurally-distinct mutually-⊑ pairs
     for a in &u {
         assert!(le(a, a, &spif), "reflexivity");
-        let aa = a.join(a, &spif).expect("∨ total over the fixed-ownership sublattice");
+        let aa = a
+            .join(a, &spif)
+            .expect("∨ total over the fixed-ownership sublattice");
         assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
     }
     for a in &u {

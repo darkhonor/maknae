@@ -40,7 +40,13 @@ fn label(ownership: Ownership, ntk: Option<&str>, controls: Controls) -> Resourc
 #[test]
 fn cross_ownership_derive_is_none() {
     let s = spif();
-    let usa = label(Ownership::Owned { owner: "USA".into() }, None, Controls::empty());
+    let usa = label(
+        Ownership::Owned {
+            owner: "USA".into(),
+        },
+        None,
+        Controls::empty(),
+    );
     let joint = label(
         Ownership::Joint {
             owners: set(&["USA", "KOR"]),
@@ -67,12 +73,16 @@ fn cross_ownership_derive_is_none() {
 fn cross_ntk_derive_is_none() {
     let s = spif();
     let oplan = label(
-        Ownership::Owned { owner: "USA".into() },
+        Ownership::Owned {
+            owner: "USA".into(),
+        },
         Some("OPLAN"),
         Controls::empty(),
     );
     let conplan = label(
-        Ownership::Owned { owner: "USA".into() },
+        Ownership::Owned {
+            owner: "USA".into(),
+        },
         Some("CONPLAN"),
         Controls::empty(),
     );
@@ -85,12 +95,16 @@ fn join_total_where_derive_will_later_refuse_exclusion_pair() {
     use ControlMarking::*;
     let s = spif();
     let relido = label(
-        Ownership::Owned { owner: "USA".into() },
+        Ownership::Owned {
+            owner: "USA".into(),
+        },
         None,
         Controls::from_set([Relido].into_iter().collect()),
     );
     let displayed = label(
-        Ownership::Owned { owner: "USA".into() },
+        Ownership::Owned {
+            owner: "USA".into(),
+        },
         None,
         Controls::from_set([Displayed].into_iter().collect()),
     );

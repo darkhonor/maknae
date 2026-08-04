@@ -42,9 +42,7 @@ impl Ownership {
         match self {
             Ownership::Owned { owner } => [owner.clone()].into_iter().collect(),
             Ownership::Joint { owners } => owners.clone(),
-            Ownership::ConcealedForeign { custodian } => {
-                [custodian.clone()].into_iter().collect()
-            }
+            Ownership::ConcealedForeign { custodian } => [custodian.clone()].into_iter().collect(),
         }
     }
 
@@ -65,7 +63,9 @@ impl Ownership {
         } else if let Some(one) = owners.into_iter().next() {
             Ownership::Owned { owner: one }
         } else {
-            Ownership::Owned { owner: String::new() }
+            Ownership::Owned {
+                owner: String::new(),
+            }
         }
     }
 }
@@ -79,50 +79,86 @@ mod tests {
 
     #[test]
     fn owners_and_custodian_by_variant() {
-        let owned = Ownership::Owned { owner: "USA".into() };
+        let owned = Ownership::Owned {
+            owner: "USA".into(),
+        };
         assert_eq!(owned.owners(), Some(s(&["USA"])));
         assert_eq!(owned.custodian(), Some("USA"));
 
-        let joint = Ownership::Joint { owners: s(&["USA", "KOR"]) };
+        let joint = Ownership::Joint {
+            owners: s(&["USA", "KOR"]),
+        };
         assert_eq!(joint.owners(), Some(s(&["USA", "KOR"])));
         assert_eq!(joint.custodian(), None); // Joint has no single custodian
 
-        let cf = Ownership::ConcealedForeign { custodian: "USA".into() };
+        let cf = Ownership::ConcealedForeign {
+            custodian: "USA".into(),
+        };
         assert_eq!(cf.owners(), None); // owners unknowable
         assert_eq!(cf.custodian(), Some("USA"));
     }
 
     #[test]
     fn same_frame_requires_identical_ownership() {
-        let a = Ownership::Owned { owner: "USA".into() };
-        assert!(a.same_frame(&Ownership::Owned { owner: "USA".into() }));
-        assert!(!a.same_frame(&Ownership::Owned { owner: "DEU".into() }));
-        assert!(!a.same_frame(&Ownership::Joint { owners: s(&["USA", "KOR"]) }));
-        assert!(!a.same_frame(&Ownership::ConcealedForeign { custodian: "USA".into() }));
+        let a = Ownership::Owned {
+            owner: "USA".into(),
+        };
+        assert!(a.same_frame(&Ownership::Owned {
+            owner: "USA".into()
+        }));
+        assert!(!a.same_frame(&Ownership::Owned {
+            owner: "DEU".into()
+        }));
+        assert!(!a.same_frame(&Ownership::Joint {
+            owners: s(&["USA", "KOR"])
+        }));
+        assert!(!a.same_frame(&Ownership::ConcealedForeign {
+            custodian: "USA".into()
+        }));
     }
 
     #[test]
     fn joint_invariant_two_or_more() {
-        assert!(matches!(Ownership::joint_from(s(&["USA"])), Ownership::Owned { .. }));
-        assert!(matches!(Ownership::joint_from(s(&["USA", "KOR"])), Ownership::Joint { .. }));
+        assert!(matches!(
+            Ownership::joint_from(s(&["USA"])),
+            Ownership::Owned { .. }
+        ));
+        assert!(matches!(
+            Ownership::joint_from(s(&["USA", "KOR"])),
+            Ownership::Joint { .. }
+        ));
         // empty owner set → the Owned{""} sentinel (rejected downstream at gate 4
         // is_trigraph; this test kills the empty-arm mutant per the T1 0-missed gate)
         assert_eq!(
             Ownership::joint_from(BTreeSet::new()),
-            Ownership::Owned { owner: String::new() }
+            Ownership::Owned {
+                owner: String::new()
+            }
         );
     }
 
     #[test]
     fn base_set_by_variant() {
-        assert_eq!(Ownership::Owned { owner: "USA".into() }.base_set(), s(&["USA"]));
         assert_eq!(
-            Ownership::Joint { owners: s(&["USA", "KOR"]) }.base_set(),
+            Ownership::Owned {
+                owner: "USA".into()
+            }
+            .base_set(),
+            s(&["USA"])
+        );
+        assert_eq!(
+            Ownership::Joint {
+                owners: s(&["USA", "KOR"])
+            }
+            .base_set(),
             s(&["USA", "KOR"])
         );
         // ConcealedForeign baseline is the custodian (spec §2.1 / V2 §4.e)
         assert_eq!(
-            Ownership::ConcealedForeign { custodian: "USA".into() }.base_set(),
+            Ownership::ConcealedForeign {
+                custodian: "USA".into()
+            }
+            .base_set(),
             s(&["USA"])
         );
     }

@@ -22,13 +22,13 @@ pub use decide::{
     decide, obligation_refines, obligations_refine, Action, Decision, DenyReason, Obligation,
     Purpose, RedisseminationScope,
 };
-pub use ownership::Ownership;
-pub use registry::{CuiCategory, CuiRegistry, RegistryError, RegistryProvenance};
 pub use label::{
     derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
     EligibleNations, RelValidationError, Releasability, ResourceLabel,
 };
+pub use ownership::Ownership;
 pub use policy::{
     is_trigraph, CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion,
 };
+pub use registry::{CuiCategory, CuiRegistry, RegistryError, RegistryProvenance};
 pub use subject::{affiliation_satisfies, Affiliation, Employment, Subject};

@@ -281,7 +281,10 @@ mod tests {
             .expandable("FVEY")
             .registry(CuiRegistry::seed())
             .build();
-        assert_eq!(spif.category_kind("ATTY"), Some(CategoryKind::ListControlled));
+        assert_eq!(
+            spif.category_kind("ATTY"),
+            Some(CategoryKind::ListControlled)
+        );
         assert_eq!(spif.home_nation(), Some("USA"));
         assert!(spif.is_expandable_for_rollup("FVEY"));
         assert!(!spif.is_expandable_for_rollup("NATO")); // unflagged → false

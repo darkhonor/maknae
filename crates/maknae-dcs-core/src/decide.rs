@@ -29,7 +29,9 @@ pub enum Decision {
     /// deny-biased contract — a consumer that cannot honor an obligation denies).
     /// Emission is Stage 3; the variant is landed Stage 1 so downstream code
     /// pattern-matches all three arms from the start.
-    PermitWithObligations { obligations: BTreeSet<Obligation> },
+    PermitWithObligations {
+        obligations: BTreeSet<Obligation>,
+    },
     Deny(DenyReason),
 }
 
@@ -171,9 +173,7 @@ pub fn decide(
             Some(CategoryKind::Permissive) => return Decision::Deny(DenyReason::Indeterminate),
             // List-control (#30) decide semantics land Stage 5; until then an
             // unhandled ListControlled tag denies, never silently unenforces.
-            Some(CategoryKind::ListControlled) => {
-                return Decision::Deny(DenyReason::Indeterminate)
-            }
+            Some(CategoryKind::ListControlled) => return Decision::Deny(DenyReason::Indeterminate),
             Some(CategoryKind::Informative) => {} // ignored by definition
         }
     }
@@ -307,7 +307,9 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: level.into(),
             },
-            ownership: Ownership::Owned { owner: "USA".into() },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: [("SCI".to_string(), set(&["SI"]))].into_iter().collect(),
             disclosure: Disclosure {
                 release: Releasability::NoMarking,

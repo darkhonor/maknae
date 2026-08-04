@@ -179,7 +179,10 @@ mod tests {
         assert_eq!(c(&[Relido]).join(&c(&[Displayed])), c(&[Relido, Displayed]));
         // idempotent, commutative
         assert_eq!(c(&[Orcon]).join(&c(&[Orcon])), c(&[Orcon]));
-        assert_eq!(c(&[Orcon]).join(&c(&[Nodis])), c(&[Nodis]).join(&c(&[Orcon])));
+        assert_eq!(
+            c(&[Orcon]).join(&c(&[Nodis])),
+            c(&[Nodis]).join(&c(&[Orcon]))
+        );
         // empty is the identity
         assert_eq!(c(&[Orcon]).join(&Controls::empty()), c(&[Orcon]));
     }

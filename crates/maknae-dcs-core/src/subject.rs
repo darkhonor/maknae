@@ -139,10 +139,19 @@ mod tests {
     #[test]
     fn employment_bridges_to_affiliation() {
         // 5→3 compat mapping keeps the v1 affiliation_satisfies vectors valid
-        assert_eq!(Employment::FederalCivilian.to_affiliation(), Affiliation::UsGovernment);
-        assert_eq!(Employment::ArmedForces.to_affiliation(), Affiliation::UsGovernment);
+        assert_eq!(
+            Employment::FederalCivilian.to_affiliation(),
+            Affiliation::UsGovernment
+        );
+        assert_eq!(
+            Employment::ArmedForces.to_affiliation(),
+            Affiliation::UsGovernment
+        );
         assert_eq!(Employment::Sltt.to_affiliation(), Affiliation::UsGovernment);
-        assert_eq!(Employment::Contractor.to_affiliation(), Affiliation::ClearedContractor);
+        assert_eq!(
+            Employment::Contractor.to_affiliation(),
+            Affiliation::ClearedContractor
+        );
         assert_eq!(Employment::Foreign.to_affiliation(), Affiliation::Foreign);
         // FEDCON admits Contractor; FED_ONLY does not — via the bridge
         assert!(affiliation_satisfies(

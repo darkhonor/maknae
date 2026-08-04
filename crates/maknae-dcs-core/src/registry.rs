@@ -100,7 +100,9 @@ impl CuiRegistry {
                 continue;
             }
             if let Some(kv) = line.strip_prefix("# ") {
-                let (k, v) = kv.split_once('=').ok_or(RegistryError::MalformedRow(i + 1))?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or(RegistryError::MalformedRow(i + 1))?;
                 prov.insert(k.trim().to_string(), v.trim().to_string());
                 continue;
             }
@@ -180,7 +182,10 @@ mod tests {
         assert_eq!(reg.provenance().extraction_date, "2026-08-04");
         // authoritative Registry facts (operator-supplied 2026-08-04)
         assert!(reg.is_known_category("Legal Privilege"));
-        assert_eq!(reg.category("Legal Privilege").map(|c| c.slug.as_str()), Some("legal-privilege"));
+        assert_eq!(
+            reg.category("Legal Privilege").map(|c| c.slug.as_str()),
+            Some("legal-privilege")
+        );
         assert!(reg.is_known_ldc("NOFORN"));
         assert!(reg.is_known_ldc("DISPLAY ONLY"));
         // fail-closed unknown (kills the is_known_* fail-open mutant)
