@@ -633,6 +633,32 @@ impl ResourceLabel {
     }
 }
 
+/// Validate a label against the Stage-1 invariants, fail-closed to `None`.
+///
+/// Stage 1 enforces exactly: (i) the `display ⊇ release` invariant. Controls
+/// are canonical by construction (the `Controls` type exposes only canonical
+/// constructors), so no re-canonicalization is required. Registry-marking
+/// enforcement (unknown CUI LDC/category → reject) needs the CUI-regime
+/// discriminator and is Stage 4; exclusion pairs and §2.6 couplings are
+/// Stages 2/4. The lattice `∨` never calls this — validity is a `derive`-layer
+/// property (spec §2.3 total-∨/partial-derive split).
+pub fn validate_label(label: ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
+    let base = label.ownership.base_set();
+    if !label.disclosure.display_covers_release(&base, spif) {
+        return None; // display ⊂ release — invalid
+    }
+    Some(label)
+}
+
+/// The OPERATIONAL derivation step: `derive = validate_label ∘ ∨`. Returns the
+/// derived, validated label, or `None` fail-closed. ALL fail-closed refusals
+/// live here — the cross-ownership frame boundary (via `join`) and the
+/// Stage-1 validity invariants (via `validate_label`); Stages 2/4 add exclusion
+/// + coupling rejection. `decide()` consumes only `derive` output.
+pub fn derive(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
+    validate_label(a.join(b, spif)?, spif)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +741,69 @@ mod tests {
             coalitions: BTreeSet::new(),
         };
         assert_eq!(d.eligible_release(&set(&["USA", "KOR"]), &spif), deny_all);
+    }
+
+    #[test]
+    fn derive_and_validate_label_stage1() {
+        use crate::policy::{Classification, PolicyId};
+        use std::collections::BTreeMap;
+        let spif = Spif::builder("US").levels(&["U", "S", "TS"]).build();
+        let mk = |owner: &str, controls: Controls, disclosure: Disclosure| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "S".into(),
+            },
+            ownership: Ownership::Owned {
+                owner: owner.into(),
+            },
+            categories: BTreeMap::new(),
+            disclosure,
+            controls,
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        let plain = |rel: Releasability| Disclosure {
+            release: rel,
+            display: None,
+            exclusions: BTreeSet::new(),
+        };
+        use crate::controls::ControlMarking::*;
+
+        // (a) a within-frame pair whose join yields a would-be-rejectable
+        // control combo ({Relido,Displayed}) STILL derives to Some in Stage 1 —
+        // exclusion rejection is Stage 2. TODO(stage2): flip this to None.
+        let a = mk(
+            "USA",
+            Controls::from_set([Relido].into_iter().collect()),
+            plain(Releasability::NoMarking),
+        );
+        let b = mk(
+            "USA",
+            Controls::from_set([Displayed].into_iter().collect()),
+            plain(Releasability::NoMarking),
+        );
+        let d = derive(&a, &b, &spif).expect("within-frame derive is Some in Stage 1");
+        assert_eq!(
+            d.controls.as_set(),
+            &[Relido, Displayed].into_iter().collect()
+        );
+
+        // (b) cross-ownership pair → derive None (the frame boundary, via join)
+        let foreign = mk("DEU", Controls::empty(), plain(Releasability::NoMarking));
+        assert!(derive(&a, &foreign, &spif).is_none());
+
+        // (c) a directly-constructed display ⊂ release label → validate_label None
+        let malformed = mk(
+            "USA",
+            Controls::empty(),
+            Disclosure {
+                release: Releasability::Grant(set(&["AUS", "KOR"])),
+                display: Some(Releasability::Grant(set(&["AUS"]))),
+                exclusions: BTreeSet::new(),
+            },
+        );
+        assert!(validate_label(malformed, &spif).is_none());
     }
 
     #[test]

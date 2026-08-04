@@ -25,8 +25,8 @@ pub use decide::{
 pub use ownership::Ownership;
 pub use registry::{CuiCategory, CuiRegistry, RegistryError, RegistryProvenance};
 pub use label::{
-    restrictive_dominates, validate_rel, Caveat, Disclosure, EligibleNations, RelValidationError,
-    Releasability, ResourceLabel,
+    derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
+    EligibleNations, RelValidationError, Releasability, ResourceLabel,
 };
 pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};
 pub use subject::{affiliation_satisfies, Affiliation, Employment, Subject};
