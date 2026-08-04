@@ -1,0 +1,132 @@
+# Risk-tiered coverage contract (ADR-0016, issue #24).
+# UNIVERSE: every git-tracked *.rs file in the REPO (`git ls-files '*.rs'`)
+# outside [universe].exclude resolves to EXACTLY ONE tier. Unclassified,
+# stale, double-classified, or (non-T3) absent-from-coverage = hard failure.
+# Line-drawing rule (T1): "if this code silently breaks, can the engine return
+# Permit for an access policy denies, derive a label less restrictive than its
+# sources, or emit false assurance?" See design/adr/ADR-0016.
+
+[universe]
+# Segment-aware globs (`*` = one path segment, `**` = any number of segments),
+# depth-pinned to workspace-member level: tests/benches/examples/build scripts
+# are instruments, not subjects. A src/-nested look-alike is NOT excluded and
+# hard-fails unclassified (fail-closed by design).
+exclude = [
+  "crates/*/tests/**",    "bins/*/tests/**",
+  "crates/*/benches/**",  "bins/*/benches/**",
+  "crates/*/examples/**", "bins/*/examples/**",
+  "crates/*/build.rs",    "bins/*/build.rs",
+  "build.rs",
+]
+
+[t1]
+floor_production_region = 95
+files = [
+  "crates/maknae-dcs-core/src/decide.rs",
+  "crates/maknae-dcs-core/src/label.rs",
+  "crates/maknae-dcs-core/src/policy.rs",
+  "crates/maknae-dcs-core/src/subject.rs",
+]
+# Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
+# critical crates whose fail-closed behavior must be provable to external
+# third parties. Zero missed mutants required; TIMEOUT = investigate-failure.
+mutants_crates = ["maknae-dcs-core"]
+
+[t2]
+floor_production_region = 90
+files = []
+
+[project]
+# Cohort ratchet (ADR-0016 §4): the floor applies to ratchet_cohort ONLY —
+# new files meet their tier bars but do not implicitly join the cohort.
+# Re-baselining (extend cohort + recompute floor) is deliberate and recorded
+# here with provenance. Floor is int-only: floor(measured on the CI lane).
+ratchet_floor = 97
+ratchet_cohort = [
+  "crates/maknae-dcs-core/src/decide.rs",
+  "crates/maknae-dcs-core/src/label.rs",
+  "crates/maknae-dcs-core/src/policy.rs",
+  "crates/maknae-dcs-core/src/subject.rs",
+]
+
+[project.ratchet_provenance]
+# Authoritative CI-lane measurement (adoption PR #37 run 30872039077);
+# identical to the dev-host measurement — no cfg(target_os) code exists yet.
+value = 97.65
+date = "2026-08-04"
+lane = "ubuntu-latest (CI, authoritative; darwin dev-host measured identically)"
+command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
+
+# ---- T3: report-only, per-file justification (never a blanket glob) --------
+
+[[t3]]
+path = "crates/maknae-dcs-core/src/lib.rs"
+why = "module decls + re-exports only; no logic"
+
+[[t3]]
+path = "bins/maknaed/src/main.rs"
+why = "scaffold stub — re-tier at body landing (T1 candidate per the line-drawing rule: trust-plane entry point)"
+
+[[t3]]
+path = "bins/maknae/src/main.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "bins/maknae-spifc/src/main.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-audit-append/src/lib.rs"
+why = "scaffold stub — re-tier at body landing (T1 candidate: privileged capability crate)"
+
+[[t3]]
+path = "crates/maknae-audit/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-config/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-kernel/src/lib.rs"
+why = "scaffold stub — re-tier at body landing (T1 candidate: reference-monitor host)"
+
+[[t3]]
+path = "crates/maknae-llm/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-mcp/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-proto/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-spif-compile/src/lib.rs"
+why = "scaffold stub — re-tier at body landing (T1 candidate: Tier-0 SPIF compiler)"
+
+[[t3]]
+path = "crates/maknae-spif/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-subject-ctx-mint/src/lib.rs"
+why = "scaffold stub — re-tier at body landing (T1 candidate: privileged capability crate)"
+
+[[t3]]
+path = "crates/maknae-subject-ctx/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-vault/src/lib.rs"
+why = "scaffold stub — re-tier at body landing"
+
+# [[exception]] — documented-not-tested (none at adoption). Removes every code
+# region whose line_start falls within [anchor, end_anchor] from numerator AND
+# denominator. Fail-closed: zero/multi-match anchors, zero-region spans,
+# all-covered (stale) spans, blank why. Never a dodge for testable logic.
+
+# [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
+# closed grammar ^target_os:(linux|macos|windows)$.

@@ -97,7 +97,7 @@ Per-language toolchain calls:
 Two standards on top of volume:
 
 1. **KLC §15 invariants become executable property tests** in every container that touches labels — the machine-readable block is the shared acceptance suite, implemented once per language and run in CI. A contract change without a corresponding test change fails review by definition.
-2. **Mutation testing is the gate on the tests themselves.** A metric ton of tests proves nothing if the tests are slop too; mutation runs (scheduled, not per-commit — they are expensive) verify the suite actually kills behavior changes. Surviving mutants in trust-plane code are release blockers; in runtime-plane code they are backlog items.
+2. **Mutation testing is the gate on the tests themselves.** A metric ton of tests proves nothing if the tests are slop too; mutation runs verify the suite actually kills behavior changes (*cadence superseded by ADR-0016: change-gated per-PR for security-critical crates + unconditional on merge to main — no longer "scheduled, not per-commit"*). Surviving mutants in trust-plane code are release blockers; in runtime-plane code they are backlog items.
 
 ## 6. Shared DCS capability strategy — one engine, not eight
 
