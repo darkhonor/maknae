@@ -9,12 +9,16 @@
 //! input → `Deny` / grants-nothing.
 #![forbid(unsafe_code)]
 
+pub mod controls;
 pub mod decide;
 pub mod label;
+pub mod ownership;
 pub mod policy;
 pub mod subject;
 
+pub use controls::{ControlMarking, Controls};
 pub use decide::{decide, Action, Decision, DenyReason, Purpose};
+pub use ownership::Ownership;
 pub use label::{
     restrictive_dominates, validate_rel, Caveat, EligibleNations, RelValidationError,
     Releasability, ResourceLabel,
