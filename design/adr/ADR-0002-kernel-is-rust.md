@@ -38,3 +38,12 @@ Assessor framing, stated plainly: **a language choice does not satisfy any contr
 | Cryptography | `aws-lc-rs` — FIPS 140-3 validated module, proven in-house by Microkosmos | SC-13 (cryptographic protection — FIPS-validated mechanisms) | CMVP validation record for the AWS-LC module |
 
 Two honest boundaries on the claim, so the mapping survives a hostile read: (1) the guarantees are per-language, not per-system — the Python and Go containers make no equivalent claim, which is exactly why the trust plane is confined to the two Rust containers (container-architecture §2); (2) logic errors, policy errors, and unsound `unsafe` in dependencies remain in scope — that is what the SA-11 test doctrine, the KLC §15 conformance vectors, and the dependency-vetting policy are for. The language closes a defect class; the SDLC closes the rest.
+
+## Amendment 2026-08-04 — mutation-testing cadence superseded (ADR-0016)
+
+The SDLC control-mapping row above says "scheduled mutation testing
+(container-architecture §5)". That cadence is superseded by **ADR-0016**:
+mutation testing for security-critical crates is a **change-gated CI job**
+(runs on every PR touching a `mutants_crates` path, unconditionally on merge
+to `main`), zero missed mutants required. The SA-11/SA-11(1)/SA-15 mapping is
+unchanged; only the cadence description is superseded.
