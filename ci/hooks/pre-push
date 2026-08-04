@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Opt-in pre-push hook (ADR-0016): runs the coverage-tiers gate's default
+# stage set (partition + coverage + ratchet + workflow-sync). Never the
+# mutation stage (minutes-long; CI is the enforcement of record).
+# Enable per-clone: git config core.hooksPath ci/hooks   (see README.md)
+set -euo pipefail
+root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
+exec bash "$root/ci/gates/coverage-tiers.sh" --root "$root"
