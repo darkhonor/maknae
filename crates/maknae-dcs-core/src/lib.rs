@@ -28,5 +28,7 @@ pub use label::{
     derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
     EligibleNations, RelValidationError, Releasability, ResourceLabel,
 };
-pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};
+pub use policy::{
+    is_trigraph, CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion,
+};
 pub use subject::{affiliation_satisfies, Affiliation, Employment, Subject};

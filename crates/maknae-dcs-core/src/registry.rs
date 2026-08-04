@@ -106,9 +106,14 @@ impl CuiRegistry {
             }
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.as_slice() {
-                ["LDC", name] if !name.is_empty() => {
+                // `line` is trim_end'd, so a 2-field LDC row's name is the last
+                // field and is never empty (a trailing empty field is trimmed to
+                // a 1-field row → the `_` arm) — no empty-name guard needed here.
+                ["LDC", name] => {
                     ldcs.insert((*name).to_string());
                 }
+                // CATEGORY's name is NOT the last field, so an empty name IS
+                // reachable (`CATEGORY\t\t<index>\t<slug>`) — guard it.
                 ["CATEGORY", name, index, slug] if !name.is_empty() => {
                     categories.insert(
                         (*name).to_string(),
@@ -145,6 +150,12 @@ impl CuiRegistry {
 
     /// The dated seed snapshot embedded in the binary (air-gapped: the engine
     /// carries its own registry). Refreshed out-of-band by the extraction tool.
+    ///
+    /// # Panics
+    /// Panics only if the compiled-in seed `.tsv` fails to parse — a build-time
+    /// invariant covered by `seed_loads_and_knows_legal_privilege_and_ldcs`, so
+    /// it cannot fire at runtime unless a future edit to the embedded asset
+    /// breaks its grammar (which that test catches in CI).
     pub fn seed() -> CuiRegistry {
         Self::from_snapshot_tsv(include_str!(
             "../references/cui-registry/cui-registry-2026-08-04.tsv"
@@ -173,26 +184,44 @@ mod tests {
 
     #[test]
     fn loader_fails_closed_on_degenerate_input() {
-        // empty / provenance-only → EmptyRegistry (never a silent empty load)
-        let prov_only = "# source_url=u\n# extraction_date=d\n# current_as_of=c\n# content_hash=h\n";
+        let prov = "# source_url=u\n# extraction_date=d\n# current_as_of=c\n# content_hash=h\n";
+        // provenance-only → EmptyRegistry (never a silent empty load)
         assert_eq!(
-            CuiRegistry::from_snapshot_tsv(prov_only),
+            CuiRegistry::from_snapshot_tsv(prov),
             Err(RegistryError::EmptyRegistry)
         );
+        // a registry with ONLY LDCs, or ONLY categories, DOES load — this pins
+        // the empty-check as `categories.is_empty() && ldcs.is_empty()` (an `||`
+        // mutant would wrongly reject a non-empty-one-side registry)
+        assert!(CuiRegistry::from_snapshot_tsv(&format!("{prov}LDC\tNOFORN\n")).is_ok());
+        assert!(CuiRegistry::from_snapshot_tsv(&format!(
+            "{prov}CATEGORY\tLegal Privilege\tLegal\tlegal-privilege\n"
+        ))
+        .is_ok());
         // missing a provenance key
         let no_hash = "# source_url=u\n# extraction_date=d\n# current_as_of=c\nLDC\tNOFORN\n";
         assert_eq!(
             CuiRegistry::from_snapshot_tsv(no_hash),
             Err(RegistryError::MissingProvenance("content_hash".into()))
         );
-        // malformed data row (wrong field count)
-        let bad_row =
-            "# source_url=u\n# extraction_date=d\n# current_as_of=c\n# content_hash=h\nLDC\n";
+        // malformed PROVENANCE row (no '=') → MalformedRow at its 1-based line
+        // (pins the `i + 1` line number: a `*` mutant would report line 1)
         assert_eq!(
-            CuiRegistry::from_snapshot_tsv(bad_row),
+            CuiRegistry::from_snapshot_tsv("# source_url=u\n# noequals\n"),
+            Err(RegistryError::MalformedRow(2))
+        );
+        // empty-name CATEGORY row → MalformedRow (exercises the name guard)
+        assert_eq!(
+            CuiRegistry::from_snapshot_tsv(&format!("{prov}CATEGORY\t\tLegal\tslug\n")),
             Err(RegistryError::MalformedRow(5))
         );
-        // fully empty input
+        // malformed data row (wrong field count) → MalformedRow at line 5
+        // (pins the data-row `i + 1`)
+        assert_eq!(
+            CuiRegistry::from_snapshot_tsv(&format!("{prov}LDC\n")),
+            Err(RegistryError::MalformedRow(5))
+        );
+        // fully empty input → missing provenance
         assert!(matches!(
             CuiRegistry::from_snapshot_tsv(""),
             Err(RegistryError::MissingProvenance(_))

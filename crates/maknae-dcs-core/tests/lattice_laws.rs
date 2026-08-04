@@ -321,6 +321,7 @@ fn v2_axes_order_and_join_laws() {
     assert!(u.iter().any(|l| !l.disclosure.exclusions.is_empty()));
 
     let mut join_some_count: usize = 0;
+    let mut antisymmetry_fires: usize = 0; // structurally-distinct mutually-⊑ pairs
     for a in &u {
         assert!(le(a, a, &spif), "reflexivity");
         let aa = a.join(a, &spif).expect("∨ total over the fixed-ownership sublattice");
@@ -340,6 +341,11 @@ fn v2_axes_order_and_join_laws() {
             assert!(le(b, &ab, &spif), "b ⊑ a∨b");
             if le(a, b, &spif) && le(b, a, &spif) {
                 assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
+                if a != b {
+                    // distinct reps that are mutually-⊑ (e.g. display=None vs
+                    // display=Some(=release)) → the law is non-vacuously exercised
+                    antisymmetry_fires += 1;
+                }
             }
             // controls never shrink on join (monotone)
             assert!(a.controls.le(&ab.controls) && b.controls.le(&ab.controls));
@@ -348,6 +354,7 @@ fn v2_axes_order_and_join_laws() {
         }
     }
     assert_eq!(join_some_count, 168 * 168); // ∨ total: no fail-closed None in the sweep
+    assert!(antisymmetry_fires > 0, "v2 antisymmetry suite is vacuous");
 }
 
 #[test]
