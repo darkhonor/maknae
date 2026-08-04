@@ -53,14 +53,14 @@ Maknae's catastrophic failure mode is not a crash — it is a **fail-open access
 
 ## Baseline of record
 
-Refresh rule: re-measure on the CI lane and update this table + the toml provenance when coverage materially changes; every column carries value/date/lane/command provenance. Initial adoption baseline — **PROVISIONAL, measured on the darwin/aarch64 dev host** (production-region and gate-full-file: `bash ci/gates/coverage-tiers.sh --root .`, 2026-08-04; llvm summary: emitted by the same gate run from the coverage JSON's files[] summaries, 2026-08-04, same host/command). **The CI-lane (ubuntu-latest) re-measure lands on the adoption PR's CI run and replaces this table + the toml provenance before merge** (spec §4: initial floor = floor(measured on CI lane)):
+Refresh rule: re-measure on the CI lane and update this table + the toml provenance when coverage materially changes; every column carries value/date/lane/command provenance. Initial adoption baseline — **measured on the authoritative CI lane (ubuntu-latest, adoption PR #37, actions run 30872039077, 2026-08-04)**; every column from the same gate invocation (`bash ci/gates/coverage-tiers.sh --root .` in `build-and-gate`): production-region and gate-full-file computed by `coverage_check.py`; llvm summary from the coverage JSON's `files[]` summaries. The darwin/aarch64 dev host measured identically (no `cfg(target_os)` code exists yet):
 
 | File (T1) | Production-region (record) | Gate full-file | llvm summary |
 |---|---|---|---|
-| `crates/maknae-dcs-core/src/decide.rs` | 98.85% (86/87) | 99.78% (462/463) | 99.35% |
-| `crates/maknae-dcs-core/src/label.rs` | 96.72% (383/396) | 97.62% (1190/1219) | 97.21% |
-| `crates/maknae-dcs-core/src/policy.rs` | 100.00% (95/95) | 97.02% (228/235) | 97.02% |
-| `crates/maknae-dcs-core/src/subject.rs` | 100.00% (17/17) | 100.00% (51/51) | 100.00% |
+| `crates/maknae-dcs-core/src/decide.rs` | 98.85% (86/87) | 99.78% (462/463) | 99.35% (460/463) |
+| `crates/maknae-dcs-core/src/label.rs` | 96.72% (383/396) | 97.62% (1190/1219) | 97.21% (1185/1219) |
+| `crates/maknae-dcs-core/src/policy.rs` | 100.00% (95/95) | 97.02% (228/235) | 97.02% (228/235) |
+| `crates/maknae-dcs-core/src/subject.rs` | 100.00% (17/17) | 100.00% (51/51) | 100.00% (51/51) |
 
 Cohort ratchet: 581/595 = 97.65% → floor **97**. Mutation gate (`maknae-dcs-core`): **zero missed at adoption — 104 mutants, 91 caught, 13 unviable (darwin/aarch64 dev host, `bash ci/gates/coverage-tiers.sh --root . --mutants-all`, 2026-08-04)**; the authoritative ubuntu run of the same obligation lands on the post-merge push to `main`.
 
