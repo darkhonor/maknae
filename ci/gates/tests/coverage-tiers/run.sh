@@ -377,10 +377,6 @@ expect "env_bound non-native absent = advisory + exit 0" "advisory:" 0 -- \
   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
 
 # ---------- split-marker modes ----------------------------------------------
-mk_marker_file() { # <root> <body>
-  local r="$1"; shift
-  printf '%s\n' "$1" >"$r/crates/x/src/core.rs"
-}
 r="$(newroot)"; mk_base "$r"
 cat >"$r/crates/x/src/core.rs" <<'EOF'
 pub fn a() -> u32 { 1 }
@@ -462,8 +458,6 @@ import json, sys
 r = sys.argv[1]
 p = f"{r}/cov.json"
 d = json.load(open(p))
-core = "crates/x/src/core.rs"
-python_missing = [f for f in [core]]
 d["data"][0]["functions"] = []
 json.dump(d, open(p, "w"))
 PYEOF
@@ -509,12 +503,12 @@ expect "workflow-sync pass" "PASS: coverage-tiers gate" 0 -- \
       COVERAGE_TIERS_CRATE_DIRS="xcore=crates/xcore" "$gate" --root "$r" --injection
 
 r="$(newroot)"; mk_base "$r"; sync_base "$r"; mk_wf "$r" "crates/other"
-expect "workflow-sync mismatch" "MUTANTS_PATHS drift" nonzero -- \
+expect "workflow-sync mismatch" "crates/other" nonzero -- \
   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="xcore=crates/xcore" "$gate" --root "$r" --injection
 
 r="$(newroot)"; mk_base "$r"; sync_base "$r"; mk_wf "$r" "crates/xcore-extra"
-expect "workflow-sync near-miss dir" "MUTANTS_PATHS drift" nonzero -- \
+expect "workflow-sync near-miss dir" "crates/xcore-extra" nonzero -- \
   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="xcore=crates/xcore" "$gate" --root "$r" --injection
 
@@ -540,7 +534,7 @@ shim="$(newroot)"; cat >"$shim/cargo-mutants" <<'EOF'
 exit 0
 EOF
 chmod +x "$shim/cargo-mutants"
-expect "mutation-stage unknown crate (name oracle)" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
+expect "mutation-stage unknown crate" "unknown crate in mutants_crates: xcore" nonzero -- \
   env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="other=crates/other" "$gate" --root "$r" --injection --mutants-all
 
@@ -641,6 +635,151 @@ EOF
 chmod +x "$shimD/cargo" "$shimD/cargo-mutants"
 expect "live mode D: mutation-path name-oracle failure" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
   env PATH="$shimD:$PATH" "$gate" --root "$r" --mutants-all
+
+# ---------- mutation contract-shape modes (CR-impl C1) -----------------------
+r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
+expect "mutation: empty mutants_crates" "empty or missing" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
+
+r="$(newroot)"; mk_base "$r"
+printf 'not toml at all [[[\n' >"$r/coverage-tiers.toml"
+expect "mutation: unparseable contract" "cannot read mutants_crates" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
+
+r="$(newroot)"; mk_base "$r"
+sed -i.bak 's/mutants_crates = \[\]/mutants_crates = "abc"/' "$r/coverage-tiers.toml"
+expect "mutation: mutants_crates not a list" "cannot read mutants_crates" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
+
+# ---------- env_bound lane-resolution modes (CR-impl C2; rustc shim) ---------
+mk_rustc_shim() { # <dir> <triple>
+  cat >"$1/rustc" <<EOF
+#!/bin/sh
+if [ "\$1" = "-vV" ]; then printf 'rustc 1.94.1\nhost: $2\n'; exit 0; fi
+exit 0
+EOF
+  chmod +x "$1/rustc"
+}
+r="$(newroot)"; mk_base "$r"
+cat >>"$r/coverage-tiers.toml" <<'EOF'
+[[env_bound_override]]
+path = "crates/x/src/core.rs"
+env_bound = "target_os:linux"
+why = "unmapped-host fixture"
+EOF
+shimU="$(newroot)"; mk_rustc_shim "$shimU" "sparcv9-sun-solaris"
+expect "env_bound unmapped host triple" "unmapped host triple" nonzero -- \
+  env PATH="$shimU:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      "$gate" --root "$r" --injection
+
+# native-lane enforcement, lane PINNED via shim (never lane-dependent):
+# shim says linux; env_bound=linux; file sub-floor -> the floor IS enforced
+r="$(newroot)"; mk_base "$r"
+cat >>"$r/coverage-tiers.toml" <<'EOF'
+[[env_bound_override]]
+path = "crates/x/src/core.rs"
+env_bound = "target_os:linux"
+why = "native-lane enforcement fixture"
+EOF
+mk_json "$r" "crates/x/src/core.rs" "1:5" "2:0"   # 50% < 95
+shimL="$(newroot)"; mk_rustc_shim "$shimL" "x86_64-unknown-linux-gnu"
+expect "env_bound native-lane enforcement (shimmed rustc)" "< T1 floor" nonzero -- \
+  env PATH="$shimL:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      "$gate" --root "$r" --injection
+
+# ---------- remaining shape modes (CR-impl C5) -------------------------------
+r="$(newroot)"; mk_base "$r"
+cat >>"$r/coverage-tiers.toml" <<'EOF'
+[[t3]]
+path = "crates/x/src/aux.rs"
+why = "t3 target"
+[[env_bound_override]]
+path = "crates/x/src/aux.rs"
+env_bound = "target_os:linux"
+why = "override resolving to t3"
+EOF
+printf 'crates/x/src/aux.rs\n' >>"$r/files.list"
+printf '// aux\n' >"$r/crates/x/src/aux.rs"
+expect "env_bound override resolves to t3" "exactly one existing t1/t2 entry" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+
+r="$(newroot)"; mk_base "$r"
+python3 - "$r" <<'PYEOF2'
+import sys
+r = sys.argv[1]
+p = f"{r}/coverage-tiers.toml"
+s = open(p).read().replace("exclude = []", 'exclude = ["crates/*/tests/**"]', 1)
+open(p, "w").write(s)
+PYEOF2
+cat >>"$r/coverage-tiers.toml" <<'EOF'
+[[exception]]
+path = "crates/x/tests/it.rs"
+anchor = "whatever"
+why = "exception on an excluded file"
+EOF
+printf 'crates/x/tests/it.rs\n' >>"$r/files.list"
+expect "exception on excluded file" "no floor to excuse" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+
+for bad in 'ratchet_floor = "97"' 'ratchet_floor = true' 'ratchet_floor = 197'; do
+  r="$(newroot)"; mk_base "$r"
+  sed -i.bak "s/ratchet_floor = 0/$bad/" "$r/coverage-tiers.toml"
+  expect "ratchet_floor typing/range: $bad" "ratchet_floor" nonzero -- \
+    env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+done
+for bad in 'floor_production_region = "95"' 'floor_production_region = true'; do
+  r="$(newroot)"; mk_base "$r"
+  python3 - "$r" "$bad" <<'PYEOF2'
+import sys
+r, bad = sys.argv[1], sys.argv[2]
+p = f"{r}/coverage-tiers.toml"
+s = open(p).read().replace("floor_production_region = 95", bad, 1)  # first = t1
+open(p, "w").write(s)
+PYEOF2
+  expect "t1 floor typing: $bad" "floor_production_region" nonzero -- \
+    env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+done
+
+r="$(newroot)"; mk_base "$r"
+sed -i.bak 's/ratchet_cohort = \[\]/ratchet_cohort = ["crates\/x\/src\/core.rs"]/' "$r/coverage-tiers.toml"
+expect "cohort non-empty with floor 0" "ratchet_floor == 0" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+
+# per-exclude-glob positive + near-miss pairs (all shipped patterns)
+glob_pair() { # <pattern> <positive> <nearmiss>
+  local pat="$1" pos="$2" near="$3"
+  local r; r="$(newroot)"; mk_base "$r"
+  python3 - "$r" "$pat" <<'PYEOF2'
+import sys
+r, pat = sys.argv[1], sys.argv[2]
+p = f"{r}/coverage-tiers.toml"
+s = open(p).read().replace("exclude = []", f'exclude = ["{pat}"]', 1)
+open(p, "w").write(s)
+PYEOF2
+  printf '%s\n' "$pos" >>"$r/files.list"
+  expect "glob positive: $pat ($pos excluded)" "PASS: coverage tiers" 0 -- \
+    env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+  printf '%s\n' "$near" >>"$r/files.list"
+  expect "glob near-miss: $pat ($near unclassified)" "unclassified" nonzero -- \
+    env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+}
+glob_pair "bins/*/tests/**"    "bins/y/tests/it.rs"       "bins/y/src/tests/it.rs"
+glob_pair "crates/*/benches/**" "crates/x/benches/b.rs"   "crates/x/src/benches/b.rs"
+glob_pair "bins/*/benches/**"  "bins/y/benches/b.rs"      "bins/y/src/benches/b.rs"
+glob_pair "crates/*/examples/**" "crates/x/examples/e.rs" "crates/x/src/examples/e.rs"
+glob_pair "bins/*/examples/**" "bins/y/examples/e.rs"     "bins/y/src/examples/e.rs"
+glob_pair "crates/*/build.rs"  "crates/x/build.rs"        "crates/x/src/build.rs"
+glob_pair "bins/*/build.rs"    "bins/y/build.rs"          "bins/y/src/build.rs"
+glob_pair "build.rs"           "build.rs"                 "sub/build.rs"
+
+# ---------- ambient-GIT_DIR immunity ----------------------------------------
+r="$(newroot)"; mk_base "$r"
+expect "ambient GIT_DIR immunity (pass path unaffected)" "PASS: coverage-tiers gate" 0 -- \
+  env GIT_DIR="$repo_root/.git" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      "$gate" --root "$r" --injection
 
 # ---------- summary ----------------------------------------------------------
 printf '\n%d fixture(s) passed, %d failed.\n' "$pass_n" "$fail_n"

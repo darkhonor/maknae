@@ -39,9 +39,9 @@ Maknae's catastrophic failure mode is not a crash — it is a **fail-open access
 
 **Environment-dependent coverage:** signal-interpretation logic must be unit-testable against synthetic fixtures and counts toward the floor (testing your own logic on invented data is not gaming; asserting real-world facts from fake data is, and is forbidden). Real-environment integration tests are env-gated and skip cleanly. Genuinely un-instrumentable-on-CI code uses the `env_bound` discriminator (closed grammar, native-lane-enforced) — never a silent carve-out. The authoritative measurement lane is CI (ubuntu-latest); other hosts get an advisory.
 
-**Enforcement surfaces:** the gate runs in CI (fixture suite first — 57 forced-failure fixtures proving every failure mode fires, including four live-root modes — then the live gate), as an **opt-in** pre-push hook (`git config core.hooksPath ci/hooks`; "lead a horse to water" — CI is the enforcement of record), and the change-gated mutation job (always starts, SKIPs unless `MUTANTS_PATHS` paths changed, unconditional on push to `main`). The workflow-sync check makes contract↔workflow drift a gate failure.
+**Enforcement surfaces:** the gate runs in CI (fixture suite first — 87 fixtures: 81 forced-failure modes with mode-identifying assertions plus 6 pass-path/positive cases, including four live-root modes and per-exclude-glob positive/near-miss pairs — then the live gate), as an **opt-in** pre-push hook (`git config core.hooksPath ci/hooks`; "lead a horse to water" — CI is the enforcement of record), and the change-gated mutation job (always starts, SKIPs unless `MUTANTS_PATHS` paths changed, unconditional on push to `main`). The workflow-sync check makes contract↔workflow drift a gate failure.
 
-**Resolved decisions recorded:** opt-in pre-push (operator); risk-based mutation scope (operator); runner-readiness model (operator); pinned-toolchain/branch-omission (operator); scaffold stubs = T3 with per-file justification, re-tiered at body landing (`bins/maknaed/src/main.rs` and the privileged-capability crates are named T1 candidates). Editing rule: a `Proposed` ADR is editable in place; an `Accepted` ADR is append-only (per the ADR-0001 amendment landed with this change).
+**Resolved decisions recorded:** opt-in pre-push (operator); risk-based mutation scope (operator); runner-readiness model (operator); pinned-toolchain/branch-omission (operator); scaffold stubs = T3 with per-file justification, re-tiered at body landing (`bins/maknaed/src/main.rs` and the privileged-capability crates are named T1 candidates). Editing rule: per the ADR-0001 amendment landed with this change (cited, not declared here) — a `Proposed` ADR is editable in place; an `Accepted` ADR is append-only.
 
 ## Consequences
 
@@ -53,7 +53,7 @@ Maknae's catastrophic failure mode is not a crash — it is a **fail-open access
 
 ## Baseline of record
 
-Refresh rule: re-measure on the CI lane and update this table + the toml provenance when coverage materially changes; every column carries value/date/lane/command provenance. Initial adoption baseline (2026-08-04; production-region and gate-full-file from `bash ci/gates/coverage-tiers.sh --root .`; llvm summary from `cargo llvm-cov --summary-only`; CI-lane values confirmed on the PR run — see PR #24-implementation):
+Refresh rule: re-measure on the CI lane and update this table + the toml provenance when coverage materially changes; every column carries value/date/lane/command provenance. Initial adoption baseline — **PROVISIONAL, measured on the darwin/aarch64 dev host** (production-region and gate-full-file: `bash ci/gates/coverage-tiers.sh --root .`, 2026-08-04; llvm summary: emitted by the same gate run from the coverage JSON's files[] summaries, 2026-08-04, same host/command). **The CI-lane (ubuntu-latest) re-measure lands on the adoption PR's CI run and replaces this table + the toml provenance before merge** (spec §4: initial floor = floor(measured on CI lane)):
 
 | File (T1) | Production-region (record) | Gate full-file | llvm summary |
 |---|---|---|---|
@@ -62,11 +62,11 @@ Refresh rule: re-measure on the CI lane and update this table + the toml provena
 | `crates/maknae-dcs-core/src/policy.rs` | 100.00% (95/95) | 97.02% (228/235) | 97.02% |
 | `crates/maknae-dcs-core/src/subject.rs` | 100.00% (17/17) | 100.00% (51/51) | 100.00% |
 
-Cohort ratchet: 581/595 = 97.65% → floor **97**. Mutation gate (`maknae-dcs-core`): zero missed at adoption (host-labeled evidence in the adoption PR; the authoritative ubuntu run lands on the post-merge push to `main`).
+Cohort ratchet: 581/595 = 97.65% → floor **97**. Mutation gate (`maknae-dcs-core`): **zero missed at adoption — 104 mutants, 91 caught, 13 unviable (darwin/aarch64 dev host, `bash ci/gates/coverage-tiers.sh --root . --mutants-all`, 2026-08-04)**; the authoritative ubuntu run of the same obligation lands on the post-merge push to `main`.
 
 ## Security control mapping (informative; per ADR-0001)
 
-Assessor framing: the gate upgrades access-enforcement testing evidence from procedural attestation to mechanically-collected, AO-inspectable artifacts — the coverage JSON is uploaded on every CI run (red or green), and the fixture suite proves every failure mode of the gate itself fires.
+Assessor framing: the gate upgrades access-enforcement testing evidence from procedural attestation to mechanically-collected, AO-inspectable artifacts — the coverage JSON is uploaded on every CI run that reaches the coverage step (red or green at that step; an earlier-step failure means no coverage ran to upload), and the fixture suite proves every failure mode of the gate itself fires.
 
 | Concern | Property | NIST SP 800-53 rev 5 | Evidence |
 |---|---|---|---|
