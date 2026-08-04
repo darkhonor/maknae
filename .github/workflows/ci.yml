@@ -47,3 +47,53 @@ jobs:
         run: ci/gates/negative-control.sh
       - name: Isolation-contract lint
         run: ci/gates/isolation-contract-lint.sh
+      - name: Coverage tooling (llvm-tools via rustup show; cargo-llvm-cov pinned)
+        run: cargo install cargo-llvm-cov --locked --version "^0.8"
+      - name: Coverage-tiers fixture suite (gate proven to fire, all modes)
+        run: ci/gates/tests/coverage-tiers/run.sh
+      - name: Coverage-tiers gate (live; CI is the lane of record)
+        run: bash ci/gates/coverage-tiers.sh --root .
+      - name: Upload coverage evidence (SA-11 artifact; exists for red runs too)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json
+          path: target/coverage.json
+          if-no-files-found: warn
+
+  mutation:
+    # Change-gated, required-check-safe: always starts; SKIPs unless a
+    # security-critical crate (MUTANTS_PATHS) changed; runs UNCONDITIONALLY on
+    # push (push = main by the trigger set — if the trigger set ever widens,
+    # revisit the base resolution here).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Change gate
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "run=1" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          changed="$(git diff --name-only "$base"...HEAD)"
+          run=0
+          IFS=',' read -r -a paths <<<"$MUTANTS_PATHS"
+          for p in "${paths[@]}"; do
+            p="$(printf '%s' "$p" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            if printf '%s\n' "$changed" | grep -Eq "^${p}(/|$)"; then run=1; fi
+          done
+          if [ "$run" = "0" ]; then echo "SKIP: no mutants_crates paths changed"; fi
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+      - name: Install toolchain (pinned)
+        if: steps.gate.outputs.run == '1'
+        run: rustup show
+      - name: Install cargo-mutants
+        if: steps.gate.outputs.run == '1'
+        run: cargo install cargo-mutants --locked
+      - name: Mutation gate (zero missed; TIMEOUT = investigate)
+        if: steps.gate.outputs.run == '1'
+        run: bash ci/gates/coverage-tiers.sh --root . --mutants-all
