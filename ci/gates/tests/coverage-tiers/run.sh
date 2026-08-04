@@ -647,21 +647,27 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
 
 # ---------- mutation contract-shape modes (CR-impl C1) -----------------------
+# These select the mutation stage, so readiness requires cargo-mutants —
+# absent in build-and-gate. Shim a stub (same pattern as the unknown-crate
+# fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
+# lane (lane-dependent fixtures are forbidden).
+shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; chmod +x "$shimM/cargo-mutants"
+
 r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
 expect "mutation: empty mutants_crates" "empty or missing" nonzero -- \
-  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+  env PATH="$shimM:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 r="$(newroot)"; mk_base "$r"
 printf 'not toml at all [[[\n' >"$r/coverage-tiers.toml"
 expect "mutation: unparseable contract" "cannot read mutants_crates" nonzero -- \
-  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+  env PATH="$shimM:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 r="$(newroot)"; mk_base "$r"
 sed -i.bak 's/mutants_crates = \[\]/mutants_crates = "abc"/' "$r/coverage-tiers.toml"
 expect "mutation: mutants_crates not a list" "cannot read mutants_crates" nonzero -- \
-  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+  env PATH="$shimM:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="x=crates/x" "$gate" --root "$r" --injection --mutants-all
 
 # ---------- env_bound lane-resolution modes (CR-impl C2; rustc shim) ---------
