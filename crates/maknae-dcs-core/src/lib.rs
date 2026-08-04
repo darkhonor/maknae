@@ -17,7 +17,10 @@ pub mod policy;
 pub mod subject;
 
 pub use controls::{ControlMarking, Controls};
-pub use decide::{decide, Action, Decision, DenyReason, Purpose};
+pub use decide::{
+    decide, obligation_refines, obligations_refine, Action, Decision, DenyReason, Obligation,
+    Purpose, RedisseminationScope,
+};
 pub use ownership::Ownership;
 pub use label::{
     restrictive_dominates, validate_rel, Caveat, Disclosure, EligibleNations, RelValidationError,
