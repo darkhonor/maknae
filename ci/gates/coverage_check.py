@@ -114,9 +114,17 @@ def main() -> int:
     t1_floor = typed_num(t1.get("floor_production_region"), "t1.floor_production_region")
     t2_floor = typed_num(t2.get("floor_production_region"), "t2.floor_production_region")
     mutants_crates = t1.get("mutants_crates", [])
+    if not isinstance(mutants_crates, list):
+        fail("t1.mutants_crates must be a list")
+        mutants_crates = []
     for name in mutants_crates:
         if not isinstance(name, str) or not CRATE_NAME_RE.match(name):
             fail(f"malformed mutants_crates entry: {name!r}")
+    for lst, nm in ((t1_files, "t1.files"), (t2_files, "t2.files")):
+        if not isinstance(lst, list) or not all(isinstance(x, str) for x in lst):
+            fail(f"{nm} must be a list of strings")
+        elif len(set(lst)) != len(lst):
+            fail(f"{nm} contains duplicate paths")
 
     t3_entries = contract.get("t3", [])
     t3_files: dict[str, str] = {}
@@ -244,6 +252,18 @@ def main() -> int:
         fail(f"coverage JSON data has {len(data)} exports, expected exactly 1")
         return finish(None)
 
+    # llvm's own per-file summary (files[] uses function-record dedup — the
+    # third baseline column; synthetic fixtures have empty files[] -> n/a)
+    llvm_summary: dict[str, str] = {}
+    for fentry in data[0].get("files", []):
+        rel = normalize(fentry.get("filename", ""), root_real)
+        if rel is None:
+            continue
+        summ = fentry.get("summary", {}).get("regions", {})
+        cnt, cov_n = summ.get("count"), summ.get("covered")
+        if isinstance(cnt, int) and isinstance(cov_n, int) and cnt:
+            llvm_summary[rel] = f"{100.0 * cov_n / cnt:.2f}% ({cov_n}/{cnt})"
+
     # per-file region buckets via functions[].filenames[region.file_id]
     buckets: dict[str, dict[tuple, bool]] = {}
     for fn in data[0].get("functions", []):
@@ -279,11 +299,16 @@ def main() -> int:
     for pth, tier in sorted(tier_of.items()):
         if tier == "t3":
             if pth in buckets:
-                results[pth] = file_metrics(pth, buckets[pth], root_real, exceptions)
+                m = file_metrics(pth, buckets[pth], root_real, exceptions, report_only=True)
+                if m is not None:
+                    results[pth] = m
             continue
         eb = overrides.get(pth)
+        if eb is not None and lane_os is None:
+            fail(f"{pth}: env_bound present but the running lane is unresolved (gate must supply COVERAGE_LANE_OS from rustc -vV)")
+            continue
         if pth not in buckets:
-            if eb is not None and lane_os is not None and not eb.endswith(":" + lane_os):
+            if eb is not None and not eb.endswith(":" + lane_os):
                 print(f"advisory: {pth} absent from coverage on non-native lane ({eb}) — report-only here")
                 continue
             fail(f"{pth}: classified {tier.upper()} but absent from coverage JSON")
@@ -295,7 +320,7 @@ def main() -> int:
         floor = t1_floor if tier == "t1" else t2_floor
         if floor is None:
             continue
-        if eb is not None and lane_os is not None and not eb.endswith(":" + lane_os):
+        if eb is not None and not eb.endswith(":" + lane_os):
             print(f"advisory: {pth} is env_bound ({eb}) — floor report-only on this lane")
             continue
         if m["prod_pct"] < floor:
@@ -308,8 +333,9 @@ def main() -> int:
         for pth in cohort:
             m = results.get(pth)
             if m is None:
+                fail(f"{pth}: ratchet_cohort member has no evaluated metric — the floor was NOT evaluated")
                 ok = False
-                break
+                continue
             cov_sum += m["prod_cov"]
             tot_sum += m["prod_tot"]
         if ok and tot_sum:
@@ -318,7 +344,7 @@ def main() -> int:
             if agg < ratchet_floor:
                 fail(f"cohort ratchet: aggregate {agg:.2f}% < floor {ratchet_floor}%")
 
-    return finish(results)
+    return finish(results, llvm_summary)
 
 
 def normalize(fname: str, root_real: str) -> str | None:
@@ -332,23 +358,26 @@ def normalize(fname: str, root_real: str) -> str | None:
 
 
 def detect_lane_os() -> str | None:
-    plat = sys.platform
-    if plat.startswith("linux"):
-        return "linux"
-    if plat == "darwin":
-        return "macos"
-    if plat in ("win32", "cygwin"):
-        return "windows"
-    return None
+    """Lane comes from the GATE (rustc -vV host-triple mapping, spec §5) via
+    COVERAGE_LANE_OS; the helper never guesses from sys.platform. Absent env
+    (no env_bound users needed it) -> None; the caller fails closed on use."""
+    import os
+    lane = os.environ.get("COVERAGE_LANE_OS", "")
+    return lane if lane in ("linux", "macos", "windows") else None
 
 
-def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> dict | None:
-    """Production split + exceptions for one file."""
+def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list,
+                 report_only: bool = False) -> dict | None:
+    """Production split + exceptions for one file. `report_only` (T3) demotes
+    every marker hard-fail to silence — T3 has no floor to protect."""
+    def hardfail(msg: str) -> None:
+        if not report_only:
+            fail(msg)
     src = Path(root_real, pth)
     try:
         lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        fail(f"{pth}: cannot read source for production split")
+        hardfail(f"{pth}: cannot read source for production split")
         return None
 
     # split marker: column-0 #[cfg(test)] whose next non-blank line begins `mod `
@@ -360,10 +389,10 @@ def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> di
             if nxt.startswith("mod "):
                 markers.append(i + 1)  # 1-based marker line
             else:
-                fail(f"{pth}: column-0 #[cfg(test)] not followed by `mod ` (line {i+1}) — restructure the idiom")
+                hardfail(f"{pth}: column-0 #[cfg(test)] not followed by `mod ` (line {i+1}) — restructure the idiom")
                 bad_marker = True
     if len(markers) > 1:
-        fail(f"{pth}: more than one column-0 #[cfg(test)] mod marker")
+        hardfail(f"{pth}: more than one column-0 #[cfg(test)] mod marker")
         return None
     if bad_marker:
         return None
@@ -381,7 +410,7 @@ def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> di
                 continue
             if ln.startswith("}") or ln.startswith("//") or ln.startswith("/*"):
                 continue
-            fail(f"{pth}: column-0 code after the test module (line {j+1}) leaves the production denominator")
+            hardfail(f"{pth}: column-0 code after the test module (line {j+1}) leaves the production denominator")
             return None
 
     # exception spans for this file
@@ -402,8 +431,9 @@ def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> di
                 continue
             end = ehits[0]
         span = set(range(start, end + 1))
+        marker_line = markers[0] if markers else None
         span_regs = [(k, c) for k, c in bucket.items()
-                     if k[0] in span]
+                     if k[0] in span and (marker_line is None or k[0] < marker_line)]
         if not span_regs:
             fail(f"{pth}: exception anchor {anchor!r} carries ZERO regions (non-instrumentable line)")
             continue
@@ -420,7 +450,7 @@ def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> di
     prod_tot = len(prod)
     prod_cov = sum(1 for c in prod.values() if c)
     if marker is not None and prod_tot == 0:
-        fail(f"{pth}: production-region count == 0 (marker misplacement?)")
+        hardfail(f"{pth}: production-region count == 0 (marker misplacement?)")
         return None
     return {
         "prod_tot": prod_tot, "prod_cov": prod_cov,
@@ -430,7 +460,8 @@ def file_metrics(pth: str, bucket: dict, root_real: str, exceptions: list) -> di
     }
 
 
-def finish(results) -> int:
+def finish(results, llvm_summary=None) -> int:
+    llvm_summary = llvm_summary or {}
     if results:
         print()
         print("| File | Production-region (record) | Gate full-file | llvm summary |")
@@ -438,7 +469,7 @@ def finish(results) -> int:
         for pth, m in sorted(results.items()):
             print(f"| `{pth}` | {m['prod_pct']:.2f}% ({m['prod_cov']}/{m['prod_tot']}) "
                   f"| {m['full_pct']:.2f}% ({m['full_cov']}/{m['full_tot']}) "
-                  f"| (from `cargo llvm-cov --summary-only`, recorded at capture) |")
+                  f"| {llvm_summary.get(pth, 'n/a (synthetic fixture)')} |")
         print()
     if FAILS:
         print(f"{len(FAILS)} violation(s).")

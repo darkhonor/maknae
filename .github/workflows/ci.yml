@@ -47,8 +47,10 @@ jobs:
         run: ci/gates/negative-control.sh
       - name: Isolation-contract lint
         run: ci/gates/isolation-contract-lint.sh
-      - name: Coverage tooling (llvm-tools via rustup show; cargo-llvm-cov pinned)
-        run: cargo install cargo-llvm-cov --locked --version "^0.8"
+      - name: Coverage tooling (llvm-tools + cargo-llvm-cov pinned)
+        run: |
+          rustup component add llvm-tools
+          cargo install cargo-llvm-cov --locked --version "^0.8"
       - name: Coverage-tiers fixture suite (gate proven to fire, all modes)
         run: ci/gates/tests/coverage-tiers/run.sh
       - name: Coverage-tiers gate (live; CI is the lane of record)

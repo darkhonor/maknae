@@ -11,6 +11,10 @@
 #   COVERAGE_TIERS_CRATE_DIRS  name=dir pairs (replaces cargo metadata for sync)
 # --injection is REQUIRED to honor them and is REFUSED inside a git work tree.
 set -euo pipefail
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  printf 'FAIL: bash >= 4 required (declare -A/mapfile); macOS system bash is 3.2 — install via brew\n'
+  exit 1
+fi
 here="$(cd "$(dirname "$0")" && pwd)"
 
 fail_n=0
@@ -24,13 +28,21 @@ mutants_mode=""      # "", "all", "list"
 mutant_crates=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root) shift; root="${1:?--root needs a path}";;
+    --root)
+      shift
+      if [ $# -eq 0 ] || [ -z "${1:-}" ]; then fail "--root needs a path"; exit 1; fi
+      root="$1";;
     --injection) injection=1;;
     --readiness-check) readiness_only=1;;
     --mutants-all) mutants_mode="all";;
     --mutants)
       mutants_mode="list"; shift
-      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do mutant_crates+=("$1"); shift; done
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        if ! printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+          fail "invalid crate name for --mutants: $1"; exit 1
+        fi
+        mutant_crates+=("$1"); shift
+      done
       continue;;
     *) fail "unknown argument: $1"; exit 1;;
   esac
@@ -112,9 +124,13 @@ if [ "$need_default" -eq 1 ]; then
   # coverage tools (suppressed when JSON injected)
   if [ -z "${COVERAGE_TIERS_JSON+x}" ]; then
     if [ ! -f "$root/rust-toolchain.toml" ]; then
-      r_fail "no $root/rust-toolchain.toml (pinned toolchain probe)"
+      r_fail "no $root/rust-toolchain.toml (pinned toolchain probe) — add a rust-toolchain.toml pinning the channel"
     else
       want="$(grep -E '^channel' "$root/rust-toolchain.toml" | sed 's/.*"\(.*\)".*/\1/' || true)"
+      if [ -z "$want" ]; then
+        r_fail "cannot parse channel from $root/rust-toolchain.toml (an empty want would match ANY toolchain — fail closed)"
+        want="__UNPARSEABLE__"
+      fi
       active="$(cd "$root" && RUSTUP_AUTO_INSTALL=0 rustup show active-toolchain 2>/dev/null || true)"
       case "$active" in
         "$want"*) :;;
@@ -148,6 +164,31 @@ if [ "$readiness_only" -eq 1 ]; then echo "PASS: readiness"; exit 0; fi
 toml="$root/coverage-tiers.toml"
 if [ ! -f "$toml" ]; then fail "missing contract: $toml"; exit 1; fi
 
+# ---- env_bound lane resolution (spec §5: rustc -vV host triple, mapped) -----
+# Runs ONLY when the contract has env_bound users — a contract without them
+# never invokes rustc (injection roots stay cargo/rustc-free at adoption).
+has_env_bound=0
+if grep -q 'env_bound' "$toml"; then has_env_bound=1; fi
+export COVERAGE_LANE_OS=""
+if [ "$has_env_bound" -eq 1 ]; then
+  if ! command -v rustc >/dev/null 2>&1; then
+    fail "env_bound entries present but rustc missing (lane resolution) — install rustup"
+  else
+    host_line="$(rustc -vV 2>/dev/null | grep '^host:' || true)"
+    if [ -z "$host_line" ]; then
+      fail "cannot read host triple from rustc -vV (lane resolution)"
+    else
+      case "$host_line" in
+        *-apple-darwin*)            COVERAGE_LANE_OS="macos";;
+        *-linux-gnu*|*-linux-musl*) COVERAGE_LANE_OS="linux";;
+        *-windows-*)                COVERAGE_LANE_OS="windows";;
+        *) fail "unmapped host triple for env_bound lane resolution: ${host_line#host: } (a floor-bearing env_bound file must never become silently never-enforced)";;
+      esac
+    fi
+  fi
+  [ "$fail_n" -gt 0 ] && { printf '%d violation(s).\n' "$fail_n"; exit 1; }
+fi
+
 # ---- name oracle + sync helper ---------------------------------------------
 resolve_crate_dirs() {
   # populates crate_dir_map from cargo metadata on live roots (injection map already loaded)
@@ -176,9 +217,17 @@ for p in m["packages"]:
 toml_mutants_crates() {
   python3 - "$toml" <<'PYEOF'
 import sys, tomllib
-with open(sys.argv[1], "rb") as f:
-    c = tomllib.load(f)
-for name in c.get("t1", {}).get("mutants_crates", []):
+try:
+    with open(sys.argv[1], "rb") as f:
+        c = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError) as e:
+    print(f"unparseable: {e}", file=sys.stderr)
+    sys.exit(1)
+mc = c.get("t1", {}).get("mutants_crates")
+if not isinstance(mc, list) or not all(isinstance(x, str) for x in mc):
+    print("mutants_crates missing or not a list of strings", file=sys.stderr)
+    sys.exit(1)
+for name in mc:
     print(name)
 PYEOF
 }
@@ -242,7 +291,7 @@ if [ "$need_default" -eq 1 ]; then
     else
       raw="${mp_lines[0]#*MUTANTS_PATHS:}"
       raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
-      declared="$(printf '%s' "$raw" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort)"
+      declared="$(printf '%s' "$raw" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort -u)"
       expected=""
       while IFS= read -r cname; do
         [ -z "$cname" ] && continue
@@ -252,7 +301,7 @@ if [ "$need_default" -eq 1 ]; then
           expected="$expected${crate_dir_map[$cname]}"$'\n'
         fi
       done < <(toml_mutants_crates)
-      expected="$(printf '%s' "$expected" | sed '/^$/d' | sort)"
+      expected="$(printf '%s' "$expected" | sed '/^$/d' | sort -u)"
       if [ "$declared" != "$expected" ]; then
         fail "MUTANTS_PATHS drift: workflow declares [$(printf '%s' "$declared" | tr '\n' ' ')] but mutants_crates derive [$(printf '%s' "$expected" | tr '\n' ' ')]"
       fi
@@ -263,17 +312,32 @@ fi
 # ---- mutation stage ---------------------------------------------------------
 if [ "$mutants_mode" != "" ]; then
   if [ "$mutants_mode" = "all" ]; then
-    mapfile -t mutant_crates < <(toml_mutants_crates)
+    # contract-shape validation of the key this stage reads (fail closed:
+    # unparseable toml, non-list, or EMPTY mutants_crates must never yield a
+    # green mutation job doing nothing)
+    if ! crates_out="$(toml_mutants_crates)"; then
+      fail "cannot read mutants_crates from $toml (unparseable contract)"
+      printf '%d violation(s).\n' "$fail_n"; exit 1
+    fi
+    mapfile -t mutant_crates <<<"$crates_out"
+    if [ "${#mutant_crates[@]}" -eq 0 ] || [ -z "${mutant_crates[0]}" ]; then
+      fail "mutants_crates is empty or missing — the mutation gate would be a no-op claiming assurance"
+      printf '%d violation(s).\n' "$fail_n"; exit 1
+    fi
   fi
+  oracle_ok=1
   if [ "$injection" -eq 0 ]; then
     if ! resolve_crate_dirs; then
       fail "cannot resolve mutants_crates package names (mutation stage)"
+      oracle_ok=0
     fi
   fi
   for cname in "${mutant_crates[@]}"; do
     [ -z "$cname" ] && continue
     if [ -z "${crate_dir_map[$cname]+x}" ]; then
-      fail "cannot resolve mutants_crates package names (mutation stage): $cname"
+      if [ "$oracle_ok" -eq 1 ]; then
+        fail "unknown crate in mutants_crates: $cname"
+      fi
       continue
     fi
     if ! (cd "$root" && cargo mutants --package "$cname"); then
