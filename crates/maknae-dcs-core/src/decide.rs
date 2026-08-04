@@ -241,6 +241,15 @@ mod tests {
                 scope: Some(RedisseminationScope::UsGov)
             },
         ));
+        // two scoped OriginatorControlled compare by identity of scope
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
         // identity for the other obligations
         assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
         assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
@@ -355,6 +364,11 @@ mod tests {
                 &mk_resource("SECRET"),
                 Action::Read
             ),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+        // resource classification name not in SPIF (subject known) → Indeterminate
+        assert_eq!(
+            run(&mk_subject("SECRET"), &mk_resource("MAGENTA"), Action::Read),
             Decision::Deny(DenyReason::Indeterminate)
         );
     }

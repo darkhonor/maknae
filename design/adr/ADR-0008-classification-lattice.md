@@ -41,6 +41,59 @@ Closes the two lattice findings (`releasability-antitone-dominance`, `dominance-
 - Correctness preconditions and owners: authentic inputs → ADR-0014/kernel; correct SPIF → governance; write-path/*-property → sibling ADR. This engine is only as good as its inputs; those boundaries are named, not hidden.
 - Serialization, STANAG-4778 binding, SPIF generation, and cross-origin derivation are deferred (spec §10) and gate later component work.
 
+## Amendment — EPIC #33 Stage 1: marking-completeness vocabulary (2026-08-05)
+
+The Lake marking-policy sweep showed the v1 model (single `origin`, one
+releasability relation, bare Permit/Deny, 3-variant `Affiliation`) is
+insufficient across five axes; all are Day-1 (operator directive). Stage 1
+lands the SHARED VOCABULARY (spec `~/claude-memory/maknae/specs/2026-08-04-marking-completeness-design.md`,
+CR-converged round 11 + operator-reviewed); the six issues extend it in later
+stages. Status stays **Proposed** pending the full Day-1 slate.
+
+- **Ownership axis (#25):** `origin: String` → `Ownership` enum, 3 variants
+  Day-1: `Owned{owner}`, `Joint{owners}` (≥2), `ConcealedForeign{custodian}`
+  (the `//FGI` no-codes form; custodian-implicit baseline per V2 §4.e). The
+  earlier `ConcealedAsUs` variant is DROPPED (operator Q1): wholly-US-marked
+  data reaches the engine as `Owned{USA}`. Stage 1 wires only `Owned` at
+  `decide()`; Joint/ConcealedForeign fail closed (Indeterminate) until Stage 5.
+- **Dual-relation disclosure (#26/#27):** `Disclosure{release, display:Option, exclusions}`
+  subsumes v1 releasability; `display ⊇ release`; NAF exclusions (#26) carried
+  Day-1, enforced Stage 2.
+- **Controls product-of-chains lattice (#27):** closed `ControlMarking` enum +
+  `Controls` (four 3-element precedence chains × powerset). The join is TOTAL,
+  ASSOCIATIVE, and **validity-agnostic** — mutual-exclusion rejection lives in
+  `validate_label`, never in `∨`.
+- **Total-∨ / partial-derive split (the hard-won result):** the lattice `∨` is
+  a pure algebraic semilattice (never returns `None`, never validity-checks),
+  proven total/associative over a FIXED-ownership sublattice; `derive =
+  validate_label ∘ ∨` is the partial operational step where every fail-closed
+  `None` lives (cross-ownership frame, cross-NTK, and — from Stages 2/4 —
+  exclusion pairs / couplings). `decide()` consumes only `derive`.
+- **Decision-with-obligations (#27):** `Decision::PermitWithObligations`;
+  closed `Obligation` enum + `⊑_obl` refinement order (type shell Day-1;
+  emission Stage 3, when `Caveat` retires into `Obligation`).
+- **Subject employment (#29):** `Employment` (5 variants) is the public
+  attribute; `Affiliation` remains internal predicate currency until Stage 5.
+  `Subject` gains `list_memberships` (#30).
+- **List-control (#30):** `CategoryKind::ListControlled` (gate-3 →
+  Indeterminate Day-1; list semantics Stage 5). `Legal Privilege` is a data
+  CATEGORY (CUI Registry), NOT an `ATTORNEY_*` access predicate.
+- **SPIF constraints + offline CUI registry (#31 / spec §6):** `Spif` gains
+  `home_nation`, `expandable_for_rollup`, and an optional loaded `CuiRegistry`.
+  The registry is a dated, provenance-stamped, line-oriented **`.tsv`**
+  snapshot (zero-dep; JSON avoided) the binary carries via `include_str!` for
+  the air-gapped target — the engine never fetches; a maintenance tool
+  refreshes it. ENUM-VS-DATA line: algebra-bearing controls are the closed
+  `ControlMarking` enum; the ~125 Registry-delegated CUI categories + LDC
+  strings are DATA. Stage 1 lands the loader + `is_known_*` API + the loader's
+  fail-closed (empty/malformed → `Err`); `validate_label` enforcement is
+  Stage 4. Grounded in EO 13556 + 32 CFR § 2002.16/§ 2002.4 (Lake).
+- **Proof:** the v1 576-label law suite is preserved (migrated), plus a v2-axes
+  sweep (controls × display × exclusions) proving `∨` total/associative over
+  the fixed-ownership sublattice, plus `derive` fail-closed targeted vectors.
+- **Coverage:** `ownership.rs`, `controls.rs`, `registry.rs` join the T1 tier +
+  ratchet cohort (ADR-0016).
+
 ## Security control mapping (informative; per ADR-0001)
 
 Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is a WIRED CI CONTROL as of ADR-0016: the change-gated mutation job runs `cargo mutants` on this crate for every PR touching it and unconditionally on merge to main.
