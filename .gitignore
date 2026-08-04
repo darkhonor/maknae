@@ -4,3 +4,7 @@ Cargo.lock.orig
 
 # cargo-mutants output (regenerable; results of record live in PR bodies / CI)
 /mutants.out*
+
+# Python bytecode (the gate helper is source-of-record only)
+__pycache__/
+*.pyc
