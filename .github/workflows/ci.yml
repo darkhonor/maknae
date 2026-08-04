@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
 
+# MUTANTS_PATHS: consumed by the mutation job's change gate AND verified by
+# ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
+# (drift = gate FAIL). Comma-separated repo-relative crate dirs. Do not add a
+# second MUTANTS_PATHS: line anywhere in this file (multi-match = hard FAIL).
+env:
+  MUTANTS_PATHS: "crates/maknae-dcs-core"
+
 jobs:
   build-and-gate:
     runs-on: ubuntu-latest
