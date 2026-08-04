@@ -6,6 +6,7 @@
 //! categories ∧ nationality/coalition ∧ purpose ∧ action.
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
+use crate::ownership::Ownership;
 use crate::policy::{is_trigraph, CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
 use std::collections::BTreeSet;
@@ -172,13 +173,20 @@ pub fn decide(
         }
     }
 
-    // Gate 4: releasability (origin-validated).
-    if !is_trigraph(&resource.origin) {
+    // Gate 4: releasability (origin-validated). Stage 1 wires only single-owner
+    // labels; Joint / ConcealedForeign fail closed until Stage 5 wires their
+    // semantics (plan Task 6 Q1 resolution).
+    let owner = match &resource.ownership {
+        Ownership::Owned { owner } => owner,
+        _ => return Decision::Deny(DenyReason::Indeterminate),
+    };
+    if !is_trigraph(owner) {
+        // rejects the Owned{""} sentinel and any malformed origin
         return Decision::Deny(DenyReason::Indeterminate);
     }
     if !resource
-        .releasability
-        .eligible(&resource.origin, spif)
+        .disclosure
+        .eligible_release(&resource.ownership.base_set(), spif)
         .permits(&subject.nationality, &subject.coalition_memberships)
     {
         return Decision::Deny(DenyReason::Releasability);
@@ -202,7 +210,8 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::Releasability;
+    use crate::controls::Controls;
+    use crate::label::{Disclosure, Releasability};
     use crate::policy::{Classification, PolicyId};
     use crate::subject::Employment;
     use std::collections::BTreeSet;
@@ -284,9 +293,14 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: level.into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: [("SCI".to_string(), set(&["SI"]))].into_iter().collect(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: Some("OPLAN".into()),
@@ -416,7 +430,7 @@ mod tests {
     #[test]
     fn releasability_deny() {
         let mut r = mk_resource("SECRET");
-        r.releasability = Releasability::Grant(set(&["AUS"]));
+        r.disclosure.release = Releasability::Grant(set(&["AUS"]));
         let mut s = mk_subject("TOP_SECRET");
         s.nationality = "KOR".into();
         assert_eq!(
@@ -431,13 +445,42 @@ mod tests {
         // precheck is the deciding gate
         for bad in ["", "usa", "USAA"] {
             let mut r = mk_resource("SECRET");
-            r.origin = bad.into();
+            r.ownership = Ownership::Owned { owner: bad.into() };
             assert_eq!(
                 run(&mk_subject("TOP_SECRET"), &r, Action::Read),
                 Decision::Deny(DenyReason::Indeterminate),
                 "origin {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn non_owned_ownership_fails_closed_stage1() {
+        // Stage 1 wires only single-owner labels; Joint / ConcealedForeign fail
+        // closed at gate 4 until Stage 5 wires their semantics (plan Task 6 Q1).
+        let mut joint = mk_resource("SECRET");
+        joint.ownership = Ownership::Joint {
+            owners: set(&["USA", "KOR"]),
+        };
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &joint, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+        let mut cf = mk_resource("SECRET");
+        cf.ownership = Ownership::ConcealedForeign {
+            custodian: "USA".into(),
+        };
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &cf, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+        // Owned{""} sentinel (joint_from(∅)) → malformed origin → Indeterminate
+        let mut empty_owner = mk_resource("SECRET");
+        empty_owner.ownership = Ownership::joint_from(BTreeSet::new());
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &empty_owner, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
     }
 
     #[test]

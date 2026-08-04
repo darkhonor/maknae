@@ -9,6 +9,8 @@
 //! `REL {origin}` (NOFORN-equivalent), never to ⊥. Join on releasability is
 //! component-wise set INTERSECTION of eligible nations and eligible coalitions.
 
+use crate::controls::Controls;
+use crate::ownership::Ownership;
 use crate::policy::{is_trigraph, Spif, TetraExpansion};
 use std::collections::BTreeSet;
 
@@ -415,15 +417,22 @@ pub fn restrictive_dominates(held: &BTreeSet<String>, required: &BTreeSet<String
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceLabel {
     pub classification: crate::policy::Classification,
-    /// Originating nation trigraph (3 uppercase ASCII; malformed → `decide()`
-    /// denies `Indeterminate`, and `⊑`/`join` are incomparable/undefined).
-    pub origin: String,
+    /// Who owns the information (#25). Generalizes v1 `origin`. The lattice
+    /// `∨`/`⊑` are defined only WITHIN an identical ownership frame; malformed
+    /// owner tokens poison them to `None` and `decide()` to `Indeterminate`.
+    pub ownership: Ownership,
     /// tag → required values; the tag's SPIF-declared `CategoryKind` decides
     /// the satisfaction rule. INVARIANT: no empty value-sets stored (an
     /// empty-valued tag poisons `⊑`/`join` to `None` and `decide()` to
     /// `Deny(Indeterminate)` — never silently normalized).
     pub categories: std::collections::BTreeMap<String, BTreeSet<String>>,
-    pub releasability: Releasability,
+    /// Dual-relation disclosure (#26/#27): release + optional display + NAF
+    /// exclusions (subsumes v1 `releasability`).
+    pub disclosure: Disclosure,
+    /// Dissemination controls (#27): the product-of-chains controls lattice.
+    pub controls: Controls,
+    /// v1 caveats. RETAINED in Stage 1 (gate-5 DisplayOnly-blocks-Export stays
+    /// live); retired into `Obligation` in Stage 3.
     pub caveats: BTreeSet<Caveat>,
     /// Raise-above-join floor (OCA compilation determination); `None` = no
     /// floor. A compilation at-or-below the level is semantically identical
@@ -450,6 +459,14 @@ fn categories_comparable(label: &ResourceLabel, spif: &Spif) -> bool {
                 )
             )
     })
+}
+
+/// Every owner/custodian token in the ownership frame is a well-formed
+/// trigraph. `Owned{""}` (the `joint_from(∅)` sentinel) and any lowercase/
+/// wrong-length token fail — poisoning `⊑`/`join` to `None`, exactly as v1's
+/// `is_trigraph(&origin)` poisoned the single-origin case.
+fn ownership_wellformed(o: &Ownership) -> bool {
+    o.base_set().iter().all(|t| is_trigraph(t))
 }
 
 /// The rank `decide()` actually enforces: `max(level, compilation-or-level)`.
@@ -487,16 +504,18 @@ impl ResourceLabel {
     /// unregistered, `Permissive`, or empty-valued.
     pub fn at_most_as_restrictive_as(&self, other: &ResourceLabel, spif: &Spif) -> Option<bool> {
         if self.classification.policy != other.classification.policy
-            || self.origin != other.origin
-            // one shape check covers both labels: origins are already proven
-            // equal by the clause above (a second check would be a provably
-            // equivalent mutant — untestable dead logic)
-            || !is_trigraph(&self.origin)
+            // identical ownership FRAME required (cross-ownership has no ⊑ —
+            // a `derive` refusal, exactly as v1 required equal origins); the
+            // wellformedness check below covers both labels since they are now
+            // proven equal
+            || self.ownership != other.ownership
+            || !ownership_wellformed(&self.ownership)
             || !categories_comparable(self, spif)
             || !categories_comparable(other, spif)
         {
             return None;
         }
+        let base = self.ownership.base_set();
         let (self_rank, other_rank) = (
             spif.rank(&self.classification)?,
             spif.rank(&other.classification)?,
@@ -507,17 +526,17 @@ impl ResourceLabel {
             .categories
             .iter()
             .all(|(tag, sv)| other.categories.get(tag).is_some_and(|ov| sv.is_subset(ov)));
-        let releasability_ok = other
-            .releasability
-            .eligible(&other.origin, spif)
-            .is_subset_of(&self.releasability.eligible(&self.origin, spif));
+        // disclosure ⊑ (release + display eligibility + exclusions, decomposed)
+        let disclosure_ok = self.disclosure.le(&other.disclosure, &base, spif);
+        // controls ⊑ (product-of-chains: per-chain rank + non-chain ⊆)
+        let controls_ok = self.controls.le(&other.controls);
         let caveats_ok = self.caveats.is_subset(&other.caveats);
         let ntk_ok = match (&self.need_to_know, &other.need_to_know) {
             (None, _) => true,
             (Some(a), Some(b)) => a == b,
             (Some(_), None) => false,
         };
-        Some(levels_ok && categories_ok && releasability_ok && caveats_ok && ntk_ok)
+        Some(levels_ok && categories_ok && disclosure_ok && controls_ok && caveats_ok && ntk_ok)
     }
 
     /// Derivation-join `∨` = least-upper-bound = the MORE-restrictive combine:
@@ -541,13 +560,17 @@ impl ResourceLabel {
     /// must poison the join, never be normalized).
     pub fn join(&self, other: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
         if self.classification.policy != other.classification.policy
-            || self.origin != other.origin
-            || !is_trigraph(&self.origin)
+            // identical ownership FRAME required — the ONLY ownership-frame
+            // `None` (cross-ownership derivation deferred, as cross-origin was);
+            // every OTHER v1 `None` path below is retained
+            || !self.ownership.same_frame(&other.ownership)
+            || !ownership_wellformed(&self.ownership)
             || !categories_comparable(self, spif)
             || !categories_comparable(other, spif)
         {
             return None;
         }
+        let base = self.ownership.base_set();
         let (self_rank, other_rank) = (
             spif.rank(&self.classification)?,
             spif.rank(&other.classification)?,
@@ -568,13 +591,10 @@ impl ResourceLabel {
                 .and_modify(|v| v.extend(values.iter().cloned()))
                 .or_insert_with(|| values.clone());
         }
-        let releasability = Releasability::from_eligible(
-            &self
-                .releasability
-                .eligible(&self.origin, spif)
-                .join(&other.releasability.eligible(&other.origin, spif)),
-            &self.origin,
-        );
+        // disclosure ∨: release ∩, display ∩, exclusions ∪ (Disclosure::join)
+        let disclosure = self.disclosure.join(&other.disclosure, &base, spif);
+        // controls ∨: per-chain max + non-chain union (total, validity-agnostic)
+        let controls = self.controls.join(&other.controls);
         let caveats: BTreeSet<Caveat> = self.caveats.union(&other.caveats).copied().collect();
         let compilation_level = match (&self.compilation_level, &other.compilation_level) {
             (None, None) => None,
@@ -602,9 +622,10 @@ impl ResourceLabel {
         };
         Some(ResourceLabel {
             classification,
-            origin: self.origin.clone(),
+            ownership: self.ownership.clone(),
             categories,
-            releasability,
+            disclosure,
+            controls,
             caveats,
             compilation_level,
             need_to_know,
@@ -696,6 +717,41 @@ mod tests {
         assert_eq!(d.eligible_release(&set(&["USA", "KOR"]), &spif), deny_all);
     }
 
+    #[test]
+    fn empty_owner_sentinel_contained_in_lattice_ops() {
+        use crate::policy::{Classification, PolicyId};
+        use std::collections::BTreeMap;
+        let spif = Spif::builder("US").levels(&["U", "S", "TS"]).build();
+        let mk = |owner: &str| ResourceLabel {
+            classification: Classification {
+                policy: PolicyId("US".into()),
+                name: "S".into(),
+            },
+            ownership: Ownership::Owned {
+                owner: owner.into(),
+            },
+            categories: BTreeMap::new(),
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        let empty = mk("");
+        let usa = mk("USA");
+        // cross-frame (different ownership) → None both directions (never widens)
+        assert_eq!(empty.at_most_as_restrictive_as(&usa, &spif), None);
+        assert_eq!(usa.at_most_as_restrictive_as(&empty, &spif), None);
+        assert!(empty.join(&usa, &spif).is_none());
+        // even self-frame Owned{""} is malformed → ⊑/join poisoned to None
+        assert_eq!(empty.at_most_as_restrictive_as(&empty, &spif), None);
+        assert!(empty.join(&empty, &spif).is_none());
+    }
+
     use crate::policy::{CategoryKind, Classification, PolicyId};
     use std::collections::BTreeMap;
 
@@ -711,13 +767,18 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: lvl.into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: if sci.is_empty() {
                 BTreeMap::new()
             } else {
                 [("SCI".to_string(), set(sci))].into_iter().collect()
             },
-            releasability: rel,
+            disclosure: Disclosure {
+                release: rel,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
@@ -727,8 +788,8 @@ mod tests {
         let j = a.join(&b, &spif).unwrap();
         assert_eq!(j.classification.name, "TOP_SECRET"); // max level
         assert_eq!(j.categories["SCI"], set(&["SI", "TK"])); // ∪ per-tag
-        assert!(matches!(j.releasability, Releasability::NoMarking)); // ∩ → {USA} → canonical NoMarking
-        let e = j.releasability.eligible("USA", &spif);
+        assert!(matches!(j.disclosure.release, Releasability::NoMarking)); // ∩ → {USA} → canonical NoMarking
+        let e = j.disclosure.eligible_release(&j.ownership.base_set(), &spif);
         assert!(
             e.permits("USA", &set(&[]))
                 && !e.permits("AUS", &set(&[]))
@@ -746,9 +807,14 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: BTreeMap::new(),
-            releasability: Releasability::Public,
+            disclosure: Disclosure {
+                release: Releasability::Public,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: cavs.iter().cloned().collect(),
             compilation_level: comp.map(|n| Classification {
                 policy: PolicyId("US".into()),
@@ -774,9 +840,14 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: BTreeMap::new(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: comp.map(|n| Classification {
                 policy: PolicyId("US".into()),
@@ -806,9 +877,14 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: BTreeMap::new(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: ntk.map(|s| s.to_string()),
@@ -843,15 +919,20 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: BTreeMap::new(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };
         let mut aus_origin = us.clone();
-        aus_origin.origin = "AUS".into();
+        aus_origin.ownership = Ownership::Owned { owner: "AUS".into() };
         assert!(us.join(&aus_origin, &spif).is_none()); // cross-origin deferred → None, fail closed
                                                         // ⊑ poisons on origin mismatch ALONE (mutation-gate: this single
                                                         // assertion kills every ||→&& mutant in the poison disjunction —
@@ -878,11 +959,16 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned { owner: "USA".into() },
             categories: tag
                 .map(|t| [(t.to_string(), set(&["USA"]))].into_iter().collect())
                 .unwrap_or_default(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
@@ -895,7 +981,7 @@ mod tests {
         assert_eq!(plain.at_most_as_restrictive_as(&permissive, &spif), None);
         assert_eq!(unknown.at_most_as_restrictive_as(&plain, &spif), None);
         let mut bad_origin = mk(None);
-        bad_origin.origin = "".into(); // malformed origin
+        bad_origin.ownership = Ownership::Owned { owner: "".into() }; // malformed origin
         assert!(bad_origin.join(&bad_origin.clone(), &spif).is_none()); // equal-but-malformed → None
         assert_eq!(
             bad_origin.at_most_as_restrictive_as(&bad_origin.clone(), &spif),

@@ -6,8 +6,9 @@
 //! deny through gate 4 (releasability) instead of gate 1 (policy).
 
 use maknae_dcs_core::{
-    decide, validate_rel, Action, CategoryKind, Caveat, Classification, Decision, Employment,
-    DenyReason, PolicyId, Purpose, RelValidationError, Releasability, ResourceLabel, Spif, Subject,
+    decide, validate_rel, Action, CategoryKind, Caveat, Classification, Controls, Decision,
+    DenyReason, Disclosure, Employment, Ownership, PolicyId, Purpose, RelValidationError,
+    Releasability, ResourceLabel, Spif, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -67,9 +68,16 @@ fn resource(policy: &str, origin: &str, rel: Releasability) -> ResourceLabel {
             policy: PolicyId(policy.into()),
             name: "SECRET".into(),
         },
-        origin: origin.into(),
+        ownership: Ownership::Owned {
+            owner: origin.into(),
+        },
         categories: BTreeMap::new(),
-        releasability: rel,
+        disclosure: Disclosure {
+            release: rel,
+            display: None,
+            exclusions: BTreeSet::new(),
+        },
+        controls: Controls::empty(),
         caveats: BTreeSet::new(),
         compilation_level: None,
         need_to_know: None,
@@ -88,7 +96,7 @@ fn aus_kor_derivation_reduces_to_origin() {
     let a = resource("US", "USA", Releasability::Grant(set(&["AUS"])));
     let b = resource("US", "USA", Releasability::Grant(set(&["KOR"])));
     let j = a.join(&b, &spif).expect("same-policy, same-origin join");
-    assert!(matches!(j.releasability, Releasability::NoMarking));
+    assert!(matches!(j.disclosure.release, Releasability::NoMarking));
     assert_eq!(read(&subject("US", "USA"), &j, &spif), Decision::Permit);
     assert_eq!(
         read(&subject("US", "AUS"), &j, &spif),

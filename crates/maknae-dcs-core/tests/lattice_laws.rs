@@ -14,8 +14,8 @@
 //! not the stride, are the guarantee).
 
 use maknae_dcs_core::{
-    decide, Action, CategoryKind, Caveat, Classification, Decision, Employment, PolicyId, Purpose,
-    Releasability, ResourceLabel, Spif, Subject,
+    decide, Action, CategoryKind, Caveat, Classification, Controls, Decision, Disclosure,
+    Employment, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,14 +63,21 @@ fn universe() -> Vec<ResourceLabel> {
                         for ntk in ntk_states {
                             out.push(ResourceLabel {
                                 classification: class(level),
-                                origin: "USA".into(),
+                                ownership: Ownership::Owned {
+                                    owner: "USA".into(),
+                                },
                                 categories: match sci {
                                     None => BTreeMap::new(),
                                     Some(vals) => {
                                         [("SCI".to_string(), set(vals))].into_iter().collect()
                                     }
                                 },
-                                releasability: rel.clone(),
+                                disclosure: Disclosure {
+                                    release: rel.clone(),
+                                    display: None,
+                                    exclusions: BTreeSet::new(),
+                                },
+                                controls: Controls::empty(),
                                 caveats: cavs.iter().copied().collect(),
                                 compilation_level: comp.map(class),
                                 need_to_know: ntk.map(|s| s.to_string()),
@@ -105,10 +112,14 @@ fn sem_eq(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
         ra.is_some() && rb.is_some(),
         "law universe must have known ranks"
     );
+    let (ba, bb) = (a.ownership.base_set(), b.ownership.base_set());
     ra == rb
-        && a.origin == b.origin
+        && a.ownership == b.ownership
         && a.categories == b.categories // well-defined: no-empty-value-set invariant
-        && a.releasability.eligible(&a.origin, spif) == b.releasability.eligible(&b.origin, spif)
+        && a.disclosure.eligible_release(&ba, spif) == b.disclosure.eligible_release(&bb, spif)
+        && a.disclosure.eligible_display(&ba, spif) == b.disclosure.eligible_display(&bb, spif)
+        && a.disclosure.exclusions == b.disclosure.exclusions
+        && a.controls == b.controls
         && a.caveats == b.caveats
         && effective_rank(a, spif) == effective_rank(b, spif)
         && a.need_to_know == b.need_to_know
@@ -134,8 +145,8 @@ fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
     assert_eq!(distinct_sci.len(), 4);
     let mut distinct_rels: Vec<&Releasability> = Vec::new();
     for l in &sample {
-        if !distinct_rels.contains(&&l.releasability) {
-            distinct_rels.push(&l.releasability);
+        if !distinct_rels.contains(&&l.disclosure.release) {
+            distinct_rels.push(&l.disclosure.release);
         }
     }
     assert_eq!(distinct_rels.len(), 6);
@@ -184,9 +195,11 @@ fn order_and_join_laws() {
                 assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
             }
             // releasability never widens on join (∩ only narrows)
-            let e_ab = ab.releasability.eligible(&ab.origin, &spif);
-            assert!(e_ab.is_subset_of(&a.releasability.eligible(&a.origin, &spif)));
-            assert!(e_ab.is_subset_of(&b.releasability.eligible(&b.origin, &spif)));
+            let e_ab = ab.disclosure.eligible_release(&ab.ownership.base_set(), &spif);
+            assert!(e_ab
+                .is_subset_of(&a.disclosure.eligible_release(&a.ownership.base_set(), &spif)));
+            assert!(e_ab
+                .is_subset_of(&b.disclosure.eligible_release(&b.ownership.base_set(), &spif)));
         }
     }
     assert_eq!(join_some_count, 576 * 576);
