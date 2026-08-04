@@ -32,3 +32,12 @@ The ADR practice is itself a secure-design control implementation, not project h
 | Assessment-ready evidence | ADRs are the primary artifact an assessor reads to reconstruct why the trust plane is shaped as it is; control mappings inline take reconstruction cost to near zero | CA-2 (control assessments — evidence quality); supports the SSP's architecture description | Operator's SCA practice: the package that explains itself assesses fastest |
 
 Boundary on the claim: an ADR documents; it does not enforce. Enforcement lives in the KLC hooks, the CI gates, and the conformance vectors — the ADRs are why those exist in the shape they do.
+
+## Amendment 2026-08-04 — editability clarification (landed with ADR-0016)
+
+Clarifies (does not change) the append-only rule: the practice above scopes
+append-only amendment to a **ratified** ADR ("a ratified ADR is point-in-time
+prose"), and the control-mapping row's "Append-only amendments" carries the
+same scope. The converse is now explicit: a **`Proposed`** ADR — not yet
+ratified — is editable in place; an **`Accepted`** ADR changes only by
+appended amendment such as this one.

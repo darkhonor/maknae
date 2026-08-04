@@ -43,7 +43,7 @@ Closes the two lattice findings (`releasability-antitone-dominance`, `dominance-
 
 ## Security control mapping (informative; per ADR-0001)
 
-Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is run locally at release points and is OWED as a wired CI step — recorded follow-up, not yet an in-place CI control.
+Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is a WIRED CI CONTROL as of ADR-0016: the change-gated mutation job runs `cargo mutants` on this crate for every PR touching it and unconditionally on merge to main.
 
 | Concern | Engine property | NIST SP 800-53 rev 5 | Authoritative guidance |
 |---|---|---|---|
@@ -52,7 +52,7 @@ Assessor framing: the engine upgrades the evidence class for access-enforcement 
 | Security attributes | STANAG-4774-shaped label; SPIF-owned category kinds | AC-16; AC-16(6) (attribute association) | ADatP-4774 §4.2/Table 7 |
 | Reference monitor | Pure/total/side-effect-free; exhaustively law-checked | AC-25 (always invoked, tamper-resistant, small enough to analyze) | NIST SP 800-53; DoD ZT RA |
 | Transmission of attributes | Label carried with resource through derivation | SC-16; SC-16(1) | STANAG 4778 (binding → ADR-0007) |
-| Verification | 576-label exhaustive law suite + golden vectors (CI); mutation triage local-only, CI wiring owed | SA-11; SA-11(1) | The crate's `tests/` + `.github/workflows/ci.yml` |
+| Verification | 576-label exhaustive law suite + golden vectors (CI); mutation gate wired in CI (ADR-0016 change-gated job, zero missed) | SA-11; SA-11(1) | The crate's `tests/` + `.github/workflows/ci.yml` `mutation` job |
 
 The full control matrix belongs in the RMF package, not this ADR.
 
