@@ -290,7 +290,7 @@ Scope discipline: MVP ships the schema, RLS, and signed-git label integrity; Ope
 
 If the kernel and the database ever disagree about who sees a row, CI fails before a human could.
 
-**Property tests** (`proptest`): dominance is a partial order (reflexive, antisymmetric, transitive); high-water-mark derivation is a lattice join; generated RLS predicates are monotone (adding a category never widens visibility). **Mutation testing** gates the tests themselves; surviving mutants in trust-plane label code are release blockers (container-architecture §5).
+**Property tests** (`proptest`): dominance is a partial order (reflexive, antisymmetric, transitive); high-water-mark derivation is a lattice join; generated RLS predicates are monotone (adding a category never widens visibility). **Mutation testing** gates the tests themselves; surviving mutants in trust-plane label code are release blockers (cadence and enforcement per ADR-0016: change-gated in CI, zero missed).
 
 **Negative testing is first-class:** every row of the §9.2 matrix becomes a test; the §8 worked flows become end-to-end acceptance tests including their adversarial variants (REL drift at fire time, cross-subject health query, NOFORN payload at an eligible-but-foreign endpoint, boot with tampered SPIF).
 
@@ -334,7 +334,7 @@ Delta over the KLC §13 and ADR mappings — rows specific to this document:
 | Zero-PII audit with determining-policy diagnostics; labeled audit rows | AU-2, AU-3, AU-9, AU-10, PT-2 |
 | Certification gate for restricted categories | CM-3, PL-2 (documented deviation with visibility); PT-2 (privacy regimes) |
 | OpenTDF cryptographic label binding (Phase B) | SC-13, SC-16(1), SC-28 (at-rest protection for restricted payloads) |
-| Conformance vectors + mutation gates on label logic | SA-11, SI-10 |
+| Conformance vectors + mutation gates on label logic (enforced per ADR-0016) | SA-11, SI-10 |
 
 Full matrix belongs in the RMF package, not this document.
 
