@@ -169,6 +169,11 @@ pub fn decide(
             // unhandled access-control dimension an accredited SPIF declared —
             // deny, never silently unenforce.
             Some(CategoryKind::Permissive) => return Decision::Deny(DenyReason::Indeterminate),
+            // List-control (#30) decide semantics land Stage 5; until then an
+            // unhandled ListControlled tag denies, never silently unenforces.
+            Some(CategoryKind::ListControlled) => {
+                return Decision::Deny(DenyReason::Indeterminate)
+            }
             Some(CategoryKind::Informative) => {} // ignored by definition
         }
     }
@@ -452,6 +457,30 @@ mod tests {
                 "origin {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn list_controlled_tag_fails_closed_stage1() {
+        // #30 list-control decide semantics land Stage 5; until then a
+        // ListControlled-registered tag → Indeterminate (kills the gate-3 arm
+        // mutant, since the law sweep excludes ListControlled).
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
+            .category("SCI", CategoryKind::Restrictive)
+            .category("ATTY", CategoryKind::ListControlled)
+            .build();
+        let mut r = mk_resource("SECRET");
+        r.categories.insert("ATTY".into(), set(&["LEGAL_TEAM"]));
+        assert_eq!(
+            decide(
+                &mk_subject("TOP_SECRET"),
+                &r,
+                Action::Read,
+                &Purpose("OPLAN".into()),
+                &spif,
+            ),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
     }
 
     #[test]

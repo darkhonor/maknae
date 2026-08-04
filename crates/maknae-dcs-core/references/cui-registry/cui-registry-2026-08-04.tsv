@@ -1,0 +1,12 @@
+# source_url=https://www.archives.gov/cui/registry/category-list
+# extraction_date=2026-08-04
+# current_as_of=2026-08-04
+# content_hash=seed-stage1-legal-privilege+5200.48-table2
+LDC	NOFORN
+LDC	FED ONLY
+LDC	FEDCON
+LDC	NOCON
+LDC	DL ONLY
+LDC	REL TO
+LDC	DISPLAY ONLY
+CATEGORY	Legal Privilege	Legal	legal-privilege

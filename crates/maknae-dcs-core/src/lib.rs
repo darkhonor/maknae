@@ -14,6 +14,7 @@ pub mod decide;
 pub mod label;
 pub mod ownership;
 pub mod policy;
+pub mod registry;
 pub mod subject;
 
 pub use controls::{ControlMarking, Controls};
@@ -22,6 +23,7 @@ pub use decide::{
     Purpose, RedisseminationScope,
 };
 pub use ownership::Ownership;
+pub use registry::{CuiCategory, CuiRegistry, RegistryError, RegistryProvenance};
 pub use label::{
     restrictive_dominates, validate_rel, Caveat, Disclosure, EligibleNations, RelValidationError,
     Releasability, ResourceLabel,
