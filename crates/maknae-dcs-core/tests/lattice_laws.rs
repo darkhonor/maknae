@@ -14,8 +14,9 @@
 //! not the stride, are the guarantee).
 
 use maknae_dcs_core::{
-    decide, Action, CategoryKind, Caveat, Classification, Controls, Decision, Disclosure,
-    Employment, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif, Subject,
+    decide, Action, CategoryKind, Caveat, Classification, ControlMarking, Controls, Decision,
+    Disclosure, Employment, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif,
+    Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -241,6 +242,112 @@ fn order_and_join_laws() {
         "transitivity suite is vacuous"
     );
     assert!(leastness_antecedent_fires > 0, "leastness suite is vacuous");
+}
+
+/// The v2 axes (controls × display × exclusions) swept with the v1 axes pinned
+/// small (spec §5 "Law universe v2"). Ownership FIXED to `Owned{USA}`, NTK ≤ 1
+/// token; the `∨` is total + validity-agnostic over this fixed-ownership
+/// sublattice, so the sweep MAY include control combos (`{Relido},{Displayed}`)
+/// that `validate_label` would reject — they are valid LATTICE points here
+/// (their `derive` rejection is a targeted vector, see `derive_vectors.rs`).
+/// `ListControlled`/predicate category tags are DELIBERATELY excluded (they
+/// aren't in `categories_comparable`'s allowed set → would poison `⊑`/`∨`).
+fn universe_v2_axes() -> Vec<ResourceLabel> {
+    use ControlMarking::*;
+    let set_s = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    };
+    let levels = ["S", "TS"];
+    let rels = [
+        Releasability::NoMarking,
+        Releasability::Grant(set_s(&["AUS"])),
+        Releasability::Grant(set_s(&["AUS", "KOR"])),
+    ];
+    let displays: [Option<Releasability>; 2] = [None, Some(Releasability::Grant(set_s(&["AUS"])))];
+    let exclusions = [BTreeSet::new(), set_s(&["NZL"])];
+    let controls_axis = [
+        Controls::empty(),
+        Controls::from_set([OrconUsGov].into_iter().collect()),
+        Controls::from_set([Orcon].into_iter().collect()),
+        Controls::from_set([Exdis].into_iter().collect()),
+        Controls::from_set([Nodis].into_iter().collect()),
+        Controls::from_set([Relido].into_iter().collect()),
+        Controls::from_set([Displayed].into_iter().collect()),
+    ];
+    let mut out = Vec::new();
+    for level in levels {
+        for rel in &rels {
+            for display in &displays {
+                for excl in &exclusions {
+                    for controls in &controls_axis {
+                        out.push(ResourceLabel {
+                            classification: class(level),
+                            ownership: Ownership::Owned {
+                                owner: "USA".into(),
+                            },
+                            categories: BTreeMap::new(),
+                            disclosure: Disclosure {
+                                release: rel.clone(),
+                                display: display.clone(),
+                                exclusions: excl.clone(),
+                            },
+                            controls: controls.clone(),
+                            caveats: BTreeSet::new(),
+                            compilation_level: None,
+                            need_to_know: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(out.len(), 2 * 3 * 2 * 2 * 7); // 168
+    out
+}
+
+#[test]
+fn v2_axes_order_and_join_laws() {
+    let spif = law_spif();
+    let u = universe_v2_axes();
+
+    // axis-coverage: every controls value, both displays, both exclusions present
+    let distinct_controls: BTreeSet<Vec<ControlMarking>> = u
+        .iter()
+        .map(|l| l.controls.as_set().iter().copied().collect())
+        .collect();
+    assert_eq!(distinct_controls.len(), 7);
+    assert!(u.iter().any(|l| l.disclosure.display.is_some()));
+    assert!(u.iter().any(|l| l.disclosure.display.is_none()));
+    assert!(u.iter().any(|l| !l.disclosure.exclusions.is_empty()));
+
+    let mut join_some_count: usize = 0;
+    for a in &u {
+        assert!(le(a, a, &spif), "reflexivity");
+        let aa = a.join(a, &spif).expect("∨ total over the fixed-ownership sublattice");
+        assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
+    }
+    for a in &u {
+        for b in &u {
+            let ab = a
+                .join(b, &spif)
+                .expect("∨ total over the fixed-ownership sublattice");
+            join_some_count += 1;
+            let ba = b.join(a, &spif).expect("∨ total");
+            assert!(sem_eq(&ab, &ba, &spif), "commutativity");
+            let a_ab = a.join(&ab, &spif).expect("∨ total");
+            assert!(sem_eq(&a_ab, &ab, &spif), "absorption a∨(a∨b) ≈ a∨b");
+            assert!(le(a, &ab, &spif), "a ⊑ a∨b");
+            assert!(le(b, &ab, &spif), "b ⊑ a∨b");
+            if le(a, b, &spif) && le(b, a, &spif) {
+                assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
+            }
+            // controls never shrink on join (monotone)
+            assert!(a.controls.le(&ab.controls) && b.controls.le(&ab.controls));
+            // exclusions never shrink on join (∪)
+            assert!(a.disclosure.exclusions.is_subset(&ab.disclosure.exclusions));
+        }
+    }
+    assert_eq!(join_some_count, 168 * 168); // ∨ total: no fail-closed None in the sweep
 }
 
 #[test]
