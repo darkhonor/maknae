@@ -26,6 +26,13 @@ files = [
   "crates/maknae-dcs-core/src/label.rs",
   "crates/maknae-dcs-core/src/policy.rs",
   "crates/maknae-dcs-core/src/subject.rs",
+  # EPIC #33 Stage 1 vocabulary (security-critical lattice/registry logic):
+  # a broken controls join can derive a label less restrictive than its
+  # sources; a registry that fails OPEN on an unknown marking emits false
+  # assurance; ownership frames gate the whole releasability path.
+  "crates/maknae-dcs-core/src/controls.rs",
+  "crates/maknae-dcs-core/src/ownership.rs",
+  "crates/maknae-dcs-core/src/registry.rs",
 ]
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
@@ -47,6 +54,9 @@ ratchet_cohort = [
   "crates/maknae-dcs-core/src/label.rs",
   "crates/maknae-dcs-core/src/policy.rs",
   "crates/maknae-dcs-core/src/subject.rs",
+  "crates/maknae-dcs-core/src/controls.rs",
+  "crates/maknae-dcs-core/src/ownership.rs",
+  "crates/maknae-dcs-core/src/registry.rs",
 ]
 
 [project.ratchet_provenance]
