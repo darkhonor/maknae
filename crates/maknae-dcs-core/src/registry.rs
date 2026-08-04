@@ -114,7 +114,10 @@ impl CuiRegistry {
                 }
                 // CATEGORY's name is NOT the last field, so an empty name IS
                 // reachable (`CATEGORY\t\t<index>\t<slug>`) — guard it.
-                ["CATEGORY", name, index, slug] if !name.is_empty() => {
+                // name (field 2) and index (field 3) can be empty-but-present;
+                // slug is the last field, so a trailing empty slug is trimmed to
+                // an arity mismatch (→ `_` arm) — no slug guard needed.
+                ["CATEGORY", name, index, slug] if !name.is_empty() && !index.is_empty() => {
                     categories.insert(
                         (*name).to_string(),
                         CuiCategory {
@@ -127,8 +130,11 @@ impl CuiRegistry {
             }
         }
 
+        // a present-but-EMPTY provenance value is treated as missing (the
+        // "provenance-stamped" invariant requires real stamps — fail closed)
         let get = |k: &str| {
             prov.get(k)
+                .filter(|v| !v.is_empty())
                 .cloned()
                 .ok_or_else(|| RegistryError::MissingProvenance(k.to_string()))
         };
@@ -210,9 +216,25 @@ mod tests {
             CuiRegistry::from_snapshot_tsv("# source_url=u\n# noequals\n"),
             Err(RegistryError::MalformedRow(2))
         );
-        // empty-name CATEGORY row → MalformedRow (exercises the name guard)
+        // a present-but-EMPTY provenance value is rejected as missing
+        assert_eq!(
+            CuiRegistry::from_snapshot_tsv(
+                "# source_url=\n# extraction_date=d\n# current_as_of=c\n# content_hash=h\nLDC\tNOFORN\n"
+            ),
+            Err(RegistryError::MissingProvenance("source_url".into()))
+        );
+        // empty-name / empty-index / empty-slug CATEGORY rows → MalformedRow
+        // (each conjunct of the guard exercised)
         assert_eq!(
             CuiRegistry::from_snapshot_tsv(&format!("{prov}CATEGORY\t\tLegal\tslug\n")),
+            Err(RegistryError::MalformedRow(5))
+        );
+        assert_eq!(
+            CuiRegistry::from_snapshot_tsv(&format!("{prov}CATEGORY\tLegal Privilege\t\tslug\n")),
+            Err(RegistryError::MalformedRow(5))
+        );
+        assert_eq!(
+            CuiRegistry::from_snapshot_tsv(&format!("{prov}CATEGORY\tLegal Privilege\tLegal\t\n")),
             Err(RegistryError::MalformedRow(5))
         );
         // malformed data row (wrong field count) → MalformedRow at line 5
