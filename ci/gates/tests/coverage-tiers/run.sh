@@ -44,7 +44,7 @@ mk_json() { # mk_json <root> <file-rel> <covered0|1 per region line-start list..
   for spec in "$@"; do # spec = line:count
     local line="${spec%%:*}" cnt="${spec##*:}"
     [ "$first" -eq 0 ] && regs="$regs,"
-    regs="$regs[$line,1,$line,20,$cnt,0,0,0]"
+    regs="${regs}[$line,1,$line,20,$cnt,0,0,0]"
     first=0
   done
   cat >"$r/cov.json" <<EOF
