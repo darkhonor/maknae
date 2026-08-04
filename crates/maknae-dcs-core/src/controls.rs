@@ -66,8 +66,9 @@ impl Controls {
     /// `a ⊑ b`: per-chain rank(a) <= rank(b) AND non-chain a ⊆ b. Total boolean
     /// (v1-faithful: incomparable → false both directions, never a panic).
     pub fn le(&self, other: &Controls) -> bool {
-        for i in 0..CHAINS.len() {
-            if chain_rank_in(&self.0, i) > chain_rank_in(&other.0, i) {
+        for &(dominant, dominated) in &CHAINS {
+            if chain_rank(&self.0, dominant, dominated) > chain_rank(&other.0, dominant, dominated)
+            {
                 return false;
             }
         }
@@ -86,14 +87,15 @@ impl Controls {
                 raw.insert(*m);
             }
         }
-        for i in 0..CHAINS.len() {
-            let r = chain_rank_in(&self.0, i).max(chain_rank_in(&other.0, i));
-            match r {
+        for &(dominant, dominated) in &CHAINS {
+            match chain_rank(&self.0, dominant, dominated)
+                .max(chain_rank(&other.0, dominant, dominated))
+            {
                 2 => {
-                    raw.insert(CHAINS[i].0);
+                    raw.insert(dominant);
                 }
                 1 => {
-                    raw.insert(CHAINS[i].1);
+                    raw.insert(dominated);
                 }
                 _ => {}
             }
@@ -104,11 +106,14 @@ impl Controls {
 
 /// Rank of a chain within a raw set: 2 = dominant present, 1 = dominated
 /// present, 0 = absent.
-fn chain_rank_in(set: &BTreeSet<ControlMarking>, chain_idx: usize) -> usize {
-    let (d, s) = CHAINS[chain_idx];
-    if set.contains(&d) {
+fn chain_rank(
+    set: &BTreeSet<ControlMarking>,
+    dominant: ControlMarking,
+    dominated: ControlMarking,
+) -> usize {
+    if set.contains(&dominant) {
         2
-    } else if set.contains(&s) {
+    } else if set.contains(&dominated) {
         1
     } else {
         0
@@ -122,13 +127,13 @@ fn canonicalize(raw: BTreeSet<ControlMarking>) -> BTreeSet<ControlMarking> {
             out.insert(*m);
         }
     }
-    for i in 0..CHAINS.len() {
-        match chain_rank_in(&raw, i) {
+    for &(dominant, dominated) in &CHAINS {
+        match chain_rank(&raw, dominant, dominated) {
             2 => {
-                out.insert(CHAINS[i].0);
+                out.insert(dominant);
             }
             1 => {
-                out.insert(CHAINS[i].1);
+                out.insert(dominated);
             }
             _ => {}
         }
