@@ -142,5 +142,39 @@ else
   echo "neg-skip: [p2/artifact-inventory-witness] deferred to CI (needs cargo-auditable + rust-audit-info)"
 fi
 
+# --- Fixture E: coverage-tiers gate (ADR-0016) — unclassified file must FAIL.
+# Injection contract (both required vars + --injection; env-prefixed argv is
+# the pinned shape for this, the first env-prefixed fixture in this file).
+tmpE="$(mktemp -d)"
+mkdir -p "$tmpE/crates/x/src"
+printf 'pub fn a() -> u32 { 1 }\n' > "$tmpE/crates/x/src/core.rs"
+printf 'crates/x/src/core.rs\ncrates/x/src/rogue.rs\n' > "$tmpE/files.list"
+cat > "$tmpE/cov.json" <<EOF
+{"type":"llvm.coverage.json.export","version":"3.0.1","data":[{"functions":[
+ {"filenames":["$tmpE/crates/x/src/core.rs"],"regions":[[1,1,1,20,5,0,0,0]]}],"files":[]}]}
+EOF
+cat > "$tmpE/coverage-tiers.toml" <<'EOF'
+[universe]
+exclude = []
+[t1]
+floor_production_region = 95
+files = ["crates/x/src/core.rs"]
+mutants_crates = []
+[t2]
+floor_production_region = 90
+files = []
+[project]
+ratchet_floor = 0
+ratchet_cohort = []
+[project.ratchet_provenance]
+value = 0.0
+date = "2026-08-04"
+lane = "fixture"
+command = "fixture"
+EOF
+expect_reject "coverage-tiers/unclassified-file" \
+  env COVERAGE_TIERS_JSON="$tmpE/cov.json" COVERAGE_TIERS_FILELIST="$tmpE/files.list" \
+      "$here/coverage-tiers.sh" --root "$tmpE" --injection
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]
