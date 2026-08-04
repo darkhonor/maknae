@@ -636,6 +636,16 @@ chmod +x "$shimD/cargo" "$shimD/cargo-mutants"
 expect "live mode D: mutation-path name-oracle failure" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
   env PATH="$shimD:$PATH" "$gate" --root "$r" --mutants-all
 
+# ---------- collection-shape mode (codex P2) ---------------------------------
+r="$(newroot)"; mk_base "$r"
+cat >>"$r/coverage-tiers.toml" <<'EOF'
+[t3]
+path = "crates/x/src/aux.rs"
+why = "single table where array-of-tables expected"
+EOF
+expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of tables" nonzero -- \
+  env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" "$gate" --root "$r" --injection
+
 # ---------- mutation contract-shape modes (CR-impl C1) -----------------------
 r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
 expect "mutation: empty mutants_crates" "empty or missing" nonzero -- \

@@ -126,7 +126,16 @@ def main() -> int:
         elif len(set(lst)) != len(lst):
             fail(f"{nm} contains duplicate paths")
 
-    t3_entries = contract.get("t3", [])
+    def table_list(key: str) -> list:
+        """Codex P2: a [t3] (single table) or scalar where [[t3]] (array of
+        tables) is expected must FAIL:, never AttributeError."""
+        v = contract.get(key, [])
+        if not isinstance(v, list) or not all(isinstance(e, dict) for e in v):
+            fail(f"[[{key}]] must be an array of tables (got a malformed shape)")
+            return []
+        return v
+
+    t3_entries = table_list("t3")
     t3_files: dict[str, str] = {}
     for ent in t3_entries:
         pth = ent.get("path")
@@ -144,7 +153,7 @@ def main() -> int:
 
     # env_bound overrides (t1/t2 only; not tier memberships)
     overrides: dict[str, str] = {}
-    for ent in contract.get("env_bound_override", []):
+    for ent in table_list("env_bound_override"):
         pth = ent.get("path")
         eb = ent.get("env_bound")
         why = ent.get("why")
@@ -166,7 +175,7 @@ def main() -> int:
 
     # exceptions (not tier memberships; must resolve to a t1/t2 entry)
     exceptions = []
-    for ent in contract.get("exception", []):
+    for ent in table_list("exception"):
         pth, anchor, why = ent.get("path"), ent.get("anchor"), ent.get("why")
         end_anchor = ent.get("end_anchor")
         if not isinstance(pth, str) or not pth or not isinstance(anchor, str) or not anchor:
