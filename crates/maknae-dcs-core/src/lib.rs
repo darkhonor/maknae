@@ -20,7 +20,7 @@ pub use controls::{ControlMarking, Controls};
 pub use decide::{decide, Action, Decision, DenyReason, Purpose};
 pub use ownership::Ownership;
 pub use label::{
-    restrictive_dominates, validate_rel, Caveat, EligibleNations, RelValidationError,
+    restrictive_dominates, validate_rel, Caveat, Disclosure, EligibleNations, RelValidationError,
     Releasability, ResourceLabel,
 };
 pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};

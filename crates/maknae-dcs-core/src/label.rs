@@ -199,6 +199,116 @@ impl EligibleNations {
     }
 }
 
+/// Dual-relation disclosure (spec §2.2): the release relation (v1 semantics),
+/// an optional display relation (`display ⊇ release`), and NAF exclusions
+/// (#26 NOT AUTHORIZED FOR). Exclusion ENFORCEMENT at permits-time is Stage 2;
+/// this type lands the relations + their decomposed order/join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disclosure {
+    /// The release relation (who may RECEIVE a copy) — v1 releasability.
+    pub release: Releasability,
+    /// The display relation (who may VIEW). `None` means "display = release".
+    /// INVARIANT (validate_label, Stage 4): display ⊇ release.
+    pub display: Option<Releasability>,
+    /// NOT AUTHORIZED FOR (#26): nations excluded regardless of grant. Carried
+    /// + unioned on join in Stage 1; permits-time dominance is Stage 2.
+    pub exclusions: BTreeSet<String>,
+}
+
+impl Disclosure {
+    /// A single-owner base yields that owner as the eligibility origin; any
+    /// other cardinality FAILS CLOSED (deny-all). Stage 5 replaces this guard
+    /// with the real multi-owner union (plan Task 3 |base|≠1 rule).
+    fn origin_of(base: &BTreeSet<String>) -> Option<&str> {
+        if base.len() == 1 {
+            base.iter().next().map(|s| s.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn deny_all() -> EligibleNations {
+        EligibleNations::Set {
+            nations: BTreeSet::new(),
+            coalitions: BTreeSet::new(),
+        }
+    }
+
+    /// Eligible set for the RELEASE relation (who may receive a copy).
+    pub fn eligible_release(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
+        match Self::origin_of(base) {
+            Some(origin) => self.release.eligible(origin, spif),
+            None => Self::deny_all(),
+        }
+    }
+
+    /// Eligible set for the DISPLAY relation (who may view). `None` display
+    /// tracks release.
+    pub fn eligible_display(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
+        let rel = self.display.as_ref().unwrap_or(&self.release);
+        match Self::origin_of(base) {
+            Some(origin) => rel.eligible(origin, spif),
+            None => Self::deny_all(),
+        }
+    }
+
+    /// The `display ⊇ release` invariant (validate_label consults this).
+    pub fn display_covers_release(&self, base: &BTreeSet<String>, spif: &Spif) -> bool {
+        self.eligible_release(base, spif)
+            .is_subset_of(&self.eligible_display(base, spif))
+    }
+
+    /// `∨`: release ∩ release, display ∩ display, exclusions ∪. Ownership is
+    /// identical at the ResourceLabel call site, so one `base` suffices.
+    pub fn join(&self, other: &Disclosure, base: &BTreeSet<String>, spif: &Spif) -> Disclosure {
+        let origin = Self::origin_of(base);
+        let release = match origin {
+            Some(o) => Releasability::from_eligible(
+                &self
+                    .eligible_release(base, spif)
+                    .join(&other.eligible_release(base, spif)),
+                o,
+            ),
+            None => Releasability::Empty,
+        };
+        // display present in the result iff either operand carried an explicit
+        // display; otherwise it tracks release (None).
+        let display = if self.display.is_none() && other.display.is_none() {
+            None
+        } else {
+            match origin {
+                Some(o) => Some(Releasability::from_eligible(
+                    &self
+                        .eligible_display(base, spif)
+                        .join(&other.eligible_display(base, spif)),
+                    o,
+                )),
+                None => Some(Releasability::Empty),
+            }
+        };
+        let mut exclusions = self.exclusions.clone();
+        exclusions.extend(other.exclusions.iter().cloned());
+        Disclosure {
+            release,
+            display,
+            exclusions,
+        }
+    }
+
+    /// `⊑` (decomposed, spec §2.2): release-eligible(other) ⊆ release-eligible(self)
+    /// AND display-eligible(other) ⊆ display-eligible(self) AND exclusions(self)
+    /// ⊆ exclusions(other). Ownership identical at the call site → one base.
+    pub fn le(&self, other: &Disclosure, base: &BTreeSet<String>, spif: &Spif) -> bool {
+        other
+            .eligible_release(base, spif)
+            .is_subset_of(&self.eligible_release(base, spif))
+            && other
+                .eligible_display(base, spif)
+                .is_subset_of(&self.eligible_display(base, spif))
+            && self.exclusions.is_subset(&other.exclusions)
+    }
+}
+
 /// Ingest-time coalition validation (spec §6.3 anti-duplication). Two clauses:
 ///
 /// 1. Nation-vs-tetragraph — per `design/references/dcs-schema-migration.md`
@@ -532,6 +642,58 @@ mod tests {
         // unreachable from decide() — gate 3's precheck denies Indeterminate first
         assert!(restrictive_dominates(&set(&[]), &set(&[])));
         assert!(restrictive_dominates(&set(&["SI"]), &set(&[])));
+    }
+
+    #[test]
+    fn disclosure_dual_relation_join_and_exclusions() {
+        let spif = Spif::builder("US").levels(&["U", "S", "TS"]).build();
+        let base = set(&["USA"]);
+
+        // display None → display tracks release
+        let d = Disclosure {
+            release: Releasability::Grant(set(&["AUS"])),
+            display: None,
+            exclusions: BTreeSet::new(),
+        };
+        assert_eq!(d.eligible_release(&base, &spif), d.eligible_display(&base, &spif));
+        assert!(d.display_covers_release(&base, &spif));
+
+        // explicit display ⊇ release holds; display ⊂ release violates the invariant
+        let wide = Disclosure {
+            release: Releasability::Grant(set(&["AUS"])),
+            display: Some(Releasability::Grant(set(&["AUS", "KOR"]))),
+            exclusions: BTreeSet::new(),
+        };
+        assert!(wide.display_covers_release(&base, &spif));
+        let bad = Disclosure {
+            release: Releasability::Grant(set(&["AUS", "KOR"])),
+            display: Some(Releasability::Grant(set(&["AUS"]))),
+            exclusions: BTreeSet::new(),
+        };
+        assert!(!bad.display_covers_release(&base, &spif));
+
+        // join: release ∩ (AUS,KOR ∩ AUS,NZL = AUS), exclusions ∪
+        let a = Disclosure {
+            release: Releasability::Grant(set(&["AUS", "KOR"])),
+            display: None,
+            exclusions: set(&["DEU"]),
+        };
+        let b = Disclosure {
+            release: Releasability::Grant(set(&["AUS", "NZL"])),
+            display: None,
+            exclusions: set(&["FRA"]),
+        };
+        let j = a.join(&b, &base, &spif);
+        assert_eq!(j.release, Releasability::Grant(set(&["AUS"])));
+        assert_eq!(j.exclusions, set(&["DEU", "FRA"]));
+        assert!(a.le(&j, &base, &spif)); // a ⊑ a∨b
+
+        // |base| != 1 → deny-all (fail-closed)
+        let deny_all = EligibleNations::Set {
+            nations: BTreeSet::new(),
+            coalitions: BTreeSet::new(),
+        };
+        assert_eq!(d.eligible_release(&set(&["USA", "KOR"]), &spif), deny_all);
     }
 
     use crate::policy::{CategoryKind, Classification, PolicyId};
