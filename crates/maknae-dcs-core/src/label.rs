@@ -539,9 +539,24 @@ impl ResourceLabel {
         Some(levels_ok && categories_ok && disclosure_ok && controls_ok && caveats_ok && ntk_ok)
     }
 
-    /// Derivation-join `∨` = least-upper-bound = the MORE-restrictive combine:
-    /// max rank; ∪ categories per-tag; ∩ releasability re-canonicalized via
-    /// [`Releasability::from_eligible`]; ∪ caveats; compilation
+    /// Lattice-join `∨` = least-upper-bound = the MORE-restrictive combine.
+    ///
+    /// PRECISION (per lattice-math review): this operation is TOTAL over a
+    /// fixed policy / ownership / representable-NTK FRAME and PARTIAL ACROSS
+    /// frames. Cross-policy, cross-ownership, and cross-NTK inputs are not
+    /// elements of one lattice frame, so `∨` returns `None` there as a
+    /// DOMAIN-BOUNDARY refusal — NOT a validity check over an otherwise-valid
+    /// lattice point (mirroring v1's cross-origin refusal). This does not
+    /// threaten associativity, which is only claimed WITHIN a frame (§5 law
+    /// suite). VALIDITY refusals (exclusion pairs, §2.6 couplings) live in
+    /// `validate_label`/`derive`, never here — a validity-`None` inside a
+    /// binary `∨` is absorbing and WOULD break associativity. The per-axis
+    /// operations (`Controls::join`, `Disclosure::join`, releasability `∩`) are
+    /// unconditionally total — they never return `Option`.
+    ///
+    /// Combine rule: max rank; ∪ categories per-tag; ∩ releasability
+    /// re-canonicalized via [`Releasability::from_eligible`]; ∪ caveats;
+    /// compilation
     /// `(None, x) | (x, None) → x`, `(Some, Some)` → higher rank;
     /// need-to-know `(None, None) → None`, one `Some` → that `Some`, equal
     /// `Some`s → keep, DIFFERING `Some`s → `None` (fail closed — codex P1:
@@ -552,12 +567,14 @@ impl ResourceLabel {
     /// is deferred exactly like cross-origin — set-valued NTK is the
     /// recorded follow-up).
     ///
-    /// `None` (fail closed) if policies differ, origins differ (cross-origin
-    /// derivation deferred), either origin is malformed, any present rank is
-    /// unknown, or any category tag in either label is unregistered,
-    /// `Permissive`, or empty-valued (dropping an empty-valued tag would
-    /// derive a Permit from a label `decide()` denies — the degenerate state
-    /// must poison the join, never be normalized).
+    /// `None` (the frame-boundary refusals above) if policies differ,
+    /// ownership frames differ (cross-ownership derivation deferred), ownership
+    /// is malformed, a present NTK differs, any present rank is unknown, or any
+    /// category tag in either label is unregistered, `Permissive`, or
+    /// empty-valued (dropping an empty-valued tag would derive a Permit from a
+    /// label `decide()` denies — the degenerate state must poison the join,
+    /// never be normalized). All are DOMAIN/frame conditions, not validity
+    /// checks over a valid same-frame pair.
     pub fn join(&self, other: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
         if self.classification.policy != other.classification.policy
             // identical ownership FRAME required — the ONLY ownership-frame
@@ -651,10 +668,14 @@ pub fn validate_label(label: ResourceLabel, spif: &Spif) -> Option<ResourceLabel
 }
 
 /// The OPERATIONAL derivation step: `derive = validate_label ∘ ∨`. Returns the
-/// derived, validated label, or `None` fail-closed. ALL fail-closed refusals
-/// live here — the cross-ownership frame boundary (via `join`) and the
-/// Stage-1 validity invariants (via `validate_label`); Stages 2/4 add exclusion
-/// + coupling rejection. `decide()` consumes only `derive` output.
+/// derived, validated label, or `None` fail-closed. Every fail-closed refusal
+/// is SURFACED here, but they originate in two distinct places (precision per
+/// lattice-math review): the FRAME-boundary `None` (cross-policy / ownership /
+/// NTK, malformed/unregistered inputs) originates in `join` as a domain-of-
+/// definition refusal and is merely propagated through `derive`; the VALIDITY
+/// `None` (Stage-1 `display ⊇ release`; Stages 2/4 exclusion pairs + §2.6
+/// couplings) originates in `validate_label`. `decide()` consumes only `derive`
+/// output.
 pub fn derive(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
     validate_label(a.join(b, spif)?, spif)
 }

@@ -60,15 +60,26 @@ stages. Status stays **Proposed** pending the full Day-1 slate.
   subsumes v1 releasability; `display ⊇ release`; NAF exclusions (#26) carried
   Day-1, enforced Stage 2.
 - **Controls product-of-chains lattice (#27):** closed `ControlMarking` enum +
-  `Controls` (four 3-element precedence chains × powerset). The join is TOTAL,
-  ASSOCIATIVE, and **validity-agnostic** — mutual-exclusion rejection lives in
-  `validate_label`, never in `∨`.
-- **Total-∨ / partial-derive split (the hard-won result):** the lattice `∨` is
-  a pure algebraic semilattice (never returns `None`, never validity-checks),
-  proven total/associative over a FIXED-ownership sublattice; `derive =
-  validate_label ∘ ∨` is the partial operational step where every fail-closed
-  `None` lives (cross-ownership frame, cross-NTK, and — from Stages 2/4 —
-  exclusion pairs / couplings). `decide()` consumes only `derive`.
+  `Controls` (four 3-element precedence chains × powerset). This AXIS operation
+  (`Controls::join`) is unconditionally total, associative, and
+  **validity-agnostic** — it never returns `Option`; mutual-exclusion rejection
+  lives in `validate_label`, never in `∨`.
+- **Total-∨ / partial-derive split (the hard-won result) — stated precisely for
+  assessors (per lattice-math review):** the per-axis join operations
+  (`Controls::join`, `Disclosure::join`, releasability `∩`) are unconditionally
+  total. The composite `ResourceLabel::join` (`∨`) is **total over a fixed
+  policy / ownership / representable-NTK FRAME and partial across frames**: it
+  returns `None` for cross-policy / cross-ownership / cross-NTK (and
+  malformed/unregistered) inputs, which are not elements of one lattice frame —
+  a DOMAIN-of-definition refusal, NOT a validity check over a valid same-frame
+  pair (mirroring v1's cross-origin refusal). This does not threaten
+  associativity, which §5's law suite proves WITHIN a frame. The distinct
+  hard-won result: **VALIDITY** refusals (exclusion pairs, §2.6 couplings) must
+  live in `validate_label`/`derive`, never inside `∨` — a validity-`None`
+  inside a binary `∨` is absorbing and would break associativity; a
+  domain-boundary `None` does not. `derive = validate_label ∘ ∨` is where both
+  kinds of `None` SURFACE (the frame `None` originating in `join`, the validity
+  `None` in `validate_label`); `decide()` consumes only `derive`.
 - **Decision-with-obligations (#27):** `Decision::PermitWithObligations`;
   closed `Obligation` enum + `⊑_obl` refinement order (type shell Day-1;
   emission Stage 3, when `Caveat` retires into `Obligation`).

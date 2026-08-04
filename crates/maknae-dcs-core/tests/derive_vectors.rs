@@ -1,9 +1,13 @@
 //! `derive` fail-closed targeted vectors (spec §5): the partial derive-guard
 //! cases proven as VECTORS, not sweep axes — exactly as v1 sweeps single-origin
-//! and treats cross-origin `None` as targeted vectors. The lattice `∨` is total
-//! and validity-agnostic; `derive = validate_label ∘ ∨` is where fail-closed
-//! `None` lives (cross-ownership frame, cross-NTK, and — from Stage 2 —
-//! exclusion pairs / couplings).
+//! and treats cross-origin `None` as targeted vectors.
+//!
+//! PRECISION (per lattice-math review): `∨` is total over a fixed policy /
+//! ownership / NTK frame and validity-agnostic. The cross-ownership and
+//! cross-NTK `None`s below are FRAME-boundary refusals that originate in `join`
+//! (those inputs are outside one lattice frame) and are surfaced through
+//! `derive`; the Stage-2 exclusion/coupling `None`s will originate in
+//! `validate_label`. `derive = validate_label ∘ ∨` is where both SURFACE.
 use maknae_dcs_core::{
     derive, Classification, ControlMarking, Controls, Disclosure, Ownership, PolicyId,
     Releasability, ResourceLabel, Spif,
