@@ -1,6 +1,6 @@
 # ADR-0016: Risk-tiered test coverage — objective, fail-closed evidence that security-critical code is tested
 
-- **Status:** Proposed (implemented; awaiting operator ratification at merge)
+- **Status:** Accepted (operator-ratified 2026-08-04)
 - **Date:** 2026-08-04
 - **Deciders:** Alex Ackerman (operator), Byeori (Claude Fable 5, pair)
 - **Addresses:** issue #24 (risk-tiered coverage policy), operator-directed
