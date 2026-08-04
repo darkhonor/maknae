@@ -60,11 +60,14 @@ ratchet_cohort = [
 ]
 
 [project.ratchet_provenance]
-# Authoritative CI-lane measurement (adoption PR #37 run 30872039077);
-# identical to the dev-host measurement — no cfg(target_os) code exists yet.
-value = 97.65
-date = "2026-08-04"
-lane = "ubuntu-latest (CI, authoritative; darwin dev-host measured identically)"
+# Re-baselined for EPIC #33 Stage 1: cohort extended by ownership.rs /
+# controls.rs / registry.rs (deliberate, ADR-0016 §4). floor stays 97 =
+# floor(97.88). CI (ubuntu) remains authoritative; this value is the clean
+# dev-host worktree measurement (the in-place dev target dir can report low
+# from mixed cargo-test/llvm-cov runs — measure in a fresh checkout).
+value = 97.88
+date = "2026-08-05"
+lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merge"
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
 
 # ---- T3: report-only, per-file justification (never a blanket glob) --------
