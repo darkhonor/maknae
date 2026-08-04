@@ -6,7 +6,7 @@
 //! deny through gate 4 (releasability) instead of gate 1 (policy).
 
 use maknae_dcs_core::{
-    decide, validate_rel, Action, Affiliation, CategoryKind, Caveat, Classification, Decision,
+    decide, validate_rel, Action, CategoryKind, Caveat, Classification, Decision, Employment,
     DenyReason, PolicyId, Purpose, RelValidationError, Releasability, ResourceLabel, Spif, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,7 +54,8 @@ fn subject(policy: &str, nationality: &str) -> Subject {
         nationality: nationality.into(),
         read_ins: BTreeMap::new(),
         coalition_memberships: BTreeSet::new(),
-        affiliation: Affiliation::UsGovernment,
+        employment: Employment::FederalCivilian,
+        list_memberships: BTreeSet::new(),
         purposes: BTreeSet::new(),
     }
 }
@@ -153,7 +154,8 @@ fn noforn_austeo_mirror() {
         nationality: "USA".into(),
         read_ins: BTreeMap::new(),
         coalition_memberships: BTreeSet::new(),
-        affiliation: Affiliation::UsGovernment,
+        employment: Employment::FederalCivilian,
+        list_memberships: BTreeSet::new(),
         purposes: BTreeSet::new(),
     };
     assert_eq!(
@@ -186,27 +188,27 @@ fn fedcon_vs_fed_only() {
         r.categories = [("LDC".to_string(), set(controls))].into_iter().collect();
         r
     };
-    let mk_subj = |aff: Affiliation| {
+    let mk_subj = |emp: Employment| {
         let mut s = subject("US", "USA");
-        s.affiliation = aff;
+        s.employment = emp;
         s
     };
     let fedcon = mk(&["FEDCON"]);
     assert_eq!(
-        read(&mk_subj(Affiliation::ClearedContractor), &fedcon, &spif),
+        read(&mk_subj(Employment::Contractor), &fedcon, &spif),
         Decision::Permit
     );
     let fed_only = mk(&["FED_ONLY"]);
     assert_eq!(
-        read(&mk_subj(Affiliation::ClearedContractor), &fed_only, &spif),
+        read(&mk_subj(Employment::Contractor), &fed_only, &spif),
         Decision::Deny(DenyReason::AffiliationControl)
     );
     assert_eq!(
-        read(&mk_subj(Affiliation::UsGovernment), &fed_only, &spif),
+        read(&mk_subj(Employment::FederalCivilian), &fed_only, &spif),
         Decision::Permit
     );
     assert_eq!(
-        read(&mk_subj(Affiliation::Foreign), &fed_only, &spif),
+        read(&mk_subj(Employment::Foreign), &fed_only, &spif),
         Decision::Deny(DenyReason::AffiliationControl)
     );
 }

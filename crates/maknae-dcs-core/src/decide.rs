@@ -159,7 +159,7 @@ pub fn decide(
                 }
             }
             Some(CategoryKind::RestrictivePredicate) => {
-                if !affiliation_satisfies(required, &subject.affiliation) {
+                if !affiliation_satisfies(required, &subject.employment.to_affiliation()) {
                     return Decision::Deny(DenyReason::AffiliationControl);
                 }
             }
@@ -204,7 +204,7 @@ mod tests {
     use super::*;
     use crate::label::Releasability;
     use crate::policy::{Classification, PolicyId};
-    use crate::subject::Affiliation;
+    use crate::subject::Employment;
     use std::collections::BTreeSet;
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
@@ -272,7 +272,8 @@ mod tests {
                 .into_iter()
                 .collect(),
             coalition_memberships: BTreeSet::new(),
-            affiliation: Affiliation::UsGovernment,
+            employment: Employment::FederalCivilian,
+            list_memberships: BTreeSet::new(),
             purposes: set(&["OPLAN"]),
         }
     }
@@ -382,7 +383,7 @@ mod tests {
             .into_iter()
             .collect();
         let mut s = mk_subject("SECRET");
-        s.affiliation = Affiliation::ClearedContractor;
+        s.employment = Employment::Contractor;
         assert_eq!(
             run(&s, &r, Action::Read),
             Decision::Deny(DenyReason::AffiliationControl)
@@ -499,9 +500,9 @@ mod tests {
 
     #[test]
     fn no_admin_bypass() {
-        // UsGovernment affiliation, insufficient clearance — affiliation grants nothing
+        // Federal employment, insufficient clearance — affiliation grants nothing
         let s = mk_subject("UNCLASSIFIED");
-        assert_eq!(s.affiliation, Affiliation::UsGovernment);
+        assert_eq!(s.employment, Employment::FederalCivilian);
         assert_eq!(
             run(&s, &mk_resource("SECRET"), Action::Read),
             Decision::Deny(DenyReason::Level)

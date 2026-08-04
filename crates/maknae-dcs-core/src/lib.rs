@@ -27,4 +27,4 @@ pub use label::{
     Releasability, ResourceLabel,
 };
 pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};
-pub use subject::{affiliation_satisfies, Affiliation, Subject};
+pub use subject::{affiliation_satisfies, Affiliation, Employment, Subject};

@@ -14,7 +14,7 @@
 //! not the stride, are the guarantee).
 
 use maknae_dcs_core::{
-    decide, Action, Affiliation, CategoryKind, Caveat, Classification, Decision, PolicyId, Purpose,
+    decide, Action, CategoryKind, Caveat, Classification, Decision, Employment, PolicyId, Purpose,
     Releasability, ResourceLabel, Spif, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -253,7 +253,8 @@ fn dominance_monotonicity() {
                         Some(vals) => [("SCI".to_string(), set(vals))].into_iter().collect(),
                     },
                     coalition_memberships: BTreeSet::new(),
-                    affiliation: Affiliation::UsGovernment,
+                    employment: Employment::FederalCivilian,
+                    list_memberships: BTreeSet::new(),
                     purposes: purposes.iter().map(|s| s.to_string()).collect(),
                 });
             }
@@ -266,7 +267,8 @@ fn dominance_monotonicity() {
             .into_iter()
             .collect(),
         coalition_memberships: BTreeSet::new(),
-        affiliation: Affiliation::Foreign,
+        employment: Employment::Foreign,
+        list_memberships: BTreeSet::new(),
         purposes: set(&["OPLAN"]),
     });
     assert_eq!(panel.len(), 13);
