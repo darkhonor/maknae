@@ -17,3 +17,17 @@ fn iso3166_table_compiled_and_nonempty() {
     assert!(registry::is_iso3166("USA"));
     assert!(!registry::is_iso3166("ZZZ"));
 }
+
+#[test]
+fn iso3166_recognizes_real_codes_rejects_fake() {
+    for c in [
+        "USA", "GBR", "CAN", "AUS", "NZL", "JPN", "KOR", "PHL", "MYS", "IND", "FRA", "DEU", "ZAF",
+        "TUR",
+    ] {
+        assert!(
+            maknae_dcs_core::registry::is_iso3166(c),
+            "{c} should be ISO-3166"
+        );
+    }
+    assert!(!maknae_dcs_core::registry::is_iso3166("XYZ")); // structurally a trigraph, not a real country
+}
