@@ -3,7 +3,8 @@
 //! `decide` is pure, total, and side-effect-free. It returns `Permit` only if
 //! EVERY gate passes; any failure or indeterminate input → `Deny`. There is no
 //! role or administrative bypass: a read permit derives only from clearance ∧
-//! categories ∧ nationality/coalition ∧ purpose ∧ action.
+//! categories ∧ nationality ∧ purpose ∧ action (releasability is decided by
+//! nationality alone under #26 — the coalition-credential arm is removed).
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
 use crate::ownership::Ownership;
@@ -109,7 +110,8 @@ pub enum DenyReason {
 ///    `Option`; unknown → `Indeterminate`, never a mislabeled `Level`.
 /// 3. Category gates — per-tag dispatch on the SPIF-declared kind; empty
 ///    required-sets and unknown/Permissive kinds → `Indeterminate`.
-/// 4. Releasability — origin-validated, two-namespace eligibility.
+/// 4. Releasability — origin-validated, single nation-namespace eligibility
+///    (nationality ∈ resolved ∖ exclusions); two-locus with `validate_label`.
 /// 5. Action — `DisplayOnly` blocks `Export` (Read/Display permitted at MVP;
 ///    recorded open question for LLM-endpoint principals).
 /// 6. Need-to-know — exact token match when the label demands one.

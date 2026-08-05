@@ -92,6 +92,22 @@ fn owner_is_never_excluded_permits() {
     );
 }
 
+#[test]
+fn public_release_permits_any_nationality() {
+    // legibility (+ the Universe arm of subtract_exclusions, defended explicitly):
+    // a REL ALL/Public release with NO NAF permits any nationality through decide().
+    let mut r = mk_owned("USA");
+    r.disclosure.release = Releasability::Public;
+    assert_eq!(
+        decide(&sub("ZAF"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+    assert_eq!(
+        decide(&sub("JPN"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+}
+
 // --- Task 12: AuditRecord — pure return, classified-coalition non-disclosure. ---
 
 #[test]

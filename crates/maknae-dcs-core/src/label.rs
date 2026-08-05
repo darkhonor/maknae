@@ -385,11 +385,14 @@ pub fn validate_rel(
                         covered: (*tetra).clone(),
                     });
                 }
-            } else if let Some((_, other_expansion)) =
-                decomposable.iter().find(|(t, _)| *t == member)
-            {
-                // Clause 2 (Maknae-local): expansions overlap beyond the origin.
-                if !expansion.is_disjoint(other_expansion) {
+            } else if let TetraExpansion::Nations(other) = spif.expand_tetra(member) {
+                // Clause 2 (Maknae-local): `member` is another listed coalition;
+                // if its ORIGIN-STRIPPED expansion overlaps this tetra's, they
+                // are duplicative. Recompute the member's expansion directly (not
+                // via a lookup keyed on `member`) so the origin-exemption is the
+                // load-bearing, mutation-testable operation.
+                let other: BTreeSet<String> = other.into_iter().filter(|m| *m != origin).collect();
+                if !expansion.is_disjoint(&other) {
                     return Err(RelValidationError::DuplicativeTetragraph {
                         token: member.clone(),
                         covered: (*tetra).clone(),
