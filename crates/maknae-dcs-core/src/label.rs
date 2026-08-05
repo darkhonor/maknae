@@ -1,5 +1,5 @@
-//! Resource labels, releasability (nation/coalition eligible sets), caveats,
-//! and the label lattice: restriction-order `⊑` and derivation-join `∨`.
+//! Resource labels, releasability (a single resolved nation eligible set),
+//! caveats, and the label lattice: restriction-order `⊑` and derivation-join `∨`.
 //!
 //! Releasability orientation (ADR-0008 §2.4): restriction order — `∨` is the
 //! least-upper-bound, the MORE-restrictive combine. `⊤` (most restrictive) is
@@ -7,11 +7,13 @@
 //! restrictive, the join identity) is `REL ALL`/public. The origin nation is
 //! always a member of any non-empty REL set; an ABSENT REL marking computes to
 //! `REL {origin}` (NOFORN-equivalent), never to ⊥. Join on releasability is
-//! component-wise set INTERSECTION of eligible nations and eligible coalitions.
+//! set INTERSECTION of the resolved eligible nations (#26: coalition tetragraphs
+//! decompose to member nations at expansion time — a single nation namespace).
 
 use crate::controls::Controls;
 use crate::ownership::Ownership;
 use crate::policy::{is_trigraph, Spif, TetraExpansion};
+use crate::registry;
 use std::collections::BTreeSet;
 
 /// The releasability marking as originated (three explicit states + absence).
@@ -29,21 +31,21 @@ pub enum Releasability {
     Public,
 }
 
-/// The expanded eligibility of a releasability marking. The nation and
-/// coalition namespaces are STRUCTURALLY separate: a subject's coalition
-/// assertions are matched only against `coalitions`, so asserting a nation
-/// trigraph (even the origin) as a coalition membership grants nothing.
+/// The expanded eligibility of a releasability marking: a SINGLE nation
+/// namespace (#26 expand-or-deny). Coalition tetragraphs are decomposed to their
+/// member nations at expansion time, so there is no separate coalition-
+/// credential axis — a subject is eligible iff its nationality is in the
+/// resolved nation set. A subject's coalition assertions are never consulted
+/// (the coalition-credential arm is removed); membership is decided by
+/// nationality alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EligibleNations {
     /// `⊥` — public, everyone eligible.
     Universe,
-    /// Finite eligibility; both fields empty = deny-all = `⊤`.
+    /// Finite eligibility; empty set = deny-all = `⊤`.
     Set {
         /// Nation trigraphs, matched against `Subject::nationality`.
         nations: BTreeSet<String>,
-        /// Registered non-decomposable coalition tokens, matched against
-        /// `Subject::coalition_memberships`.
-        coalitions: BTreeSet<String>,
     },
 }
 
@@ -59,59 +61,73 @@ pub enum RelValidationError {
     UnknownToken(String),
 }
 
+/// Why `validate_label` rejects a label at ingest (#26 two-locus enforcement,
+/// part 1). Existence-agnostic: a variant names the failing DIMENSION, never a
+/// specific token/coalition, so the refusal discloses no membership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LabelInvalidity {
+    /// A releasability or exclusion token outside the encoded world view — a
+    /// trigraph that is not an ISO-3166 nation, or a non-trigraph that is not a
+    /// registered coalition (maps to `DenyReason::InvalidElement`).
+    Element,
+    /// A structurally malformed label (maps to `DenyReason::InvalidLabel`):
+    /// - an owner/co-owner appears in the NAF exclusion set (spec §6 — the owner
+    ///   is never excluded); or
+    /// - a NAF exclusion accompanies a `Public`/`Empty`/`NoMarking` release (DoDM
+    ///   §e: a dissemination restriction is for classified, NAMED recipients, not
+    ///   an all/none/origin marking); or
+    /// - `display ⊉ release` (the dual-relation invariant).
+    Label,
+}
+
 impl Releasability {
-    /// Expand to the canonical eligible sets for a given origin + SPIF.
+    /// Expand to the canonical resolved nation set for a given origin + SPIF.
     ///
-    /// Trigraph-shaped tokens → nations; decomposable tetragraphs → their
-    /// member nations; registered non-decomposable tokens → coalitions;
-    /// unknown non-trigraph tokens → DROPPED (grant nothing — fail closed).
-    /// The origin is unioned into nations for every non-`Empty` finite form.
+    /// Trigraph-shaped tokens → nations; registered coalition tetragraphs →
+    /// their member nations (in-memory expand-or-deny, #26); unknown non-trigraph
+    /// tokens → DROPPED (grant nothing — fail closed). The origin is unioned into
+    /// nations for every non-`Empty` finite form.
     pub fn eligible(&self, origin: &str, spif: &Spif) -> EligibleNations {
         match self {
             Releasability::Public => EligibleNations::Universe,
             Releasability::Empty => EligibleNations::Set {
                 nations: BTreeSet::new(),
-                coalitions: BTreeSet::new(),
             },
             Releasability::NoMarking => EligibleNations::Set {
                 nations: [origin.to_string()].into_iter().collect(),
-                coalitions: BTreeSet::new(),
             },
             Releasability::Grant(tokens) => {
                 let mut nations: BTreeSet<String> = BTreeSet::new();
-                let mut coalitions: BTreeSet<String> = BTreeSet::new();
                 for token in tokens {
                     if is_trigraph(token) {
                         nations.insert(token.clone());
                     } else {
                         match spif.expand_tetra(token) {
-                            // belt-and-braces: the builder already filters
-                            // members to trigraphs; re-filter here so a
-                            // malformed expansion can never enter the nations
-                            // namespace and widen through the join round-trip
+                            // Coalitions decompose to member nations (#26
+                            // expand-or-deny). Re-filter to trigraphs as
+                            // belt-and-braces so a malformed expansion can never
+                            // enter the namespace and widen through the join
+                            // round-trip (build.rs also guarantees this at
+                            // build time). An Unknown token is DROPPED here —
+                            // grants nothing — and the Unknown→Deny is enforced
+                            // at both loci (validate_label + gate-4), never
+                            // silently in `eligible`.
                             TetraExpansion::Nations(members) => {
                                 nations.extend(members.into_iter().filter(|m| is_trigraph(m)));
                             }
-                            TetraExpansion::NonDecomposable => {
-                                coalitions.insert(token.clone());
-                            }
-                            TetraExpansion::Unknown => {} // dropped — grants nothing
+                            TetraExpansion::Unknown => {}
                         }
                     }
                 }
                 nations.insert(origin.to_string());
-                EligibleNations::Set {
-                    nations,
-                    coalitions,
-                }
+                EligibleNations::Set { nations }
             }
         }
     }
 
     /// Canonicalize an eligible set back to the unique `Releasability` form:
-    /// `Universe → Public`; both-∅ → `Empty`; nations `== {origin}` with no
-    /// coalitions → `NoMarking`; else `Grant((nations ∖ {origin}) ∪ coalitions)`
-    /// — guaranteed non-empty.
+    /// `Universe → Public`; ∅ → `Empty`; nations `== {origin}` → `NoMarking`;
+    /// else `Grant(nations ∖ {origin})` — guaranteed non-empty.
     ///
     /// Precondition: `e` was produced by [`Releasability::eligible`] or
     /// [`EligibleNations::join`] with the same `origin` (every non-empty such
@@ -123,11 +139,8 @@ impl Releasability {
     pub fn from_eligible(e: &EligibleNations, origin: &str) -> Releasability {
         match e {
             EligibleNations::Universe => Releasability::Public,
-            EligibleNations::Set {
-                nations,
-                coalitions,
-            } => {
-                if nations.is_empty() && coalitions.is_empty() {
+            EligibleNations::Set { nations } => {
+                if nations.is_empty() {
                     return Releasability::Empty;
                 }
                 if !nations.contains(origin) {
@@ -136,7 +149,6 @@ impl Releasability {
                 }
                 let mut grant: BTreeSet<String> = nations.clone();
                 grant.remove(origin);
-                grant.extend(coalitions.iter().cloned());
                 if grant.is_empty() {
                     Releasability::NoMarking
                 } else {
@@ -148,55 +160,38 @@ impl Releasability {
 }
 
 impl EligibleNations {
-    /// Whether a subject with this nationality and these coalition assertions
-    /// is eligible. Coalition assertions are matched ONLY against the
-    /// coalitions field — the namespaces never cross.
-    pub fn permits(&self, nationality: &str, subject_coalitions: &BTreeSet<String>) -> bool {
+    /// Whether a subject with this nationality is eligible. Decided by
+    /// nationality alone (#26): coalition tetragraphs were already decomposed to
+    /// member nations at expansion time, so a subject's asserted coalition
+    /// memberships are NOT consulted — the credential arm is removed.
+    pub fn permits(&self, nationality: &str) -> bool {
         match self {
             EligibleNations::Universe => true,
-            EligibleNations::Set {
-                nations,
-                coalitions,
-            } => nations.contains(nationality) || !subject_coalitions.is_disjoint(coalitions),
+            EligibleNations::Set { nations } => nations.contains(nationality),
         }
     }
 
-    /// `∨` on releasability = component-wise intersection (`Universe ∩ x = x`).
+    /// `∨` on releasability = set intersection (`Universe ∩ x = x`).
     pub fn join(&self, other: &EligibleNations) -> EligibleNations {
         match (self, other) {
             (EligibleNations::Universe, x) | (x, EligibleNations::Universe) => x.clone(),
-            (
+            (EligibleNations::Set { nations: n1 }, EligibleNations::Set { nations: n2 }) => {
                 EligibleNations::Set {
-                    nations: n1,
-                    coalitions: c1,
-                },
-                EligibleNations::Set {
-                    nations: n2,
-                    coalitions: c2,
-                },
-            ) => EligibleNations::Set {
-                nations: n1.intersection(n2).cloned().collect(),
-                coalitions: c1.intersection(c2).cloned().collect(),
-            },
+                    nations: n1.intersection(n2).cloned().collect(),
+                }
+            }
         }
     }
 
-    /// `X ⊆ Universe` always; `Universe ⊆ Set` never; `Set ⊆ Set` = both
-    /// fields subset.
+    /// `X ⊆ Universe` always; `Universe ⊆ Set` never; `Set ⊆ Set` = nations
+    /// subset.
     pub fn is_subset_of(&self, other: &EligibleNations) -> bool {
         match (self, other) {
             (_, EligibleNations::Universe) => true,
             (EligibleNations::Universe, EligibleNations::Set { .. }) => false,
-            (
-                EligibleNations::Set {
-                    nations: n1,
-                    coalitions: c1,
-                },
-                EligibleNations::Set {
-                    nations: n2,
-                    coalitions: c2,
-                },
-            ) => n1.is_subset(n2) && c1.is_subset(c2),
+            (EligibleNations::Set { nations: n1 }, EligibleNations::Set { nations: n2 }) => {
+                n1.is_subset(n2)
+            }
         }
     }
 }
@@ -232,25 +227,45 @@ impl Disclosure {
     fn deny_all() -> EligibleNations {
         EligibleNations::Set {
             nations: BTreeSet::new(),
-            coalitions: BTreeSet::new(),
         }
     }
 
-    /// Eligible set for the RELEASE relation (who may receive a copy).
+    /// Subtract the NAF exclusions (#26) from a resolved eligible set. Applied
+    /// to the RELEASE relation only. A `Universe` (`REL ALL`/Public) set is
+    /// returned unchanged: a NAF on a `Public`/`Empty`/`NoMarking` release is an
+    /// `InvalidLabel`, rejected at BOTH loci (`validate_label` + gate-4) and
+    /// asserted unreachable in the law universe, so this never sees a non-empty
+    /// exclusion set over `Universe`.
+    fn subtract_exclusions(&self, e: EligibleNations) -> EligibleNations {
+        match e {
+            EligibleNations::Universe => EligibleNations::Universe,
+            EligibleNations::Set { mut nations } => {
+                nations.retain(|n| !self.exclusions.contains(n));
+                EligibleNations::Set { nations }
+            }
+        }
+    }
+
+    /// Eligible set for the RELEASE relation (who may receive a copy), with the
+    /// NAF exclusions subtracted (#26 expand-or-deny: nationality ∈ resolved ∖ X).
     pub fn eligible_release(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
         match Self::origin_of(base) {
-            Some(origin) => self.release.eligible(origin, spif),
+            Some(origin) => self.subtract_exclusions(self.release.eligible(origin, spif)),
             None => Self::deny_all(),
         }
     }
 
-    /// Eligible set for the DISPLAY relation (who may view). `None` display
-    /// tracks release.
+    /// Eligible set for the DISPLAY relation (who may view). A `None` display
+    /// tracks the RELEASE relation — INCLUDING its NAF subtraction (a copy you
+    /// cannot receive you cannot view). An EXPLICIT display grant is untouched by
+    /// release-side NAF (display-side exclusions are #27, out of #26 scope).
     pub fn eligible_display(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
-        let rel = self.display.as_ref().unwrap_or(&self.release);
-        match Self::origin_of(base) {
-            Some(origin) => rel.eligible(origin, spif),
-            None => Self::deny_all(),
+        match &self.display {
+            None => self.eligible_release(base, spif),
+            Some(d) => match Self::origin_of(base) {
+                Some(origin) => d.eligible(origin, spif),
+                None => Self::deny_all(),
+            },
         }
     }
 
@@ -260,8 +275,14 @@ impl Disclosure {
             .is_subset_of(&self.eligible_display(base, spif))
     }
 
-    /// `∨`: release ∩ release, display ∩ display, exclusions ∪. Ownership is
-    /// identical at the ResourceLabel call site, so one `base` suffices.
+    /// `∨`: release ∩ release, display ∩ display. Ownership is identical at the
+    /// ResourceLabel call site, so one `base` suffices.
+    ///
+    /// The NAF exclusions are NO LONGER a lattice axis (#26): `eligible_release`
+    /// bakes the subtraction into each operand's RESOLVED set BEFORE the `∩`, so
+    /// the joined `release` already omits every excluded nation. The result
+    /// therefore carries an EMPTY `exclusions` field — the exclusion is consumed
+    /// into the (narrower) release grant, not re-carried as a separate axis.
     pub fn join(&self, other: &Disclosure, base: &BTreeSet<String>, spif: &Spif) -> Disclosure {
         let origin = Self::origin_of(base);
         let release = match origin {
@@ -288,18 +309,19 @@ impl Disclosure {
                 None => Some(Releasability::Empty),
             }
         };
-        let mut exclusions = self.exclusions.clone();
-        exclusions.extend(other.exclusions.iter().cloned());
         Disclosure {
             release,
             display,
-            exclusions,
+            exclusions: BTreeSet::new(),
         }
     }
 
     /// `⊑` (decomposed, spec §2.2): release-eligible(other) ⊆ release-eligible(self)
-    /// AND display-eligible(other) ⊆ display-eligible(self) AND exclusions(self)
-    /// ⊆ exclusions(other). Ownership identical at the call site → one base.
+    /// AND display-eligible(other) ⊆ display-eligible(self). The exclusions are
+    /// consumed by `eligible_release`'s subtraction (#26) — they are no longer a
+    /// separate lattice axis, so two disclosures with equal RESOLVED release/
+    /// display sets are `⊑` both ways regardless of their raw exclusion markings.
+    /// Ownership identical at the call site → one base.
     pub fn le(&self, other: &Disclosure, base: &BTreeSet<String>, spif: &Spif) -> bool {
         other
             .eligible_release(base, spif)
@@ -307,7 +329,6 @@ impl Disclosure {
             && other
                 .eligible_display(base, spif)
                 .is_subset_of(&self.eligible_display(base, spif))
-            && self.exclusions.is_subset(&other.exclusions)
     }
 }
 
@@ -364,11 +385,14 @@ pub fn validate_rel(
                         covered: (*tetra).clone(),
                     });
                 }
-            } else if let Some((_, other_expansion)) =
-                decomposable.iter().find(|(t, _)| *t == member)
-            {
-                // Clause 2 (Maknae-local): expansions overlap beyond the origin.
-                if !expansion.is_disjoint(other_expansion) {
+            } else if let TetraExpansion::Nations(other) = spif.expand_tetra(member) {
+                // Clause 2 (Maknae-local): `member` is another listed coalition;
+                // if its ORIGIN-STRIPPED expansion overlaps this tetra's, they
+                // are duplicative. Recompute the member's expansion directly (not
+                // via a lookup keyed on `member`) so the origin-exemption is the
+                // load-bearing, mutation-testable operation.
+                let other: BTreeSet<String> = other.into_iter().filter(|m| *m != origin).collect();
+                if !expansion.is_disjoint(&other) {
                     return Err(RelValidationError::DuplicativeTetragraph {
                         token: member.clone(),
                         covered: (*tetra).clone(),
@@ -663,21 +687,97 @@ impl ResourceLabel {
     }
 }
 
-/// Validate a label against the Stage-1 invariants, fail-closed to `None`.
-///
-/// Stage 1 enforces exactly: (i) the `display ⊇ release` invariant. Controls
-/// are canonical by construction (the `Controls` type exposes only canonical
-/// constructors), so no re-canonicalization is required. Registry-marking
-/// enforcement (unknown CUI LDC/category → reject) needs the CUI-regime
-/// discriminator and is Stage 4; exclusion pairs and §2.6 couplings are
-/// Stages 2/4. The lattice `∨` never calls this — validity is a `derive`-layer
-/// property (spec §2.3 total-∨/partial-derive split).
-pub fn validate_label(label: ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
-    let base = label.ownership.base_set();
-    if !label.disclosure.display_covers_release(&base, spif) {
-        return None; // display ⊂ release — invalid
+/// Every releasability token names a recognized WORLD-VIEW element: a trigraph
+/// must be an ISO-3166 nation, a non-trigraph must be a registered coalition.
+/// An unrecognized token → `Element` (#26: the engine has a complete world view
+/// and refuses to decide on an unknown trigraph/tetragraph).
+fn rel_tokens_recognized(rel: &Releasability) -> Result<(), LabelInvalidity> {
+    if let Releasability::Grant(tokens) = rel {
+        for t in tokens {
+            let recognized = if is_trigraph(t) {
+                registry::is_iso3166(t)
+            } else {
+                registry::expand_coalition(t).is_some()
+            };
+            if !recognized {
+                return Err(LabelInvalidity::Element);
+            }
+        }
     }
-    Some(label)
+    Ok(())
+}
+
+/// Ingest predicate — the FIRST enforcement locus of #26 (validate_label +
+/// decide() gate-4 is the two-locus, defense-in-depth pair). Fail-closed to
+/// `Err`. Enforces, for ANY ownership (single-origin `Owned` AND multi-origin
+/// `Joint`, via `ownership.base_set()`):
+///
+/// - every release/display token is a recognized element (`Element`);
+/// - every NAF exclusion token is a recognized nation (`Element`);
+/// - no owner/co-owner is in the exclusion set (`Label`, spec §6);
+/// - a NAF exclusion requires a `Grant` release — a restriction on
+///   `Public`/`Empty`/`NoMarking` is invalid (`Label`, DoDM §e);
+/// - `display ⊇ release` (`Label`).
+///
+/// (An EMPTY `exclusions` set is the "no NAF" state — absence, not a present
+/// empty set: the `BTreeSet` representation cannot carry a present-but-empty
+/// marking, so "non-empty when present" is a marking-layer invariant, not one
+/// this adjudicator can observe.) The lattice `∨` never calls this — validity is
+/// a `derive`-layer property (spec §2.3 total-∨/partial-derive split).
+pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInvalidity> {
+    let d = &label.disclosure;
+    // (0) every owner/custodian is a recognized nation — the engine has a COMPLETE
+    //     world view and refuses to adjudicate on an unrecognized owner trigraph.
+    //     (`Owned("ZZZ")` with NoMarking would otherwise resolve to eligible
+    //     {ZZZ} and permit a "ZZZ" nationality — a made-up nation.)
+    for owner in label.ownership.base_set() {
+        if !registry::is_iso3166(&owner) {
+            return Err(LabelInvalidity::Element);
+        }
+    }
+    // (1) release + display tokens are recognized world-view elements.
+    rel_tokens_recognized(&d.release)?;
+    if let Some(disp) = &d.display {
+        rel_tokens_recognized(disp)?;
+    }
+    // (2) every excluded token is a recognized nation (exclusions are trigraphs).
+    for x in &d.exclusions {
+        if !registry::is_iso3166(x) {
+            return Err(LabelInvalidity::Element);
+        }
+    }
+    // (3)+(4): NAF-specific structural checks (only when a NAF is present).
+    if !d.exclusions.is_empty() {
+        // (3) owner/co-owner is NEVER excluded (spec §6; all ownership).
+        let owners = label.ownership.base_set();
+        if !d.exclusions.is_disjoint(&owners) {
+            return Err(LabelInvalidity::Label);
+        }
+        // (4) a NAF requires a NAMED release — an exclusion is only meaningful
+        //     against a positive `Grant` to except a member FROM. A restriction
+        //     on `Public` (REL ALL — everyone is authorized), `Empty` (REL NONE)
+        //     or `NoMarking` (REL {origin} only) is structurally contradictory
+        //     (DoDM §e: a dissemination restriction is for a named recipient set,
+        //     not an all/none/origin marking).
+        //
+        //     This is deliberately NOT gated on classification LEVEL (SETTLED per
+        //     policy — see the ADR-0008 Stage-2 "Policy basis" note). A release-
+        //     side NAF subtracts from a `REL TO` grant, and REL TO applies to CUI
+        //     as well as classified (DoDI 5200.48; 32 CFR 2002.4(dd) LDCs), so a
+        //     level gate would wrongly reject valid CUI NAF labels. The classified-
+        //     only level restriction is DISPLAY ONLY's (DoDM V2 §e, TS/S/C) and
+        //     lands with #27 — where it needs explicit SPIF classified-level
+        //     support, NOT a rank heuristic.
+        if !matches!(d.release, Releasability::Grant(_)) {
+            return Err(LabelInvalidity::Label);
+        }
+    }
+    // (5) the dual-relation invariant: display ⊇ release.
+    let base = label.ownership.base_set();
+    if !d.display_covers_release(&base, spif) {
+        return Err(LabelInvalidity::Label);
+    }
+    Ok(())
 }
 
 /// The OPERATIONAL derivation step: `derive = validate_label ∘ ∨`. Returns the
@@ -690,7 +790,9 @@ pub fn validate_label(label: ResourceLabel, spif: &Spif) -> Option<ResourceLabel
 /// couplings) originates in `validate_label`. `decide()` consumes only `derive`
 /// output.
 pub fn derive(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> Option<ResourceLabel> {
-    validate_label(a.join(b, spif)?, spif)
+    let joined = a.join(b, spif)?;
+    validate_label(&joined, spif).ok()?;
+    Some(joined)
 }
 
 #[cfg(test)]
@@ -700,6 +802,49 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    // Shared #26 test helpers (D7). `sub`/`purpose` are decide-path helpers used
+    // only by the integration NAF vectors (`tests/common/mod.rs`), so they are
+    // NOT declared here (they would be dead code in the label.rs unit module).
+    fn one(t: &str) -> BTreeSet<String> {
+        [t.to_string()].into_iter().collect()
+    }
+    // US-policy SPIF, levels U<S<TS, NO tetragraph (coalitions are global, D1).
+    fn us_spif() -> Spif {
+        Spif::builder("US").levels(&["U", "S", "TS"]).build()
+    }
+    // Owned{origin}, classification U//US, everything else empty — gates 1-3/5
+    // pass under us_spif() so gate 4 (releasability) is the deciding gate.
+    fn mk_owned(origin: &str) -> ResourceLabel {
+        ResourceLabel {
+            classification: crate::policy::Classification {
+                policy: crate::policy::PolicyId("US".into()),
+                name: "U".into(),
+            },
+            ownership: Ownership::Owned {
+                owner: origin.into(),
+            },
+            categories: std::collections::BTreeMap::new(),
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        }
+    }
+    // Same as mk_owned but Joint ownership (struct-update over mk_owned).
+    fn joint_label(owners: &[&str]) -> ResourceLabel {
+        ResourceLabel {
+            ownership: Ownership::Joint {
+                owners: set(owners),
+            },
+            ..mk_owned("USA")
+        }
     }
 
     #[test]
@@ -756,7 +901,9 @@ mod tests {
         };
         assert!(!bad.display_covers_release(&base, &spif));
 
-        // join: release ∩ (AUS,KOR ∩ AUS,NZL = AUS), exclusions ∪
+        // join: release ∩ (resolved AUS,KOR ∩ AUS,NZL = AUS). The NAF exclusions
+        // are baked into each operand's resolved release BEFORE the ∩ and are no
+        // longer a carried axis — the joined disclosure has EMPTY exclusions (#26).
         let a = Disclosure {
             release: Releasability::Grant(set(&["AUS", "KOR"])),
             display: None,
@@ -769,15 +916,175 @@ mod tests {
         };
         let j = a.join(&b, &base, &spif);
         assert_eq!(j.release, Releasability::Grant(set(&["AUS"])));
-        assert_eq!(j.exclusions, set(&["DEU", "FRA"]));
+        assert_eq!(j.exclusions, BTreeSet::new()); // consumed into the resolved release
         assert!(a.le(&j, &base, &spif)); // a ⊑ a∨b
 
         // |base| != 1 → deny-all (fail-closed)
         let deny_all = EligibleNations::Set {
             nations: BTreeSet::new(),
-            coalitions: BTreeSet::new(),
         };
         assert_eq!(d.eligible_release(&set(&["USA", "KOR"]), &spif), deny_all);
+    }
+
+    #[test]
+    fn equal_resolved_release_sets_are_le_both_ways() {
+        // Task 7: the retained-exclusions lattice axis is removed. Two disclosures
+        // with EQUAL resolved release sets are ⊑ both ways regardless of their raw
+        // exclusion markings (canonical uniqueness over the resolved set).
+        let spif = us_spif();
+        let base = one("USA");
+        // P: REL {AUS,CAN}, NAF AUS → resolved release {USA,CAN} (AUS subtracted)
+        let p = Disclosure {
+            release: Releasability::Grant(set(&["AUS", "CAN"])),
+            display: None,
+            exclusions: set(&["AUS"]),
+        };
+        // Q: REL {CAN}, no NAF → resolved release {USA,CAN}
+        let q = Disclosure {
+            release: Releasability::Grant(set(&["CAN"])),
+            display: None,
+            exclusions: BTreeSet::new(),
+        };
+        assert_eq!(
+            p.eligible_release(&base, &spif),
+            q.eligible_release(&base, &spif)
+        );
+        assert!(p.le(&q, &base, &spif));
+        assert!(q.le(&p, &base, &spif));
+    }
+
+    #[test]
+    fn naf_subtracts_an_expanded_member() {
+        // Task 8: a NAF exclusion is subtracted from the RESOLVED (post-expansion)
+        // release set — REL UNCK NAF ZAF removes ZAF though it is a UNCK member.
+        let spif = us_spif();
+        let base = one("USA");
+        let d = Disclosure {
+            release: Releasability::Grant(set(&["UNCK"])),
+            display: None,
+            exclusions: set(&["ZAF"]),
+        };
+        let e = d.eligible_release(&base, &spif);
+        assert!(e.permits("AUS")); // UNCK member, not excluded
+        assert!(!e.permits("ZAF")); // UNCK member, excluded → out
+    }
+
+    #[test]
+    fn none_display_tracks_subtracted_release() {
+        // display(None) tracks the SUBTRACTED release (ZAF out of both).
+        let spif = us_spif();
+        let base = one("USA");
+        let d = Disclosure {
+            release: Releasability::Grant(set(&["UNCK"])),
+            display: None,
+            exclusions: set(&["ZAF"]),
+        };
+        assert_eq!(
+            d.eligible_display(&base, &spif),
+            d.eligible_release(&base, &spif)
+        );
+        assert!(!d.eligible_display(&base, &spif).permits("ZAF"));
+    }
+
+    #[test]
+    fn explicit_display_is_not_subtracted() {
+        // an EXPLICIT display grant is untouched by release-side NAF (display-side
+        // exclusions are #27, not #26): ZAF stays display-eligible.
+        let spif = us_spif();
+        let base = one("USA");
+        let d = Disclosure {
+            release: Releasability::Grant(set(&["USA"])),
+            display: Some(Releasability::Grant(set(&["UNCK"]))),
+            exclusions: set(&["ZAF"]),
+        };
+        assert!(d.eligible_display(&base, &spif).permits("ZAF"));
+    }
+
+    #[test]
+    fn owner_in_x_is_invalid_single_origin() {
+        // Task 9 (spec §6): the owner is never excluded.
+        let mut l = mk_owned("USA");
+        l.disclosure.release = Releasability::Grant(set(&["AUS"]));
+        l.disclosure.exclusions = set(&["USA"]);
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
+        ));
+    }
+
+    #[test]
+    fn owner_in_x_is_invalid_joint() {
+        // MANDATORY (spec §6): asserted on the ingest predicate for MULTI-origin
+        // Joint ownership (decide() short-circuits Joint to Indeterminate, so this
+        // owner-in-X guard must live in validate_label).
+        let mut l = joint_label(&["USA", "KOR"]);
+        l.disclosure.release = Releasability::Grant(set(&["AUS"]));
+        l.disclosure.exclusions = set(&["KOR"]);
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
+        ));
+    }
+
+    #[test]
+    fn public_with_naf_is_invalid() {
+        // DoDM §e: a dissemination restriction is for a classified, NAMED release,
+        // not a Public/all marking.
+        let mut l = mk_owned("USA");
+        l.disclosure.release = Releasability::Public;
+        l.disclosure.exclusions = set(&["ZAF"]);
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
+        ));
+    }
+
+    #[test]
+    fn unknown_release_token_is_invalid_element() {
+        // a release token outside the world view (neither ISO-3166 nor a
+        // registered coalition) → Element.
+        let mut l = mk_owned("USA");
+        l.disclosure.release = Releasability::Grant(set(&["ZZZZ"]));
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Element)
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_trigraph_is_invalid_element() {
+        // codex P1: a syntactically-valid but non-ISO owner (ZZZ) must not
+        // adjudicate — the engine has a complete world view. Without this,
+        // Owned("ZZZ")+NoMarking resolves to eligible {ZZZ} and would permit a
+        // "ZZZ" nationality.
+        let l = mk_owned("ZZZ"); // not an ISO-3166 nation
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Element)
+        ));
+    }
+
+    #[test]
+    fn naf_is_not_gated_on_classification_level() {
+        // codex-r2: a NAF is valid regardless of classification level (CUI carries
+        // dissemination controls too). The structural invariant is the NAMED
+        // release, not the level — the same NAF validates at "U" and "S".
+        let mut l = mk_owned("USA");
+        l.disclosure.release = Releasability::Grant(set(&["UNCK"]));
+        l.disclosure.exclusions = set(&["ZAF"]);
+        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // "U" (unclassified)
+        l.classification.name = "S".into();
+        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // "S" (classified)
+    }
+
+    #[test]
+    fn well_formed_naf_label_validates() {
+        // a well-formed NAF label (Grant release, owner not excluded, recognized
+        // tokens) passes ingest validation.
+        let mut l = mk_owned("USA");
+        l.disclosure.release = Releasability::Grant(set(&["UNCK"]));
+        l.disclosure.exclusions = set(&["ZAF"]);
+        assert_eq!(validate_label(&l, &us_spif()), Ok(()));
     }
 
     #[test]
@@ -830,7 +1137,7 @@ mod tests {
         let foreign = mk("DEU", Controls::empty(), plain(Releasability::NoMarking));
         assert!(derive(&a, &foreign, &spif).is_none());
 
-        // (c) a directly-constructed display ⊂ release label → validate_label None
+        // (c) a directly-constructed display ⊂ release label → validate_label Err
         let malformed = mk(
             "USA",
             Controls::empty(),
@@ -840,7 +1147,10 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
         );
-        assert!(validate_label(malformed, &spif).is_none());
+        assert!(matches!(
+            validate_label(&malformed, &spif),
+            Err(LabelInvalidity::Label)
+        ));
     }
 
     #[test]
@@ -920,11 +1230,7 @@ mod tests {
         let e = j
             .disclosure
             .eligible_release(&j.ownership.base_set(), &spif);
-        assert!(
-            e.permits("USA", &set(&[]))
-                && !e.permits("AUS", &set(&[]))
-                && !e.permits("KOR", &set(&[]))
-        );
+        assert!(e.permits("USA") && !e.permits("AUS") && !e.permits("KOR"));
     }
 
     #[test]
@@ -1145,70 +1451,73 @@ mod tests {
     fn nomarking_is_origin_only() {
         let spif = Spif::builder("US").build();
         let e = Releasability::NoMarking.eligible("USA", &spif);
-        assert!(e.permits("USA", &set(&[]))); // origin permits
-        assert!(!e.permits("AUS", &set(&[]))); // foreign denies (NOFORN-equiv)
+        assert!(e.permits("USA")); // origin permits
+        assert!(!e.permits("AUS")); // foreign denies (NOFORN-equiv)
     }
 
     #[test]
     fn grant_includes_origin_and_listed() {
         let spif = Spif::builder("US").build();
         let e = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
-        assert!(e.permits("USA", &set(&[]))); // origin always eligible
-        assert!(e.permits("AUS", &set(&[]))); // listed
-        assert!(!e.permits("KOR", &set(&[]))); // not listed
+        assert!(e.permits("USA")); // origin always eligible
+        assert!(e.permits("AUS")); // listed
+        assert!(!e.permits("KOR")); // not listed
     }
 
     #[test]
-    fn nation_code_asserted_as_coalition_grants_nothing() {
-        // the two namespaces are separate — a trigraph in coalition_memberships never matches
+    fn only_nationality_is_consulted() {
+        // #26: the coalition-credential arm is REMOVED — eligibility is decided by
+        // nationality alone. A subject whose nationality is not in the resolved
+        // set is denied; there is no coalition assertion that can rescue it (the
+        // resolved set is nations, and `permits` takes only a nation).
         let spif = Spif::builder("US").build();
         let e = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
-        assert!(!e.permits("KOR", &set(&["AUS"]))); // asserting AUS-as-coalition grants nothing
-        assert!(!e.permits("KOR", &set(&["USA"]))); // asserting the ORIGIN-as-coalition grants nothing
+        assert!(e.permits("AUS")); // in the resolved nation set
+        assert!(!e.permits("KOR")); // not in the set → denied
     }
 
     #[test]
     fn empty_denies_all_including_origin() {
         let spif = Spif::builder("US").build();
         let e = Releasability::Empty.eligible("USA", &spif);
-        assert!(!e.permits("USA", &set(&[]))); // ⊤ — deny even origin
-        assert!(!e.permits("AUS", &set(&[])));
+        assert!(!e.permits("USA")); // ⊤ — deny even origin
+        assert!(!e.permits("AUS"));
     }
 
     #[test]
     fn public_permits_everyone() {
         let spif = Spif::builder("US").build();
-        assert!(Releasability::Public
-            .eligible("USA", &spif)
-            .permits("ANY", &set(&[])));
+        assert!(Releasability::Public.eligible("USA", &spif).permits("ANY"));
     }
 
     #[test]
     fn tetragraph_decomposes_in_eligible() {
-        let spif = Spif::builder("US")
-            .tetragraph("CFCK", Some(&["USA", "KOR"]))
-            .build();
-        let e = Releasability::Grant(set(&["CFCK"])).eligible("USA", &spif);
-        assert!(e.permits("KOR", &set(&[]))); // decomposed into nations
-        assert!(!e.permits("AUS", &set(&[]))); // AUS not in CFCK (CFC≠UNC)
+        // a coalition tetragraph decomposes to its GLOBAL registry member nations
+        let spif = Spif::builder("US").build();
+        let e = Releasability::Grant(set(&["FVEY"])).eligible("USA", &spif);
+        assert!(e.permits("GBR")); // FVEY member, decomposed into nations
+        assert!(!e.permits("ZAF")); // ZAF not in FVEY
     }
 
     #[test]
-    fn non_decomposable_needs_subject_membership() {
-        let spif = Spif::builder("US").tetragraph("NKIC", None).build();
-        let e = Releasability::Grant(set(&["NKIC"])).eligible("USA", &spif);
-        assert!(!e.permits("KOR", &set(&[]))); // nationality can't be inferred
-        assert!(e.permits("KOR", &set(&["NKIC"]))); // subject holds the coalition membership
+    fn unexpandable_coalition_grants_only_origin() {
+        // #26 expand-or-deny: a coalition the engine cannot expand (not in the
+        // registry) is DROPPED from the resolved set — it grants nothing beyond
+        // the origin. The Unknown-token → Deny is enforced at both loci
+        // (validate_label + gate-4), not silently widened here.
+        let spif = Spif::builder("US").build();
+        let e = Releasability::Grant(set(&["NKIC"])).eligible("USA", &spif); // NKIC ∉ registry
+        assert!(e.permits("USA")); // origin still eligible
+        assert!(!e.permits("KOR")); // NKIC unexpandable → grants no other nation
     }
 
     #[test]
     fn unknown_token_grants_nothing() {
-        // fail-closed: an unregistered non-trigraph token is dropped — even a
-        // subject ASSERTING it is denied
+        // fail-closed: an unregistered non-trigraph token is dropped from the set
         let spif = Spif::builder("US").build(); // "ZZZZ" not registered
         let e = Releasability::Grant(set(&["ZZZZ"])).eligible("USA", &spif);
-        assert!(e.permits("USA", &set(&[]))); // origin still eligible
-        assert!(!e.permits("KOR", &set(&["ZZZZ"]))); // assertion of an unknown token grants nothing
+        assert!(e.permits("USA")); // origin still eligible
+        assert!(!e.permits("KOR")); // an unknown token grants no nation
     }
 
     #[test]
@@ -1219,9 +1528,9 @@ mod tests {
         let a = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif); // nations {USA,AUS}
         let b = Releasability::Grant(set(&["KOR"])).eligible("USA", &spif); // nations {USA,KOR}
         let j = a.join(&b); // ∩ = {USA}
-        assert!(j.permits("USA", &set(&[])));
-        assert!(!j.permits("AUS", &set(&[])));
-        assert!(!j.permits("KOR", &set(&[])));
+        assert!(j.permits("USA"));
+        assert!(!j.permits("AUS"));
+        assert!(!j.permits("KOR"));
     }
 
     #[test]
@@ -1229,78 +1538,50 @@ mod tests {
         let spif = Spif::builder("US").build();
         let g = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
         let j = EligibleNations::Universe.join(&g);
-        assert!(
-            j.permits("AUS", &set(&[]))
-                && j.permits("USA", &set(&[]))
-                && !j.permits("KOR", &set(&[]))
-        );
+        assert!(j.permits("AUS") && j.permits("USA") && !j.permits("KOR"));
     }
 
     #[test]
     fn from_eligible_is_canonical_and_unique() {
         // one form per semantic state; Grant(∅) can never be produced
         let origin = "USA";
-        let s = |n: &[&str], c: &[&str]| EligibleNations::Set {
-            nations: set(n),
-            coalitions: set(c),
-        };
+        let s = |n: &[&str]| EligibleNations::Set { nations: set(n) };
         assert!(matches!(
             Releasability::from_eligible(&EligibleNations::Universe, origin),
             Releasability::Public
         ));
         assert!(matches!(
-            Releasability::from_eligible(&s(&[], &[]), origin),
+            Releasability::from_eligible(&s(&[]), origin),
             Releasability::Empty
         ));
         assert!(matches!(
-            Releasability::from_eligible(&s(&["USA"], &[]), origin),
+            Releasability::from_eligible(&s(&["USA"]), origin),
             Releasability::NoMarking
         ));
-        match Releasability::from_eligible(&s(&["USA", "AUS"], &[]), origin) {
+        match Releasability::from_eligible(&s(&["USA", "AUS"]), origin) {
             Releasability::Grant(g) => {
                 assert_eq!(g, set(&["AUS"]));
                 assert!(!g.is_empty());
             }
             other => panic!("expected Grant, got {other:?}"),
         }
-        match Releasability::from_eligible(&s(&["USA"], &["NKIC"]), origin) {
-            Releasability::Grant(g) => assert_eq!(g, set(&["NKIC"])), // coalition survives canonicalization
-            other => panic!("expected Grant, got {other:?}"),
-        }
         // precondition violation (origin absent from a non-empty set) FAILS
         // CLOSED to Empty — no panic, no round-trip widening
         assert!(matches!(
-            Releasability::from_eligible(&s(&[], &["NKIC"]), origin),
-            Releasability::Empty
-        ));
-        assert!(matches!(
-            Releasability::from_eligible(&s(&["AUS"], &[]), origin),
+            Releasability::from_eligible(&s(&["AUS"]), origin),
             Releasability::Empty
         ));
     }
 
-    #[test]
-    fn malformed_spif_member_cannot_widen_through_join() {
-        // CR-impl C1 regression: a decomposable tetragraph whose SPIF entry
-        // (somehow) listed a nested tetragraph must not widen a∨a beyond a
-        let spif = Spif::builder("US")
-            .tetragraph("CFCK", Some(&["USA", "FVEY", "KOR"])) // FVEY filtered by builder
-            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-            .build();
-        let e = Releasability::Grant(set(&["CFCK"])).eligible("USA", &spif);
-        assert!(e.permits("KOR", &set(&[])));
-        assert!(!e.permits("GBR", &set(&[]))); // FVEY member never leaked in
-                                               // idempotent round-trip: canonical → eligible is stable
-        let canon = Releasability::from_eligible(&e, "USA");
-        assert_eq!(canon.eligible("USA", &spif), e);
-    }
+    // `malformed_spif_member_cannot_widen_through_join` is RETIRED (D2): the
+    // per-SPIF `tetragraph` builder it exercised is gone, and its mutation-kill
+    // role — a coalition member must be a well-formed nation — is now a BUILD-TIME
+    // guarantee (build.rs cross-validates every member against ISO-3166; a
+    // malformed member FAILS THE BUILD). See `tests/registry_compile.rs`.
 
     #[test]
     fn subset_helper_handles_universe() {
-        let s = |n: &[&str]| EligibleNations::Set {
-            nations: set(n),
-            coalitions: set(&[]),
-        };
+        let s = |n: &[&str]| EligibleNations::Set { nations: set(n) };
         assert!(s(&["USA"]).is_subset_of(&EligibleNations::Universe));
         assert!(!EligibleNations::Universe.is_subset_of(&s(&["USA"])));
         // reflexive — a match arm ordered (Universe, _) => false would pass the
@@ -1316,9 +1597,8 @@ mod tests {
         //   VALID:   REL TO USA, FVEY        (origin USA listed alongside its tetragraph)
         //   VALID:   REL TO USA, DEU, FVEY   (DEU not in FVEY)
         //   INVALID: REL TO USA, GBR, FVEY   (GBR ∈ FVEY — duplicate)
-        let spif = Spif::builder("US")
-            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-            .build();
+        // FVEY comes from the GLOBAL registry now (D1); no per-SPIF roster.
+        let spif = Spif::builder("US").build();
         assert!(validate_rel(&set(&["USA", "FVEY"]), "USA", &spif).is_ok());
         assert!(validate_rel(&set(&["USA", "DEU", "FVEY"]), "USA", &spif).is_ok());
         match validate_rel(&set(&["USA", "GBR", "FVEY"]), "USA", &spif) {
@@ -1342,17 +1622,18 @@ mod tests {
 
     #[test]
     fn validate_rel_tetra_tetra_overlap_is_origin_exempt() {
-        // Maknae-local strictness: overlap computed on expansion ∖ {origin}
-        let spif = Spif::builder("US")
-            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-            .tetragraph("CFCK", Some(&["USA", "KOR"]))
-            .tetragraph("MINI", Some(&["USA", "KOR", "AUS"]))
-            .build();
-        // overlap = {USA} = origin only → VALID
-        assert!(validate_rel(&set(&["CFCK", "FVEY"]), "USA", &spif).is_ok());
-        // overlap ∖ origin = {KOR} → duplicate
+        // Maknae-local strictness: overlap computed on expansion ∖ {origin}.
+        // Registry witness (D5): FVEY ⊂ UNCK (all 5 FVEY members are UNCK
+        // members), so REL TO FVEY, UNCK (USA origin) overlaps beyond the origin
+        // → duplicative. (No two registry coalitions overlap ONLY at the origin,
+        // so the origin-exempt VALID case is witnessed by the sibling test's
+        // `REL TO USA, FVEY` — origin listed alongside its own tetragraph.)
+        let spif = Spif::builder("US").build();
+        // a single coalition alone has no overlap partner → VALID
+        assert!(validate_rel(&set(&["FVEY"]), "USA", &spif).is_ok());
+        // FVEY ⊂ UNCK: overlap ∖ origin ⊇ {AUS,CAN,GBR,NZL} → duplicate
         assert!(matches!(
-            validate_rel(&set(&["CFCK", "MINI"]), "USA", &spif),
+            validate_rel(&set(&["FVEY", "UNCK"]), "USA", &spif),
             Err(RelValidationError::DuplicativeTetragraph { .. })
         ));
     }

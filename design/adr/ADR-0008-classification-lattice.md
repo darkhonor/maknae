@@ -163,6 +163,93 @@ concern.
 Each of these is a fail-closed or explicitly documented boundary, never an open
 default.
 
+## Amendment — EPIC #33 Stage 2: NOT AUTHORIZED FOR enforcement (#26, 2026-08-06)
+
+Stage 1 carried the NAF exclusion vocabulary decide-inert; Stage 2 makes it LIVE
+releasability policy (spec `~/claude-memory/maknae/specs/2026-08-05-issue-26-not-authorized-for-exclusions-design.md`,
+CR-converged). The engine implements POLICY (DoDM 5200.01 V2 §e, IC Register 2016,
+CJCSI 2015.01A) — never the interpreted `dcs-schema-migration.md`. Status stays
+**Proposed** pending the full Day-1 slate.
+
+- **Expand-or-deny releasability (§3).** Every coalition tetragraph is decomposed
+  to its member nation trigraphs IN-MEMORY from a global versioned registry, or
+  the request is `Deny`. The engine has a COMPLETE world view: a trigraph that is
+  not an ISO-3166 nation, or a non-trigraph that is not a registered coalition, is
+  `InvalidElement` — the engine never adjudicates on an element it does not
+  recognize. Decomposition is domain-specific and never leaves the engine (the
+  protective measure); eligibility is decided by `nationality ∈ (resolved ∖ X)`.
+- **Removal of the coalition-credential arm.** `EligibleNations` collapses to a
+  SINGLE nation namespace; `permits` takes only a nationality. A subject's asserted
+  coalition memberships are no longer consulted — coalition eligibility is resolved
+  at expansion time, not by a held credential.
+- **Subtraction, not a lattice axis.** NAF exclusions are subtracted from the
+  RESOLVED release set inside `eligible_release` (release-relation only;
+  `eligible_display(None)` tracks the subtracted release; an explicit display grant
+  is untouched — display-side NAF is #27). The retained-exclusions axis of
+  `Disclosure::le`/`join` is REMOVED: two disclosures with equal resolved release/
+  display are `⊑` both ways regardless of raw exclusion markings, and `join`
+  consumes the subtraction into the narrower release (joined exclusions = ∅).
+- **Two-locus enforcement (§5).** `validate_label` is the ingest predicate
+  (`Result<(), LabelInvalidity{Element,Label}>`, for ALL ownership incl. Joint) and
+  `decide()` gate-4 re-runs it as defense-in-depth (single-origin `Owned`; Joint/
+  ConcealedForeign already short-circuit to `Indeterminate`). New `DenyReason`
+  variants `InvalidElement`/`InvalidLabel`; reasons stay existence-agnostic.
+- **Owner never excluded (§6).** An owner/co-owner in the exclusion set is
+  `InvalidLabel`, asserted on single-origin AND multi-origin Joint labels.
+- **Versioned `data/*.json` registries.** ISO-3166 nations, coalition tetragraphs
+  (UNCK = CJCSI 2015.01A + Germany = 18, FVEY, NATO), and the FULL DoD CUI registry
+  (archives.gov), each with its own JSON Schema, compiled into the binary by one
+  `build.rs` (source-only; a malformed source FAILS THE BUILD — the cross-validation
+  of every coalition member against ISO-3166 supersedes the runtime widen-guard).
+- **AuditRecord + classified-coalition non-disclosure (§8).** A pure `audit()`
+  returns a record carrying the UNEXPANDED presented label and the existence-
+  agnostic decision — no expanded-roster field exists to leak, so membership (or
+  lack thereof) in a classified coalition is structurally undisclosable; no secure
+  channel is needed.
+
+**Policy basis — a NAF's validity is NOT gated on classification LEVEL (settled; do not re-litigate).**
+`validate_label` requires a NAF exclusion to accompany a NAMED (`Grant`) release
+— an exclusion needs a positive grant to except a member from; a restriction on
+`Public`/`Empty`/`NoMarking` (an all/none/origin marking) is structurally
+contradictory. It deliberately does NOT require the resource to be a classified
+LEVEL, because the governing policy does not support that for the #26 release
+relation:
+- **`REL TO` applies to CUI as well as classified.** DoDI 5200.48 (`520048p.md:728,746`):
+  "REL TO … [applies] to information properly categorized as CUI … (b) DoD
+  operational CUI (not related to intelligence) may be marked as REL TO." CUI
+  (unclassified) legitimately carries dissemination controls — 32 CFR 2002.4(dd)
+  (`:466`) defines Limited Dissemination Controls as CUI-EA-approved controls for
+  CUI dissemination. So a release-side NAF (which subtracts from a `REL TO` grant)
+  is valid on CUI; a classification-level gate would WRONGLY reject valid CUI NAF
+  labels (this was a reverted implementation over-reach — codex-r1 proposed it,
+  codex-r2 caught the unsound "rank 0 = unclassified" heuristic; `Spif::levels`
+  promises only low→high ordering, so rank cannot identify "classified").
+- **The classified-only level restriction belongs to DISPLAY ONLY (#27), not #26.**
+  DoDM 5200.01 V2 §e (`520001m_vol2.md:5494,5503`): DISPLAY ONLY "identifies
+  CLASSIFIED information …" and "may be used with TOP SECRET, SECRET or
+  CONFIDENTIAL." When #27 lands the display relation, its DISPLAY ONLY validity
+  MUST gate on classification ∈ {CONFIDENTIAL, SECRET, TOP_SECRET} — which is an
+  explicit level set, NOT a rank heuristic, and therefore needs `Spif` support to
+  declare which levels are classified (an unclassified-floor / classified-set
+  declaration the model does not yet carry — a #27 dependency).
+- **"NOT AUTHORIZED FOR" is not a CAPCO/IC-Register formal marking** (operator-
+  confirmed); it is Maknae's subtractive qualifier on a `REL TO`/`DISPLAY ONLY`
+  grant, so its classification scope is INHERITED from the control it qualifies
+  (REL TO → classified+CUI; DISPLAY ONLY → classified-only), never intrinsic.
+
+**Supersessions of the Stage-1 record (four):**
+1. RETRACT the §2 mixed-grant "nation ∩ coalition" intersection claim (`:19`): there
+   is one nation namespace; coalitions decompose to nations before any `∩`.
+2. SUPERSEDE the §3 unknown-token-DROP simplification (`:20`): an unknown/
+   unexpandable token is now `Deny` (`InvalidElement`) at both loci, not a silent
+   drop.
+3. SUPERSEDE the "nation/coalition namespaces structurally separate" clause (`:19`):
+   the credential arm is removed; there is a single namespace.
+4. SUPERSEDE the "NAF carried Day-1, enforced Stage 2 / no ingest registry"
+   simplification (`:31`, `:59-61`): the CUI `.tsv` + `CuiRegistry`/`is_known_*` +
+   the per-SPIF `Spif.registry` are RETIRED for the compiled `data/*.json`
+   registries; NAF is now enforced.
+
 ## Security control mapping (informative; per ADR-0001)
 
 Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is a WIRED CI CONTROL as of ADR-0016: the change-gated mutation job runs `cargo mutants` on this crate for every PR touching it and unconditionally on merge to main.

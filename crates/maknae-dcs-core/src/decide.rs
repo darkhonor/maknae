@@ -3,7 +3,8 @@
 //! `decide` is pure, total, and side-effect-free. It returns `Permit` only if
 //! EVERY gate passes; any failure or indeterminate input → `Deny`. There is no
 //! role or administrative bypass: a read permit derives only from clearance ∧
-//! categories ∧ nationality/coalition ∧ purpose ∧ action.
+//! categories ∧ nationality ∧ purpose ∧ action (releasability is decided by
+//! nationality alone under #26 — the coalition-credential arm is removed).
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
 use crate::ownership::Ownership;
@@ -93,6 +94,11 @@ pub enum DenyReason {
     ActionForbidden,
     Indeterminate,
     PolicyMismatch,
+    /// A trigraph/tetragraph outside the encoded world view (#26).
+    InvalidElement,
+    /// A structurally malformed label (owner-in-X, empty exclusion set,
+    /// restriction on Public/UNCLASSIFIED) (#26).
+    InvalidLabel,
 }
 
 /// The reference-monitor decision. Gate order (all must pass; first failure
@@ -104,7 +110,8 @@ pub enum DenyReason {
 ///    `Option`; unknown → `Indeterminate`, never a mislabeled `Level`.
 /// 3. Category gates — per-tag dispatch on the SPIF-declared kind; empty
 ///    required-sets and unknown/Permissive kinds → `Indeterminate`.
-/// 4. Releasability — origin-validated, two-namespace eligibility.
+/// 4. Releasability — origin-validated, single nation-namespace eligibility
+///    (nationality ∈ resolved ∖ exclusions); two-locus with `validate_label`.
 /// 5. Action — `DisplayOnly` blocks `Export` (Read/Display permitted at MVP;
 ///    recorded open question for LLM-endpoint principals).
 /// 6. Need-to-know — exact token match when the label demands one.
@@ -189,10 +196,23 @@ pub fn decide(
         // rejects the Owned{""} sentinel and any malformed origin
         return Decision::Deny(DenyReason::Indeterminate);
     }
+    // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
+    // decision point, so a label that reached decide() WITHOUT passing
+    // validate_label (the engine is a decision point, not the ingest gate) still
+    // denies structurally — owner-in-X / restriction-on-Public / unknown token
+    // never silently permit. `validate_label` is reached only for single-origin
+    // `Owned` here (Joint/ConcealedForeign short-circuit to Indeterminate above),
+    // exactly the safety subset it must cover.
+    if let Err(inv) = crate::label::validate_label(resource, spif) {
+        return Decision::Deny(match inv {
+            crate::label::LabelInvalidity::Element => DenyReason::InvalidElement,
+            crate::label::LabelInvalidity::Label => DenyReason::InvalidLabel,
+        });
+    }
     if !resource
         .disclosure
         .eligible_release(&resource.ownership.base_set(), spif)
-        .permits(&subject.nationality, &subject.coalition_memberships)
+        .permits(&subject.nationality)
     {
         return Decision::Deny(DenyReason::Releasability);
     }
@@ -212,6 +232,47 @@ pub fn decide(
     Decision::Permit
 }
 
+/// A pure, self-contained audit record of one decision (#26). The engine NEVER
+/// logs — it RETURNS this; the caller owns persistence.
+///
+/// Classified-coalition NON-DISCLOSURE is STRUCTURAL, not a redaction step: the
+/// record has NO expanded-eligible-set / roster field to leak, it carries the
+/// UNEXPANDED authoritative `presented_label` (the in-memory coalition expansion
+/// never leaves the engine — the protective measure), and `decision`'s deny
+/// reason is existence-agnostic (it names only the failing dimension, never a
+/// coalition or its membership). There is no secure channel because there is
+/// nothing membership-revealing to protect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditRecord {
+    /// Caller-supplied correlation id for this decision request.
+    pub request_id: String,
+    /// A reference to the requesting subject — its declared nationality (an input
+    /// attribute the requester already holds), NOT any derived coalition
+    /// membership. Never the expanded roster.
+    pub subject_ref: String,
+    /// The authoritative label AS PRESENTED — unexpanded. No resolved eligible
+    /// set / coalition roster is carried (the expansion stayed in the engine).
+    pub presented_label: ResourceLabel,
+    /// The decision, including its existence-agnostic reason on a `Deny`.
+    pub decision: Decision,
+}
+
+/// Build the pure audit record for a decision. Total, side-effect-free — no
+/// logging, no I/O; the engine returns the record and the caller persists it.
+pub fn audit(
+    request_id: &str,
+    subject: &Subject,
+    label: &ResourceLabel,
+    decision: Decision,
+) -> AuditRecord {
+    AuditRecord {
+        request_id: request_id.to_string(),
+        subject_ref: subject.nationality.clone(),
+        presented_label: label.clone(),
+        decision,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +284,15 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn new_deny_reasons_exist_and_are_existence_agnostic() {
+        // existence-agnostic: the variants name a dimension, carry no payload
+        let a = DenyReason::InvalidElement;
+        let b = DenyReason::InvalidLabel;
+        assert_ne!(a, b);
+        assert_ne!(a, DenyReason::Indeterminate);
     }
 
     #[test]
@@ -271,16 +341,10 @@ mod tests {
             .category("LDC", CategoryKind::RestrictivePredicate)
             .category("EYES", CategoryKind::Permissive)
             .category("HANDLING", CategoryKind::Informative)
-            .tetragraph("CFCK", Some(&["USA", "KOR"]))
-            .tetragraph(
-                "UNCK",
-                Some(&[
-                    "AUS", "BEL", "CAN", "COL", "DEU", "DNK", "FRA", "GRC", "ITA", "KOR", "NLD",
-                    "NZL", "NOR", "PHL", "THA", "TUR", "GBR", "USA",
-                ]),
-            )
-            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-            .tetragraph("NKIC", None)
+            // Coalitions (UNCK/FVEY) come from the GLOBAL registry now (D1) — no
+            // per-SPIF roster. CFCK/NKIC are not in #26's registry (D4), so they
+            // resolve to Unknown; the vectors that depended on them are reworked
+            // in Task 11.
             .build()
     }
 

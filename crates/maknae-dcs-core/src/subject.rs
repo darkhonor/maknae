@@ -58,9 +58,11 @@ pub struct Subject {
     pub nationality: String,
     /// tag → held values (containment tags: SCI/SAP/CUI-cat read-ins).
     pub read_ins: BTreeMap<String, BTreeSet<String>>,
-    /// Non-decomposable coalition tokens held (kernel-minted; a distinct
-    /// namespace from nation trigraphs — asserting a trigraph here grants
-    /// nothing).
+    /// Coalition tokens the subject asserts. DECIDE-INERT under #26: the
+    /// coalition-credential arm is removed, so `decide()` never consults this —
+    /// releasability is decided by `nationality` alone (coalition tetragraphs are
+    /// decomposed to member nations at expansion time). Retained on the type for
+    /// a later stage; tests set it only to prove it is ignored.
     pub coalition_memberships: BTreeSet<String>,
     /// Public employment attribute (#29); bridged to `Affiliation` at gate 3.
     pub employment: Employment,

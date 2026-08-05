@@ -121,7 +121,11 @@ fn sem_eq(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
         && a.categories == b.categories // well-defined: no-empty-value-set invariant
         && a.disclosure.eligible_release(&ba, spif) == b.disclosure.eligible_release(&bb, spif)
         && a.disclosure.eligible_display(&ba, spif) == b.disclosure.eligible_display(&bb, spif)
-        && a.disclosure.exclusions == b.disclosure.exclusions
+        // NAF exclusions are NO LONGER a semantic axis (#26): they are consumed
+        // into `eligible_release`'s subtraction (already compared above), so
+        // `le` carries no exclusions conjunct and `sem_eq` must quotient the same
+        // way — two labels with equal RESOLVED release/display are sem_eq
+        // regardless of their raw exclusion markings.
         && a.controls == b.controls
         && a.caveats == b.caveats
         && effective_rank(a, spif) == effective_rank(b, spif)
@@ -252,12 +256,20 @@ fn order_and_join_laws() {
     assert!(leastness_antecedent_fires > 0, "leastness suite is vacuous");
 }
 
-/// The v2 axes (controls × display × exclusions) swept with the v1 axes pinned
-/// small (spec §5 "Law universe v2"). Ownership FIXED to `Owned{USA}`, NTK ≤ 1
-/// token; the `∨` is total + validity-agnostic over this fixed-ownership
-/// sublattice, so the sweep MAY include control combos (`{Relido},{Displayed}`)
-/// that `validate_label` would reject — they are valid LATTICE points here
-/// (their `derive` rejection is a targeted vector, see `derive_vectors.rs`).
+/// The v2 axes (controls × display × coalition-derived-and-exclusion-reduced
+/// release) swept with the v1 axes pinned small (spec §5 "Law universe v2").
+/// Ownership FIXED to `Owned{USA}`, NTK ≤ 1 token; the `∨` is total +
+/// validity-agnostic over this fixed-ownership sublattice, so the sweep MAY
+/// include control combos (`{Relido},{Displayed}`) that `validate_label` would
+/// reject — they are valid LATTICE points here (their `derive` rejection is a
+/// targeted vector, see `derive_vectors.rs`).
+///
+/// #26 SF2 obligation: a non-empty NAF exclusion set is paired ONLY with a
+/// `Grant` release — a NAF on `Public`/`Empty`/`NoMarking` is `InvalidLabel`,
+/// rejected at both loci, NOT a lattice point (the release/exclusion axis is a
+/// coupled `(release, exclusions)` list, not an independent cross-product). The
+/// release axis is COALITION-DERIVED (`Grant([UNCK])` expands to 18 nations) and
+/// EXCLUSION-REDUCED (`NAF ZAF` removes a UNCK member from the resolved set).
 /// `ListControlled`/predicate category tags are DELIBERATELY excluded (they
 /// aren't in `categories_comparable`'s allowed set → would poison `⊑`/`∨`).
 fn universe_v2_axes() -> Vec<ResourceLabel> {
@@ -266,13 +278,23 @@ fn universe_v2_axes() -> Vec<ResourceLabel> {
         xs.iter().map(|s| s.to_string()).collect()
     };
     let levels = ["S", "TS"];
-    let rels = [
-        Releasability::NoMarking,
-        Releasability::Grant(set_s(&["AUS"])),
-        Releasability::Grant(set_s(&["AUS", "KOR"])),
+    // Coupled (release, exclusions): a non-empty NAF ONLY with a Grant (SF2), and
+    // the exclusion names an ACTUAL member so the subtraction is load-bearing.
+    let rel_excl_pairs: [(Releasability, BTreeSet<String>); 6] = [
+        (Releasability::NoMarking, BTreeSet::new()),
+        (Releasability::Grant(set_s(&["AUS"])), BTreeSet::new()),
+        (
+            Releasability::Grant(set_s(&["AUS", "KOR"])),
+            BTreeSet::new(),
+        ),
+        (Releasability::Grant(set_s(&["UNCK"])), BTreeSet::new()), // coalition-derived (18 nations)
+        (Releasability::Grant(set_s(&["UNCK"])), set_s(&["ZAF"])), // exclusion-reduced (ZAF is a UNCK member)
+        (
+            Releasability::Grant(set_s(&["AUS", "KOR"])),
+            set_s(&["KOR"]),
+        ), // exclusion-reduced (KOR listed)
     ];
     let displays: [Option<Releasability>; 2] = [None, Some(Releasability::Grant(set_s(&["AUS"])))];
-    let exclusions = [BTreeSet::new(), set_s(&["NZL"])];
     let controls_axis = [
         Controls::empty(),
         Controls::from_set([OrconUsGov].into_iter().collect()),
@@ -284,32 +306,40 @@ fn universe_v2_axes() -> Vec<ResourceLabel> {
     ];
     let mut out = Vec::new();
     for level in levels {
-        for rel in &rels {
+        for (rel, excl) in &rel_excl_pairs {
             for display in &displays {
-                for excl in &exclusions {
-                    for controls in &controls_axis {
-                        out.push(ResourceLabel {
-                            classification: class(level),
-                            ownership: Ownership::Owned {
-                                owner: "USA".into(),
-                            },
-                            categories: BTreeMap::new(),
-                            disclosure: Disclosure {
-                                release: rel.clone(),
-                                display: display.clone(),
-                                exclusions: excl.clone(),
-                            },
-                            controls: controls.clone(),
-                            caveats: BTreeSet::new(),
-                            compilation_level: None,
-                            need_to_know: None,
-                        });
-                    }
+                for controls in &controls_axis {
+                    out.push(ResourceLabel {
+                        classification: class(level),
+                        ownership: Ownership::Owned {
+                            owner: "USA".into(),
+                        },
+                        categories: BTreeMap::new(),
+                        disclosure: Disclosure {
+                            release: rel.clone(),
+                            display: display.clone(),
+                            exclusions: excl.clone(),
+                        },
+                        controls: controls.clone(),
+                        caveats: BTreeSet::new(),
+                        compilation_level: None,
+                        need_to_know: None,
+                    });
                 }
             }
         }
     }
-    assert_eq!(out.len(), 2 * 3 * 2 * 2 * 7); // 168
+    assert_eq!(out.len(), 2 * 6 * 2 * 7); // 168
+                                          // SF2 invariant: no swept label carries a NAF over a Public/Empty/NoMarking
+                                          // release (those states are InvalidLabel, rejected at both loci — never a
+                                          // lattice point that `eligible_release`'s Universe arm would have to subtract).
+    for l in &out {
+        assert!(
+            l.disclosure.exclusions.is_empty()
+                || matches!(l.disclosure.release, Releasability::Grant(_)),
+            "SF2: a NAF exclusion must accompany a Grant release"
+        );
+    }
     out
 }
 
@@ -359,8 +389,11 @@ fn v2_axes_order_and_join_laws() {
             }
             // controls never shrink on join (monotone)
             assert!(a.controls.le(&ab.controls) && b.controls.le(&ab.controls));
-            // exclusions never shrink on join (∪)
-            assert!(a.disclosure.exclusions.is_subset(&ab.disclosure.exclusions));
+            // NAF exclusions are NO LONGER a join axis (#26): the subtraction is
+            // baked into each operand's resolved release BEFORE the ∩, so the
+            // joined disclosure carries EMPTY exclusions (the exclusion is
+            // consumed into the narrower release, not re-carried).
+            assert!(ab.disclosure.exclusions.is_empty());
         }
     }
     assert_eq!(join_some_count, 168 * 168); // ∨ total: no fail-closed None in the sweep

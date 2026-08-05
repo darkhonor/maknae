@@ -1,0 +1,4054 @@
+{
+  "version": "2026-08-06",
+  "source": "archives.gov/cui/registry",
+  "retrieved": "2026-08-06",
+  "groups": [
+    "Critical Infrastructure",
+    "Defense",
+    "Export Control",
+    "Financial",
+    "Immigration",
+    "Intelligence",
+    "International Agreements",
+    "Law Enforcement",
+    "Legal",
+    "Natural and Cultural Resources",
+    "North Atlantic Treaty Organization (NATO)",
+    "Nuclear",
+    "Patent",
+    "Privacy",
+    "Procurement and Acquisition",
+    "Proprietary Business Information",
+    "Provisional",
+    "Statistical",
+    "Tax",
+    "Transportation"
+  ],
+  "categories": [
+    {
+      "name": "Status Adjustment",
+      "category_marking": "ADJ",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//ADJ",
+      "group": "Immigration",
+      "description": "Related to applications for the adjustment of immigration status.",
+      "authorities": [
+        {
+          "citation": "8 USC 1160(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "8 USC 1160(b)(6)(D)"
+        },
+        {
+          "citation": "8 USC 1255a(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "8 USC 1255a(c)(5)(E)"
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/status-adjustment"
+    },
+    {
+      "name": "Administrative Proceedings",
+      "category_marking": "ADPO",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//ADPO",
+      "group": "Legal",
+      "description": "Adjudication of agency-related matters including, but not limited to, dispute resolution, settlements, and issuances of orders.",
+      "authorities": [
+        {
+          "citation": "5 USC 574",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2000e-8(e)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 2000e-8(e)"
+        },
+        {
+          "citation": "16 CFR 3.45",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-ADPO",
+          "sanctions": null
+        },
+        {
+          "citation": "16 CFR 4.9(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 385.606",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 2200.120(d)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "8 CFR 292.3(h)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2000e-5(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 2000e-5(b)"
+        },
+        {
+          "citation": "42 USC 3610(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "46 CFR 502.167",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "17 CFR 11.3",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "17 CFR 10.64",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-ADPO",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1640.4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1603.108(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/admin-proceedings"
+    },
+    {
+      "name": "Agriculture",
+      "category_marking": "AG",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//AG",
+      "group": "Intelligence",
+      "description": "Information related to the agricultural operation, farming or conservation practices, or the actual land of an agricultural producer or landowner.",
+      "authorities": [
+        {
+          "citation": "7 USC 8791(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/agriculture"
+    },
+    {
+      "name": "Accident Investigation",
+      "category_marking": "AIV",
+      "banner_marking": "CUI//SP-AIV",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Related to information obtained during the course of an accident or incident investigation. Including but not limited to information related to wreckage, records, mail, or cargo.",
+      "authorities": [
+        {
+          "citation": "49 CFR Part 1114",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-AIV",
+          "sanctions": null
+        },
+        {
+          "citation": "49 CFR Part 831",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-AIV",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/accident-investigation"
+    },
+    {
+      "name": "Patent Applications",
+      "category_marking": "APP",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//APP",
+      "group": "Patent",
+      "description": "Application for patent filed under 35 U.S.C. 111(a) that includes all types of patent applications (i.e., utility, design, plant, and reissue) except provisional applications. The nonprovisional application establishes the filing date and initiates the examination process. A nonprovisional utility patent application must include a specification, including a claim or claims; drawings, when necessary; an oath or declaration; and the prescribed filing fee.",
+      "authorities": [
+        {
+          "citation": "35 USC 122(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "35 USC 186 35 USC 187"
+        },
+        {
+          "citation": "35 USC 205",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "35 USC 186 35 USC 187"
+        },
+        {
+          "citation": "37 CFR 401.13(c)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/patent-application"
+    },
+    {
+      "name": "Archaeological Resources",
+      "category_marking": "ARCHR",
+      "banner_marking": "CUI//ARCHR",
+      "alternative_banner_marking": "CUI//ARCHR",
+      "group": "Natural and Cultural Resources",
+      "description": "Related to information about the nature and location of any archaeological resource for which the excavation or removal requires a permit or other permission.",
+      "authorities": [
+        {
+          "citation": "16 USC 470hh",
+          "classification": "Basic",
+          "banner_marking": "CUI//ARCHR",
+          "sanctions": null
+        },
+        {
+          "citation": "43 CFR 7.18",
+          "classification": "Basic",
+          "banner_marking": "CUI//ARCHR",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/archaeological-resources"
+    },
+    {
+      "name": "Asylee",
+      "category_marking": "ASYL",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//ASYL",
+      "group": "Immigration",
+      "description": "Related to refugee applications and associated hearings to grant asylum to foreign nationals in the United States to be recognized as asylees.",
+      "authorities": [
+        {
+          "citation": "8 CFR 1208.6",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "8 CFR 208.6",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/asylee"
+    },
+    {
+      "name": "Collective Bargaining",
+      "category_marking": "BARG",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//BARG",
+      "group": "Legal",
+      "description": "Defining agencies' and representatives' duty to negotiate in good faith to include disclosure of certain labor relations training and guidance materials and limiting the issuance of certain subpoenas.",
+      "authorities": [
+        {
+          "citation": "5 USC 7114(b)(4)(C)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/collective-bargaining"
+    },
+    {
+      "name": "Battered Spouse or Child",
+      "category_marking": "BATT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": null,
+      "group": "Immigration",
+      "description": "Related to information within applications and associated hearings provided by, or that could identify, a battered spouse or child of a US citizen or US permanent resident seeking independent protected status within the United States.",
+      "authorities": [
+        {
+          "citation": "8 USC 1367(a)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "8 USC 1367(c)"
+        },
+        {
+          "citation": "8 USC 1375a(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "8 USC 1375a(d)(5)"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/battered-spouse-or-child"
+    },
+    {
+      "name": "Budget",
+      "category_marking": "BUDG",
+      "banner_marking": "CUI//SP-BUDG",
+      "alternative_banner_marking": null,
+      "group": "Financial",
+      "description": "Related to information concerning the federal budget, including authorizations and estimates of income and expenditures.",
+      "authorities": [
+        {
+          "citation": "OMB Circular A-11 section 22.1",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-BUDG",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "April 2, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/budget"
+    },
+    {
+      "name": "Consumer Complaint Information",
+      "category_marking": "CCI",
+      "banner_marking": "CUI//SP-CCI",
+      "alternative_banner_marking": null,
+      "group": "Financial",
+      "description": "Related to information concerning consumer complaints or inquiries concerning financial institutions or consumer financial products and services, and responses to them.",
+      "authorities": [
+        {
+          "citation": "12 CFR 1070.2(g)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CCI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/confidential-consumer-complaint-information"
+    },
+    {
+      "name": "Consumer Complaint Information",
+      "category_marking": "CCI",
+      "banner_marking": "CUI//SP-CCI",
+      "alternative_banner_marking": null,
+      "group": "Financial",
+      "description": "Related to information concerning consumer complaints or inquiries concerning financial institutions or consumer financial products and services, and responses to them.",
+      "authorities": [
+        {
+          "citation": "12 CFR 1070.2(g)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CCI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/consumer-complaint-information"
+    },
+    {
+      "name": "Critical Energy Infrastructure Information",
+      "category_marking": "CEII",
+      "banner_marking": null,
+      "alternative_banner_marking": null,
+      "group": "Critical Infrastructure",
+      "description": "Critical energy infrastructure information means specific engineering, vulnerability, or detailed design information about proposed or existing critical infrastructure that: (i) Relates details about the production, generation, transportation, transmission, or distribution of energy; (ii) Could be useful to a person in planning an attack on critical infrastructure;... and (iii) Does not simply give the general location of the critical infrastructure.",
+      "authorities": [
+        {
+          "citation": "18 CFR 388.113",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CEII",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 1004.13",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CEII",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/critical-energy-infrastructure-information"
+    },
+    {
+      "name": "US Census",
+      "category_marking": "CENS",
+      "banner_marking": "CUI//SP-CENS",
+      "alternative_banner_marking": null,
+      "group": "Statistical",
+      "description": "Related to information gathered by the Bureau of the Census during the process of collecting, compiling, evaluating, analyzing of demographic, economic, and social data pertaining at a specified time to any or all persons in the United States and dissemination is limited to those with special sworn status, who may only use the data for statistical purposes and only for those statistical purposes for which the data was supplied.",
+      "authorities": [
+        {
+          "citation": "13 USC 8(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CENS",
+          "sanctions": null
+        },
+        {
+          "citation": "13 USC 9(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CENS",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/census"
+    },
+    {
+      "name": "Child Pornography",
+      "category_marking": "CHLD",
+      "banner_marking": "CUI//SP-CHLD",
+      "alternative_banner_marking": null,
+      "group": "Legal",
+      "description": "From 18 USC 2256(8) \"child pornography\" means any visual depiction, including any photograph, film, video, picture, or computer or computer-generated image or picture, whether made or produced by electronic, mechanical, or other means, of sexually explicit conduct, where— (A) the production of such visual depiction involves the use of a minor engaging in sexually explicit conduct; (B) such visual depiction is a digital image, computer image, or computer-generated image that is, or is indistinguishable from, that of a minor engaging in sexually explicit conduct; or (C) such visual depiction has been created, adapted, or modified to appear that an identifiable minor is engaging in sexually explicit conduct",
+      "authorities": [
+        {
+          "citation": "18 USC 3509(m)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CHLD",
+          "sanctions": "18 USC 403"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/child-pornography"
+    },
+    {
+      "name": "Criminal History Records Information",
+      "category_marking": "CHRI",
+      "banner_marking": "CUI//SP-CHRI",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Related to information collected by criminal justice agencies on individuals consisting of identifiable descriptions and notations of arrests, detentions, indictments, informations, or other formal criminal charges, and any disposition arising therefrom, including acquittal, sentencing, correctional supervision, and release.",
+      "authorities": [
+        {
+          "citation": "28 CFR 20",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CHRI",
+          "sanctions": "28 CFR 20.25"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/criminal-history-records-info"
+    },
+    {
+      "name": "Committed Person",
+      "category_marking": "CMPRS",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//CMPRS",
+      "group": "Law Enforcement",
+      "description": "Related to information concerning the mental condition of a person committed to a psychiatric facility.",
+      "authorities": [
+        {
+          "citation": "18 USC 4247(e)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/committed-person"
+    },
+    {
+      "name": "Comptroller General",
+      "category_marking": "COMPT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//COMPT",
+      "group": "Financial",
+      "description": "Concerning the Officer of the United States Government who is charged with duties relating to fiscal affairs, including auditing, examining accounts, and reporting the financial status of the United States Government.",
+      "authorities": [
+        {
+          "citation": "31 USC 716",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "31 USC 716"
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/comptroller-general"
+    },
+    {
+      "name": "Entity Registration Information",
+      "category_marking": "CONREG",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//CONREG",
+      "group": "Proprietary Business Information",
+      "description": "Relating to non-public information collected during entity registration in the System for Award Management (SAM), the common source of vendor data for the United States Government.",
+      "authorities": [
+        {
+          "citation": "48 CFR 4.1103(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/entity-registration-info"
+    },
+    {
+      "name": "Contract Use",
+      "category_marking": "CONTRACT",
+      "banner_marking": "CUI//SP-CONTRACT",
+      "alternative_banner_marking": null,
+      "group": "Privacy",
+      "description": "Stipulations for a contractor to meet before material may be used in performance of certain contracts.",
+      "authorities": [
+        {
+          "citation": "48 CFR 324.103(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CONTRACT",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 324.104",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CONTRACT",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/contract-use"
+    },
+    {
+      "name": "Tax Convention",
+      "category_marking": "CONV",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//CONV",
+      "group": "Tax",
+      "description": "Related to any--(A) agreement entered into with the competent authority of one or more foreign governments pursuant to a tax convention, (B) application for relief under a tax convention, (C) background information related to such agreement or application, (D) document implementing such agreement, and (E) other information exchanged pursuant to a tax convention which is treated as confidential or secret under the tax convention. Tax convention information originating with the IRS generally retains its confidential status even when it resides with agencies other than the IRS.",
+      "authorities": [
+        {
+          "citation": "26 USC 6105(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "26 USC 7213 26 USC 7213A 26 USC 7431"
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/tax-convention"
+    },
+    {
+      "name": "General Critical Infrastructure Information",
+      "category_marking": "CRIT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//CRIT",
+      "group": "Critical Infrastructure",
+      "description": "Systems and assets, whether physical or virtual, so vital that the incapacity or destruction of such may have a debilitating impact on the security, economy, public health or safety, environment, or any combination of these matters, across any Federal, State, regional, territorial, or local jurisdiction.",
+      "authorities": [
+        {
+          "citation": "National Security Memorandum on Critical Infrastructure Security and Resilience",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "August 22, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/critical-infrastructure"
+    },
+    {
+      "name": "Ammonium Nitrate",
+      "category_marking": "CRITAN",
+      "banner_marking": "CUI//SP-CRITAN",
+      "alternative_banner_marking": null,
+      "group": "Critical Infrastructure",
+      "description": "Related to registration information of those who own and operate ammonium nitrate facilities, purchasers of ammonium nitrate, and the regulation of sales and transfers of ammonium nitrate.",
+      "authorities": [
+        {
+          "citation": "6 USC 488a(h)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CRITAN",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/ammonium-nitrate"
+    },
+    {
+      "name": "Controlled Technical Information",
+      "category_marking": "CTI",
+      "banner_marking": "CUI//SP-CTI",
+      "alternative_banner_marking": null,
+      "group": "Defense",
+      "description": "Controlled Technical Information means technical information with military or space application that is subject to controls on the access, use, reproduction, modification, performance, display, release, disclosure, or dissemination. Controlled technical information is to be marked with one of the distribution statements B through F, in accordance with Department of Defense Instruction 5230.24, \"Distribution Statements of Technical Documents.\" The term does not include information that is lawfully publicly available without restrictions. \"Technical Information\" means technical data or computer software, as those terms are defined in Defense Federal Acquisition Regulation Supplement clause 252.227-7013, \"Rights in Technical Data - Noncommercial Items\" (48 CFR 252.227-7013). Examples of technical information include research and engineering data, engineering drawings, and associated lists, specifications, standards, process sheets, manuals, technical reports, technical orders, catalog-item identifications, data sets, studies and analyses and related information, and computer software executable code and source code.",
+      "authorities": [
+        {
+          "citation": "48 CFR 252.204-7012",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CTI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/controlled-technical-info"
+    },
+    {
+      "name": "Chemical-terrorism Vulnerability Information",
+      "category_marking": "CVI",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//CVI",
+      "group": "Critical Infrastructure",
+      "description": "In accordance with Section 550(c) of the Department of Homeland Security Appropriations Act of 2007, the following information, whether transmitted verbally, electronically, or in written form, shall constitute CVI, see (1) - (9).",
+      "authorities": [
+        {
+          "citation": "6 USC 121 note",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "6 CFR 27.400(j)"
+        },
+        {
+          "citation": "6 CFR 27",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-CVI",
+          "sanctions": "6 CFR 27.400(j)"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/chemical-terrorism-vulnerability-information"
+    },
+    {
+      "name": "Child Victim/Witness",
+      "category_marking": "CVIC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//CVIC",
+      "group": "Legal",
+      "description": "Information pertaining to a minor who was a victim, witness, or potential witness to a criminal act.",
+      "authorities": [
+        {
+          "citation": "18 USC 3509(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 403"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/child-victim-witness"
+    },
+    {
+      "name": "Unclassified Controlled Nuclear Information - Defense",
+      "category_marking": "DCNI",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//DCNI",
+      "group": "Defense",
+      "description": "Relating to Department of Defense special nuclear material (SNM), equipment, and facilities, as defined by 32 CFR 223.",
+      "authorities": [
+        {
+          "citation": "10 USC 128(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "32 CFR 223",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-DCNI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/ucni-dod"
+    },
+    {
+      "name": "DoD Critical Infrastructure Security Information",
+      "category_marking": "DCRIT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//DCRIT",
+      "group": "Defense",
+      "description": "Information that, if disclosed, would reveal vulnerabilities in the DoD critical infrastructure and, if exploited, would likely result in the significant disruption, destruction, or damage of or to DoD operations, property, or facilities, including information regarding the securing and safeguarding of explosives, hazardous chemicals, or pipelines, related to critical infrastructure or protected systems owned or operated on behalf of the DoD, including vulnerability assessments prepared by or on behalf of the DoD, explosives safety information (including storage and handling), and other site-specific information on or relating to installation security.",
+      "authorities": [
+        {
+          "citation": "DCRIT",
+          "classification": null,
+          "banner_marking": null,
+          "sanctions": null
+        },
+        {
+          "citation": "CUI//DCRIT",
+          "classification": null,
+          "banner_marking": null,
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 130e",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/dod-critical-infrastructure-security-information"
+    },
+    {
+      "name": "Death Records",
+      "category_marking": "DREC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//DREC",
+      "group": "Privacy",
+      "description": "Related to information contained within an official document issued by a public registry verifying that a person has died, with information such as the date and time of death, the cause of death, and the signature of the attending or examining physician.",
+      "authorities": [
+        {
+          "citation": "42 USC 405(r)(5)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/death-records"
+    },
+    {
+      "name": "Emergency Management",
+      "category_marking": "EMGT",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//EMGT",
+      "group": "Critical Infrastructure",
+      "description": "Related to information concerning the continuity of executive branch operations during all-hazards emergencies or other situations that may disrupt normal operations.",
+      "authorities": [
+        {
+          "citation": "Federal Continuity Directive",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "January 22, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/emergency-mgmt"
+    },
+    {
+      "name": "Export Controlled",
+      "category_marking": "EXPT",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//EXPT",
+      "group": "Export Control",
+      "description": "Unclassified information concerning certain items, commodities, technology, software, or other information whose export could reasonably be expected to adversely affect the United States national security and nonproliferation objectives. To include dual use items; items identified in export administration regulations, international traffic in arms regulations (ITAR) and the munitions list; license applications; and sensitive nuclear technology information.",
+      "authorities": [
+        {
+          "citation": "50 USC 4614(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "13 USC 301(g)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "15 CFR 736, Supplement No. 2",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2077(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2156",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2168(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 2168(b) 42 USC 2168(c)"
+        },
+        {
+          "citation": "15 CFR 718.3",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "22 CFR 124.9(a)(5)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "22 CFR 127.3"
+        },
+        {
+          "citation": "22 CFR 120.21",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 4605(l)(5)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "15 CFR 748.1(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "15 CFR 760.5(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 130(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "32 CFR 250.4(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "32 CFR 250.9",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-EXPT",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/export-control"
+    },
+    {
+      "name": "Export Controlled Research",
+      "category_marking": "EXPTR",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//EXPTR",
+      "group": "Export Control",
+      "description": "Related to the systematic investigation into and study of materials and sources in order to establish facts and reach new conclusions.",
+      "authorities": [
+        {
+          "citation": "15 CFR 734.8(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/export-controlled-research"
+    },
+    {
+      "name": "Federal Housing Finance Non-Public Information",
+      "category_marking": "FHFANPI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//FHFANPI",
+      "group": "Financial",
+      "description": "Related to information that the Federal Housing Finance Agency (FHFA) has not made public that is created by, obtained by, or communicated to an FHFA employee in connection with the performance of official duties, regardless of who is in possession of the information, including confidential supervisory information. Confidential supervisory information includes FHFA reports of examination, inspection and visitation, confidential operating and condition reports, and any information derived from, related to, or contained in such reports, or gathered by FHFA in the course of any investigation, suspicious activity report, cease-and- desist order, civil money penalty enforcement order, suspension, removal or prohibition order, or other supervisory or enforcement orders or actions taken under the Federal Housing Enterprises Financial Safety and Soundness Act of 1992, and other conditions as set forth in 12 CFR Part 1214.1.",
+      "authorities": [
+        {
+          "citation": "12 CFR 1214.3",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/fhfa-nonpublic-info"
+    },
+    {
+      "name": "CUI Category - International Financial Institutions",
+      "category_marking": "FINT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//FINT",
+      "group": "Financial",
+      "description": "Relating to entities that provide financial services for its clients or members, and were established (or chartered) by more than one country, and hence are subjects of international law.",
+      "authorities": [
+        {
+          "citation": "22 USC 286f(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "22 USC 286f(c)"
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/international-financial-institutions"
+    },
+    {
+      "name": "Foreign Intelligence Surveillance Act",
+      "category_marking": "FISA",
+      "banner_marking": "CUI//SP-FISA",
+      "alternative_banner_marking": null,
+      "group": "Intelligence",
+      "description": "Related to unclassified and declassified information that is collected from unconsenting individuals under the authority of the Foreign Intelligence Surveillance Act (FISA).",
+      "authorities": [
+        {
+          "citation": "50 USC 1806(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FISA",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 1845",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FISA",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 1825(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FISA",
+          "sanctions": "50 USC 1827 50 USC 1828"
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/foreign-intelligence-surveillance-act"
+    },
+    {
+      "name": "Foreign Intelligence Surveillance Act Business Records",
+      "category_marking": "FISAB",
+      "banner_marking": "CUI//SP-FISAB",
+      "alternative_banner_marking": null,
+      "group": "Intelligence",
+      "description": "Related to books, records, papers, documents, and other items produced for an investigation to obtain foreign intelligence information.",
+      "authorities": [
+        {
+          "citation": "50 USC 1861(d)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FISAB",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/foreign-intelligence-surveillance-act-business-records"
+    },
+    {
+      "name": "General Financial Information",
+      "category_marking": "FNC",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//FNC",
+      "group": "Financial",
+      "description": "Related to the duties, transactions, or otherwise falling under the purview of financial institutions or United States Government fiscal functions. Uses may include, but are not limited to, customer information held by a financial institution.",
+      "authorities": [
+        {
+          "citation": "18 USC 1906",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FNC",
+          "sanctions": "18 USC 1906"
+        },
+        {
+          "citation": "12 USC 3412(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FNC",
+          "sanctions": "12 USC 3417 12 USC 3418"
+        },
+        {
+          "citation": "12 USC 5322(d)(5)(A)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "31 USC 5318(g)(2)(A)(ii)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FNC",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f)"
+        },
+        {
+          "citation": "5 USC Appendix 107(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "31 CFR 800.702(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "50 USC 4555"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/financial"
+    },
+    {
+      "name": "Bank Secrecy",
+      "category_marking": "FSEC",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//FSEC",
+      "group": "Financial",
+      "description": "Information that is provided to the government pursuant to the Bank Secrecy Act, including but not limited to, suspicious activity reports (SAR), currency transaction reports (CTR), reports of international transportation of currency or monetary instruments (CMIR), reports of cash payment over $10,000 received in trade or business, and reports of foreign bank and financial accounts (FBAR). Reports filed under the Bank Secrecy Act (BSA), codified in relevant part at 31 U.S.C. § 5311 et seq, are specifically exempt from disclosure under the Freedom of Information Act, codified at 5 U.S.C. § 552, and also may not be disclosed under any State, local, tribal, or territorial “freedom of information,” “open government,” or similar law. See 31 U.S.C. § 5319; 5 U.S.C. § 552(b)(3). These reports (BSA Reports), are maintained in a system of records containing information compiled for law enforcement investigative purposes that has been exempted from the access provisions of the Privacy Act in accordance with 5 U.S.C. §§ 552a(j)(2) and (k)(2). BSA Reports may only be re-disseminated in strict accordance with guidelines established by the Financial Crimes Enforcement Network (FinCEN), the Treasury bureau that administers the BSA. Suspicious Activity Reports, one of the types of required reports filed under the BSA, are required to be kept confidential in accordance with 31 U.S.C. § 5318(g)(2) and implementing regulations. To the extent information falling under the purview of the BSA is collected, accessed, or used for any Federal tax administration purpose, it is also subject to the confidentiality provisions of the Internal Revenue Code, codified at 26 U.S.C. § 6103.",
+      "authorities": [
+        {
+          "citation": "31 USC 5318(g)(2)(A)(ii)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FSEC",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "31 USC 5319",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "31 CFR 1010.950",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FSEC",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "26 USC 6103",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FSEC",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "85 FR 85856",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FSEC",
+          "sanctions": "31 USC 5321 Civil Penalties 31 USC 5322 Criminal Penalties 31 USC 5318(f) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/bank-secrecy"
+    },
+    {
+      "name": "Financial Supervision Information",
+      "category_marking": "FSI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//FSI",
+      "group": "Financial",
+      "description": "Related to information connected to an agency's responsibilities to supervise, examine, and evaluate a financial institution.",
+      "authorities": [
+        {
+          "citation": "12 USC 1817(a)(2)(C)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 1070.41",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 USC 1828(x)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.36",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.37",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.38",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/confidential-supervisory-information"
+    },
+    {
+      "name": "Financial Supervision Information",
+      "category_marking": "FSI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//FSI",
+      "group": "Financial",
+      "description": "Related to information connected to an agency's responsibilities to supervise, examine, and evaluate a financial institution.",
+      "authorities": [
+        {
+          "citation": "12 USC 1817(a)(2)(C)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 1070.41",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 USC 1828(x)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.36",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.37",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 4.38",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/financial-supervision-information"
+    },
+    {
+      "name": "Campaign Funds",
+      "category_marking": "FUND",
+      "banner_marking": "CUI//SP-FUND",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Related to information obtained in connection to an investigation into campaign finance and disclosure laws. Usage may include but is not limited to notification or investigation pertaining to financial support of a candidate for election.",
+      "authorities": [
+        {
+          "citation": "52 USC 30109(a)(4)(B)(i)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FUND",
+          "sanctions": "52 USC 30109(a)(12)(B) 52 USC 30109(d)"
+        },
+        {
+          "citation": "52 USC 30109(a)(12)(A)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-FUND",
+          "sanctions": "52 USC 30109(a)(12)(B) 52 USC 30109(d)"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/campaign-funds"
+    },
+    {
+      "name": "Genetic Information",
+      "category_marking": "GENETIC",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//GENETIC",
+      "group": "Privacy",
+      "description": "The term \"genetic information\" means, with respect to any individual, information about-- (i) such individual's genetic tests, (ii) the genetic tests of family members of such individual, and (iii) the manifestation of a disease or disorder in family members of such individual.",
+      "authorities": [
+        {
+          "citation": "42 USC 2000ff-5",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-GENETIC",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1635.1(a)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1635.9",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-GENETIC",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/genetic-info"
+    },
+    {
+      "name": "Geodetic Product Information",
+      "category_marking": "GEO",
+      "banner_marking": "CUI//SP-GEO",
+      "alternative_banner_marking": null,
+      "group": "Intelligence",
+      "description": "Related to imagery, imagery intelligence, or geospatial information.",
+      "authorities": [
+        {
+          "citation": "10 USC 455(b)(1)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-GEO",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/geodetic-product-info"
+    },
+    {
+      "name": "Historic Properties",
+      "category_marking": "HISTP",
+      "banner_marking": "CUI//SP-HISTP",
+      "alternative_banner_marking": null,
+      "group": "Natural and Cultural Resources",
+      "description": "Related to the location, character, or ownership of historic property.",
+      "authorities": [
+        {
+          "citation": "54 USC 307103",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HISTP",
+          "sanctions": null
+        },
+        {
+          "citation": "36 CFR 60.6(x)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HISTP",
+          "sanctions": null
+        },
+        {
+          "citation": "36 CFR 800.11(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HISTP",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/historic-properties"
+    },
+    {
+      "name": "Health Information",
+      "category_marking": "HLTH",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//HLTH",
+      "group": "Privacy",
+      "description": "As per 42 USC 1320d(4), \"health information\" means any information, whether oral or recorded in any form or medium, that (A) is created or received by a health care provider, health plan, public health authority, employer, life insurer, school or university, or health care clearinghouse; and (B) relates to the past, present, or future physical or mental health or condition of an individual, the provision of health care to an individual, or the past, present, or future payment for the provision of health care to an individual.",
+      "authorities": [
+        {
+          "citation": "18 USC 3486(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": null
+        },
+        {
+          "citation": "18 USC 4247(e)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 242m(d)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": null
+        },
+        {
+          "citation": "38 USC 7332(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "38 USC 5705"
+        },
+        {
+          "citation": "38 USC 5705",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "38 USC 5705"
+        },
+        {
+          "citation": "42 USC 12112(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 12188"
+        },
+        {
+          "citation": "42 USC 1320d-2(d)(2)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": "42 USC 1320d-5 42 USC 1320d-6(b)"
+        },
+        {
+          "citation": "42 USC 1320d-2 note(b)(Public Law 104-191, Section 264)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 1320d-5 42 USC 1320d-6(b)"
+        },
+        {
+          "citation": "42 USC 15044(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 290dd-2(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 290dd-2(f)"
+        },
+        {
+          "citation": "5 CFR 293, Subpart E (293.501, 293.504. 293. 505)",
+          "classification": "Basic (provisional)",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "(see also 5 CFR 293.106 and 5 CFR 297.401 already on Registry",
+          "classification": "Specified Basic",
+          "banner_marking": "under \"Personnel Records\" under \"General Privacy\"",
+          "sanctions": null
+        },
+        {
+          "citation": "20 CFR 401.200(g)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": "20 CFR 401.200(h)"
+        },
+        {
+          "citation": "29 CFR 1630.14(b)(1)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": null
+        },
+        {
+          "citation": "42 CFR 2.1(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 CFR 2.1(f)"
+        },
+        {
+          "citation": "42 CFR 2.12(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 CFR 2.1(f)"
+        },
+        {
+          "citation": "42 CFR 2.13(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": "42 CFR 2.1(f)"
+        },
+        {
+          "citation": "42 CFR 2.16(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": "42 CFR 2.1(f)"
+        },
+        {
+          "citation": "42 CFR 2.2(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 CFR 2.2(f)"
+        },
+        {
+          "citation": "42 CFR 2.21(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 CFR 2.2(f)"
+        },
+        {
+          "citation": "45 CFR 164.306(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "45 CFR 164.310(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "45 CFR 164.502(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "45 CFR 164.508(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "45 CFR 164.530(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "45 CFR 164.530(e)"
+        },
+        {
+          "citation": "29 CFR 1630.14(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1630.14(d)(4)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-HLTH",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 1630.16(c)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/health-info"
+    },
+    {
+      "name": "Internal Data",
+      "category_marking": "ID",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//ID",
+      "group": "Intelligence",
+      "description": "Refers to a category of information that is not intended to be disseminated beyond CIA channels that involves intelligence activities, sources, or methods. This information may also relate to the CIA's organization, functions, names, official titles, salaries, or numbers of personnel.",
+      "authorities": [
+        {
+          "citation": "50 USC 3024(i)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-ID",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3507",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3523(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-ID",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 424",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/internal-data"
+    },
+    {
+      "name": "Intelligence Financial Records",
+      "category_marking": "IFNC",
+      "banner_marking": "CUI//SP-IFNC",
+      "alternative_banner_marking": null,
+      "group": "Intelligence",
+      "description": "Related to financial records obtained for intelligence or counterintelligence activity, investigation, or analysis.",
+      "authorities": [
+        {
+          "citation": "12 USC 3412(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-IFNC",
+          "sanctions": "12 USC 3417 12 USC 3418"
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/intelligence-financial-records"
+    },
+    {
+      "name": "Informant",
+      "category_marking": "INF",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//INF",
+      "group": "Law Enforcement",
+      "description": "Related to the identity of a human source.",
+      "authorities": [
+        {
+          "citation": "5 CFR 736.103",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "21 CFR 20.64(a)(4)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 19.16(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "26 USC 6103(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INF",
+          "sanctions": null
+        },
+        {
+          "citation": "26 USC 6103(h)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INF",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/informant"
+    },
+    {
+      "name": "General Intelligence",
+      "category_marking": "INTEL",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//INTEL",
+      "group": "Intelligence",
+      "description": "Related to intelligence activities, sources, or methods.",
+      "authorities": [
+        {
+          "citation": "Executive Order 13470",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3024(i)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INTEL",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3507",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "Intelligence Community Directive 501",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "Intelligence Community Directive 700",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "Intelligence Community Directive 710",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3047(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 USC 798(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 798(a) 18 USC 798(d)(1) 18 USC 798(d)(2)"
+        },
+        {
+          "citation": "50 USC 3605(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/intelligence"
+    },
+    {
+      "name": "International Agreement Information",
+      "category_marking": "INTL",
+      "banner_marking": "CUI//SP-INTL",
+      "alternative_banner_marking": null,
+      "group": "International Agreements",
+      "description": "Information provided by, otherwise made available by, or produced in cooperation with, a foreign government or international organization that requires protection pursuant to an existing treaty, agreement, bilateral exchange or other obligation under the requirements stipulated in 10 USC 130c(b), when not subject to classification under Executive Order 13526. Title 10 USC 130c(b) may exempt this class of foreign government information from the safeguard provisions otherwise required by Executive Order 13526. Per Title 10 USC 130c(h) the following national security officials are the only ones defined by statute as able to determine such information requires control: (A) The Secretary of Defense, with respect to information of concern to the Department of Defense. (B) The Secretary of Homeland Security, with respect to information of concern to the Coast Guard, as determined by the Secretary, but only while the Coast Guard is not operating as a service in the Navy. (C) The Secretary of Energy, with respect to information concerning the national security programs of the Department of Energy, as determined by the Secretary.",
+      "authorities": [
+        {
+          "citation": "10 USC 130c",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INTL",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/international-agreements"
+    },
+    {
+      "name": "Investigation",
+      "category_marking": "INV",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//INV",
+      "group": "Law Enforcement",
+      "description": "Related to information obtained during the course of a law enforcement investigation or action, civil or criminal.",
+      "authorities": [
+        {
+          "citation": "6 CFR Part 5 Appendix C(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 1b.20",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INV",
+          "sanctions": "18 CFR 1b.15"
+        },
+        {
+          "citation": "18 CFR 1b.9",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "21 CFR 20.64(d)(4)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INV",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 2.390(c)(3)(v)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 820.12",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 824.12",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 851.40",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 1070.2(h)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-INV",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/investigation"
+    },
+    {
+      "name": "Inventions",
+      "category_marking": "INVENT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//INVENT",
+      "group": "Patent",
+      "description": "An invention is any art or process (way of doing or making things), machine, manufacture, design, or composition of matter, or any new and useful improvement thereof, or any variety of plant, which is or may be patentable under the patent laws of the United States, in which the federal government owns or may own a right, title, or interest.",
+      "authorities": [
+        {
+          "citation": "35 USC 205",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "35 USC 186 35 USC 187"
+        },
+        {
+          "citation": "48 CFR 27.302",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 27.305-4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "37 CFR 401.13(c)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "37 CFR 401.13(c)(3)-(5)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/inventions"
+    },
+    {
+      "name": "Information Systems Vulnerability Information",
+      "category_marking": "ISVI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//ISVI",
+      "group": "Critical Infrastructure",
+      "description": "Related to information that if not protected, could result in adverse effects to information systems. Information system means a discrete set of information resources organized for the collection, processing, maintenance, use, sharing, dissemination, or disposition of information.",
+      "authorities": [
+        {
+          "citation": "44 USC 3554 (see OMB M-24-04 for implementing guidance)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "44 USC 3555(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/info-systems-vulnerability-info"
+    },
+    {
+      "name": "Victims of Human Trafficking",
+      "category_marking": "IVIC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": null,
+      "group": "Immigration",
+      "description": "Related to identifiable information of persons who have been victims of human trafficking and their family members.",
+      "authorities": [
+        {
+          "citation": "28 CFR 1100.31(d)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/victims-of-human-trafficking"
+    },
+    {
+      "name": "Federal Grand Jury",
+      "category_marking": "JURY",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//JURY",
+      "group": "Legal",
+      "description": "Material obtained pursuant to a federal grand jury subpoena, which includes (1) any reference to a specific sitting grand jury; (2) any documentation or data obtained by a grand jury subpoena if disclosure of such material tends to reveal what transpired before or at the direction of the federal grand jury; (3) documentation prepared specifically for the federal grand jury; and (4) transcripts or other recordings of testimony presented to the federal grand jury.",
+      "authorities": [
+        {
+          "citation": "Federal Rules of Criminal Procedure",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-JURY",
+          "sanctions": "Federal Rules of Criminal Procedure"
+        },
+        {
+          "citation": "18 USC 3771(c)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 3771(d)"
+        },
+        {
+          "citation": "US Attorney's Manual",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-JURY",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/federal-grand-jury"
+    },
+    {
+      "name": "Juvenile",
+      "category_marking": "JUV",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//JUV",
+      "group": "Law Enforcement",
+      "description": "Related to the identity of individual juvenile youths.",
+      "authorities": [
+        {
+          "citation": "34 USC 11186",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "34 USC 11275",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 USC 5038",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/juvenile"
+    },
+    {
+      "name": "Communications",
+      "category_marking": "LCOMM",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LCOMM",
+      "group": "Law Enforcement",
+      "description": "Related to the contents of any wire, oral, or electronic communication.",
+      "authorities": [
+        {
+          "citation": "18 USC 2511(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 2511(4) 18 USC 2511(5)"
+        },
+        {
+          "citation": "47 USC 605(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "47 USC 605(e)"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/communications"
+    },
+    {
+      "name": "DNA",
+      "category_marking": "LDNA",
+      "banner_marking": "CUI//SP-LDNA",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Related to hereditary material in humans that is used for law enforcement purposes.",
+      "authorities": [
+        {
+          "citation": "34 USC 12592(b)(3)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LDNA",
+          "sanctions": "34 USC 12592(c)"
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/dna"
+    },
+    {
+      "name": "General Law Enforcement",
+      "category_marking": "LEI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LEI",
+      "group": "Law Enforcement",
+      "description": "Related to techniques and procedures for law enforcement operations, investigations, prosecutions, or enforcement actions.",
+      "authorities": [
+        {
+          "citation": "50 USC 3365(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "28 USC 534(f)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/general-law-enforcement"
+    },
+    {
+      "name": "Law Enforcement Financial Records",
+      "category_marking": "LFNC",
+      "banner_marking": "CUI//SP-LFNC",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Related to financial records obtained for law enforcement purposes.",
+      "authorities": [
+        {
+          "citation": "12 USC 3412(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LFNC",
+          "sanctions": "12 USC 3417 12 USC 3418"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/law-enforcement-financial-records"
+    },
+    {
+      "name": "Legislative Materials",
+      "category_marking": "LMI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LMI",
+      "group": "Legal",
+      "description": "Data related to Congress’s legislative, investigatory or oversight responsibilities of the Executive branch of the Federal government. This includes data related to proposed or pending legislation as well as inquiries submitted by Congress to Federal agencies, agency responses to those inquiries and any other information which, if disclosed, would reveal the nature and scope of Congressional inquiries.",
+      "authorities": [
+        {
+          "citation": "U.S. Constitution, Article 1, Section 6",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "As Determined by Congress."
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/legislative-materials"
+    },
+    {
+      "name": "National Security Letter",
+      "category_marking": "LNSL",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LNSL",
+      "group": "Law Enforcement",
+      "description": "Related to administrative orders sent to compel the recipients of the letters to provide information to federal investigators.",
+      "authorities": [
+        {
+          "citation": "50 USC 3162(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/national-security-letter"
+    },
+    {
+      "name": "Protective Order",
+      "category_marking": "LPROT",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//LPROT",
+      "group": "Legal",
+      "description": "Stipulation that certain information that would normally fall under discovery rules will not be disclosed for specifically stated reason.",
+      "authorities": [
+        {
+          "citation": "15 USC 57b-2",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": "15 USC 57b-2(c)(3)"
+        },
+        {
+          "citation": "19 USC 1677f(g)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "19 USC 1677f(f)(3)-(6)"
+        },
+        {
+          "citation": "32 CFR 2.116",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 2.1010(b)(6)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 385.410(c)(6)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 2200.52(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": null
+        },
+        {
+          "citation": "46 CFR 502.201(i)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.34",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.39",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LPROT",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1333(h)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-LRPOT",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/protective-order"
+    },
+    {
+      "name": "Terrorist Screening",
+      "category_marking": "LSCRN",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LSCRN",
+      "group": "Law Enforcement",
+      "description": "Related to information gathering and analysis concerning possible threats or acts of a destructive nature.",
+      "authorities": [
+        {
+          "citation": "HSPD 6",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/terrorist-screening"
+    },
+    {
+      "name": "Victim",
+      "category_marking": "LVIC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//LVIC",
+      "group": "Legal",
+      "description": "Information requiring protection of the name or other details that may identify one who was the victim of a crime.",
+      "authorities": [
+        {
+          "citation": "18 USC 3612(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "34 USC 20920(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/victim"
+    },
+    {
+      "name": "Mergers",
+      "category_marking": "MERG",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//MERG",
+      "group": "Financial",
+      "description": "Relating to methods by which corporations legally unify ownership of assets formerly subject to separate controls.",
+      "authorities": [
+        {
+          "citation": "15 USC 18a(h)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "15 USC 18a(g)(1)"
+        },
+        {
+          "citation": "50 USC 4565(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/mergers"
+    },
+    {
+      "name": "Proprietary Manufacturer",
+      "category_marking": "MFC",
+      "banner_marking": "CUI//SP-MFC",
+      "alternative_banner_marking": null,
+      "group": "Proprietary Business Information",
+      "description": "Relating to the production of a consumer product to include that of a private labeler.",
+      "authorities": [
+        {
+          "citation": "15 USC 2055",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-MFC",
+          "sanctions": "15 USC 2055(e)"
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/proprietary-manufacturer"
+    },
+    {
+      "name": "Military Personnel Records",
+      "category_marking": "MIL",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//MIL",
+      "group": "Privacy",
+      "description": "Any member or former member of the armed forces or affiliated organization of the Department of Defense.",
+      "authorities": [
+        {
+          "citation": "10 USC 130b(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 1506(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 424(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 1071 note (Historical and Revision Notes - Section 1616(c))",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "38 USC 5701(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "38 USC 5701(f)"
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/military-personnel-records"
+    },
+    {
+      "name": "NATO Restricted",
+      "category_marking": "Mark this information in accordance with instructions in the United States Security Authority for NATO, Instruction 1-07 and supporting NATO Security Directives.",
+      "banner_marking": null,
+      "alternative_banner_marking": null,
+      "group": "North Atlantic Treaty Organization (NATO)",
+      "description": "Per the United States Security Authority for NATO, Instruction 1-07, information classified as \"\"NATO Restricted\"\", the fourth level of classification under the North Atlantic Treaty, requires safeguards and protection from public release and disclosure. This category does not apply to information classified NATO Confidential, NATO SECRET or NATO COSMIC TOP SECRET.",
+      "authorities": [
+        {
+          "citation": "United States Security Authority for NATO, Instruction 1-07",
+          "classification": "Specified",
+          "banner_marking": null,
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/nato-restricted"
+    },
+    {
+      "name": "NATO Unclassified",
+      "category_marking": "Mark this information in accordance with instructions in the United States Security Authority for NATO, Instruction 1-07 and supporting NATO Security Directives.",
+      "banner_marking": null,
+      "alternative_banner_marking": null,
+      "group": "North Atlantic Treaty Organization (NATO)",
+      "description": "Per the United States Security Authority for NATO, Instruction 1-07, this is information classified as \"NATO Unclassified\", which may only be used for official NATO purposes and may carry administrative or dissemination limitation markings.",
+      "authorities": [
+        {
+          "citation": "United States Security Authority for NATO, Instruction 1-07",
+          "classification": "Specified",
+          "banner_marking": null,
+          "sanctions": null
+        },
+        {
+          "citation": "NATO C-M(2002)60",
+          "classification": "Specified",
+          "banner_marking": null,
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "January 29, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/nato-unclassified"
+    },
+    {
+      "name": "Net Worth",
+      "category_marking": "NETW",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//NETW",
+      "group": "Financial",
+      "description": "Related to the net worth of an individual and/or their affiliates in certain administrative proceedings.",
+      "authorities": [
+        {
+          "citation": "19 CFR 212.11(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/net-worth"
+    },
+    {
+      "name": "Naval Nuclear Propulsion Information",
+      "category_marking": "NNPI",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//NNPI",
+      "group": "Defense",
+      "description": "Related to the safety of reactors and associated naval nuclear propulsion plants, and control of radiation and radioactivity associated with naval nuclear propulsion activities, including prescribing and enforcing standards and regulations for these areas as they affect the environment and the safety and health of workers, operators, and the general public.",
+      "authorities": [
+        {
+          "citation": "42 USC 2013",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 2168(b) 42 USC 2168(c)"
+        },
+        {
+          "citation": "50 USC 2511",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-NNPI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/naval-nuclear-propulsion-info"
+    },
+    {
+      "name": "National Park System Resources",
+      "category_marking": "NPSR",
+      "banner_marking": "CUI//SP-NPSR",
+      "alternative_banner_marking": null,
+      "group": "Natural and Cultural Resources",
+      "description": "Related to information concerning the nature and specific location of a National Park System resource that is endangered, threatened, rare, or commercially valuable, of mineral or paleontological objects within System units, or of objects of cultural patrimony within System units.",
+      "authorities": [
+        {
+          "citation": "54 USC 100707",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-NPSR",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/national-park-system-resources"
+    },
+    {
+      "name": "CUI Registry: General Nuclear",
+      "category_marking": "NUC",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//NUC",
+      "group": "Nuclear",
+      "description": "Related to protection of information concerning nuclear reactors, materials, or security.",
+      "authorities": [
+        {
+          "citation": "42 USC 2077(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-NUC",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 810.8",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "10 CFR 810.15"
+        },
+        {
+          "citation": "42 USC 2156",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/nuclear"
+    },
+    {
+      "name": "Ocean Common Carrier and Marine Terminal Operator Agreements",
+      "category_marking": "OCCMTO",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//OCCMTO",
+      "group": "Proprietary Business Information",
+      "description": "Relating to agreements between or among ocean common carriers and marine terminal operators as referenced in 46 USC 40301 and 40306.",
+      "authorities": [],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/occ-mto-agreements"
+    },
+    {
+      "name": "Operations Security",
+      "category_marking": "OPSEC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//OPSEC",
+      "group": "Intelligence",
+      "description": "Critical information determined to give evidence of the planning and execution of sensitive (frequently classified) government activities after going through a formal systematic vetting process in accordance with National Security Presidential Memorandum Number 28. This process identifies unclassified information that must be protected. It almost always results from an agency’s official OPSEC program, or is otherwise commonly approved for use by the CUI Senior Agency Official.",
+      "authorities": [
+        {
+          "citation": "NSPM 28",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/opsec"
+    },
+    {
+      "name": "Protected Critical Infrastructure Information",
+      "category_marking": "PCII",
+      "banner_marking": "CUI//SP-PCII",
+      "alternative_banner_marking": null,
+      "group": "Critical Infrastructure",
+      "description": "As defined by 6 USC 131-134, and 6 CFR 29, PCII relates to threats, vulnerabilities, or operational experience related to the national infrastructure. PCII offers protection to private sector infrastructure information voluntarily shared with government entities for purposes of homeland security.",
+      "authorities": [
+        {
+          "citation": "6 CFR 29",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PCII",
+          "sanctions": "6 CFR 29.9"
+        }
+      ],
+      "last_reviewed": "May 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/protected-critical-infrastructure-information"
+    },
+    {
+      "name": "Personnel Records",
+      "category_marking": "PERS",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//PERS",
+      "group": "Privacy",
+      "description": "Related to the employees of federal agencies.",
+      "authorities": [
+        {
+          "citation": "45 USC 362(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "45 USC 359 45 USC 231"
+        },
+        {
+          "citation": "5 CFR 293.106",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PERS",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/personnel-records"
+    },
+    {
+      "name": "Pesticide Producer Survey",
+      "category_marking": "PEST",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PEST",
+      "group": "Statistical",
+      "description": "Related to the data gathered regarding the production of pesticides that specifies the non-disclosure of the identity and location of individual producers.",
+      "authorities": [
+        {
+          "citation": "7 USC 136i-1(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "7 USC 136i-1(d)"
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/pesticide-producer-survey"
+    },
+    {
+      "name": "Physical Security",
+      "category_marking": "PHYS",
+      "banner_marking": "CUI//PHYS",
+      "alternative_banner_marking": "CUI//PHYS",
+      "group": "Critical Infrastructure",
+      "description": "Related to protection of federal buildings, grounds or property.",
+      "authorities": [
+        {
+          "citation": "GSA PBS P 3490.3",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "The Risk Management Process for Federal Facilities: An Interagency Security Committee Standard - 2024 Edition (promulgated under Executive Order 12977, as modified by Executive Order 13286)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "February 6, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/physical-security"
+    },
+    {
+      "name": "Proprietary Postal",
+      "category_marking": "POST",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//POST",
+      "group": "Proprietary Business Information",
+      "description": "Concerning or related to the course of business of the United States Postal Service.",
+      "authorities": [
+        {
+          "citation": "39 USC 410(c)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "39 USC 3652(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "39 USC 3654(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/proprietary-postal"
+    },
+    {
+      "name": "Presentence Report",
+      "category_marking": "PRE",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PRE",
+      "group": "Legal",
+      "description": "A report, generally prepared to assist the court in determining the most appropriate sentence for a defendant. It can include an assessment of the nature and seriousness of the offense and should contain details summarizing the background information of the defendant and the crime.",
+      "authorities": [
+        {
+          "citation": "Federal Rules of Criminal Procedure",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 10, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/presentence-report"
+    },
+    {
+      "name": "Inspector General Protected",
+      "category_marking": "PRIIG",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//PRIIG",
+      "group": "Privacy",
+      "description": "Related to the identity of a person making a report to the Inspector General of any Executive agency.",
+      "authorities": [
+        {
+          "citation": "5 USC Appendix 7(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 USC Appendix 8D(a)(1)(F)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 USC Appendix 8D(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PRIIG",
+          "sanctions": null
+        },
+        {
+          "citation": "5 USC Appendix 8M(b)(2)(B)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "50 USC 3033(g)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 USC 407(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 USC 420(b)(2)(B)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 20, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/inspector-general-protected"
+    },
+    {
+      "name": "Prior Arrest",
+      "category_marking": "PRIOR",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PRIOR",
+      "group": "Legal",
+      "description": "Information related to previous instances of law enforcement official's apprehension and formal processing of a suspect.",
+      "authorities": [
+        {
+          "citation": "34 USC 20920(b)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/prior-arrest"
+    },
+    {
+      "name": "Legal Privilege",
+      "category_marking": "PRIVILEGE",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PRIVILEGE",
+      "group": "Legal",
+      "description": "Per 15 USC 78x(f)(4): The term \"privilege\" includes any work-product privilege, attorney-client privilege, governmental privilege, or other privilege recognized under Federal, State, or foreign law. Per 502(g): (1) \"attorney-client privilege\" means the protection that applicable law provides for confidential attorney-client communications, and (2) \"work-product protection\" means the protection that applicable law provides for tangible material (or its intangible equivalent) prepared in anticipation of litigation or for trial. Note: There are two limited dissemination control markings that can be used with this category; Attorney Work Product (AWP), Attorney Client Privilege (AC). These limited dissemination control markings may be used to help identify the type of privilege in the document and limit the dissemination of that information so as to preserve that privilege. These limited dissemination control markings (AWP, AC) may only be used on information protected under the CUI \"Legal Privilege\" category.",
+      "authorities": [
+        {
+          "citation": "10 CFR 2.347(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "16 CFR 1025.31(c)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "Federal Rules of Civil Procedure 26(b)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "Federal Rules of Civil Procedure 37"
+        },
+        {
+          "citation": "Federal Rules of Civil Procedure 26(b)(5)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "Federal Rules of Civil Procedure 37"
+        },
+        {
+          "citation": "Federal Rules of Criminal Procedure 16(a)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "28 CFR 16.23",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "76 Federal Register 34986",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "26 USC 7525",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "Federal Rules of Evidence Rules 501 and 502(g)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 385",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 3c.2",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 388.112(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/legal-privilege"
+    },
+    {
+      "name": "General Procurement and Acquisition",
+      "category_marking": "PROCURE",
+      "banner_marking": "CUI//SP-PROCURE",
+      "alternative_banner_marking": null,
+      "group": "Procurement and Acquisition",
+      "description": "Material and information relating to, or associated with, the acquisition and procurement of goods and services, including but not limited to, cost or pricing data, contract information, indirect costs and direct labor rates.",
+      "authorities": [
+        {
+          "citation": "48 CFR 3.104-4",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROCURE",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 52.215-1(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROCURE",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "10 USC 4021(i)(2)(B)(i) and (ii)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/procurement-acquisition"
+    },
+    {
+      "name": "General Proprietary Business Information",
+      "category_marking": "PROPIN",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//PROPIN",
+      "group": "Proprietary Business Information",
+      "description": "Material and information relating to, or associated with, a company's products, business, or activities, including but not limited to financial information; data or statements; trade secrets; product research and development; existing and future product designs and performance specifications.",
+      "authorities": [
+        {
+          "citation": "18 USC 1905",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 1905"
+        },
+        {
+          "citation": "15 USC 2055",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": "15 USC 2055(e)"
+        },
+        {
+          "citation": "15 USC 46(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "15 USC 50"
+        },
+        {
+          "citation": "18 USC 1831(a)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 1831"
+        },
+        {
+          "citation": "18 USC 1832(a)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 1832"
+        },
+        {
+          "citation": "21 USC 331(j)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": "21 USC 333(a)"
+        },
+        {
+          "citation": "21 USC 355(c)(3)(D)(i)(III)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "29 USC 664",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "33 USC 1318(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "33 USC 1318(b)"
+        },
+        {
+          "citation": "33 USC 1320(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "33 USC 1320(d)"
+        },
+        {
+          "citation": "33 USC 1322(g)(3)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": "33 USC 1322(g)(3)"
+        },
+        {
+          "citation": "33 USC 1369(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 300j-4(d)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 300j-4(c)"
+        },
+        {
+          "citation": "42 USC 6921(b)(3)(B)(ii)(II)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 6921(b)(2)(B)(ii)(II)"
+        },
+        {
+          "citation": "42 USC 6927(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 6927(b)(2) 42 USC 6928(d)"
+        },
+        {
+          "citation": "42 USC 6991d(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 6991d(b)(2)"
+        },
+        {
+          "citation": "42 USC 7414(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 9604(e)(7)(A)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 9604(e)(7)(B)"
+        },
+        {
+          "citation": "51 USC 20131(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "7 USC 12(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "7 USC 13"
+        },
+        {
+          "citation": "7 USC 136h(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "7 USC 136h(f)"
+        },
+        {
+          "citation": "10 CFR 600.15(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 351.105(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 351.304(a)(1)(i)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 351.305(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 351.306(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "22 CFR 130.15",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "22 CFR 130.17(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "28 CFR 100.20",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 9903.202-4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "40 CFR 2.205(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": "40 CFR 2.211"
+        },
+        {
+          "citation": "48 CFR 15.407-1(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 225.7304(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 52.203-13",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 52.239-1",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 CFR 2634.604(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "5 CFR 2634.703"
+        },
+        {
+          "citation": "5 CFR 2634.901(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "5 CFR 2634.703"
+        },
+        {
+          "citation": "49 USC 30167(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "49 USC 32307(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "49 USC 32307(c) 49 USC 32308(b)"
+        },
+        {
+          "citation": "49 USC 32505(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "49 USC 32708(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "49 USC 32709"
+        },
+        {
+          "citation": "49 USC 33116(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 2320(a)(2)(B)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 11042(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "17 CFR 140.98",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "17 CFR 145.5",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "15 USC 3710a(c)(7)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 1306(f)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "2 CFR 910.362(d) (1)-(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "2 CFR 910, Subpart D, Appendix A",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 600.325(d)(1)-(f)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 600, Subpart D, Appendix A",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 603.850",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 603.870",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 52.227-14(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 52.227-20(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 970.5227-1",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 970.5227-2",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1332(g)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 2436(a)(4)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 2252(a)(8)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 2252(i)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1337(n)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1677f(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1677f(c)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 USC 1677f(f)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 201.6",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 206.7",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 206.8",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 206.17",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 206.54(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.5(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.5(d)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.5(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.34(c)(1)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 210.72",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 207.3",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 207.4",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 207.7",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 207.51",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 207.93",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PROPIN",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 2.390(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 USC 4021 (i)(2)(B)(iii)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/proprietary-business-info"
+    },
+    {
+      "name": "Temporary Protected Status",
+      "category_marking": "PROT",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PROT",
+      "group": "Immigration",
+      "description": "Related to findings that conditions in a given country pose a danger to personal safety due to ongoing armed conflict or an environmental disaster and persons should receive special temporary status to remain in the United States.",
+      "authorities": [
+        {
+          "citation": "8 USC 1254a(c)(6)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "8 CFR 244.16",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/temporary-protected-status"
+    },
+    {
+      "name": "General Privacy",
+      "category_marking": "PRVCY",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//PRVCY",
+      "group": "Privacy",
+      "description": "Refers to personal information, or, in some cases, \"personally identifiable information,\" as defined in OMB M-17-12, or \"means of identification\" as defined in 18 USC 1028(d)(7).",
+      "authorities": [
+        {
+          "citation": "5 USC 552a(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "5 USC 552a(i)"
+        },
+        {
+          "citation": "34 USC 20920(b)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 2400.4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 2705.9",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 792.60",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "12 CFR 792.69(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "17 CFR 146.6(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "18 CFR 3b.225(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "5 CFR 297.401",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "OMB M-17-12",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-PRVCY",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 22.1024",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "20 CFR 401.100",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "20 CFR 401.105(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "11 CFR 1.14",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "OMB Circular A-130",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 20, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/privacy"
+    },
+    {
+      "name": "Secrecy Orders",
+      "category_marking": "PSEC",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//PSEC",
+      "group": "Patent",
+      "description": "An order by the Commissioner of Patents that an invention be kept secret and to withhold the publication of an application or the grant of a patent due to national security concerns.",
+      "authorities": [
+        {
+          "citation": "35 USC 181",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/secrecy-orders"
+    },
+    {
+      "name": "Railroad Safety Analysis Records",
+      "category_marking": "RAIL",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//RAIL",
+      "group": "Transportation",
+      "description": "Related to the establishment, implementation, or modification of a railroad safety risk reduction program or pilot program, if the record is: (1) Supplied to the Secretary (of Transportation) pursuant to that safety risk reduction program or pilot program; or (2) made available for inspection and copying by an officer, employee, or agent of the Secretary pursuant to that safety risk reduction program or pilot program.",
+      "authorities": [
+        {
+          "citation": "49 USC 20118",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/railroad-safety-analysis-records"
+    },
+    {
+      "name": "Nuclear Recommendation Material",
+      "category_marking": "RECCOM",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//RECCOM",
+      "group": "Nuclear",
+      "description": "Related to recommendations to the Secretary of Energy with respect to Department of Energy defense nuclear facilities as determined necessary to ensure adequate protection of public health and safety.",
+      "authorities": [
+        {
+          "citation": "42 USC 2286d(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "42 USC 2286d(h)(3)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 1704.4(c)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/nuclear-recommendation-material"
+    },
+    {
+      "name": "Permanent Resident Status",
+      "category_marking": "RESD",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//RESD",
+      "group": "Immigration",
+      "description": "Related to applications and associated hearings to grant permanent residency to foreign nationals living in the United States.",
+      "authorities": [
+        {
+          "citation": "8 CFR 245a.21",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/permanent-resident-status"
+    },
+    {
+      "name": "Retirement",
+      "category_marking": "RTR",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//RTR",
+      "group": "Financial",
+      "description": "Related to post-employment funding provided by an employer.",
+      "authorities": [
+        {
+          "citation": "29 USC 1310(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 USC 1343(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 4010.13",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "29 CFR 4043.8",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/retirement"
+    },
+    {
+      "name": "Reward",
+      "category_marking": "RWRD",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//RWRD",
+      "group": "Law Enforcement",
+      "description": "Related to the identity of a recipient of a reward.",
+      "authorities": [
+        {
+          "citation": "18 USC 3073",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/reward"
+    },
+    {
+      "name": "SAFETY Act Information",
+      "category_marking": "SAFE",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//SAFE",
+      "group": "Critical Infrastructure",
+      "description": "Defined as “SAFETY Act Confidential Information” in 6 CFR Part 25, the regulations implementing the Support Anti-terrorism by Fostering Effective Technologies Act of 2002, SAFETY Act Information includes any and all information and data voluntarily submitted to the Department of Homeland Security under this part (including Applications, Pre-Applications, other forms, supporting documents and other materials relating to any of the foregoing, and responses to requests for additional information), including, but not limited to, inventions, devices, Technology, know-how, designs, copyrighted information, trade secrets, confidential business information, analyses, test and evaluation results, manuals, videotapes, contracts, letters, facsimile transmissions, electronic mail and other correspondence, financial information and projections, actuarial calculations, liability estimates, insurance quotations, and business and marketing plans.",
+      "authorities": [
+        {
+          "citation": "6 USC 441 et seq",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "6 CFR 25.10",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/safety-act-info"
+    },
+    {
+      "name": "Small Business Research and Technology",
+      "category_marking": "SBIZ",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//SBIZ",
+      "group": "Procurement and Acquisition",
+      "description": "Relating to certain \"Small Business Innovation Research Program\" and \"Small Business Technology Transfer Program\" information in a government database, as referenced in 15 USC 638(k)(2).",
+      "authorities": [
+        {
+          "citation": "15 USC 638(k)(4)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/small-business-research-and-technology"
+    },
+    {
+      "name": "Sex Crime Victim",
+      "category_marking": "SCV",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//SCV",
+      "group": "Law Enforcement",
+      "description": "Related to the identity of a victim of a sex offense.",
+      "authorities": [
+        {
+          "citation": "34 USC 20920(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/sex-crime-victim"
+    },
+    {
+      "name": "Ocean Common Carrier Service Contracts",
+      "category_marking": "SERV",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//SERV",
+      "group": "Proprietary Business Information",
+      "description": "Relating to an agreement for the provision of services filed with the Federal Maritime Commission as referenced in 46 USC 40502(b), 46 CFR 530.4, and/or 46 CFR 531.4(a).",
+      "authorities": [
+        {
+          "citation": "46 USC 40502(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "46 CFR 530.4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "46 CFR 531.4(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 24, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/ocean-common-carrier-service-contracts"
+    },
+    {
+      "name": "Safeguards Information",
+      "category_marking": "SGI",
+      "banner_marking": "CUI//SP-SGI",
+      "alternative_banner_marking": null,
+      "group": "Nuclear",
+      "description": "Pursuant to 42 USC 2011, et seq., and as defined in 10 CFR 73.2, SGI relates to security related information concerning the physical protection of source, byproduct or special nuclear material and the detailed security measures for facilities and information contained within security plans.",
+      "authorities": [
+        {
+          "citation": "10 CFR 73",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SGI",
+          "sanctions": "10 CFR 73.81"
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/safeguards-info"
+    },
+    {
+      "name": "Nuclear Security-Related Information",
+      "category_marking": "SRI",
+      "banner_marking": null,
+      "alternative_banner_marking": null,
+      "group": "Nuclear",
+      "description": "Related to information that could be useful, or could reasonably be expected to be useful, to a terrorist in a potential attack that does not qualify as Safeguards or classified information, including the exact location and quantities of radioactive material, certain detailed design drawings, information on nearby facilities, emergency planning information, and certain assessments of vulnerability and safety analyses.",
+      "authorities": [
+        {
+          "citation": "42 USC 2201(b) NRC RIS 2005-31, Revision 1 NRC RIS 2005-26",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SRI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/nuclear-security-related-info"
+    },
+    {
+      "name": "Source Selection",
+      "category_marking": "SSEL",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//SSEL",
+      "group": "Procurement and Acquisition",
+      "description": "Per FAR 2.101: any of the following information that is prepared for use by an agency for the purpose of evaluating a bid or proposal to enter into an agency procurement contract, if that information has not been previously made available to the public or disclosed publicly: (Items 1-10).",
+      "authorities": [
+        {
+          "citation": "48 CFR 14.211",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 14.303",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 14.402-1(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 15.207(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 15.505(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 15.609(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 3.104-3(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8 48 CFR 3.104-2(b)(2)"
+        },
+        {
+          "citation": "48 CFR 42.1503(b)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 5.401(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "48 CFR 603.104-4",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 4.802(e)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 836.203",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "41 USC 2102(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "41 USC 2105"
+        },
+        {
+          "citation": "48 CFR 14.401(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 3.104-4",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 52.215-1(e)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSEL",
+          "sanctions": "41 USC 2105 48 CFR 3.104-8"
+        },
+        {
+          "citation": "48 CFR 9.105-3(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 30, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/source-selection"
+    },
+    {
+      "name": "Sensitive Security Information",
+      "category_marking": "SSI",
+      "banner_marking": "CUI//SP-SSI",
+      "alternative_banner_marking": null,
+      "group": "Transportation",
+      "description": "As defined in 49 C.F.R. Part 15.5, Sensitive Security Information is information obtained or developed in the conduct of security activities, including research and development, the disclosure of which DOT has determined would constitute an unwarranted invasion of privacy, reveal trade secrets or privileged or confidential information, or be detrimental to transportation safety. As defined in 49 C.F.R. Part 1520.5, Sensitive Security Information is information obtained or developed in the conduct of security activities, including research and development, the disclosure of which DHS/TSA has determined would, among other things, be detrimental to the security of transportation.",
+      "authorities": [
+        {
+          "citation": "49 CFR 1520 (authorized by 49 USC 114(h))",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSI",
+          "sanctions": "49 CFR 1520.17"
+        },
+        {
+          "citation": "49 CFR 15 (authorized by 49 USC 40119(b)(1))",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-SSI",
+          "sanctions": "49 CFR 15.17"
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/sensitive-security-info"
+    },
+    {
+      "name": "Statistical Information",
+      "category_marking": "STAT",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//STAT",
+      "group": "Statistical",
+      "description": "Refers to information collected by a Federal statistical agency, unit, or program for statistical purposes or used for statistical activities; under law, regulation, or Government-wide policy such 'Statistical' CUI requires: (1) protection from unauthorized disclosure; (2) special handling safeguards; and/or (3) prescribed limits on access or dissemination.",
+      "authorities": [
+        {
+          "citation": "18 USC 1905",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 1905"
+        },
+        {
+          "citation": "42 USC 242m(d)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-STAT",
+          "sanctions": null
+        },
+        {
+          "citation": "44 USC 3501 note Public Law 107-347, Sec. 512",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-STAT",
+          "sanctions": "44 USC 3501 note Public Law 107-347, Sec. 512"
+        },
+        {
+          "citation": "28 CFR 22.25",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-STAT",
+          "sanctions": "28 CFR 22.29"
+        },
+        {
+          "citation": "28 CFR 22.22",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-STAT",
+          "sanctions": "28 CFR 22.29"
+        },
+        {
+          "citation": "62 FR 35043 Sec. 2(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 12, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/statistical"
+    },
+    {
+      "name": "Student Records",
+      "category_marking": "STUD",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//STUD",
+      "group": "Privacy",
+      "description": "As per 20 USC 1232g, the Family Educational Rights and Privacy Act of 1974, an education record which is comprised of those records which are directly related to a student.",
+      "authorities": [
+        {
+          "citation": "20 USC 1232g(a)(1)(C)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "25 CFR 43.14",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "25 CFR 43.22",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-STUD",
+          "sanctions": null
+        },
+        {
+          "citation": "34 CFR 99.30(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "34 CFR 99.31(a)(6)(ii)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "34 CFR 99.33(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/student-records"
+    },
+    {
+      "name": "Controlled Substances",
+      "category_marking": "SUB",
+      "banner_marking": "CUI//SP-SUB",
+      "alternative_banner_marking": null,
+      "group": "Law Enforcement",
+      "description": "Information obtained by the Drug Enforcement Administration (DEA) or in DEA investigative reports related to controlled substances.",
+      "authorities": [
+        {
+          "citation": "28 CFR 0.103",
+          "classification": "Specified",
+          "banner_marking": "CU//SP-SUB",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/controlled-substances"
+    },
+    {
+      "name": "Investment Survey",
+      "category_marking": "SURV",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//SURV",
+      "group": "Statistical",
+      "description": "Information reported to Treasury, the Federal Reserve Board of Governors, or the Federal Reserve Banks as part of the Treasury International Capital (TIC) data reporting system.",
+      "authorities": [
+        {
+          "citation": "22 USC 3104(c)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "22 USC 3104(e)"
+        },
+        {
+          "citation": "31 CFR 128.3",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 24, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/investment-survey"
+    },
+    {
+      "name": "Taxpayer Advocate Information",
+      "category_marking": "TAI",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//TAI",
+      "group": "Tax",
+      "description": "A local taxpayer advocate (LTA) has the discretion to not disclose to the IRS contact with or information provided by, a taxpayer. Such discretion may result in declinations of requests for information by IRS personnel including cases involving criminal tax investigations or those where the failure to provide information to the IRS would be beneficial to the taxpayer but to the detriment of the IRS. Such discretion does not extend to cases where the LTA believes a taxpayer is using the Taxpayer Advocate’s office to perpetuate fraud on the government or in cases where the information is sought in litigation.",
+      "authorities": [
+        {
+          "citation": "26 USC 7803(c)(4)(A)(iv)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "26 USC 7214(a)(8)"
+        }
+      ],
+      "last_reviewed": "June 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/taxpayer-advocate-info"
+    },
+    {
+      "name": "Federal Taxpayer Information",
+      "category_marking": "TAX",
+      "banner_marking": "CUI//SP-TAX",
+      "alternative_banner_marking": null,
+      "group": "Tax",
+      "description": "Related to returns and return information which are submitted, gathered, or generated in conjunction with taxpayers’ responsibilities to comply with federal tax provisions in the United States Code. “Returns” includes information that is provided to the government pursuant to Title 26, including tax or information returns, declarations of estimated tax, or claims for refund. “Return information” includes a taxpayer’s identity, the nature, source, or amount of income, or any information received by, recorded by, prepared by, or furnished to the Internal Revenue Service relevant to the determination of tax liability including whether the taxpayer is the subject of investigation. This protection extends to such items as medical, financial, and other personal information submitted to the IRS by taxpayers. Standards (typically tolerances, audit criteria, and law enforcement techniques) related to the selection of returns for examination should only be disclosed to the extent their disclosure would not impair assessment, collection, or enforcement under the Internal Revenue laws. Tax data originating with the IRS generally retains its confidential status even when it resides with agencies other than the IRS.",
+      "authorities": [
+        {
+          "citation": "26 USC 6103",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TAX",
+          "sanctions": "26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "26 USC 6110",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TAX",
+          "sanctions": "26 USC 6110(j) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "42 USC 1306(a)(1)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TAX",
+          "sanctions": "42 USC 1306(a)(1)"
+        },
+        {
+          "citation": "26 CFR 301.6103(i)-1(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TAX",
+          "sanctions": "26 USC 7213 26 USC 7213A 26 USC 7431"
+        },
+        {
+          "citation": "IRS Publication 1075",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TAX",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/federal-taxpayer-info"
+    },
+    {
+      "name": "Pen Register/Trap & Trace",
+      "category_marking": "TRACE",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//TRACE",
+      "group": "Law Enforcement",
+      "description": "Related to devices used to identify incoming and outgoing telephone numbers.",
+      "authorities": [
+        {
+          "citation": "18 USC 3123(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/pen-register-trap-and-trace"
+    },
+    {
+      "name": "Toxic Substances",
+      "category_marking": "TSCA",
+      "banner_marking": "CUI//SP-TSCA",
+      "alternative_banner_marking": null,
+      "group": "Critical Infrastructure",
+      "description": "Health, safety, and exposure information related to chemical substances, chemical mixtures, and articles as defined under the Toxic Substances Control Act (TSCA).",
+      "authorities": [
+        {
+          "citation": "40 CFR Part 700-Part 721",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        },
+        {
+          "citation": "40 CFR Part 723-Part 789",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        },
+        {
+          "citation": "40 CFR Part 790-Part 799",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 12.118",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 12.127",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        },
+        {
+          "citation": "19 CFR 12.28",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-TSCA",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 7, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/toxic-substances"
+    },
+    {
+      "name": "Unclassified Controlled Nuclear Information - Energy",
+      "category_marking": "UCNI",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//UCNI",
+      "group": "Nuclear",
+      "description": "Relating to certain design and security information concerning nuclear facilities, materials, and weapons, specific to the Department of Energy.",
+      "authorities": [
+        {
+          "citation": "42 USC 2168(a)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 2168(b) 42 USC 2168(c)"
+        },
+        {
+          "citation": "10 CFR 1017",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-UCNI",
+          "sanctions": "10 CFR 1017.29 10 CFR 1017.30"
+        },
+        {
+          "citation": "10 USC 128(a)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/ucni-doe"
+    },
+    {
+      "name": "Visas",
+      "category_marking": "VISA",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//VISA",
+      "group": "Immigration",
+      "description": "Related to applications or permits to enter the United States.",
+      "authorities": [
+        {
+          "citation": "8 USC 1202(f)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 25, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/visas"
+    },
+    {
+      "name": "Water Assessments",
+      "category_marking": "WATER",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//WATER",
+      "group": "Critical Infrastructure",
+      "description": "Vulnerability Assessments on the risks and security of public drinking water systems, to include, but not be limited to, a review of pipes and constructed conveyances, physical barriers, water collection, pretreatment, treatment, storage and distribution facilities, electronic, computer or other automated systems which are utilized by the public water system, the use, storage, or handling of various chemicals, and the operation and maintenance of such system.",
+      "authorities": [
+        {
+          "citation": "42 USC 300i-2",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "42 USC 300i-2(a)(6)"
+        }
+      ],
+      "last_reviewed": "April 6, 2026",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/water-assessments"
+    },
+    {
+      "name": "Written Determinations",
+      "category_marking": "WDT",
+      "banner_marking": "CUI//SP-WDT",
+      "alternative_banner_marking": null,
+      "group": "Tax",
+      "description": "Rulings, determination letters, technical advice memoranda or Chief Counsel Advice, as those terms are defined in Treasury Regulation 301.6110-2, which are made available for public inspection subject to the withholding of certain types of data as enumerated in Treasury Regulation 301-6110.",
+      "authorities": [
+        {
+          "citation": "26 USC 6110",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-WDT",
+          "sanctions": "26 USC 6110(j) 26 USC 7213 26 USC 7213A 26 USC 7431"
+        }
+      ],
+      "last_reviewed": "June 13, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/written-determinations"
+    },
+    {
+      "name": "Whistleblower Identity",
+      "category_marking": "WHSTL",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//WHSTL",
+      "group": "Law Enforcement",
+      "description": "Identity of anyone providing information relating to a legal violation or illicit or unsafe activity, including information provided by a whistleblower which could reasonably be expected to reveal the identity of a whistleblower.",
+      "authorities": [
+        {
+          "citation": "7 USC 26(h)(2)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "10 CFR 21.2(d)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        },
+        {
+          "citation": "26 USC 6103(a)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-WHSTL",
+          "sanctions": null
+        },
+        {
+          "citation": "26 USC 6103(h)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-WHSTL",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/whistleblower-identity"
+    },
+    {
+      "name": "Witness Protection",
+      "category_marking": "WIT",
+      "banner_marking": null,
+      "alternative_banner_marking": "CUI//WIT",
+      "group": "Legal",
+      "description": "Information related to the secretive details associated with one who has testified or may testify under circumstances that require secrecy of that individual and details pertaining to that person.",
+      "authorities": [
+        {
+          "citation": "18 USC 3521(b)(1)",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": "18 USC 3521(b)(3)"
+        },
+        {
+          "citation": "28 CFR 0.111B(b)",
+          "classification": "Specified",
+          "banner_marking": "CUI//SP-WIT",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "July 29, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/witness-protection"
+    },
+    {
+      "name": "Electronic Funds Transfer",
+      "category_marking": "XFER",
+      "banner_marking": "CUI",
+      "alternative_banner_marking": "CUI//XFER",
+      "group": "Financial",
+      "description": "Relating to the computer-based systems used to perform financial transactions electronically.",
+      "authorities": [
+        {
+          "citation": "48 CFR 32.1104",
+          "classification": "Basic",
+          "banner_marking": "CUI",
+          "sanctions": null
+        }
+      ],
+      "last_reviewed": "May 8, 2025",
+      "source_url": "https://www.archives.gov/cui/registry/category-detail/electronic-funds-transfer"
+    }
+  ]
+}
