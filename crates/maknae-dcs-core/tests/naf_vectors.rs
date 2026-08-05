@@ -43,6 +43,18 @@ fn gate4_denies_unexpandable_coalition() {
     );
 }
 
+#[test]
+fn gate4_denies_unknown_owner() {
+    // codex P1: a non-ISO owner trigraph (ZZZ) with NoMarking would resolve to
+    // eligible {ZZZ} and permit a "ZZZ" nationality — gate-4 validate_label now
+    // rejects it as InvalidElement (complete world view).
+    let r = mk_owned("ZZZ"); // ZZZ passes is_trigraph but is not an ISO nation
+    assert_eq!(
+        decide(&sub("ZZZ"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::InvalidElement)
+    );
+}
+
 // --- Task 11: the flagship NAF releasability decisions. REL UNCK NAF ZAF —
 // ZAF is a UNCK member, excluded → Deny(Releasability) (a valid label whose
 // resolved set simply omits ZAF, NOT InvalidLabel). ---

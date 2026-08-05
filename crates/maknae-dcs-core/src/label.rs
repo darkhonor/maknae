@@ -726,6 +726,15 @@ fn rel_tokens_recognized(rel: &Releasability) -> Result<(), LabelInvalidity> {
 /// a `derive`-layer property (spec §2.3 total-∨/partial-derive split).
 pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInvalidity> {
     let d = &label.disclosure;
+    // (0) every owner/custodian is a recognized nation — the engine has a COMPLETE
+    //     world view and refuses to adjudicate on an unrecognized owner trigraph.
+    //     (`Owned("ZZZ")` with NoMarking would otherwise resolve to eligible
+    //     {ZZZ} and permit a "ZZZ" nationality — a made-up nation.)
+    for owner in label.ownership.base_set() {
+        if !registry::is_iso3166(&owner) {
+            return Err(LabelInvalidity::Element);
+        }
+    }
     // (1) release + display tokens are recognized world-view elements.
     rel_tokens_recognized(&d.release)?;
     if let Some(disp) = &d.display {
@@ -744,9 +753,18 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
         if !d.exclusions.is_disjoint(&owners) {
             return Err(LabelInvalidity::Label);
         }
-        // (4) a NAF requires a classified, NAMED release — a restriction on a
-        //     Public/Empty/NoMarking release is structurally invalid (DoDM §e).
+        // (4) a NAF requires a CLASSIFIED, NAMED release (DoDM §e — a dissemination
+        //     restriction is for classified information). Two ways to fail it:
+        //     a non-`Grant` release (Public/Empty/NoMarking — an all/none/origin
+        //     marking is not "named"), OR an UNCLASSIFIED-level resource (the
+        //     SPIF orders levels low→high, so its lowest rank is the
+        //     unclassified-equivalent floor; a NAF requires a rank ABOVE it —
+        //     rank unknown also fails closed).
         if !matches!(d.release, Releasability::Grant(_)) {
+            return Err(LabelInvalidity::Label);
+        }
+        // rank unknown OR the floor (0 = unclassified-equivalent) → not classified.
+        if spif.rank(&label.classification).is_none_or(|r| r == 0) {
             return Err(LabelInvalidity::Label);
         }
     }
@@ -794,11 +812,13 @@ mod tests {
     }
     // Owned{origin}, classification U//US, everything else empty — gates 1-3/5
     // pass under us_spif() so gate 4 (releasability) is the deciding gate.
+    // Classification "S" (CLASSIFIED, rank 1) — a NAF is valid only on classified
+    // information (DoDM §e); an unclassified-level NAF is InvalidLabel.
     fn mk_owned(origin: &str) -> ResourceLabel {
         ResourceLabel {
             classification: crate::policy::Classification {
                 policy: crate::policy::PolicyId("US".into()),
-                name: "U".into(),
+                name: "S".into(),
             },
             ownership: Ownership::Owned {
                 owner: origin.into(),
@@ -1026,6 +1046,34 @@ mod tests {
         assert!(matches!(
             validate_label(&l, &us_spif()),
             Err(LabelInvalidity::Element)
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_trigraph_is_invalid_element() {
+        // codex P1: a syntactically-valid but non-ISO owner (ZZZ) must not
+        // adjudicate — the engine has a complete world view. Without this,
+        // Owned("ZZZ")+NoMarking resolves to eligible {ZZZ} and would permit a
+        // "ZZZ" nationality.
+        let l = mk_owned("ZZZ"); // not an ISO-3166 nation
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Element)
+        ));
+    }
+
+    #[test]
+    fn naf_on_unclassified_is_invalid_label() {
+        // codex P1 / DoDM §e: a NAF requires CLASSIFIED information. The same
+        // well-formed NAF that validates at "S" is InvalidLabel at "U".
+        let mut l = mk_owned("USA"); // "S" — classified
+        l.disclosure.release = Releasability::Grant(set(&["UNCK"]));
+        l.disclosure.exclusions = set(&["ZAF"]);
+        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // valid on classified
+        l.classification.name = "U".into(); // demote to UNCLASSIFIED (rank 0)
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
         ));
     }
 
