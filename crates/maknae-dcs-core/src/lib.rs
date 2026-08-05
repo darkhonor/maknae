@@ -19,8 +19,8 @@ pub mod subject;
 
 pub use controls::{ControlMarking, Controls};
 pub use decide::{
-    decide, obligation_refines, obligations_refine, Action, Decision, DenyReason, Obligation,
-    Purpose, RedisseminationScope,
+    audit, decide, obligation_refines, obligations_refine, Action, AuditRecord, Decision,
+    DenyReason, Obligation, Purpose, RedisseminationScope,
 };
 pub use label::{
     derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,

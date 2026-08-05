@@ -230,6 +230,47 @@ pub fn decide(
     Decision::Permit
 }
 
+/// A pure, self-contained audit record of one decision (#26). The engine NEVER
+/// logs — it RETURNS this; the caller owns persistence.
+///
+/// Classified-coalition NON-DISCLOSURE is STRUCTURAL, not a redaction step: the
+/// record has NO expanded-eligible-set / roster field to leak, it carries the
+/// UNEXPANDED authoritative `presented_label` (the in-memory coalition expansion
+/// never leaves the engine — the protective measure), and `decision`'s deny
+/// reason is existence-agnostic (it names only the failing dimension, never a
+/// coalition or its membership). There is no secure channel because there is
+/// nothing membership-revealing to protect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditRecord {
+    /// Caller-supplied correlation id for this decision request.
+    pub request_id: String,
+    /// A reference to the requesting subject — its declared nationality (an input
+    /// attribute the requester already holds), NOT any derived coalition
+    /// membership. Never the expanded roster.
+    pub subject_ref: String,
+    /// The authoritative label AS PRESENTED — unexpanded. No resolved eligible
+    /// set / coalition roster is carried (the expansion stayed in the engine).
+    pub presented_label: ResourceLabel,
+    /// The decision, including its existence-agnostic reason on a `Deny`.
+    pub decision: Decision,
+}
+
+/// Build the pure audit record for a decision. Total, side-effect-free — no
+/// logging, no I/O; the engine returns the record and the caller persists it.
+pub fn audit(
+    request_id: &str,
+    subject: &Subject,
+    label: &ResourceLabel,
+    decision: Decision,
+) -> AuditRecord {
+    AuditRecord {
+        request_id: request_id.to_string(),
+        subject_ref: subject.nationality.clone(),
+        presented_label: label.clone(),
+        decision,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

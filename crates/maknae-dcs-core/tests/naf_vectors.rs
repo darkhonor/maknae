@@ -5,7 +5,7 @@
 
 mod common;
 use common::*;
-use maknae_dcs_core::{decide, Action, Decision, DenyReason, Releasability};
+use maknae_dcs_core::{audit, decide, Action, Decision, DenyReason, Releasability};
 
 // --- Task 10: gate-4 defense-in-depth (a single-origin Owned label that did NOT
 // pass validate_label still denies structurally at decide()). Joint owner-in-X is
@@ -90,4 +90,26 @@ fn owner_is_never_excluded_permits() {
         decide(&sub("USA"), &r, Action::Read, &purpose(""), &us_spif()),
         Decision::Permit
     );
+}
+
+// --- Task 12: AuditRecord — pure return, classified-coalition non-disclosure. ---
+
+#[test]
+fn audit_record_carries_presented_label_and_decision_no_roster() {
+    // REL UNCK NAF ZAF, ZAF subject → Deny(Releasability); the audit record
+    // carries the UNEXPANDED label + the existence-agnostic reason, and (by TYPE)
+    // no expanded roster — classified-coalition non-disclosure is structural.
+    let mut r = mk_owned("USA");
+    r.disclosure.release = Releasability::Grant(set(&["UNCK"]));
+    r.disclosure.exclusions = set(&["ZAF"]);
+    let dec = decide(&sub("ZAF"), &r, Action::Read, &purpose(""), &us_spif());
+    assert_eq!(dec, Decision::Deny(DenyReason::Releasability));
+
+    let rec = audit("req-1", &sub("ZAF"), &r, dec.clone());
+    assert_eq!(rec.request_id, "req-1");
+    assert_eq!(rec.decision, dec); // full Decision, incl. existence-agnostic reason
+    assert_eq!(rec.presented_label, r); // UNEXPANDED authoritative input (no roster)
+                                        // classified-coalition non-disclosure is structural: AuditRecord exposes no
+                                        // eligible-set / expanded-roster field, so there is nothing to leak. The deny
+                                        // reason names only a dimension (Releasability), never UNCK or ZAF's membership.
 }
