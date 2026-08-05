@@ -753,18 +753,22 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
         if !d.exclusions.is_disjoint(&owners) {
             return Err(LabelInvalidity::Label);
         }
-        // (4) a NAF requires a CLASSIFIED, NAMED release (DoDM §e — a dissemination
-        //     restriction is for classified information). Two ways to fail it:
-        //     a non-`Grant` release (Public/Empty/NoMarking — an all/none/origin
-        //     marking is not "named"), OR an UNCLASSIFIED-level resource (the
-        //     SPIF orders levels low→high, so its lowest rank is the
-        //     unclassified-equivalent floor; a NAF requires a rank ABOVE it —
-        //     rank unknown also fails closed).
+        // (4) a NAF requires a NAMED release — an exclusion is only meaningful
+        //     against a positive `Grant` to except a member FROM. A restriction
+        //     on `Public` (REL ALL — everyone is authorized), `Empty` (REL NONE)
+        //     or `NoMarking` (REL {origin} only) is structurally contradictory
+        //     (DoDM §e: a dissemination restriction is for a named recipient set,
+        //     not an all/none/origin marking).
+        //
+        //     NOTE (codex-r2): this is deliberately NOT gated on classification
+        //     LEVEL. "NAF only on classified data" is unsound to derive here —
+        //     `Spif::levels` promises only low→high ordering (a policy may omit an
+        //     unclassified floor, so rank 0 need not be unclassified), and CUI
+        //     (unclassified) legitimately carries dissemination controls (32 CFR
+        //     2002). A level-gated NAF invariant would need explicit SPIF support
+        //     (an unclassified-floor declaration) — deferred, an OPEN QUESTION for
+        //     the operator, not a rank heuristic.
         if !matches!(d.release, Releasability::Grant(_)) {
-            return Err(LabelInvalidity::Label);
-        }
-        // rank unknown OR the floor (0 = unclassified-equivalent) → not classified.
-        if spif.rank(&label.classification).is_none_or(|r| r == 0) {
             return Err(LabelInvalidity::Label);
         }
     }
@@ -812,13 +816,11 @@ mod tests {
     }
     // Owned{origin}, classification U//US, everything else empty — gates 1-3/5
     // pass under us_spif() so gate 4 (releasability) is the deciding gate.
-    // Classification "S" (CLASSIFIED, rank 1) — a NAF is valid only on classified
-    // information (DoDM §e); an unclassified-level NAF is InvalidLabel.
     fn mk_owned(origin: &str) -> ResourceLabel {
         ResourceLabel {
             classification: crate::policy::Classification {
                 policy: crate::policy::PolicyId("US".into()),
-                name: "S".into(),
+                name: "U".into(),
             },
             ownership: Ownership::Owned {
                 owner: origin.into(),
@@ -1063,18 +1065,16 @@ mod tests {
     }
 
     #[test]
-    fn naf_on_unclassified_is_invalid_label() {
-        // codex P1 / DoDM §e: a NAF requires CLASSIFIED information. The same
-        // well-formed NAF that validates at "S" is InvalidLabel at "U".
-        let mut l = mk_owned("USA"); // "S" — classified
+    fn naf_is_not_gated_on_classification_level() {
+        // codex-r2: a NAF is valid regardless of classification level (CUI carries
+        // dissemination controls too). The structural invariant is the NAMED
+        // release, not the level — the same NAF validates at "U" and "S".
+        let mut l = mk_owned("USA");
         l.disclosure.release = Releasability::Grant(set(&["UNCK"]));
         l.disclosure.exclusions = set(&["ZAF"]);
-        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // valid on classified
-        l.classification.name = "U".into(); // demote to UNCLASSIFIED (rank 0)
-        assert!(matches!(
-            validate_label(&l, &us_spif()),
-            Err(LabelInvalidity::Label)
-        ));
+        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // "U" (unclassified)
+        l.classification.name = "S".into();
+        assert_eq!(validate_label(&l, &us_spif()), Ok(())); // "S" (classified)
     }
 
     #[test]

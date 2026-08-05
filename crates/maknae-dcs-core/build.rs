@@ -1,8 +1,19 @@
 //! Compile the versioned `data/*.json` registries into the crate (source-only;
 //! no runtime file access — the air-gapped target carries its world view in the
-//! binary). Each source is validated against the structural invariants its
-//! `data/schemas/*.schema.json` documents; a violation is a `panic!` here, which
-//! FAILS THE BUILD (fail-closed: a malformed registry never ships).
+//! binary).
+//!
+//! Each source is validated against the REQUIRED structural invariants its
+//! `data/schemas/*.schema.json` documents — the required top-level keys and
+//! their types, the required per-item fields, element shapes (trigraph /
+//! tetragraph patterns), non-empty arrays, uniqueness, and cross-references
+//! (every coalition member is an ISO-3166 nation). A violation is a `panic!`
+//! here, which FAILS THE BUILD (fail-closed: a malformed registry never ships).
+//! The checks below are the machine-enforced half of the contract the schema
+//! files document for humans; this is NOT a general JSON-Schema engine (that
+//! would need a dependency — the crate is std-only), so OPTIONAL/advisory schema
+//! fields (descriptions, alt-banner markings) are carried verbatim, not
+//! re-validated. Keep these checks in lockstep with the schemas' `required`
+//! lists when a schema changes.
 //!
 //! std-only: a small hand-rolled JSON reader (below) parses the data files —
 //! this code is never linked into the rlib, so it carries no dependency cost.
@@ -166,6 +177,17 @@ fn emit_cui(out: &mut String) {
     require_str(&json, "version", "cui-registry.json");
     require_str(&json, "source", "cui-registry.json");
     require_str(&json, "retrieved", "cui-registry.json");
+    // `groups` is a REQUIRED top-level array (schema `required`), even though #26
+    // consumes only category markings — a source missing it is malformed.
+    let groups = json
+        .get("groups")
+        .and_then(Json::as_arr)
+        .unwrap_or_else(|| panic!("cui-registry.json: 'groups' must be an array"));
+    for g in groups {
+        if g.as_str().is_none_or(str::is_empty) {
+            panic!("cui-registry.json: every group must be a non-empty string");
+        }
+    }
     let categories = json
         .get("categories")
         .and_then(Json::as_arr)

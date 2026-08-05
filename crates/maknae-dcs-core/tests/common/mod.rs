@@ -26,10 +26,8 @@ pub fn us_spif() -> Spif {
 pub fn mk_owned(origin: &str) -> ResourceLabel {
     ResourceLabel {
         classification: Classification {
-            // "S" (CLASSIFIED, rank 1) — a NAF is valid only on classified data
-            // (DoDM §e); subject clearance TS still clears it at gate 2.
             policy: PolicyId("US".into()),
-            name: "S".into(),
+            name: "U".into(),
         },
         ownership: Ownership::Owned {
             owner: origin.into(),
