@@ -204,7 +204,11 @@ mod tests {
     }
 
     #[test]
-    fn associativity_holds_over_all_control_combinations() {
+    fn control_join_associativity_over_representative_singletons() {
+        // Scope is exactly what it sweeps: singleton operands drawn from 7
+        // representative atoms spanning the precedence chains plus a powerset
+        // member — NOT all 18 variants or all subsets. The composite-axis triple
+        // associativity sweep lives in `tests/lattice_laws.rs::v2_axes_...`.
         let atoms = [Orcon, OrconUsGov, Nodis, Exdis, Imcon, Relido, Displayed];
         for &x in &atoms {
             for &y in &atoms {

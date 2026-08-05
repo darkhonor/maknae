@@ -504,11 +504,17 @@ impl ResourceLabel {
     /// unregistered, `Permissive`, or empty-valued.
     pub fn at_most_as_restrictive_as(&self, other: &ResourceLabel, spif: &Spif) -> Option<bool> {
         if self.classification.policy != other.classification.policy
-            // identical ownership FRAME required (cross-ownership has no ⊑ —
-            // a `derive` refusal, exactly as v1 required equal origins); the
-            // wellformedness check below covers both labels since they are now
-            // proven equal
-            || self.ownership != other.ownership
+            // Identical ownership FRAME required (cross-ownership has no ⊑ —
+            // a `derive` refusal, exactly as v1 required equal origins). This
+            // guard MUST stay in lockstep with `ResourceLabel::join`, the other
+            // consumer that gates the SAME frame condition through
+            // `Ownership::same_frame`; both move together, so express the check
+            // through the one predicate rather than a raw `!=` that could
+            // silently drift from it. (`Disclosure::join` does not re-gate the
+            // frame — it relies on the caller passing a single, already
+            // frame-checked `base`.) The wellformedness check below covers both
+            // labels since they are now proven equal.
+            || !self.ownership.same_frame(&other.ownership)
             || !ownership_wellformed(&self.ownership)
             || !categories_comparable(self, spif)
             || !categories_comparable(other, spif)
@@ -541,14 +547,21 @@ impl ResourceLabel {
 
     /// Lattice-join `∨` = least-upper-bound = the MORE-restrictive combine.
     ///
-    /// PRECISION (per lattice-math review): this operation is TOTAL over a
-    /// fixed policy / ownership / representable-NTK FRAME and PARTIAL ACROSS
-    /// frames. Cross-policy, cross-ownership, and cross-NTK inputs are not
-    /// elements of one lattice frame, so `∨` returns `None` there as a
-    /// DOMAIN-BOUNDARY refusal — NOT a validity check over an otherwise-valid
-    /// lattice point (mirroring v1's cross-origin refusal). This does not
-    /// threaten associativity, which is only claimed WITHIN a frame (§5 law
-    /// suite). VALIDITY refusals (exclusion pairs, §2.6 couplings) live in
+    /// PRECISION (per lattice-math review): this operation is PARTIAL, and its
+    /// `None` has two mathematically distinct sources. (1) FRAME boundary:
+    /// policy and ownership partition the label space into frames — same-policy
+    /// and same-ownership are equivalence relations — so cross-policy /
+    /// cross-ownership inputs are not elements of one lattice frame, and `∨`
+    /// returns `None` as a DOMAIN-BOUNDARY refusal (mirroring v1's cross-origin
+    /// refusal), total WITHIN a frame. (2) NO UPPER BOUND: NTK is NOT a frame
+    /// axis (it is not transitive, so it cannot partition, and `⊑` carries no
+    /// NTK guard — cross-NTK pairs are IN the order's domain and compare
+    /// `Some(false)`). Cross-NTK `∨` returns `None` because a scalar NTK cannot
+    /// hold two differing tokens at once, so the pair has no upper bound —
+    /// `None` is the unique correct result (a partial join-semilattice). Neither
+    /// `None` is a validity check, and neither threatens associativity, which is
+    /// claimed WITHIN a frame (§5 law suite). VALIDITY refusals (exclusion
+    /// pairs, §2.6 couplings) live in
     /// `validate_label`/`derive`, never here — a validity-`None` inside a
     /// binary `∨` is absorbing and WOULD break associativity. The per-axis
     /// operations (`Controls::join`, `Disclosure::join`, releasability `∩`) are

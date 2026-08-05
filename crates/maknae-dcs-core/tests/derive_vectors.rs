@@ -2,12 +2,16 @@
 //! cases proven as VECTORS, not sweep axes — exactly as v1 sweeps single-origin
 //! and treats cross-origin `None` as targeted vectors.
 //!
-//! PRECISION (per lattice-math review): `∨` is total over a fixed policy /
-//! ownership / NTK frame and validity-agnostic. The cross-ownership and
-//! cross-NTK `None`s below are FRAME-boundary refusals that originate in `join`
-//! (those inputs are outside one lattice frame) and are surfaced through
-//! `derive`; the Stage-2 exclusion/coupling `None`s will originate in
-//! `validate_label`. `derive = validate_label ∘ ∨` is where both SURFACE.
+//! PRECISION (per lattice-math review): `∨` is validity-agnostic and PARTIAL
+//! for two distinct reasons. Cross-policy / cross-ownership `None`s are
+//! FRAME-boundary refusals (policy and ownership partition the space; those
+//! inputs are outside one lattice frame). Cross-NTK `None` is NOT a frame
+//! refusal — NTK does not partition the space (it is not transitive, and `⊑`
+//! has no NTK guard); it is a NO-UPPER-BOUND partiality, because a scalar NTK
+//! cannot hold two differing tokens, so the pair has no least upper bound. Both
+//! originate in `join` and surface through `derive`; the Stage-2
+//! exclusion/coupling `None`s will originate in `validate_label`.
+//! `derive = validate_label ∘ ∨` is where all of them SURFACE.
 use maknae_dcs_core::{
     derive, Classification, ControlMarking, Controls, Disclosure, Ownership, PolicyId,
     Releasability, ResourceLabel, Spif,

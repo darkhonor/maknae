@@ -2,8 +2,9 @@
 //!
 //! Equality is SEMANTIC, never derived `==`: `join` canonicalizes
 //! releasability via `from_eligible`, so a raw enumerated label and its
-//! canonical join-output form must compare equal by meaning. `sem_eq` is
-//! definitionally the mutual-`⊑` quotient — deliberate: it catches
+//! canonical join-output form must compare equal by meaning. `sem_eq` is a
+//! structural equality that MODELS the mutual-`⊑` quotient (a decidable proxy,
+//! not literally `le(a,b) && le(b,a)`) — deliberate: it catches
 //! quantifier-direction and polarity bugs, which is its job.
 //!
 //! Universe (origin USA, policy US), enumerated in EXACTLY this nesting order
@@ -102,7 +103,8 @@ fn effective_rank(l: &ResourceLabel, spif: &Spif) -> Option<usize> {
     }
 }
 
-/// Semantic equality: the mutual-`⊑` quotient. Compares EFFECTIVE rank —
+/// Semantic equality: a structural equality modeling the mutual-`⊑` quotient
+/// (a decidable proxy, not literally `le(a,b) && le(b,a)`). Compares EFFECTIVE rank —
 /// compilation at-or-below the level is semantically identical to None (`⊑`
 /// compares effective rank, so sem_eq must quotient the same way or
 /// antisymmetry provably fails on the {TS, comp:None} vs {TS, comp:Some(TS)}
@@ -363,6 +365,46 @@ fn v2_axes_order_and_join_laws() {
     }
     assert_eq!(join_some_count, 168 * 168); // ∨ total: no fail-closed None in the sweep
     assert!(antisymmetry_fires > 0, "v2 antisymmetry suite is vacuous");
+
+    // Associativity is a TRIPLE law the pairwise loop above cannot see. Sweep it
+    // over a stride-4 subsample of the 168-label v2 universe whose axis coverage
+    // is asserted (the v1 triple-law pattern), so the ADR's "associative over the
+    // fixed-ownership sublattice" claim is earned, not assumed: (a∨b)∨c ≈ a∨(b∨c).
+    let sample: Vec<&ResourceLabel> = u.iter().step_by(4).collect(); // 42 labels
+    let sample_controls: BTreeSet<Vec<ControlMarking>> = sample
+        .iter()
+        .map(|l| l.controls.as_set().iter().copied().collect())
+        .collect();
+    assert_eq!(
+        sample_controls.len(),
+        7,
+        "stride subsample dropped a controls value"
+    );
+    assert!(sample.iter().any(|l| l.disclosure.display.is_some()));
+    assert!(sample.iter().any(|l| l.disclosure.display.is_none()));
+    assert!(sample.iter().any(|l| !l.disclosure.exclusions.is_empty()));
+    assert!(sample.iter().any(|l| l.disclosure.exclusions.is_empty()));
+    let mut assoc_checked: usize = 0;
+    for a in &sample {
+        for b in &sample {
+            let ab = a.join(b, &spif).expect("∨ total");
+            for c in &sample {
+                let bc = b.join(c, &spif).expect("∨ total");
+                let ab_c = ab.join(c, &spif).expect("∨ total");
+                let a_bc = a.join(&bc, &spif).expect("∨ total");
+                assert!(
+                    sem_eq(&ab_c, &a_bc, &spif),
+                    "associativity (a∨b)∨c ≈ a∨(b∨c) over the v2 axes"
+                );
+                assoc_checked += 1;
+            }
+        }
+    }
+    assert_eq!(
+        assoc_checked,
+        sample.len().pow(3),
+        "associativity sweep coverage"
+    );
 }
 
 #[test]

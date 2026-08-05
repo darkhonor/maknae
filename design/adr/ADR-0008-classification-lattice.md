@@ -19,7 +19,7 @@ One STANAG-4774-shaped label per resource: one ordinal `Classification` + **type
 2. **Releasability join = intersection; origin always a member.** `⊤` = explicit `REL ∅` (deny-all incl. origin); `⊥` = `REL ALL`/public (join identity); absent marking → computed `REL {origin}` — NOFORN is national-relative (a US official cannot read AUSTEO; affiliation is not nationality). Eligible **nations** and eligible **coalitions** (non-decomposable tetragraphs like NKIC) are structurally separate namespaces: asserting a trigraph as a coalition membership grants nothing. Canonicalization is unique (`from_eligible`); it is marking-lossy for decomposable tetragraphs (`REL CFCK` derives to `REL KOR`-shaped grants — semantics-preserving; display/serialization form deferred with spec §10). The component-wise ∩ is strictly stronger than `permits(A) ∧ permits(B)` on mixed nation/coalition grants — conservative, fail-closed, deliberate.
 3. **`decide(subject, resource, action, purpose, spif)` is a fail-closed conjunction** of gates (policy, level-with-compilation-floor, categories, releasability, action, need-to-know). Degenerate inputs never default open: an unknown level/tag, malformed origin, empty category value-set, or Permissive tag in a label denies (`Indeterminate`); an unregistered REL token is DROPPED from the eligible set (grants nothing — the origin remains eligible, everyone else denies `Releasability`); a SPIF tetragraph expansion is member-shape-validated at build (non-trigraph members are filtered so they can never enter the nations namespace and widen a derivation). **No role or administrative bypass exists.** The principal is polymorphic: human or LLM endpoint, identical treatment.
 4. **Compilation-as-floor:** an OCA compilation determination raises the enforced rank (`max(level, compilation)`); it survives derivation (`(Some, None) → Some`, `(Some, Some) → max`).
-5. **Derivation-join `∨` is the least upper bound** of the restriction order `⊑` (max rank, ∪ categories, ∩ releasability, ∪ caveats, max compilation). Proven exhaustively over a 576-label universe: reflexivity, antisymmetry, transitivity, commutativity, associativity, idempotence, absorption, upper-bound, leastness, dominance monotonicity (`r1 ⊑ r2 ∧ Permit(r2) ⟹ Permit(r1)`), and releasability-never-widens — with anti-vacuity guards on the implication-shaped laws (transitivity, leastness, monotonicity). Honesty note: the suite's semantic equality (`sem_eq`) is definitionally the mutual-`⊑` quotient — deliberate; it catches quantifier-direction and polarity bugs, not antisymmetry per se, which is near-definitional under a self-consistent `⊑`. `⊑`/`∨` fail closed (`None`) on the same dimensions `decide()` denies: cross-policy, cross-origin (derivation deferred), malformed origin, unregistered/Permissive/empty-valued tags.
+5. **Derivation-join `∨` is the least upper bound** of the restriction order `⊑` (max rank, ∪ categories, ∩ releasability, ∪ caveats, max compilation). The §6.1 law suite runs over a 576-label universe with a precise coverage split assessors can rely on: the unary/diagonal laws (reflexivity, idempotence) are checked over all 576 and the pairwise laws (antisymmetry, commutativity, absorption, upper-bound, dominance monotonicity `r1 ⊑ r2 ∧ Permit(r2) ⟹ Permit(r1)`, releasability-never-widens) EXHAUSTIVELY over the full 576²; the triple-quantified laws (transitivity, associativity, leastness) run over a stride-13, 45-label subsample whose full-axis coverage is asserted (the assertions, not the stride, are the guarantee) — with anti-vacuity guards on the implication-shaped laws. Honesty note: the suite's semantic equality (`sem_eq`) is a structural equality that models the mutual-`⊑` quotient — a decidable proxy for it, not literally `le(a,b) ∧ le(b,a)`; it catches quantifier-direction and polarity bugs, not antisymmetry per se, which is near-definitional under a self-consistent `⊑`. `⊑`/`∨` fail closed (`None`) on the same dimensions `decide()` denies: cross-policy, cross-origin (derivation deferred), malformed origin, unregistered/Permissive/empty-valued tags — plus, for `∨` only, differing need-to-know (no upper bound; `⊑` instead compares such pairs `Some(false)`, since they lie inside its domain, per the total-∨/partial-derive split below).
 6. **Ingest validation:** `validate_rel` rejects duplicative REL sets (`REL TO USA, GBR, FVEY` invalid — GBR ∈ FVEY) with the origin exempt (`REL TO USA, FVEY` valid, per the DCS reference). The tetragraph-vs-tetragraph overlap clause is **Maknae-local strictness beyond the DCS reference**, computed on `expansion ∖ {origin}`; non-decomposable tokens are excluded (membership unknowable ⇒ duplication undetectable). The JOINT co-owner exception is out of MVP scope. This crate provides the predicate; the enforcement locus is kernel ingest / `maknae-spifc`. A `validate_categories` sibling (empty-value-set ingest check) is a recorded kernel-ingest follow-up.
 7. **Label origination (spec §2.7, in-scope per the topology ADR):** per entry path — retrieval takes the lake authority-map default; operator conversational input inherits a session floor **bounded above by the operator's own attributes** (a meet/clamp, not a join — explicitly KERNEL-side; this crate ships the derivation-join only); import without signed classification is refused/quarantined. **Labels only rise via join; there is no automated downgrade** — lowering is an out-of-band, signed, audited authority action (closes the `downgrade-path-unspecified` disposition).
 
@@ -67,19 +67,33 @@ stages. Status stays **Proposed** pending the full Day-1 slate.
 - **Total-∨ / partial-derive split (the hard-won result) — stated precisely for
   assessors (per lattice-math review):** the per-axis join operations
   (`Controls::join`, `Disclosure::join`, releasability `∩`) are unconditionally
-  total. The composite `ResourceLabel::join` (`∨`) is **total over a fixed
-  policy / ownership / representable-NTK FRAME and partial across frames**: it
-  returns `None` for cross-policy / cross-ownership / cross-NTK (and
-  malformed/unregistered) inputs, which are not elements of one lattice frame —
-  a DOMAIN-of-definition refusal, NOT a validity check over a valid same-frame
-  pair (mirroring v1's cross-origin refusal). This does not threaten
-  associativity, which §5's law suite proves WITHIN a frame. The distinct
-  hard-won result: **VALIDITY** refusals (exclusion pairs, §2.6 couplings) must
-  live in `validate_label`/`derive`, never inside `∨` — a validity-`None`
-  inside a binary `∨` is absorbing and would break associativity; a
-  domain-boundary `None` does not. `derive = validate_label ∘ ∨` is where both
-  kinds of `None` SURFACE (the frame `None` originating in `join`, the validity
-  `None` in `validate_label`); `decide()` consumes only `derive`.
+  total. The composite `ResourceLabel::join` (`∨`) is **partial**, and its
+  `None` arises from two mathematically distinct sources assessors should not
+  conflate:
+  - **Frame boundary (policy, ownership).** Policy and ownership partition the
+    label space: same-policy and same-ownership are equivalence relations, so
+    distinct policies or owners are elements of *different* lattice frames with
+    no join between them. `∨` returns `None` here as a DOMAIN-of-definition
+    refusal — mirroring v1's cross-origin refusal — not a validity check.
+    Within a fixed frame `∨` is total, which is what §5's law suite sweeps.
+  - **No upper bound (need-to-know).** NTK is deliberately NOT described as a
+    frame axis, because it is not one: NTK-compatibility is not transitive
+    (`None ∨ OPLAN` and `None ∨ CONPLAN` both resolve, yet `OPLAN ∨ CONPLAN`
+    does not), so it cannot partition the space into equivalence classes, and
+    `⊑` carries no NTK guard — cross-NTK pairs sit *inside* the order's domain
+    and compare as `Some(false)`, where cross-policy / cross-ownership poison
+    `⊑` to `None`. Cross-NTK `∨` returns `None` because a scalar NTK token
+    cannot hold two differing requirements at once: the pair has **no upper
+    bound**, so `None` is the unique correct result — the textbook partial
+    join-semilattice case, provable directly from the token algebra (a stronger
+    claim than any frame narrative).
+  The distinct **VALIDITY** result stands apart from both: validity refusals
+  (exclusion pairs, §2.6 couplings) must live in `validate_label` / `derive`,
+  never inside `∨` — a validity-`None` inside a binary `∨` is absorbing and
+  would break associativity; neither a frame-boundary `None` nor a
+  no-upper-bound `None` does. `derive = validate_label ∘ ∨` is where every
+  `None` surfaces (the frame and no-upper-bound `None` originating in `join`,
+  the validity `None` in `validate_label`); `decide()` consumes only `derive`.
 - **Decision-with-obligations (#27):** `Decision::PermitWithObligations`;
   closed `Obligation` enum + `⊑_obl` refinement order (type shell Day-1;
   emission Stage 3, when `Caveat` retires into `Obligation`).
@@ -99,11 +113,55 @@ stages. Status stays **Proposed** pending the full Day-1 slate.
   strings are DATA. Stage 1 lands the loader + `is_known_*` API + the loader's
   fail-closed (empty/malformed → `Err`); `validate_label` enforcement is
   Stage 4. Grounded in EO 13556 + 32 CFR § 2002.16/§ 2002.4 (Lake).
-- **Proof:** the v1 576-label law suite is preserved (migrated), plus a v2-axes
-  sweep (controls × display × exclusions) proving `∨` total/associative over
-  the fixed-ownership sublattice, plus `derive` fail-closed targeted vectors.
+- **Proof:** the v1 576-label law suite is preserved (migrated); a v2-axes
+  sweep (controls × display × exclusions) checks the pairwise laws over the full
+  168² and associativity `(a∨b)∨c ≈ a∨(b∨c)` over a coverage-asserted stride
+  subsample, establishing `∨` total AND associative over the fixed-ownership
+  sublattice (sweep operands carry singleton/empty controls; multi-atom control
+  sets arise only as join outputs — per-chain max + set-union is associative by
+  construction); plus `derive` fail-closed targeted vectors.
 - **Coverage:** `ownership.rs`, `controls.rs`, `registry.rs` join the T1 tier +
   ratchet cohort (ADR-0016).
+
+### Stage-1 scope: what this crate decides, and what is staged
+
+**The engine is an adjudicator, not a classifier.** `maknae-dcs-core` renders a
+permit/deny decision over a label it is handed and the requesting subject's
+attributes; it never assigns, rewrites, or infers a label's markings. Its only
+judgment about the label itself is well-formedness for the system it represents.
+Origin is taken faithfully from the source data — the engine assumes no primary
+nation and no US-first releasability posture. A `SECRET // {JPN origin} //
+REL JPN, AUS` label is ordinary, and a US subject is denied against it as the
+plain result of the release set, not a special case. Effective releasability and
+access vectors are computed internally to reach a decision and are never returned
+or attached to the resource; how a label is carried on or parsed from a resource
+— frontmatter, a first-line-of-text string, any other carrier — is other crates'
+concern.
+
+**Staged enforcement — this PR lands the vocabulary; named issues implement it:**
+
+- **Control axis → #27.** The `ControlMarking` product-of-chains axis is landed
+  vocabulary that `decide()` does not yet consult. Access-affecting controls are
+  enforced through the paths `decide()` already reads — the `Caveat`
+  action-blockers and releasability — which are authoritative until #27 wires
+  control-axis enforcement and retires `Caveat` into `Obligation`. A control
+  expressed only on the `ControlMarking` axis is not yet an enforced access
+  constraint; authors must not rely on it for a decision until #27. DISPLAY ONLY
+  in particular is not a single blocked action but a constraint on who may
+  *operate* a terminal holding the data versus who may only *view* it under
+  accompaniment by an owner or releasee — its model is #27's to define.
+- **Co-ownership → #40.** A `Joint` (multi-origin) label validates as well-formed,
+  but `decide()` fails closed on it today (gate 4 denies any non-`Owned`
+  ownership, with a pinning test), and the disclosure algebra over co-owners is
+  superseded wholesale by #40. There is no live false-permit for co-owned data;
+  the honest multi-origin evaluation — each co-owner eligible to data it
+  co-produced, unioned with the release set — is #40's work.
+- **Second eligibility relation (Display) → #27.** `Action::Display` is gated by
+  release eligibility today; the distinct display-eligibility relation
+  (`display ⊇ release`) lands with #27.
+
+Each of these is a fail-closed or explicitly documented boundary, never an open
+default.
 
 ## Security control mapping (informative; per ADR-0001)
 
