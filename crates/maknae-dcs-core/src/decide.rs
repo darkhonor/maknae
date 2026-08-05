@@ -93,6 +93,11 @@ pub enum DenyReason {
     ActionForbidden,
     Indeterminate,
     PolicyMismatch,
+    /// A trigraph/tetragraph outside the encoded world view (#26).
+    InvalidElement,
+    /// A structurally malformed label (owner-in-X, empty exclusion set,
+    /// restriction on Public/UNCLASSIFIED) (#26).
+    InvalidLabel,
 }
 
 /// The reference-monitor decision. Gate order (all must pass; first failure
@@ -223,6 +228,15 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn new_deny_reasons_exist_and_are_existence_agnostic() {
+        // existence-agnostic: the variants name a dimension, carry no payload
+        let a = DenyReason::InvalidElement;
+        let b = DenyReason::InvalidLabel;
+        assert_ne!(a, b);
+        assert_ne!(a, DenyReason::Indeterminate);
     }
 
     #[test]
