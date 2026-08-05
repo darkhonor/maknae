@@ -207,6 +207,36 @@ CJCSI 2015.01A) — never the interpreted `dcs-schema-migration.md`. Status stay
   lack thereof) in a classified coalition is structurally undisclosable; no secure
   channel is needed.
 
+**Policy basis — a NAF's validity is NOT gated on classification LEVEL (settled; do not re-litigate).**
+`validate_label` requires a NAF exclusion to accompany a NAMED (`Grant`) release
+— an exclusion needs a positive grant to except a member from; a restriction on
+`Public`/`Empty`/`NoMarking` (an all/none/origin marking) is structurally
+contradictory. It deliberately does NOT require the resource to be a classified
+LEVEL, because the governing policy does not support that for the #26 release
+relation:
+- **`REL TO` applies to CUI as well as classified.** DoDI 5200.48 (`520048p.md:728,746`):
+  "REL TO … [applies] to information properly categorized as CUI … (b) DoD
+  operational CUI (not related to intelligence) may be marked as REL TO." CUI
+  (unclassified) legitimately carries dissemination controls — 32 CFR 2002.4(dd)
+  (`:466`) defines Limited Dissemination Controls as CUI-EA-approved controls for
+  CUI dissemination. So a release-side NAF (which subtracts from a `REL TO` grant)
+  is valid on CUI; a classification-level gate would WRONGLY reject valid CUI NAF
+  labels (this was a reverted implementation over-reach — codex-r1 proposed it,
+  codex-r2 caught the unsound "rank 0 = unclassified" heuristic; `Spif::levels`
+  promises only low→high ordering, so rank cannot identify "classified").
+- **The classified-only level restriction belongs to DISPLAY ONLY (#27), not #26.**
+  DoDM 5200.01 V2 §e (`520001m_vol2.md:5494,5503`): DISPLAY ONLY "identifies
+  CLASSIFIED information …" and "may be used with TOP SECRET, SECRET or
+  CONFIDENTIAL." When #27 lands the display relation, its DISPLAY ONLY validity
+  MUST gate on classification ∈ {CONFIDENTIAL, SECRET, TOP_SECRET} — which is an
+  explicit level set, NOT a rank heuristic, and therefore needs `Spif` support to
+  declare which levels are classified (an unclassified-floor / classified-set
+  declaration the model does not yet carry — a #27 dependency).
+- **"NOT AUTHORIZED FOR" is not a CAPCO/IC-Register formal marking** (operator-
+  confirmed); it is Maknae's subtractive qualifier on a `REL TO`/`DISPLAY ONLY`
+  grant, so its classification scope is INHERITED from the control it qualifies
+  (REL TO → classified+CUI; DISPLAY ONLY → classified-only), never intrinsic.
+
 **Supersessions of the Stage-1 record (four):**
 1. RETRACT the §2 mixed-grant "nation ∩ coalition" intersection claim (`:19`): there
    is one nation namespace; coalitions decompose to nations before any `∩`.

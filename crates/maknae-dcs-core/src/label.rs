@@ -760,14 +760,14 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
         //     (DoDM §e: a dissemination restriction is for a named recipient set,
         //     not an all/none/origin marking).
         //
-        //     NOTE (codex-r2): this is deliberately NOT gated on classification
-        //     LEVEL. "NAF only on classified data" is unsound to derive here —
-        //     `Spif::levels` promises only low→high ordering (a policy may omit an
-        //     unclassified floor, so rank 0 need not be unclassified), and CUI
-        //     (unclassified) legitimately carries dissemination controls (32 CFR
-        //     2002). A level-gated NAF invariant would need explicit SPIF support
-        //     (an unclassified-floor declaration) — deferred, an OPEN QUESTION for
-        //     the operator, not a rank heuristic.
+        //     This is deliberately NOT gated on classification LEVEL (SETTLED per
+        //     policy — see the ADR-0008 Stage-2 "Policy basis" note). A release-
+        //     side NAF subtracts from a `REL TO` grant, and REL TO applies to CUI
+        //     as well as classified (DoDI 5200.48; 32 CFR 2002.4(dd) LDCs), so a
+        //     level gate would wrongly reject valid CUI NAF labels. The classified-
+        //     only level restriction is DISPLAY ONLY's (DoDM V2 §e, TS/S/C) and
+        //     lands with #27 — where it needs explicit SPIF classified-level
+        //     support, NOT a rank heuristic.
         if !matches!(d.release, Releasability::Grant(_)) {
             return Err(LabelInvalidity::Label);
         }
