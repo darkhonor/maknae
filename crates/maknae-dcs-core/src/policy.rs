@@ -6,7 +6,6 @@
 //! Every lookup is total: unknown levels, tags, and tokens resolve to `None` /
 //! `Unknown`, which every caller treats as deny / grants-nothing.
 
-use crate::registry::CuiRegistry;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Identifier of the security policy authority a classification is scoped to
@@ -69,9 +68,6 @@ pub struct Spif {
     home_nation: Option<String>,
     /// Tetragraphs a SPIF flags as expandable for banner roll-up (#31).
     expandable: BTreeSet<String>,
-    /// Loaded offline CUI Registry snapshot (spec §6). `None` = no CUI
-    /// vocabulary loaded. `validate_label` enforcement is Stage 4.
-    registry: Option<CuiRegistry>,
 }
 
 impl Spif {
@@ -82,7 +78,6 @@ impl Spif {
             categories: BTreeMap::new(),
             home_nation: None,
             expandable: BTreeSet::new(),
-            registry: None,
         }
     }
 
@@ -94,11 +89,6 @@ impl Spif {
     /// Whether `token` is flagged expandable for banner roll-up (#31).
     pub fn is_expandable_for_rollup(&self, token: &str) -> bool {
         self.expandable.contains(token)
-    }
-
-    /// The loaded offline CUI Registry snapshot, if any (spec §6).
-    pub fn registry(&self) -> Option<&CuiRegistry> {
-        self.registry.as_ref()
     }
 
     /// Rank of a classification in this policy's level order.
@@ -141,7 +131,6 @@ pub struct SpifBuilder {
     categories: BTreeMap<String, CategoryKind>,
     home_nation: Option<String>,
     expandable: BTreeSet<String>,
-    registry: Option<CuiRegistry>,
 }
 
 /// True iff `token` has the shape of a bare nation trigraph
@@ -174,12 +163,6 @@ impl SpifBuilder {
         self
     }
 
-    /// Attach a loaded offline CUI Registry snapshot (spec §6).
-    pub fn registry(mut self, registry: CuiRegistry) -> Self {
-        self.registry = Some(registry);
-        self
-    }
-
     pub fn build(self) -> Spif {
         Spif {
             policy: self.policy,
@@ -187,7 +170,6 @@ impl SpifBuilder {
             categories: self.categories,
             home_nation: self.home_nation,
             expandable: self.expandable,
-            registry: self.registry,
         }
     }
 }
@@ -243,13 +225,13 @@ mod tests {
 
     #[test]
     fn stage1_spif_scaffolding() {
-        use crate::registry::CuiRegistry;
-        // ListControlled round-trips the builder
+        // ListControlled round-trips the builder. (The per-SPIF CUI `registry`
+        // field is RETIRED — D3: CUI recognition is now the GLOBAL
+        // `registry::is_cui_category` over `data/cui-registry.json`.)
         let spif = Spif::builder("US")
             .category("ATTY", CategoryKind::ListControlled)
             .home_nation("USA")
             .expandable("FVEY")
-            .registry(CuiRegistry::seed())
             .build();
         assert_eq!(
             spif.category_kind("ATTY"),
@@ -258,13 +240,11 @@ mod tests {
         assert_eq!(spif.home_nation(), Some("USA"));
         assert!(spif.is_expandable_for_rollup("FVEY"));
         assert!(!spif.is_expandable_for_rollup("NATO")); // unflagged → false
-        assert!(spif.registry().is_some());
 
-        // defaults: no home_nation, nothing expandable, no registry
+        // defaults: no home_nation, nothing expandable
         let bare = Spif::builder("US").build();
         assert_eq!(bare.home_nation(), None);
         assert!(!bare.is_expandable_for_rollup("FVEY"));
-        assert!(bare.registry().is_none());
     }
 
     #[test]

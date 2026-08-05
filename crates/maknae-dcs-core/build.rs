@@ -21,6 +21,7 @@ fn main() {
 
     let nations = emit_nations(&mut out);
     emit_coalitions(&mut out, &nations);
+    emit_cui(&mut out);
 
     fs::write(&dest, out).expect("write registries.rs");
 
@@ -151,6 +152,55 @@ fn is_three_upper_ascii(s: &str) -> bool {
 
 fn is_four_upper_ascii(s: &str) -> bool {
     s.len() == 4 && s.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+// ---------------------------------------------------------------------------
+// data/cui-registry.json  →  pub static CUI_CATEGORIES: &[&str]  (sorted, deduped)
+// The FULL DoD CUI Registry (archives.gov). #26 consumes only `category_marking`
+// for recognition; the rest of each category (banner/authorities/description) is
+// inert provenance the schema carries completely (spec §4.3, operator-mandated).
+// ---------------------------------------------------------------------------
+fn emit_cui(out: &mut String) {
+    let text = read_data("cui-registry.json");
+    let json = Json::parse(&text).unwrap_or_else(|e| panic!("cui-registry.json: {e}"));
+    require_str(&json, "version", "cui-registry.json");
+    require_str(&json, "source", "cui-registry.json");
+    require_str(&json, "retrieved", "cui-registry.json");
+    let categories = json
+        .get("categories")
+        .and_then(Json::as_arr)
+        .unwrap_or_else(|| panic!("cui-registry.json: 'categories' must be an array"));
+    if categories.is_empty() {
+        panic!("cui-registry.json: 'categories' must be non-empty");
+    }
+
+    // Recognition is by `category_marking`; multiple categories may share one
+    // (NARA aliases CCI/FSI), so dedupe into a sorted set for binary_search.
+    let mut markings: BTreeSet<String> = BTreeSet::new();
+    for c in categories {
+        // `name` is required + non-empty (structural integrity of the source).
+        match c.get("name").and_then(Json::as_str) {
+            Some(n) if !n.is_empty() => {}
+            _ => panic!("cui-registry.json: every category needs a non-empty 'name'"),
+        }
+        let marking = c
+            .get("category_marking")
+            .and_then(Json::as_str)
+            .unwrap_or_else(|| panic!("cui-registry.json: category needs a 'category_marking'"));
+        if marking.is_empty() {
+            panic!("cui-registry.json: 'category_marking' must be non-empty");
+        }
+        markings.insert(marking.to_string());
+    }
+
+    out.push_str("pub static CUI_CATEGORIES: &[&str] = &[");
+    for m in &markings {
+        // escape embedded quotes/backslashes for the emitted Rust string literal
+        out.push('"');
+        out.push_str(&m.replace('\\', "\\\\").replace('"', "\\\""));
+        out.push_str("\",");
+    }
+    out.push_str("];\n");
 }
 
 fn read_data(name: &str) -> String {
