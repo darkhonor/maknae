@@ -102,32 +102,39 @@ fn aus_kor_derivation_reduces_to_origin() {
 }
 
 #[test]
-fn cfc_is_not_unc() {
-    // REL CFCK ≠ REL UNCK: AUS is a UNC sending state but not in CFCK.
+fn unregistered_coalition_denies_invalid_element() {
+    // CFCK is NOT in #26's coalition registry (classified/host-nation rosters are
+    // not seeded, D4). The engine cannot expand it → a label releasing to it is
+    // InvalidElement (expand-or-deny), for EVERY subject — the ruling never
+    // depends on nationality, and the reason discloses no membership.
     let spif = us_spif();
     let r = resource("US", "USA", Releasability::Grant(set(&["CFCK"])));
-    assert_eq!(read(&subject("US", "USA"), &r, &spif), Decision::Permit);
-    assert_eq!(read(&subject("US", "KOR"), &r, &spif), Decision::Permit);
     assert_eq!(
-        read(&subject("US", "AUS"), &r, &spif),
-        Decision::Deny(DenyReason::Releasability)
+        read(&subject("US", "USA"), &r, &spif),
+        Decision::Deny(DenyReason::InvalidElement)
     );
     assert_eq!(
-        read(&subject("US", "JPN"), &r, &spif),
-        Decision::Deny(DenyReason::Releasability)
+        read(&subject("US", "KOR"), &r, &spif),
+        Decision::Deny(DenyReason::InvalidElement)
     );
 }
 
 #[test]
 fn unck_decomposes_to_the_18_sending_states() {
-    // the other side of CFC≠UNC — asserts the 18-nation expansion actually decomposes
+    // the 18-nation expansion decomposes from the GLOBAL registry, ZAF-in/KOR-out
+    // (CJCSI 2015.01A + DEU accession — the inverse of the old per-SPIF fixture).
     let spif = us_spif();
     let r = resource("US", "USA", Releasability::Grant(set(&["UNCK"])));
     assert_eq!(read(&subject("US", "AUS"), &r, &spif), Decision::Permit); // a UNC sending state
+    assert_eq!(read(&subject("US", "ZAF"), &r, &spif), Decision::Permit); // ZAF IS a member (CJCSI)
+    assert_eq!(
+        read(&subject("US", "KOR"), &r, &spif),
+        Decision::Deny(DenyReason::Releasability)
+    ); // host nation — NOT a member
     assert_eq!(
         read(&subject("US", "JPN"), &r, &spif),
         Decision::Deny(DenyReason::Releasability)
-    ); // not one
+    ); // not a sending state
 }
 
 #[test]
@@ -229,18 +236,24 @@ fn permissive_tag_fails_closed() {
 }
 
 #[test]
-fn non_decomposable_nkic_needs_held_membership() {
-    // spec §6.2: membership uninferrable → deny unless the subject carries the
-    // coalition attribute directly
+fn unexpandable_nkic_denies_invalid_element() {
+    // spec §7 (premise REVERSED under #26): NKIC is a classified roster NOT in the
+    // registry (D4) → the engine cannot expand it → InvalidElement (expand-or-
+    // deny). The credential arm is gone, so a subject "asserting" the coalition no
+    // longer helps. Classified-coalition NON-DISCLOSURE is structural: the reason
+    // names only the dimension (InvalidElement), never NKIC or its membership.
     let spif = us_spif();
     let r = resource("US", "USA", Releasability::Grant(set(&["NKIC"])));
+    assert_eq!(
+        read(&subject("US", "KOR"), &r, &spif),
+        Decision::Deny(DenyReason::InvalidElement)
+    );
     let mut kor = subject("US", "KOR");
+    kor.coalition_memberships = set(&["NKIC"]); // asserted — must NOT help
     assert_eq!(
         read(&kor, &r, &spif),
-        Decision::Deny(DenyReason::Releasability)
+        Decision::Deny(DenyReason::InvalidElement)
     );
-    kor.coalition_memberships = set(&["NKIC"]);
-    assert_eq!(read(&kor, &r, &spif), Decision::Permit);
 }
 
 #[test]
