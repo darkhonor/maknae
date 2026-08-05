@@ -11,6 +11,20 @@
 //! against the snapshot (which needs the CUI-regime discriminator) is Stage 4.
 use std::collections::{BTreeMap, BTreeSet};
 
+// The versioned `data/*.json` registries, compiled into the binary by build.rs
+// (source-only; the air-gapped engine carries its world view — no runtime file
+// access). Generates `pub static ISO3166: &[&str]` (sorted) and, in later tasks,
+// `COALITIONS` / `CUI_CATEGORIES`.
+include!(concat!(env!("OUT_DIR"), "/registries.rs"));
+
+/// Is `token` a code in the ISO 3166-1 alpha-3 world view? This is the
+/// *recognition* check (#26): a structurally-valid trigraph that is not a real
+/// country is `InvalidElement`. Unknown → `false` (fail closed). `ISO3166` is
+/// emitted sorted, so this is a binary search.
+pub fn is_iso3166(token: &str) -> bool {
+    ISO3166.binary_search(&token).is_ok()
+}
+
 /// Provenance stamped on every snapshot (mirrors `coverage-tiers.toml`'s
 /// `ratchet_provenance`): where it came from, when, the registry's own
 /// "current as of" date, and a content hash.
