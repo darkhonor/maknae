@@ -24,7 +24,7 @@ pub use decide::{
 };
 pub use label::{
     derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
-    EligibleNations, RelValidationError, Releasability, ResourceLabel,
+    EligibleNations, LabelInvalidity, RelValidationError, Releasability, ResourceLabel,
 };
 pub use ownership::Ownership;
 pub use policy::{
