@@ -194,6 +194,19 @@ pub fn decide(
         // rejects the Owned{""} sentinel and any malformed origin
         return Decision::Deny(DenyReason::Indeterminate);
     }
+    // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
+    // decision point, so a label that reached decide() WITHOUT passing
+    // validate_label (the engine is a decision point, not the ingest gate) still
+    // denies structurally — owner-in-X / restriction-on-Public / unknown token
+    // never silently permit. `validate_label` is reached only for single-origin
+    // `Owned` here (Joint/ConcealedForeign short-circuit to Indeterminate above),
+    // exactly the safety subset it must cover.
+    if let Err(inv) = crate::label::validate_label(resource, spif) {
+        return Decision::Deny(match inv {
+            crate::label::LabelInvalidity::Element => DenyReason::InvalidElement,
+            crate::label::LabelInvalidity::Label => DenyReason::InvalidLabel,
+        });
+    }
     if !resource
         .disclosure
         .eligible_release(&resource.ownership.base_set(), spif)
