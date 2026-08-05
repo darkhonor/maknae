@@ -6,8 +6,10 @@
 //! categories ∧ nationality/coalition ∧ purpose ∧ action.
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
+use crate::ownership::Ownership;
 use crate::policy::{is_trigraph, CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -23,7 +25,60 @@ pub struct Purpose(pub String);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Permit,
+    /// A permit that carries obligations the consumer MUST honor (spec §2.3;
+    /// deny-biased contract — a consumer that cannot honor an obligation denies).
+    /// Emission is Stage 3; the variant is landed Stage 1 so downstream code
+    /// pattern-matches all three arms from the start.
+    PermitWithObligations {
+        obligations: BTreeSet<Obligation>,
+    },
     Deny(DenyReason),
+}
+
+/// Redissemination scope for ORCON-family obligations (spec §2.3). Closed —
+/// extend only by ADR amendment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RedisseminationScope {
+    UsGov,
+}
+
+/// A closed obligation the engine attaches to a permit (spec §2.3). EMISSION
+/// (which obligations fire, and the `Caveat` retirement into these) is Stage 3;
+/// Stage 1 lands the type shell + the `⊑_obl` refinement order the monotonicity
+/// law consumes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Obligation {
+    DisplayOnly,
+    OriginatorControlled { scope: Option<RedisseminationScope> },
+    OwnerConsent,
+    ReaderRecord,
+    NoEgress,
+    OperatorOnly,
+}
+
+/// The obligation-refinement order `⊑_obl` (spec §5): a SCOPED
+/// `OriginatorControlled` is WEAKER (redissemination pre-approved) than an
+/// unscoped one, so `OriginatorControlled{Some(_)} ⊑_obl OriginatorControlled{None}`;
+/// every other obligation compares only by identity. Returns true iff `a ⊑_obl b`
+/// (a is weaker-or-equal to b).
+pub fn obligation_refines(a: &Obligation, b: &Obligation) -> bool {
+    match (a, b) {
+        (
+            Obligation::OriginatorControlled { scope: sa },
+            Obligation::OriginatorControlled { scope: sb },
+        ) => match (sa, sb) {
+            (_, None) => true,            // anything ⊑ the strongest (unscoped)
+            (Some(x), Some(y)) => x == y, // identity among scoped
+            (None, Some(_)) => false,     // stronger ⋢ weaker
+        },
+        _ => a == b,
+    }
+}
+
+/// Set-level `⊑_obl` (Hoare/lower lift, spec §5 CR-r4 SF2): every obligation in
+/// `a` is refined by some obligation in `b`. Empty `a` ⊑_obl anything.
+pub fn obligations_refine(a: &BTreeSet<Obligation>, b: &BTreeSet<Obligation>) -> bool {
+    a.iter().all(|x| b.iter().any(|y| obligation_refines(x, y)))
 }
 
 /// Deny reasons are existence-agnostic: they never name a compartment,
@@ -107,7 +162,7 @@ pub fn decide(
                 }
             }
             Some(CategoryKind::RestrictivePredicate) => {
-                if !affiliation_satisfies(required, &subject.affiliation) {
+                if !affiliation_satisfies(required, &subject.employment.to_affiliation()) {
                     return Decision::Deny(DenyReason::AffiliationControl);
                 }
             }
@@ -116,17 +171,27 @@ pub fn decide(
             // unhandled access-control dimension an accredited SPIF declared —
             // deny, never silently unenforce.
             Some(CategoryKind::Permissive) => return Decision::Deny(DenyReason::Indeterminate),
+            // List-control (#30) decide semantics land Stage 5; until then an
+            // unhandled ListControlled tag denies, never silently unenforces.
+            Some(CategoryKind::ListControlled) => return Decision::Deny(DenyReason::Indeterminate),
             Some(CategoryKind::Informative) => {} // ignored by definition
         }
     }
 
-    // Gate 4: releasability (origin-validated).
-    if !is_trigraph(&resource.origin) {
+    // Gate 4: releasability (origin-validated). Stage 1 wires only single-owner
+    // labels; Joint / ConcealedForeign fail closed until Stage 5 wires their
+    // semantics (plan Task 6 Q1 resolution).
+    let owner = match &resource.ownership {
+        Ownership::Owned { owner } => owner,
+        _ => return Decision::Deny(DenyReason::Indeterminate),
+    };
+    if !is_trigraph(owner) {
+        // rejects the Owned{""} sentinel and any malformed origin
         return Decision::Deny(DenyReason::Indeterminate);
     }
     if !resource
-        .releasability
-        .eligible(&resource.origin, spif)
+        .disclosure
+        .eligible_release(&resource.ownership.base_set(), spif)
         .permits(&subject.nationality, &subject.coalition_memberships)
     {
         return Decision::Deny(DenyReason::Releasability);
@@ -150,13 +215,49 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::Releasability;
+    use crate::controls::Controls;
+    use crate::label::{Disclosure, Releasability};
     use crate::policy::{Classification, PolicyId};
-    use crate::subject::Affiliation;
+    use crate::subject::Employment;
     use std::collections::BTreeSet;
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn obligation_refinement_order() {
+        use Obligation::*;
+        // scoped OriginatorControlled is WEAKER ⊑_obl unscoped (stronger)
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled { scope: None },
+        ));
+        assert!(!obligation_refines(
+            &OriginatorControlled { scope: None },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // two scoped OriginatorControlled compare by identity of scope
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // identity for the other obligations
+        assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
+        assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
+        // set-level: {} ⊑_obl {OwnerConsent}; {OwnerConsent} ⋢ {}
+        let empty: BTreeSet<Obligation> = BTreeSet::new();
+        let owner: BTreeSet<Obligation> = [OwnerConsent].into_iter().collect();
+        assert!(obligations_refine(&empty, &owner));
+        assert!(!obligations_refine(&owner, &empty));
     }
 
     // IDENTICAL builder chain to Task 8's pinned us_spif() — the tests below
@@ -194,7 +295,8 @@ mod tests {
                 .into_iter()
                 .collect(),
             coalition_memberships: BTreeSet::new(),
-            affiliation: Affiliation::UsGovernment,
+            employment: Employment::FederalCivilian,
+            list_memberships: BTreeSet::new(),
             purposes: set(&["OPLAN"]),
         }
     }
@@ -205,9 +307,16 @@ mod tests {
                 policy: PolicyId("US".into()),
                 name: level.into(),
             },
-            origin: "USA".into(),
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
             categories: [("SCI".to_string(), set(&["SI"]))].into_iter().collect(),
-            releasability: Releasability::NoMarking,
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,
+                display: None,
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
             caveats: BTreeSet::new(),
             compilation_level: None,
             need_to_know: Some("OPLAN".into()),
@@ -259,6 +368,11 @@ mod tests {
             ),
             Decision::Deny(DenyReason::Indeterminate)
         );
+        // resource classification name not in SPIF (subject known) → Indeterminate
+        assert_eq!(
+            run(&mk_subject("SECRET"), &mk_resource("MAGENTA"), Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
     }
 
     #[test]
@@ -304,7 +418,7 @@ mod tests {
             .into_iter()
             .collect();
         let mut s = mk_subject("SECRET");
-        s.affiliation = Affiliation::ClearedContractor;
+        s.employment = Employment::Contractor;
         assert_eq!(
             run(&s, &r, Action::Read),
             Decision::Deny(DenyReason::AffiliationControl)
@@ -337,7 +451,7 @@ mod tests {
     #[test]
     fn releasability_deny() {
         let mut r = mk_resource("SECRET");
-        r.releasability = Releasability::Grant(set(&["AUS"]));
+        r.disclosure.release = Releasability::Grant(set(&["AUS"]));
         let mut s = mk_subject("TOP_SECRET");
         s.nationality = "KOR".into();
         assert_eq!(
@@ -352,13 +466,66 @@ mod tests {
         // precheck is the deciding gate
         for bad in ["", "usa", "USAA"] {
             let mut r = mk_resource("SECRET");
-            r.origin = bad.into();
+            r.ownership = Ownership::Owned { owner: bad.into() };
             assert_eq!(
                 run(&mk_subject("TOP_SECRET"), &r, Action::Read),
                 Decision::Deny(DenyReason::Indeterminate),
                 "origin {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn list_controlled_tag_fails_closed_stage1() {
+        // #30 list-control decide semantics land Stage 5; until then a
+        // ListControlled-registered tag → Indeterminate (kills the gate-3 arm
+        // mutant, since the law sweep excludes ListControlled).
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
+            .category("SCI", CategoryKind::Restrictive)
+            .category("ATTY", CategoryKind::ListControlled)
+            .build();
+        let mut r = mk_resource("SECRET");
+        r.categories.insert("ATTY".into(), set(&["LEGAL_TEAM"]));
+        assert_eq!(
+            decide(
+                &mk_subject("TOP_SECRET"),
+                &r,
+                Action::Read,
+                &Purpose("OPLAN".into()),
+                &spif,
+            ),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+    }
+
+    #[test]
+    fn non_owned_ownership_fails_closed_stage1() {
+        // Stage 1 wires only single-owner labels; Joint / ConcealedForeign fail
+        // closed at gate 4 until Stage 5 wires their semantics (plan Task 6 Q1).
+        let mut joint = mk_resource("SECRET");
+        joint.ownership = Ownership::Joint {
+            owners: set(&["USA", "KOR"]),
+        };
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &joint, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+        let mut cf = mk_resource("SECRET");
+        cf.ownership = Ownership::ConcealedForeign {
+            custodian: "USA".into(),
+        };
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &cf, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
+        // Owned{""} sentinel (joint_from(∅)) → malformed origin → Indeterminate
+        let mut empty_owner = mk_resource("SECRET");
+        empty_owner.ownership = Ownership::joint_from(BTreeSet::new());
+        assert_eq!(
+            run(&mk_subject("TOP_SECRET"), &empty_owner, Action::Read),
+            Decision::Deny(DenyReason::Indeterminate)
+        );
     }
 
     #[test]
@@ -421,9 +588,9 @@ mod tests {
 
     #[test]
     fn no_admin_bypass() {
-        // UsGovernment affiliation, insufficient clearance — affiliation grants nothing
+        // Federal employment, insufficient clearance — affiliation grants nothing
         let s = mk_subject("UNCLASSIFIED");
-        assert_eq!(s.affiliation, Affiliation::UsGovernment);
+        assert_eq!(s.employment, Employment::FederalCivilian);
         assert_eq!(
             run(&s, &mk_resource("SECRET"), Action::Read),
             Decision::Deny(DenyReason::Level)

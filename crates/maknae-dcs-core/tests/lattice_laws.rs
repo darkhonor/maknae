@@ -2,8 +2,9 @@
 //!
 //! Equality is SEMANTIC, never derived `==`: `join` canonicalizes
 //! releasability via `from_eligible`, so a raw enumerated label and its
-//! canonical join-output form must compare equal by meaning. `sem_eq` is
-//! definitionally the mutual-`⊑` quotient — deliberate: it catches
+//! canonical join-output form must compare equal by meaning. `sem_eq` is a
+//! structural equality that MODELS the mutual-`⊑` quotient (a decidable proxy,
+//! not literally `le(a,b) && le(b,a)`) — deliberate: it catches
 //! quantifier-direction and polarity bugs, which is its job.
 //!
 //! Universe (origin USA, policy US), enumerated in EXACTLY this nesting order
@@ -14,8 +15,9 @@
 //! not the stride, are the guarantee).
 
 use maknae_dcs_core::{
-    decide, Action, Affiliation, CategoryKind, Caveat, Classification, Decision, PolicyId, Purpose,
-    Releasability, ResourceLabel, Spif, Subject,
+    decide, Action, CategoryKind, Caveat, Classification, ControlMarking, Controls, Decision,
+    Disclosure, Employment, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif,
+    Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,14 +65,21 @@ fn universe() -> Vec<ResourceLabel> {
                         for ntk in ntk_states {
                             out.push(ResourceLabel {
                                 classification: class(level),
-                                origin: "USA".into(),
+                                ownership: Ownership::Owned {
+                                    owner: "USA".into(),
+                                },
                                 categories: match sci {
                                     None => BTreeMap::new(),
                                     Some(vals) => {
                                         [("SCI".to_string(), set(vals))].into_iter().collect()
                                     }
                                 },
-                                releasability: rel.clone(),
+                                disclosure: Disclosure {
+                                    release: rel.clone(),
+                                    display: None,
+                                    exclusions: BTreeSet::new(),
+                                },
+                                controls: Controls::empty(),
                                 caveats: cavs.iter().copied().collect(),
                                 compilation_level: comp.map(class),
                                 need_to_know: ntk.map(|s| s.to_string()),
@@ -94,7 +103,8 @@ fn effective_rank(l: &ResourceLabel, spif: &Spif) -> Option<usize> {
     }
 }
 
-/// Semantic equality: the mutual-`⊑` quotient. Compares EFFECTIVE rank —
+/// Semantic equality: a structural equality modeling the mutual-`⊑` quotient
+/// (a decidable proxy, not literally `le(a,b) && le(b,a)`). Compares EFFECTIVE rank —
 /// compilation at-or-below the level is semantically identical to None (`⊑`
 /// compares effective rank, so sem_eq must quotient the same way or
 /// antisymmetry provably fails on the {TS, comp:None} vs {TS, comp:Some(TS)}
@@ -105,10 +115,14 @@ fn sem_eq(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
         ra.is_some() && rb.is_some(),
         "law universe must have known ranks"
     );
+    let (ba, bb) = (a.ownership.base_set(), b.ownership.base_set());
     ra == rb
-        && a.origin == b.origin
+        && a.ownership == b.ownership
         && a.categories == b.categories // well-defined: no-empty-value-set invariant
-        && a.releasability.eligible(&a.origin, spif) == b.releasability.eligible(&b.origin, spif)
+        && a.disclosure.eligible_release(&ba, spif) == b.disclosure.eligible_release(&bb, spif)
+        && a.disclosure.eligible_display(&ba, spif) == b.disclosure.eligible_display(&bb, spif)
+        && a.disclosure.exclusions == b.disclosure.exclusions
+        && a.controls == b.controls
         && a.caveats == b.caveats
         && effective_rank(a, spif) == effective_rank(b, spif)
         && a.need_to_know == b.need_to_know
@@ -134,8 +148,8 @@ fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
     assert_eq!(distinct_sci.len(), 4);
     let mut distinct_rels: Vec<&Releasability> = Vec::new();
     for l in &sample {
-        if !distinct_rels.contains(&&l.releasability) {
-            distinct_rels.push(&l.releasability);
+        if !distinct_rels.contains(&&l.disclosure.release) {
+            distinct_rels.push(&l.disclosure.release);
         }
     }
     assert_eq!(distinct_rels.len(), 6);
@@ -184,9 +198,17 @@ fn order_and_join_laws() {
                 assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
             }
             // releasability never widens on join (∩ only narrows)
-            let e_ab = ab.releasability.eligible(&ab.origin, &spif);
-            assert!(e_ab.is_subset_of(&a.releasability.eligible(&a.origin, &spif)));
-            assert!(e_ab.is_subset_of(&b.releasability.eligible(&b.origin, &spif)));
+            let e_ab = ab
+                .disclosure
+                .eligible_release(&ab.ownership.base_set(), &spif);
+            assert!(e_ab.is_subset_of(
+                &a.disclosure
+                    .eligible_release(&a.ownership.base_set(), &spif)
+            ));
+            assert!(e_ab.is_subset_of(
+                &b.disclosure
+                    .eligible_release(&b.ownership.base_set(), &spif)
+            ));
         }
     }
     assert_eq!(join_some_count, 576 * 576);
@@ -230,6 +252,161 @@ fn order_and_join_laws() {
     assert!(leastness_antecedent_fires > 0, "leastness suite is vacuous");
 }
 
+/// The v2 axes (controls × display × exclusions) swept with the v1 axes pinned
+/// small (spec §5 "Law universe v2"). Ownership FIXED to `Owned{USA}`, NTK ≤ 1
+/// token; the `∨` is total + validity-agnostic over this fixed-ownership
+/// sublattice, so the sweep MAY include control combos (`{Relido},{Displayed}`)
+/// that `validate_label` would reject — they are valid LATTICE points here
+/// (their `derive` rejection is a targeted vector, see `derive_vectors.rs`).
+/// `ListControlled`/predicate category tags are DELIBERATELY excluded (they
+/// aren't in `categories_comparable`'s allowed set → would poison `⊑`/`∨`).
+fn universe_v2_axes() -> Vec<ResourceLabel> {
+    use ControlMarking::*;
+    let set_s = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    };
+    let levels = ["S", "TS"];
+    let rels = [
+        Releasability::NoMarking,
+        Releasability::Grant(set_s(&["AUS"])),
+        Releasability::Grant(set_s(&["AUS", "KOR"])),
+    ];
+    let displays: [Option<Releasability>; 2] = [None, Some(Releasability::Grant(set_s(&["AUS"])))];
+    let exclusions = [BTreeSet::new(), set_s(&["NZL"])];
+    let controls_axis = [
+        Controls::empty(),
+        Controls::from_set([OrconUsGov].into_iter().collect()),
+        Controls::from_set([Orcon].into_iter().collect()),
+        Controls::from_set([Exdis].into_iter().collect()),
+        Controls::from_set([Nodis].into_iter().collect()),
+        Controls::from_set([Relido].into_iter().collect()),
+        Controls::from_set([Displayed].into_iter().collect()),
+    ];
+    let mut out = Vec::new();
+    for level in levels {
+        for rel in &rels {
+            for display in &displays {
+                for excl in &exclusions {
+                    for controls in &controls_axis {
+                        out.push(ResourceLabel {
+                            classification: class(level),
+                            ownership: Ownership::Owned {
+                                owner: "USA".into(),
+                            },
+                            categories: BTreeMap::new(),
+                            disclosure: Disclosure {
+                                release: rel.clone(),
+                                display: display.clone(),
+                                exclusions: excl.clone(),
+                            },
+                            controls: controls.clone(),
+                            caveats: BTreeSet::new(),
+                            compilation_level: None,
+                            need_to_know: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(out.len(), 2 * 3 * 2 * 2 * 7); // 168
+    out
+}
+
+#[test]
+fn v2_axes_order_and_join_laws() {
+    let spif = law_spif();
+    let u = universe_v2_axes();
+
+    // axis-coverage: every controls value, both displays, both exclusions present
+    let distinct_controls: BTreeSet<Vec<ControlMarking>> = u
+        .iter()
+        .map(|l| l.controls.as_set().iter().copied().collect())
+        .collect();
+    assert_eq!(distinct_controls.len(), 7);
+    assert!(u.iter().any(|l| l.disclosure.display.is_some()));
+    assert!(u.iter().any(|l| l.disclosure.display.is_none()));
+    assert!(u.iter().any(|l| !l.disclosure.exclusions.is_empty()));
+
+    let mut join_some_count: usize = 0;
+    let mut antisymmetry_fires: usize = 0; // structurally-distinct mutually-⊑ pairs
+    for a in &u {
+        assert!(le(a, a, &spif), "reflexivity");
+        let aa = a
+            .join(a, &spif)
+            .expect("∨ total over the fixed-ownership sublattice");
+        assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
+    }
+    for a in &u {
+        for b in &u {
+            let ab = a
+                .join(b, &spif)
+                .expect("∨ total over the fixed-ownership sublattice");
+            join_some_count += 1;
+            let ba = b.join(a, &spif).expect("∨ total");
+            assert!(sem_eq(&ab, &ba, &spif), "commutativity");
+            let a_ab = a.join(&ab, &spif).expect("∨ total");
+            assert!(sem_eq(&a_ab, &ab, &spif), "absorption a∨(a∨b) ≈ a∨b");
+            assert!(le(a, &ab, &spif), "a ⊑ a∨b");
+            assert!(le(b, &ab, &spif), "b ⊑ a∨b");
+            if le(a, b, &spif) && le(b, a, &spif) {
+                assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
+                if a != b {
+                    // distinct reps that are mutually-⊑ (e.g. display=None vs
+                    // display=Some(=release)) → the law is non-vacuously exercised
+                    antisymmetry_fires += 1;
+                }
+            }
+            // controls never shrink on join (monotone)
+            assert!(a.controls.le(&ab.controls) && b.controls.le(&ab.controls));
+            // exclusions never shrink on join (∪)
+            assert!(a.disclosure.exclusions.is_subset(&ab.disclosure.exclusions));
+        }
+    }
+    assert_eq!(join_some_count, 168 * 168); // ∨ total: no fail-closed None in the sweep
+    assert!(antisymmetry_fires > 0, "v2 antisymmetry suite is vacuous");
+
+    // Associativity is a TRIPLE law the pairwise loop above cannot see. Sweep it
+    // over a stride-4 subsample of the 168-label v2 universe whose axis coverage
+    // is asserted (the v1 triple-law pattern), so the ADR's "associative over the
+    // fixed-ownership sublattice" claim is earned, not assumed: (a∨b)∨c ≈ a∨(b∨c).
+    let sample: Vec<&ResourceLabel> = u.iter().step_by(4).collect(); // 42 labels
+    let sample_controls: BTreeSet<Vec<ControlMarking>> = sample
+        .iter()
+        .map(|l| l.controls.as_set().iter().copied().collect())
+        .collect();
+    assert_eq!(
+        sample_controls.len(),
+        7,
+        "stride subsample dropped a controls value"
+    );
+    assert!(sample.iter().any(|l| l.disclosure.display.is_some()));
+    assert!(sample.iter().any(|l| l.disclosure.display.is_none()));
+    assert!(sample.iter().any(|l| !l.disclosure.exclusions.is_empty()));
+    assert!(sample.iter().any(|l| l.disclosure.exclusions.is_empty()));
+    let mut assoc_checked: usize = 0;
+    for a in &sample {
+        for b in &sample {
+            let ab = a.join(b, &spif).expect("∨ total");
+            for c in &sample {
+                let bc = b.join(c, &spif).expect("∨ total");
+                let ab_c = ab.join(c, &spif).expect("∨ total");
+                let a_bc = a.join(&bc, &spif).expect("∨ total");
+                assert!(
+                    sem_eq(&ab_c, &a_bc, &spif),
+                    "associativity (a∨b)∨c ≈ a∨(b∨c) over the v2 axes"
+                );
+                assoc_checked += 1;
+            }
+        }
+    }
+    assert_eq!(
+        assoc_checked,
+        sample.len().pow(3),
+        "associativity sweep coverage"
+    );
+}
+
 #[test]
 fn dominance_monotonicity() {
     let spif = law_spif();
@@ -253,7 +430,8 @@ fn dominance_monotonicity() {
                         Some(vals) => [("SCI".to_string(), set(vals))].into_iter().collect(),
                     },
                     coalition_memberships: BTreeSet::new(),
-                    affiliation: Affiliation::UsGovernment,
+                    employment: Employment::FederalCivilian,
+                    list_memberships: BTreeSet::new(),
                     purposes: purposes.iter().map(|s| s.to_string()).collect(),
                 });
             }
@@ -266,7 +444,8 @@ fn dominance_monotonicity() {
             .into_iter()
             .collect(),
         coalition_memberships: BTreeSet::new(),
-        affiliation: Affiliation::Foreign,
+        employment: Employment::Foreign,
+        list_memberships: BTreeSet::new(),
         purposes: set(&["OPLAN"]),
     });
     assert_eq!(panel.len(), 13);

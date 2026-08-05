@@ -5,6 +5,7 @@
 //! Every lookup is total: unknown levels, tags, and tokens resolve to `None` /
 //! `Unknown`, which every caller treats as deny / grants-nothing.
 
+use crate::registry::CuiRegistry;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Identifier of the security policy authority a classification is scoped to
@@ -35,6 +36,10 @@ pub enum CategoryKind {
     Permissive,
     /// Ignored by decide(); carried for handling.
     Informative,
+    /// List-controlled (#30): access gated by named-reader list membership
+    /// (DL/NODIS/DISTRO-F). decide() semantics land Stage 5; in Stage 1 an
+    /// unhandled `ListControlled` tag → `Indeterminate` (fail closed).
+    ListControlled,
 }
 
 /// Result of decomposing a coalition tetragraph token against the SPIF tables.
@@ -57,6 +62,14 @@ pub struct Spif {
     categories: BTreeMap<String, CategoryKind>,
     /// `Some(nations)` = decomposable; `None` = registered non-decomposable.
     tetragraphs: BTreeMap<String, Option<BTreeSet<String>>>,
+    /// FGI `home_nation` gate (#25/#31): the policy's own nation. `None` until
+    /// a policy declares it. Consumed by the OwnerConsent trigger in Stage 5.
+    home_nation: Option<String>,
+    /// Tetragraphs a SPIF flags as expandable for banner roll-up (#31).
+    expandable: BTreeSet<String>,
+    /// Loaded offline CUI Registry snapshot (spec §6). `None` = no CUI
+    /// vocabulary loaded. `validate_label` enforcement is Stage 4.
+    registry: Option<CuiRegistry>,
 }
 
 impl Spif {
@@ -66,7 +79,25 @@ impl Spif {
             levels: Vec::new(),
             categories: BTreeMap::new(),
             tetragraphs: BTreeMap::new(),
+            home_nation: None,
+            expandable: BTreeSet::new(),
+            registry: None,
         }
+    }
+
+    /// The policy's own nation (#25 FGI `home_nation` gate), if declared.
+    pub fn home_nation(&self) -> Option<&str> {
+        self.home_nation.as_deref()
+    }
+
+    /// Whether `token` is flagged expandable for banner roll-up (#31).
+    pub fn is_expandable_for_rollup(&self, token: &str) -> bool {
+        self.expandable.contains(token)
+    }
+
+    /// The loaded offline CUI Registry snapshot, if any (spec §6).
+    pub fn registry(&self) -> Option<&CuiRegistry> {
+        self.registry.as_ref()
     }
 
     /// Rank of a classification in this policy's level order.
@@ -103,6 +134,9 @@ pub struct SpifBuilder {
     levels: Vec<String>,
     categories: BTreeMap<String, CategoryKind>,
     tetragraphs: BTreeMap<String, Option<BTreeSet<String>>>,
+    home_nation: Option<String>,
+    expandable: BTreeSet<String>,
+    registry: Option<CuiRegistry>,
 }
 
 /// True iff `token` has the shape of a bare nation trigraph
@@ -157,12 +191,33 @@ impl SpifBuilder {
         self
     }
 
+    /// Declare the policy's own nation (#25 FGI `home_nation` gate).
+    pub fn home_nation(mut self, nation: &str) -> Self {
+        self.home_nation = Some(nation.to_string());
+        self
+    }
+
+    /// Flag a tetragraph as expandable for banner roll-up (#31).
+    pub fn expandable(mut self, token: &str) -> Self {
+        self.expandable.insert(token.to_string());
+        self
+    }
+
+    /// Attach a loaded offline CUI Registry snapshot (spec §6).
+    pub fn registry(mut self, registry: CuiRegistry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
     pub fn build(self) -> Spif {
         Spif {
             policy: self.policy,
             levels: self.levels,
             categories: self.categories,
             tetragraphs: self.tetragraphs,
+            home_nation: self.home_nation,
+            expandable: self.expandable,
+            registry: self.registry,
         }
     }
 }
@@ -214,6 +269,32 @@ mod tests {
             Some(CategoryKind::RestrictivePredicate)
         );
         assert_eq!(spif.category_kind("NOPE"), None);
+    }
+
+    #[test]
+    fn stage1_spif_scaffolding() {
+        use crate::registry::CuiRegistry;
+        // ListControlled round-trips the builder
+        let spif = Spif::builder("US")
+            .category("ATTY", CategoryKind::ListControlled)
+            .home_nation("USA")
+            .expandable("FVEY")
+            .registry(CuiRegistry::seed())
+            .build();
+        assert_eq!(
+            spif.category_kind("ATTY"),
+            Some(CategoryKind::ListControlled)
+        );
+        assert_eq!(spif.home_nation(), Some("USA"));
+        assert!(spif.is_expandable_for_rollup("FVEY"));
+        assert!(!spif.is_expandable_for_rollup("NATO")); // unflagged → false
+        assert!(spif.registry().is_some());
+
+        // defaults: no home_nation, nothing expandable, no registry
+        let bare = Spif::builder("US").build();
+        assert_eq!(bare.home_nation(), None);
+        assert!(!bare.is_expandable_for_rollup("FVEY"));
+        assert!(bare.registry().is_none());
     }
 
     #[test]

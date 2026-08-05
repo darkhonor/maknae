@@ -9,15 +9,26 @@
 //! input → `Deny` / grants-nothing.
 #![forbid(unsafe_code)]
 
+pub mod controls;
 pub mod decide;
 pub mod label;
+pub mod ownership;
 pub mod policy;
+pub mod registry;
 pub mod subject;
 
-pub use decide::{decide, Action, Decision, DenyReason, Purpose};
-pub use label::{
-    restrictive_dominates, validate_rel, Caveat, EligibleNations, RelValidationError,
-    Releasability, ResourceLabel,
+pub use controls::{ControlMarking, Controls};
+pub use decide::{
+    decide, obligation_refines, obligations_refine, Action, Decision, DenyReason, Obligation,
+    Purpose, RedisseminationScope,
 };
-pub use policy::{CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion};
-pub use subject::{affiliation_satisfies, Affiliation, Subject};
+pub use label::{
+    derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
+    EligibleNations, RelValidationError, Releasability, ResourceLabel,
+};
+pub use ownership::Ownership;
+pub use policy::{
+    is_trigraph, CategoryKind, Classification, PolicyId, Spif, SpifBuilder, TetraExpansion,
+};
+pub use registry::{CuiCategory, CuiRegistry, RegistryError, RegistryProvenance};
+pub use subject::{affiliation_satisfies, Affiliation, Employment, Subject};
