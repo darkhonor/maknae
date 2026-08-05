@@ -25,6 +25,19 @@ pub fn is_iso3166(token: &str) -> bool {
     ISO3166.binary_search(&token).is_ok()
 }
 
+/// The member nation trigraphs of a coalition tetragraph, or `None` if the
+/// tetragraph is not registered (#26 expand-or-deny: an unregistered coalition
+/// grants nothing → the caller denies). Membership is a GLOBAL, versioned data
+/// fact (not policy-context-dependent). `COALITIONS` is emitted sorted by
+/// tetragraph, so this is a binary search; every member was cross-validated
+/// against `ISO3166` at build time.
+pub fn expand_coalition(token: &str) -> Option<&'static [&'static str]> {
+    COALITIONS
+        .binary_search_by(|(k, _)| (*k).cmp(token))
+        .ok()
+        .map(|i| COALITIONS[i].1)
+}
+
 /// Provenance stamped on every snapshot (mirrors `coverage-tiers.toml`'s
 /// `ratchet_provenance`): where it came from, when, the registry's own
 /// "current as of" date, and a content hash.

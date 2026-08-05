@@ -24,17 +24,10 @@ fn us_spif() -> Spif {
         .category("LDC", CategoryKind::RestrictivePredicate)
         .category("EYES", CategoryKind::Permissive)
         .category("HANDLING", CategoryKind::Informative)
-        .tetragraph("CFCK", Some(&["USA", "KOR"]))
-        // 18 UNC sending states per design/references/dcs-schema-migration.md:1215-1221
-        .tetragraph(
-            "UNCK",
-            Some(&[
-                "AUS", "BEL", "CAN", "COL", "DEU", "DNK", "FRA", "GRC", "ITA", "KOR", "NLD", "NZL",
-                "NOR", "PHL", "THA", "TUR", "GBR", "USA",
-            ]),
-        )
-        .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-        .tetragraph("NKIC", None)
+        // Coalitions come from the GLOBAL registry (D1): UNCK (ZAF-in/KOR-out per
+        // CJCSI 2015.01A + DEU accession) and FVEY. CFCK/NKIC are not in #26's
+        // registry (D4) → Unknown. The vectors relying on the old per-SPIF roster
+        // are reworked in Task 11.
         .build()
 }
 

@@ -197,7 +197,7 @@ pub fn decide(
     if !resource
         .disclosure
         .eligible_release(&resource.ownership.base_set(), spif)
-        .permits(&subject.nationality, &subject.coalition_memberships)
+        .permits(&subject.nationality)
     {
         return Decision::Deny(DenyReason::Releasability);
     }
@@ -285,16 +285,10 @@ mod tests {
             .category("LDC", CategoryKind::RestrictivePredicate)
             .category("EYES", CategoryKind::Permissive)
             .category("HANDLING", CategoryKind::Informative)
-            .tetragraph("CFCK", Some(&["USA", "KOR"]))
-            .tetragraph(
-                "UNCK",
-                Some(&[
-                    "AUS", "BEL", "CAN", "COL", "DEU", "DNK", "FRA", "GRC", "ITA", "KOR", "NLD",
-                    "NZL", "NOR", "PHL", "THA", "TUR", "GBR", "USA",
-                ]),
-            )
-            .tetragraph("FVEY", Some(&["USA", "AUS", "CAN", "GBR", "NZL"]))
-            .tetragraph("NKIC", None)
+            // Coalitions (UNCK/FVEY) come from the GLOBAL registry now (D1) — no
+            // per-SPIF roster. CFCK/NKIC are not in #26's registry (D4), so they
+            // resolve to Unknown; the vectors that depended on them are reworked
+            // in Task 11.
             .build()
     }
 

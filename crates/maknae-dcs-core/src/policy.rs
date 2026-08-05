@@ -1,5 +1,6 @@
 //! SPIF (Security Policy Information File) input types: policy-scoped classification
-//! levels, typed category kinds, and tetragraph decomposition tables.
+//! levels and typed category kinds. Coalition tetragraph decomposition is now a
+//! GLOBAL, versioned data fact (`registry::expand_coalition`), not per-SPIF (D1).
 //!
 //! The SPIF is a consumed Tier-0 input (generation is out of scope, spec §10).
 //! Every lookup is total: unknown levels, tags, and tokens resolve to `None` /
@@ -42,26 +43,27 @@ pub enum CategoryKind {
     ListControlled,
 }
 
-/// Result of decomposing a coalition tetragraph token against the SPIF tables.
+/// Result of decomposing a coalition tetragraph token against the GLOBAL
+/// coalition registry (#26 expand-or-deny). Membership is a versioned data fact,
+/// not policy-context-dependent — every registered coalition decomposes to
+/// nation trigraphs (in-memory, never leaving the engine) or the token is
+/// `Unknown` (grants nothing → the caller denies). There is no non-decomposable
+/// arm: a coalition the engine cannot expand is a coalition it cannot decide on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TetraExpansion {
     /// Decomposable: expands to an enumerated set of nation trigraphs.
     Nations(BTreeSet<String>),
-    /// Registered but non-decomposable (classified membership): satisfiable
-    /// only by a subject holding the coalition attribute directly.
-    NonDecomposable,
     /// Not registered — grants nothing, everywhere.
     Unknown,
 }
 
-/// A compiled security policy: level order, category kinds, tetragraph tables.
+/// A compiled security policy: level order and category kinds. (Coalition
+/// tetragraphs decompose via the global registry, not per-SPIF tables — D1.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spif {
     policy: PolicyId,
     levels: Vec<String>,
     categories: BTreeMap<String, CategoryKind>,
-    /// `Some(nations)` = decomposable; `None` = registered non-decomposable.
-    tetragraphs: BTreeMap<String, Option<BTreeSet<String>>>,
     /// FGI `home_nation` gate (#25/#31): the policy's own nation. `None` until
     /// a policy declares it. Consumed by the OwnerConsent trigger in Stage 5.
     home_nation: Option<String>,
@@ -78,7 +80,6 @@ impl Spif {
             policy: PolicyId(policy.to_string()),
             levels: Vec::new(),
             categories: BTreeMap::new(),
-            tetragraphs: BTreeMap::new(),
             home_nation: None,
             expandable: BTreeSet::new(),
             registry: None,
@@ -115,10 +116,15 @@ impl Spif {
         self.categories.get(tag).copied()
     }
 
+    /// Decompose a coalition tetragraph via the GLOBAL registry (#26, D1).
+    /// Coalition membership is not policy-context-dependent, so this ignores
+    /// `self` and reads `registry::expand_coalition`. A registered coalition →
+    /// its member nations (in-memory expand); anything else → `Unknown`.
     pub fn expand_tetra(&self, token: &str) -> TetraExpansion {
-        match self.tetragraphs.get(token) {
-            Some(Some(nations)) => TetraExpansion::Nations(nations.clone()),
-            Some(None) => TetraExpansion::NonDecomposable,
+        match crate::registry::expand_coalition(token) {
+            Some(members) => {
+                TetraExpansion::Nations(members.iter().map(|s| s.to_string()).collect())
+            }
             None => TetraExpansion::Unknown,
         }
     }
@@ -133,7 +139,6 @@ pub struct SpifBuilder {
     policy: PolicyId,
     levels: Vec<String>,
     categories: BTreeMap<String, CategoryKind>,
-    tetragraphs: BTreeMap<String, Option<BTreeSet<String>>>,
     home_nation: Option<String>,
     expandable: BTreeSet<String>,
     registry: Option<CuiRegistry>,
@@ -154,40 +159,6 @@ impl SpifBuilder {
 
     pub fn category(mut self, tag: &str, kind: CategoryKind) -> Self {
         self.categories.insert(tag.to_string(), kind);
-        self
-    }
-
-    /// Register a coalition tetragraph. `None` members = non-decomposable.
-    /// `Some(&[])` is SKIPPED (an empty coalition is not a coalition), and a
-    /// 3-uppercase-ASCII token is SKIPPED (it would collide with the trigraph
-    /// nation namespace) — both then resolve to `TetraExpansion::Unknown`.
-    ///
-    /// MEMBERS are shape-validated too: a decomposable expansion may contain
-    /// ONLY nation trigraphs. A non-trigraph member (a nested tetragraph, a
-    /// typo) is dropped, and if nothing valid remains the registration is
-    /// skipped entirely. Without this mirror guard, a malformed SPIF member
-    /// would enter the `nations` namespace, and the `from_eligible → eligible`
-    /// round-trip would re-expand it — WIDENING releasability through the
-    /// derivation-join (the exact issue-#6 failure class).
-    pub fn tetragraph(mut self, token: &str, members: Option<&[&str]>) -> Self {
-        if is_trigraph(token) {
-            return self;
-        }
-        let members: Option<BTreeSet<String>> = match members {
-            None => None,
-            Some(m) => {
-                let filtered: BTreeSet<String> = m
-                    .iter()
-                    .filter(|t| is_trigraph(t))
-                    .map(|s| s.to_string())
-                    .collect();
-                if filtered.is_empty() {
-                    return self; // nothing valid → not a coalition
-                }
-                Some(filtered)
-            }
-        };
-        self.tetragraphs.insert(token.to_string(), members);
         self
     }
 
@@ -214,7 +185,6 @@ impl SpifBuilder {
             policy: self.policy,
             levels: self.levels,
             categories: self.categories,
-            tetragraphs: self.tetragraphs,
             home_nation: self.home_nation,
             expandable: self.expandable,
             registry: self.registry,
@@ -298,47 +268,32 @@ mod tests {
     }
 
     #[test]
-    fn tetragraph_decomposition() {
-        let spif = Spif::builder("US")
-            .tetragraph("CFCK", Some(&["USA", "KOR"]))
-            .tetragraph("NKIC", None)
-            .build();
-        assert!(
-            matches!(spif.expand_tetra("CFCK"), TetraExpansion::Nations(n) if n.contains("KOR"))
-        );
-        assert!(matches!(
-            spif.expand_tetra("NKIC"),
-            TetraExpansion::NonDecomposable
-        ));
-        assert!(matches!(spif.expand_tetra("ZZZZ"), TetraExpansion::Unknown));
-    }
-
-    #[test]
-    fn builder_filters_non_trigraph_members() {
-        // CR-impl C1: a decomposable expansion may contain ONLY trigraphs — a
-        // nested tetragraph/typo member must never enter the nations namespace
-        let spif = Spif::builder("US")
-            .tetragraph("CFCK", Some(&["USA", "FVEY", "KOR"])) // FVEY dropped
-            .tetragraph("BADD", Some(&["FVEY"])) // nothing valid → skipped
-            .build();
-        match spif.expand_tetra("CFCK") {
+    fn expand_tetra_reads_global_registry() {
+        // D1: expand_tetra ignores per-SPIF state and reads the GLOBAL coalition
+        // registry. A registered coalition decomposes to its member nations; an
+        // unregistered token (or a trigraph-shaped one) is Unknown.
+        let spif = Spif::builder("US").build();
+        match spif.expand_tetra("UNCK") {
             TetraExpansion::Nations(n) => {
-                assert!(n.contains("USA") && n.contains("KOR"));
-                assert!(!n.contains("FVEY"));
+                assert_eq!(n.len(), 18);
+                assert!(n.contains("ZAF")); // CJCSI 2015.01A member
+                assert!(!n.contains("KOR")); // host nation, not a member
             }
             other => panic!("expected Nations, got {other:?}"),
         }
-        assert!(matches!(spif.expand_tetra("BADD"), TetraExpansion::Unknown));
+        assert!(matches!(
+            spif.expand_tetra("FVEY"),
+            TetraExpansion::Nations(_)
+        ));
+        assert!(matches!(spif.expand_tetra("ZZZZ"), TetraExpansion::Unknown)); // unregistered
+        assert!(matches!(spif.expand_tetra("USA"), TetraExpansion::Unknown)); // a trigraph is not a coalition
     }
 
-    #[test]
-    fn builder_skips_degenerate_tetragraph_registrations() {
-        // pinned contracts — trigraph-shaped tokens and empty-member coalitions never register
-        let spif = Spif::builder("US")
-            .tetragraph("USA", None) // 3-uppercase-ASCII: collides with nation namespace → skipped
-            .tetragraph("EMTY", Some(&[])) // empty member list: not a coalition → skipped
-            .build();
-        assert!(matches!(spif.expand_tetra("USA"), TetraExpansion::Unknown));
-        assert!(matches!(spif.expand_tetra("EMTY"), TetraExpansion::Unknown));
-    }
+    // D2: the builder-time member-shape guards (`builder_filters_non_trigraph_members`,
+    // `builder_skips_degenerate_tetragraph_registrations`) are RETIRED with the
+    // `SpifBuilder::tetragraph` mechanism — coalition membership is now a global
+    // versioned data fact whose validity is enforced at BUILD time (build.rs
+    // cross-validates every member against ISO-3166; a malformed member FAILS
+    // THE BUILD). The runtime widen-guard's mutation-kill role is now the
+    // build-validation, documented in `tests/registry_compile.rs`.
 }

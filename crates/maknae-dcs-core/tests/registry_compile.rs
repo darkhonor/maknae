@@ -31,3 +31,15 @@ fn iso3166_recognizes_real_codes_rejects_fake() {
     }
     assert!(!maknae_dcs_core::registry::is_iso3166("XYZ")); // structurally a trigraph, not a real country
 }
+
+#[test]
+fn unck_expands_to_18_with_zaf_and_without_kor() {
+    let m = registry::expand_coalition("UNCK").expect("UNCK registered");
+    let set: std::collections::BTreeSet<&str> = m.iter().copied().collect();
+    assert_eq!(set.len(), 18);
+    assert!(set.contains("ZAF")); // CJCSI 2015.01A member
+    assert!(!set.contains("KOR")); // host nation, NOT a member
+    assert!(set.contains("DEU")); // 2 Aug 2024 accession
+    assert_eq!(registry::expand_coalition("FVEY").unwrap().len(), 5);
+    assert!(registry::expand_coalition("ZZZZ").is_none());
+}

@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://maknae/dcs-core/schemas/cui-registry.schema.json",
+  "title": "DoD/NARA CUI Registry (embedded data source)",
+  "description": "The full Controlled Unclassified Information (CUI) Registry, scraped from the public National Archives CUI Registry (archives.gov/cui/registry) and embedded so the decision engine never fetches at decide-time (air-gapped target). Recognition is by `category_marking`; every other field is inert provenance captured for completeness and may be selectively ignored by the engine. This schema is the human-facing contract; build-time enforcement is wired separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "source", "retrieved", "groups", "categories"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Data-source version, typically the retrieval date (ISO-8601)."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provenance of the data, e.g. \"archives.gov/cui/registry\"."
+    },
+    "retrieved": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Date the registry was scraped (ISO-8601 recommended)."
+    },
+    "groups": {
+      "type": "array",
+      "description": "The organizational index groupings the CUI Registry sorts categories into (e.g. Critical Infrastructure, Defense, Nuclear).",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "categories": {
+      "type": "array",
+      "description": "Every CUI category carried by the engine. Sorted deterministically by category_marking.",
+      "items": { "$ref": "#/definitions/category" }
+    }
+  },
+  "definitions": {
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category_marking"],
+      "description": "A single CUI category. `name` and `category_marking` are REQUIRED and non-empty; everything else is optional provenance (null or omitted when the source page does not expose it).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable category name (e.g. \"Information Systems Vulnerability Information\")."
+        },
+        "category_marking": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The CUI category marking / recognition token (e.g. \"ISVI\"). This is the engine's recognition key."
+        },
+        "banner_marking": {
+          "type": ["string", "null"],
+          "description": "The CUI banner marking shown on the category page (e.g. \"CUI\")."
+        },
+        "alternative_banner_marking": {
+          "type": ["string", "null"],
+          "description": "Alternative banner marking for basic authorities (e.g. \"CUI//ISVI\")."
+        },
+        "group": {
+          "type": ["string", "null"],
+          "description": "Organizational index grouping this category belongs to; a member of the top-level `groups` list."
+        },
+        "description": {
+          "type": ["string", "null"],
+          "description": "The category description text from the registry page."
+        },
+        "authorities": {
+          "type": "array",
+          "description": "Safeguarding and/or dissemination authorities backing the category. May be empty.",
+          "items": { "$ref": "#/definitions/authority" }
+        },
+        "last_reviewed": {
+          "type": ["string", "null"],
+          "description": "The \"last reviewed on\" date reported in the page footer (source's own words, e.g. \"May 7, 2025\")."
+        },
+        "source_url": {
+          "type": ["string", "null"],
+          "description": "Canonical archives.gov category-detail URL the record was scraped from."
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One row of the category's authorities table. All fields optional; missing cells are null.",
+      "properties": {
+        "citation": {
+          "type": ["string", "null"],
+          "description": "Safeguarding and/or dissemination authority citation (e.g. \"44 USC 3554\")."
+        },
+        "classification": {
+          "type": ["string", "null"],
+          "description": "\"Basic\" or \"Specified\" (the authority's control level), as published."
+        },
+        "banner_marking": {
+          "type": ["string", "null"],
+          "description": "Banner marking associated with this specific authority."
+        },
+        "sanctions": {
+          "type": ["string", "null"],
+          "description": "Sanctions text associated with this authority, when the page lists any."
+        }
+      }
+    }
+  }
+}

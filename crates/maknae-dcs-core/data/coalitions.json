@@ -1,0 +1,24 @@
+{
+  "version": "2026-08-06",
+  "source": "Coalition tetragraph rosters (see per-coalition source); members are ISO 3166-1 alpha-3, cross-validated against data/iso-3166-1-alpha-3.json at build time.",
+  "coalitions": [
+    {
+      "tetragraph": "UNCK",
+      "members": ["AUS", "BEL", "CAN", "COL", "DNK", "DEU", "FRA", "GRC", "ITA", "NLD", "NZL", "NOR", "PHL", "ZAF", "THA", "TUR", "GBR", "USA"],
+      "source": "CJCSI 2015.01A (UNC Sending States) + Germany accession 2 Aug 2024",
+      "effective_date": "2024-08-02"
+    },
+    {
+      "tetragraph": "FVEY",
+      "members": ["AUS", "CAN", "GBR", "NZL", "USA"],
+      "source": "Five Eyes (AUSCANNZUKUS / UKUSA Agreement)",
+      "effective_date": "1955-01-01"
+    },
+    {
+      "tetragraph": "NATO",
+      "members": ["ALB", "BEL", "BGR", "CAN", "HRV", "CZE", "DNK", "EST", "FIN", "FRA", "DEU", "GRC", "HUN", "ISL", "ITA", "LVA", "LTU", "LUX", "MNE", "NLD", "MKD", "NOR", "POL", "PRT", "ROU", "SVK", "SVN", "ESP", "SWE", "TUR", "GBR", "USA"],
+      "source": "North Atlantic Treaty Organization member states (nato.int), 32 members incl. Finland (2023) and Sweden (2024)",
+      "effective_date": "2024-03-07"
+    }
+  ]
+}
