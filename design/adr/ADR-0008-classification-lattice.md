@@ -263,9 +263,13 @@ co-owned labels EVALUABLE.
   `{USA, KOR, AUS, GBR, CAN, NZL}`.
 - **Origin-as-a-set.** `Releasability::eligible`/`from_eligible` take the OWNER SET
   (`&BTreeSet<String>`), replacing the single-origin scalar; `Disclosure::origin_of`
-  (the `|base| ≠ 1 → deny-all` guard) is RETIRED. Only an EMPTY owner set fails
-  closed; a non-empty set (1 or ≥2 owners) resolves. Single-owner is the exact
-  special case `owners = {origin}`, so every v1 single-owner law/vector is unchanged.
+  (the `|base| ≠ 1 → deny-all` guard) is RETIRED at the `Releasability::eligible`
+  layer — any non-empty owner set resolves there. `decide()` gate 4 then enforces
+  ownership WELL-FORMEDNESS per variant: `Owned` = exactly 1, `Joint` = ≥2
+  co-owners (its documented invariant); a directly-constructed singleton/empty
+  `Joint` is malformed → `Deny(Indeterminate)` (fail closed, as every `Joint` did
+  before #40). Single-owner is the exact special case `owners = {origin}`, so every
+  v1 single-owner law/vector is unchanged.
 - **`Joint` un-gated at `decide()` gate 4.** Gate 4 evaluates `Owned` AND `Joint`
   (`ownership.base_set()`); `ConcealedForeign` still fails closed (Stage-5,
   custodian-routed / OwnerConsent semantics deferred). The two-locus `validate_label`

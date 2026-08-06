@@ -110,8 +110,10 @@ pub enum DenyReason {
 ///    `Option`; unknown → `Indeterminate`, never a mislabeled `Level`.
 /// 3. Category gates — per-tag dispatch on the SPIF-declared kind; empty
 ///    required-sets and unknown/Permissive kinds → `Indeterminate`.
-/// 4. Releasability — origin-validated, single nation-namespace eligibility
-///    (nationality ∈ resolved ∖ exclusions); two-locus with `validate_label`.
+/// 4. Releasability — owner-set-validated (Owned=1, Joint≥2 co-owners;
+///    ConcealedForeign fails closed). Resolved = (release-expansion) ∪ (all
+///    co-owners) − exclusions; eligible iff `nationality ∈ resolved`. Two-locus
+///    with `validate_label`.
 /// 5. Action — `DisplayOnly` blocks `Export` (Read/Display permitted at MVP;
 ///    recorded open question for LLM-endpoint principals).
 /// 6. Need-to-know — exact token match when the label demands one.
