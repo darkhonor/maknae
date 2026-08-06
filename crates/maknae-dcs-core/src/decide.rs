@@ -185,24 +185,24 @@ pub fn decide(
         }
     }
 
-    // Gate 4: releasability (origin-validated). Stage 1 wires only single-owner
-    // labels; Joint / ConcealedForeign fail closed until Stage 5 wires their
-    // semantics (plan Task 6 Q1 resolution).
-    let owner = match &resource.ownership {
-        Ownership::Owned { owner } => owner,
-        _ => return Decision::Deny(DenyReason::Indeterminate),
+    // Gate 4: releasability. Evaluates single-owner `Owned` AND multi-owner
+    // `Joint` (#40 — each co-owner is eligible to data it co-produced, unioned
+    // with the release set). `ConcealedForeign` still fails closed until Stage 5
+    // wires its custodian-routed / OwnerConsent semantics.
+    let owners = match &resource.ownership {
+        Ownership::Owned { .. } | Ownership::Joint { .. } => resource.ownership.base_set(),
+        Ownership::ConcealedForeign { .. } => return Decision::Deny(DenyReason::Indeterminate),
     };
-    if !is_trigraph(owner) {
-        // rejects the Owned{""} sentinel and any malformed origin
+    if owners.is_empty() || !owners.iter().all(|o| is_trigraph(o)) {
+        // rejects the Owned{""} / joint_from(∅) sentinel and any malformed owner
         return Decision::Deny(DenyReason::Indeterminate);
     }
     // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
     // decision point, so a label that reached decide() WITHOUT passing
     // validate_label (the engine is a decision point, not the ingest gate) still
-    // denies structurally — owner-in-X / restriction-on-Public / unknown token
-    // never silently permit. `validate_label` is reached only for single-origin
-    // `Owned` here (Joint/ConcealedForeign short-circuit to Indeterminate above),
-    // exactly the safety subset it must cover.
+    // denies structurally — owner/co-owner-in-X / restriction-on-Public / unknown
+    // token never silently permit. `validate_label` is owner-set-aware, so it
+    // covers `Joint` co-owner-in-X exactly as it covers single-origin owner-in-X.
     if let Err(inv) = crate::label::validate_label(resource, spif) {
         return Decision::Deny(match inv {
             crate::label::LabelInvalidity::Element => DenyReason::InvalidElement,
@@ -211,7 +211,7 @@ pub fn decide(
     }
     if !resource
         .disclosure
-        .eligible_release(&resource.ownership.base_set(), spif)
+        .eligible_release(&owners, spif)
         .permits(&subject.nationality)
     {
         return Decision::Deny(DenyReason::Releasability);
@@ -564,16 +564,17 @@ mod tests {
     }
 
     #[test]
-    fn non_owned_ownership_fails_closed_stage1() {
-        // Stage 1 wires only single-owner labels; Joint / ConcealedForeign fail
-        // closed at gate 4 until Stage 5 wires their semantics (plan Task 6 Q1).
+    fn joint_evaluates_concealed_foreign_and_sentinel_fail_closed() {
+        // #40: JOINT is now EVALUATED (a co-owner is eligible to co-produced data).
+        // ConcealedForeign + the joint_from(∅) sentinel still fail closed.
         let mut joint = mk_resource("SECRET");
         joint.ownership = Ownership::Joint {
             owners: set(&["USA", "KOR"]),
         };
+        // NoMarking → eligible = {USA,KOR}; the USA-national subject is a co-owner → Permit.
         assert_eq!(
             run(&mk_subject("TOP_SECRET"), &joint, Action::Read),
-            Decision::Deny(DenyReason::Indeterminate)
+            Decision::Permit
         );
         let mut cf = mk_resource("SECRET");
         cf.ownership = Ownership::ConcealedForeign {
