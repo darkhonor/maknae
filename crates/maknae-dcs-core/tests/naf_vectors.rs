@@ -8,9 +8,10 @@ use common::*;
 use maknae_dcs_core::{audit, decide, Action, Decision, DenyReason, Releasability};
 
 // --- Task 10: gate-4 defense-in-depth (a single-origin Owned label that did NOT
-// pass validate_label still denies structurally at decide()). Joint owner-in-X is
-// NOT here — decide short-circuits Joint to Indeterminate; that vector lives in
-// validate_label (label.rs unit `owner_in_x_is_invalid_joint`). ---
+// pass validate_label still denies structurally at decide()). Since #40 decide
+// EVALUATES Joint (no longer short-circuits to Indeterminate), the Joint
+// owner-in-NAF vector now reaches validate_label at decide too — see
+// `joint_owner_in_naf_is_invalid_label` below. ---
 
 #[test]
 fn gate4_denies_owner_in_x_single_origin() {
@@ -140,4 +141,86 @@ fn audit_record_carries_presented_label_and_decision_no_roster() {
                                         // classified-coalition non-disclosure is structural: AuditRecord exposes no
                                         // eligible-set / expanded-roster field, so there is nothing to leak. The deny
                                         // reason names only a dimension (Releasability), never UNCK or ZAF's membership.
+}
+
+// --- #40: JOINT co-ownership decide vectors. Resolved eligible set =
+// (release-expansion) ∪ (all co-owners) − NAF exclusions. ---
+
+#[test]
+fn joint_union_permits_coowners_and_release() {
+    // flagship: JOINT{USA,KOR} // REL FVEY → USA,KOR (owners) + FVEY expansion.
+    let mut r = joint(&["USA", "KOR"]);
+    r.disclosure.release = Releasability::Grant(set(&["FVEY"]));
+    for n in ["USA", "KOR", "AUS", "GBR", "CAN", "NZL"] {
+        assert_eq!(
+            decide(&sub(n), &r, Action::Read, &purpose(""), &us_spif()),
+            Decision::Permit,
+            "{n}"
+        );
+    }
+    for n in ["JPN", "ZAF"] {
+        assert_eq!(
+            decide(&sub(n), &r, Action::Read, &purpose(""), &us_spif()),
+            Decision::Deny(DenyReason::Releasability),
+            "{n}"
+        );
+    }
+}
+
+#[test]
+fn joint_nomarking_is_coowners_only() {
+    let r = joint(&["USA", "KOR"]); // NoMarking → {USA,KOR}
+    assert_eq!(
+        decide(&sub("USA"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+    assert_eq!(
+        decide(&sub("KOR"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+    assert_eq!(
+        decide(&sub("AUS"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::Releasability)
+    );
+}
+
+#[test]
+fn joint_owner_in_naf_is_invalid_label() {
+    // owner-never-excluded reaches decide for Joint now (gate-4 validate_label).
+    let mut r = joint(&["USA", "KOR"]);
+    r.disclosure.release = Releasability::Grant(set(&["FVEY"]));
+    r.disclosure.exclusions = set(&["KOR"]); // KOR is a co-owner
+    assert_eq!(
+        decide(&sub("USA"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::InvalidLabel)
+    );
+}
+
+#[test]
+fn joint_naf_subtracts_non_owner_member() {
+    let mut r = joint(&["USA", "KOR"]);
+    r.disclosure.release = Releasability::Grant(set(&["FVEY"]));
+    r.disclosure.exclusions = set(&["AUS"]); // AUS is not a co-owner
+    assert_eq!(
+        decide(&sub("AUS"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::Releasability)
+    );
+    assert_eq!(
+        decide(&sub("CAN"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+    // owners are never subtracted:
+    assert_eq!(
+        decide(&sub("KOR"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Permit
+    );
+}
+
+#[test]
+fn concealed_foreign_still_indeterminate() {
+    let r = cf("DEU"); // ConcealedForeign — Stage-5, still fails closed
+    assert_eq!(
+        decide(&sub("DEU"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::Indeterminate)
+    );
 }

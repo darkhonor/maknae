@@ -65,3 +65,23 @@ pub fn sub(nat: &str) -> Subject {
 pub fn purpose(s: &str) -> Purpose {
     Purpose(s.to_string())
 }
+
+/// A co-owned (JOINT) label — same as `mk_owned` but `Ownership::Joint` (#40).
+pub fn joint(owners: &[&str]) -> ResourceLabel {
+    ResourceLabel {
+        ownership: Ownership::Joint {
+            owners: set(owners),
+        },
+        ..mk_owned("USA")
+    }
+}
+
+/// A ConcealedForeign label (Stage-5, still fails closed at decide).
+pub fn cf(custodian: &str) -> ResourceLabel {
+    ResourceLabel {
+        ownership: Ownership::ConcealedForeign {
+            custodian: custodian.into(),
+        },
+        ..mk_owned("USA")
+    }
+}
