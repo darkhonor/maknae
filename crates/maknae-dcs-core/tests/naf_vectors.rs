@@ -224,3 +224,31 @@ fn concealed_foreign_still_indeterminate() {
         Decision::Deny(DenyReason::Indeterminate)
     );
 }
+
+#[test]
+fn singleton_joint_is_malformed_indeterminate() {
+    // codex P1: a directly-constructed singleton Joint violates the len>=2 invariant
+    // → fail closed (do not adjudicate a malformed ownership frame).
+    let r = joint(&["USA"]); // singleton Joint (malformed)
+    assert_eq!(
+        decide(&sub("USA"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::Indeterminate)
+    );
+}
+
+#[test]
+fn joint_three_coowners_each_permitted() {
+    // ≥3 co-owners: each owner is eligible (kills the len>=2 → len==2 mutant).
+    let r = joint(&["USA", "KOR", "JPN"]); // NoMarking → {USA,KOR,JPN}
+    for n in ["USA", "KOR", "JPN"] {
+        assert_eq!(
+            decide(&sub(n), &r, Action::Read, &purpose(""), &us_spif()),
+            Decision::Permit,
+            "{n}"
+        );
+    }
+    assert_eq!(
+        decide(&sub("AUS"), &r, Action::Read, &purpose(""), &us_spif()),
+        Decision::Deny(DenyReason::Releasability)
+    );
+}

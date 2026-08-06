@@ -190,11 +190,19 @@ pub fn decide(
     // with the release set). `ConcealedForeign` still fails closed until Stage 5
     // wires its custodian-routed / OwnerConsent semantics.
     let owners = match &resource.ownership {
-        Ownership::Owned { .. } | Ownership::Joint { .. } => resource.ownership.base_set(),
-        Ownership::ConcealedForeign { .. } => return Decision::Deny(DenyReason::Indeterminate),
+        Ownership::Owned { .. } => resource.ownership.base_set(),
+        // `Joint` requires ≥2 co-owners (its documented invariant). A directly-
+        // constructed singleton/empty `Joint` is a MALFORMED marking — fail closed,
+        // exactly as every `Joint` did before #40 (do not adjudicate a structurally
+        // invalid ownership frame).
+        Ownership::Joint { owners } if owners.len() >= 2 => resource.ownership.base_set(),
+        Ownership::Joint { .. } | Ownership::ConcealedForeign { .. } => {
+            return Decision::Deny(DenyReason::Indeterminate)
+        }
     };
-    if owners.is_empty() || !owners.iter().all(|o| is_trigraph(o)) {
-        // rejects the Owned{""} / joint_from(∅) sentinel and any malformed owner
+    if !owners.iter().all(|o| is_trigraph(o)) {
+        // rejects the Owned{""} sentinel and any malformed owner trigraph. (The
+        // owner set is guaranteed non-empty here: Owned=1, Joint≥2.)
         return Decision::Deny(DenyReason::Indeterminate);
     }
     // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
