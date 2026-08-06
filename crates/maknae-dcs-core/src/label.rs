@@ -81,20 +81,22 @@ pub enum LabelInvalidity {
 }
 
 impl Releasability {
-    /// Expand to the canonical resolved nation set for a given origin + SPIF.
+    /// Expand to the canonical resolved nation set for the OWNER SET + SPIF (#40).
     ///
     /// Trigraph-shaped tokens → nations; registered coalition tetragraphs →
     /// their member nations (in-memory expand-or-deny, #26); unknown non-trigraph
-    /// tokens → DROPPED (grant nothing — fail closed). The origin is unioned into
-    /// nations for every non-`Empty` finite form.
-    pub fn eligible(&self, origin: &str, spif: &Spif) -> EligibleNations {
+    /// tokens → DROPPED (grant nothing — fail closed). ALL co-owners are unioned
+    /// into nations for every non-`Empty` finite form — each co-owner is eligible
+    /// to data it co-produced (#40). Single-owner is the special case
+    /// `owners = {origin}`, identical to the v1 behavior.
+    pub fn eligible(&self, owners: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
         match self {
             Releasability::Public => EligibleNations::Universe,
             Releasability::Empty => EligibleNations::Set {
                 nations: BTreeSet::new(),
             },
             Releasability::NoMarking => EligibleNations::Set {
-                nations: [origin.to_string()].into_iter().collect(),
+                nations: owners.clone(),
             },
             Releasability::Grant(tokens) => {
                 let mut nations: BTreeSet<String> = BTreeSet::new();
@@ -119,36 +121,38 @@ impl Releasability {
                         }
                     }
                 }
-                nations.insert(origin.to_string());
+                nations.extend(owners.iter().cloned());
                 EligibleNations::Set { nations }
             }
         }
     }
 
     /// Canonicalize an eligible set back to the unique `Releasability` form:
-    /// `Universe → Public`; ∅ → `Empty`; nations `== {origin}` → `NoMarking`;
-    /// else `Grant(nations ∖ {origin})` — guaranteed non-empty.
+    /// `Universe → Public`; ∅ → `Empty`; nations `== owners` → `NoMarking`;
+    /// else `Grant(nations ∖ owners)` — guaranteed non-empty.
     ///
-    /// Precondition: `e` was produced by [`Releasability::eligible`] or
-    /// [`EligibleNations::join`] with the same `origin` (every non-empty such
-    /// set contains the origin). A caller-constructed set violating the
-    /// precondition FAILS CLOSED to `Empty` (deny-all) — never a panic (the
-    /// crate is pure/total) and never a silent round-trip widening (`eligible`
-    /// re-adds the origin, so representing the violating set as a `Grant`
-    /// would make the origin eligible when it was not).
-    pub fn from_eligible(e: &EligibleNations, origin: &str) -> Releasability {
+    /// Precondition (#40): `e` was produced by [`Releasability::eligible`] or
+    /// [`EligibleNations::join`] with the same OWNER SET (every non-empty such
+    /// set contains ALL co-owners). A caller-constructed set violating the
+    /// precondition (some owner absent) FAILS CLOSED to `Empty` (deny-all) —
+    /// never a panic (the crate is pure/total) and never a silent round-trip
+    /// widening (`eligible` re-adds every owner, so representing the violating
+    /// set as a `Grant` would make an owner eligible when it was not).
+    pub fn from_eligible(e: &EligibleNations, owners: &BTreeSet<String>) -> Releasability {
         match e {
             EligibleNations::Universe => Releasability::Public,
             EligibleNations::Set { nations } => {
                 if nations.is_empty() {
                     return Releasability::Empty;
                 }
-                if !nations.contains(origin) {
-                    // precondition violated: degenerate input → deny-all
+                if !owners.is_subset(nations) {
+                    // precondition violated (some co-owner absent) → deny-all
                     return Releasability::Empty;
                 }
                 let mut grant: BTreeSet<String> = nations.clone();
-                grant.remove(origin);
+                for o in owners {
+                    grant.remove(o);
+                }
                 if grant.is_empty() {
                     Releasability::NoMarking
                 } else {
@@ -213,17 +217,6 @@ pub struct Disclosure {
 }
 
 impl Disclosure {
-    /// A single-owner base yields that owner as the eligibility origin; any
-    /// other cardinality FAILS CLOSED (deny-all). Stage 5 replaces this guard
-    /// with the real multi-owner union (plan Task 3 |base|≠1 rule).
-    fn origin_of(base: &BTreeSet<String>) -> Option<&str> {
-        if base.len() == 1 {
-            base.iter().next().map(|s| s.as_str())
-        } else {
-            None
-        }
-    }
-
     fn deny_all() -> EligibleNations {
         EligibleNations::Set {
             nations: BTreeSet::new(),
@@ -249,10 +242,13 @@ impl Disclosure {
     /// Eligible set for the RELEASE relation (who may receive a copy), with the
     /// NAF exclusions subtracted (#26 expand-or-deny: nationality ∈ resolved ∖ X).
     pub fn eligible_release(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
-        match Self::origin_of(base) {
-            Some(origin) => self.subtract_exclusions(self.release.eligible(origin, spif)),
-            None => Self::deny_all(),
+        // #40: any non-empty owner set (1 or ≥2 co-owners) resolves; only an
+        // empty base fails closed. All owners are unioned into the resolved set
+        // by `Releasability::eligible`.
+        if base.is_empty() {
+            return Self::deny_all();
         }
+        self.subtract_exclusions(self.release.eligible(base, spif))
     }
 
     /// Eligible set for the DISPLAY relation (who may view). A `None` display
@@ -262,10 +258,13 @@ impl Disclosure {
     pub fn eligible_display(&self, base: &BTreeSet<String>, spif: &Spif) -> EligibleNations {
         match &self.display {
             None => self.eligible_release(base, spif),
-            Some(d) => match Self::origin_of(base) {
-                Some(origin) => d.eligible(origin, spif),
-                None => Self::deny_all(),
-            },
+            Some(d) => {
+                if base.is_empty() {
+                    Self::deny_all()
+                } else {
+                    d.eligible(base, spif)
+                }
+            }
         }
     }
 
@@ -284,30 +283,30 @@ impl Disclosure {
     /// therefore carries an EMPTY `exclusions` field — the exclusion is consumed
     /// into the (narrower) release grant, not re-carried as a separate axis.
     pub fn join(&self, other: &Disclosure, base: &BTreeSet<String>, spif: &Spif) -> Disclosure {
-        let origin = Self::origin_of(base);
-        let release = match origin {
-            Some(o) => Releasability::from_eligible(
+        // #40: canonicalize the joined eligible sets against the whole owner set.
+        let release = if base.is_empty() {
+            Releasability::Empty
+        } else {
+            Releasability::from_eligible(
                 &self
                     .eligible_release(base, spif)
                     .join(&other.eligible_release(base, spif)),
-                o,
-            ),
-            None => Releasability::Empty,
+                base,
+            )
         };
         // display present in the result iff either operand carried an explicit
         // display; otherwise it tracks release (None).
         let display = if self.display.is_none() && other.display.is_none() {
             None
+        } else if base.is_empty() {
+            Some(Releasability::Empty)
         } else {
-            match origin {
-                Some(o) => Some(Releasability::from_eligible(
-                    &self
-                        .eligible_display(base, spif)
-                        .join(&other.eligible_display(base, spif)),
-                    o,
-                )),
-                None => Some(Releasability::Empty),
-            }
+            Some(Releasability::from_eligible(
+                &self
+                    .eligible_display(base, spif)
+                    .join(&other.eligible_display(base, spif)),
+                base,
+            ))
         };
         Disclosure {
             release,
@@ -485,12 +484,14 @@ fn categories_comparable(label: &ResourceLabel, spif: &Spif) -> bool {
     })
 }
 
-/// Every owner/custodian token in the ownership frame is a well-formed
-/// trigraph. `Owned{""}` (the `joint_from(∅)` sentinel) and any lowercase/
-/// wrong-length token fail — poisoning `⊑`/`join` to `None`, exactly as v1's
-/// `is_trigraph(&origin)` poisoned the single-origin case.
+/// The ownership FRAME is structurally well-formed — delegates to the single
+/// source of truth `Ownership::is_wellformed` (Owned=1 trigraph, Joint≥2
+/// trigraphs, ConcealedForeign=trigraph custodian). A malformed frame (the
+/// `Owned{""}` sentinel, a directly-constructed singleton/empty `Joint`, any
+/// non-trigraph token) poisons `⊑`/`join` to `None` — the same boundary
+/// `decide()` gate 4 and `validate_label` enforce, so they can never disagree.
 fn ownership_wellformed(o: &Ownership) -> bool {
-    o.base_set().iter().all(|t| is_trigraph(t))
+    o.is_wellformed()
 }
 
 /// The rank `decide()` actually enforces: `max(level, compilation-or-level)`.
@@ -726,7 +727,16 @@ fn rel_tokens_recognized(rel: &Releasability) -> Result<(), LabelInvalidity> {
 /// a `derive`-layer property (spec §2.3 total-∨/partial-derive split).
 pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInvalidity> {
     let d = &label.disclosure;
-    // (0) every owner/custodian is a recognized nation — the engine has a COMPLETE
+    // (0a) the ownership FRAME is structurally well-formed — Owned=1 trigraph,
+    //      Joint≥2 trigraphs (its documented invariant), ConcealedForeign=trigraph
+    //      custodian. A directly-constructed singleton/empty `Joint` or the
+    //      `Owned{""}` sentinel is a MALFORMED label. This is the SAME boundary
+    //      `decide()` gate 4 and the lattice `⊑`/`∨` frame guard enforce, so
+    //      `derive = validate_label ∘ ∨` can never emit a malformed frame.
+    if !label.ownership.is_wellformed() {
+        return Err(LabelInvalidity::Label);
+    }
+    // (0b) every owner/custodian is a recognized nation — the engine has a COMPLETE
     //     world view and refuses to adjudicate on an unrecognized owner trigraph.
     //     (`Owned("ZZZ")` with NoMarking would otherwise resolve to eligible
     //     {ZZZ} and permit a "ZZZ" nationality — a made-up nation.)
@@ -919,11 +929,16 @@ mod tests {
         assert_eq!(j.exclusions, BTreeSet::new()); // consumed into the resolved release
         assert!(a.le(&j, &base, &spif)); // a ⊑ a∨b
 
-        // |base| != 1 → deny-all (fail-closed)
+        // #40: a MULTI-owner base (≥2 co-owners) now RESOLVES — every co-owner is
+        // unioned into the resolved release (was deny-all under the |base|≠1 scalar).
+        let multi = d.eligible_release(&set(&["USA", "KOR"]), &spif);
+        assert!(multi.permits("USA") && multi.permits("KOR")); // both co-owners eligible
+        assert!(multi.permits("AUS")); // + the release grant
+                                       // only an EMPTY base fails closed to deny-all.
         let deny_all = EligibleNations::Set {
             nations: BTreeSet::new(),
         };
-        assert_eq!(d.eligible_release(&set(&["USA", "KOR"]), &spif), deny_all);
+        assert_eq!(d.eligible_release(&BTreeSet::new(), &spif), deny_all);
     }
 
     #[test]
@@ -1049,6 +1064,19 @@ mod tests {
             validate_label(&l, &us_spif()),
             Err(LabelInvalidity::Element)
         ));
+    }
+
+    #[test]
+    fn singleton_joint_is_malformed_at_validate_and_derive() {
+        // #40 (Hobi P1): a singleton Joint violates the len≥2 invariant. The frame
+        // boundary must NOT split-brain — validate_label rejects it (matching gate 4),
+        // and the lattice poisons derive to None.
+        let l = joint_label(&["USA"]); // singleton Joint (malformed)
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
+        ));
+        assert!(derive(&l, &l, &us_spif()).is_none());
     }
 
     #[test]
@@ -1450,7 +1478,7 @@ mod tests {
     #[test]
     fn nomarking_is_origin_only() {
         let spif = Spif::builder("US").build();
-        let e = Releasability::NoMarking.eligible("USA", &spif);
+        let e = Releasability::NoMarking.eligible(&one("USA"), &spif);
         assert!(e.permits("USA")); // origin permits
         assert!(!e.permits("AUS")); // foreign denies (NOFORN-equiv)
     }
@@ -1458,7 +1486,7 @@ mod tests {
     #[test]
     fn grant_includes_origin_and_listed() {
         let spif = Spif::builder("US").build();
-        let e = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
+        let e = Releasability::Grant(set(&["AUS"])).eligible(&one("USA"), &spif);
         assert!(e.permits("USA")); // origin always eligible
         assert!(e.permits("AUS")); // listed
         assert!(!e.permits("KOR")); // not listed
@@ -1471,7 +1499,7 @@ mod tests {
         // set is denied; there is no coalition assertion that can rescue it (the
         // resolved set is nations, and `permits` takes only a nation).
         let spif = Spif::builder("US").build();
-        let e = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
+        let e = Releasability::Grant(set(&["AUS"])).eligible(&one("USA"), &spif);
         assert!(e.permits("AUS")); // in the resolved nation set
         assert!(!e.permits("KOR")); // not in the set → denied
     }
@@ -1479,7 +1507,7 @@ mod tests {
     #[test]
     fn empty_denies_all_including_origin() {
         let spif = Spif::builder("US").build();
-        let e = Releasability::Empty.eligible("USA", &spif);
+        let e = Releasability::Empty.eligible(&one("USA"), &spif);
         assert!(!e.permits("USA")); // ⊤ — deny even origin
         assert!(!e.permits("AUS"));
     }
@@ -1487,14 +1515,16 @@ mod tests {
     #[test]
     fn public_permits_everyone() {
         let spif = Spif::builder("US").build();
-        assert!(Releasability::Public.eligible("USA", &spif).permits("ANY"));
+        assert!(Releasability::Public
+            .eligible(&one("USA"), &spif)
+            .permits("ANY"));
     }
 
     #[test]
     fn tetragraph_decomposes_in_eligible() {
         // a coalition tetragraph decomposes to its GLOBAL registry member nations
         let spif = Spif::builder("US").build();
-        let e = Releasability::Grant(set(&["FVEY"])).eligible("USA", &spif);
+        let e = Releasability::Grant(set(&["FVEY"])).eligible(&one("USA"), &spif);
         assert!(e.permits("GBR")); // FVEY member, decomposed into nations
         assert!(!e.permits("ZAF")); // ZAF not in FVEY
     }
@@ -1506,7 +1536,7 @@ mod tests {
         // the origin. The Unknown-token → Deny is enforced at both loci
         // (validate_label + gate-4), not silently widened here.
         let spif = Spif::builder("US").build();
-        let e = Releasability::Grant(set(&["NKIC"])).eligible("USA", &spif); // NKIC ∉ registry
+        let e = Releasability::Grant(set(&["NKIC"])).eligible(&one("USA"), &spif); // NKIC ∉ registry
         assert!(e.permits("USA")); // origin still eligible
         assert!(!e.permits("KOR")); // NKIC unexpandable → grants no other nation
     }
@@ -1515,7 +1545,7 @@ mod tests {
     fn unknown_token_grants_nothing() {
         // fail-closed: an unregistered non-trigraph token is dropped from the set
         let spif = Spif::builder("US").build(); // "ZZZZ" not registered
-        let e = Releasability::Grant(set(&["ZZZZ"])).eligible("USA", &spif);
+        let e = Releasability::Grant(set(&["ZZZZ"])).eligible(&one("USA"), &spif);
         assert!(e.permits("USA")); // origin still eligible
         assert!(!e.permits("KOR")); // an unknown token grants no nation
     }
@@ -1525,8 +1555,8 @@ mod tests {
         // #6 flagship: REL AUS ⊕ REL KOR (US origin) → {USA} = REL {origin},
         // NOT REL AUS,KOR, NOT REL ∅.
         let spif = Spif::builder("US").build();
-        let a = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif); // nations {USA,AUS}
-        let b = Releasability::Grant(set(&["KOR"])).eligible("USA", &spif); // nations {USA,KOR}
+        let a = Releasability::Grant(set(&["AUS"])).eligible(&one("USA"), &spif); // nations {USA,AUS}
+        let b = Releasability::Grant(set(&["KOR"])).eligible(&one("USA"), &spif); // nations {USA,KOR}
         let j = a.join(&b); // ∩ = {USA}
         assert!(j.permits("USA"));
         assert!(!j.permits("AUS"));
@@ -1536,7 +1566,7 @@ mod tests {
     #[test]
     fn join_universe_is_identity() {
         let spif = Spif::builder("US").build();
-        let g = Releasability::Grant(set(&["AUS"])).eligible("USA", &spif);
+        let g = Releasability::Grant(set(&["AUS"])).eligible(&one("USA"), &spif);
         let j = EligibleNations::Universe.join(&g);
         assert!(j.permits("AUS") && j.permits("USA") && !j.permits("KOR"));
     }
@@ -1544,33 +1574,81 @@ mod tests {
     #[test]
     fn from_eligible_is_canonical_and_unique() {
         // one form per semantic state; Grant(∅) can never be produced
-        let origin = "USA";
+        let origin = one("USA"); // #40: owner SET (single-owner special case)
         let s = |n: &[&str]| EligibleNations::Set { nations: set(n) };
         assert!(matches!(
-            Releasability::from_eligible(&EligibleNations::Universe, origin),
+            Releasability::from_eligible(&EligibleNations::Universe, &origin),
             Releasability::Public
         ));
         assert!(matches!(
-            Releasability::from_eligible(&s(&[]), origin),
+            Releasability::from_eligible(&s(&[]), &origin),
             Releasability::Empty
         ));
         assert!(matches!(
-            Releasability::from_eligible(&s(&["USA"]), origin),
+            Releasability::from_eligible(&s(&["USA"]), &origin),
             Releasability::NoMarking
         ));
-        match Releasability::from_eligible(&s(&["USA", "AUS"]), origin) {
+        match Releasability::from_eligible(&s(&["USA", "AUS"]), &origin) {
             Releasability::Grant(g) => {
                 assert_eq!(g, set(&["AUS"]));
                 assert!(!g.is_empty());
             }
             other => panic!("expected Grant, got {other:?}"),
         }
-        // precondition violation (origin absent from a non-empty set) FAILS
+        // precondition violation (an owner absent from a non-empty set) FAILS
         // CLOSED to Empty — no panic, no round-trip widening
         assert!(matches!(
-            Releasability::from_eligible(&s(&["AUS"]), origin),
+            Releasability::from_eligible(&s(&["AUS"]), &origin),
             Releasability::Empty
         ));
+    }
+
+    #[test]
+    fn eligible_unions_all_coowners() {
+        // #40 flagship: JOINT{USA,KOR} // REL FVEY → every co-owner + the release
+        // expansion is eligible.
+        let spif = us_spif();
+        let owners = set(&["USA", "KOR"]);
+        let e = Releasability::Grant(set(&["FVEY"])).eligible(&owners, &spif);
+        for n in ["USA", "KOR", "AUS", "GBR", "CAN", "NZL"] {
+            assert!(e.permits(n), "{n} should be eligible");
+        }
+        assert!(!e.permits("JPN"));
+        // strictly larger than the single-owner form (anti-vacuity): KOR is in only
+        // because it is a co-owner.
+        let single = Releasability::Grant(set(&["FVEY"])).eligible(&one("USA"), &spif);
+        assert!(!single.permits("KOR") && e.permits("KOR"));
+    }
+
+    #[test]
+    fn from_eligible_round_trips_multi_owner() {
+        let owners = set(&["USA", "KOR"]);
+        // owners ∪ a released nation → Grant(non-owners)
+        let e = EligibleNations::Set {
+            nations: set(&["USA", "KOR", "AUS"]),
+        };
+        assert_eq!(
+            Releasability::from_eligible(&e, &owners),
+            Releasability::Grant(set(&["AUS"]))
+        );
+        // nations == owners → NoMarking
+        assert_eq!(
+            Releasability::from_eligible(
+                &EligibleNations::Set {
+                    nations: owners.clone()
+                },
+                &owners
+            ),
+            Releasability::NoMarking
+        );
+        // precondition violated (co-owner KOR absent) → Empty (fail-closed)
+        let bad = EligibleNations::Set {
+            nations: set(&["USA", "AUS"]),
+        };
+        assert_eq!(
+            Releasability::from_eligible(&bad, &owners),
+            Releasability::Empty
+        );
     }
 
     // `malformed_spif_member_cannot_widen_through_join` is RETIRED (D2): the

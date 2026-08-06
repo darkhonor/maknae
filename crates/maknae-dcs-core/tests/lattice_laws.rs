@@ -343,6 +343,169 @@ fn universe_v2_axes() -> Vec<ResourceLabel> {
     out
 }
 
+/// #40: the co-owned (JOINT) sublattice, fixed to one owner frame `Joint{USA,KOR}`
+/// (join is within-frame). Mirrors `universe_v2_axes` with a ONE-PAIR SWAP: the
+/// v2 axis's `(Grant{AUS,KOR}, NAF KOR)` names co-owner KOR — that is owner-in-X =
+/// `InvalidLabel`, NOT a lattice point, and would make `from_eligible`'s
+/// `owners ⊆ nations` map lossy — so it is replaced with `(Grant{AUS,KOR}, NAF AUS)`
+/// (AUS is not a co-owner). A machine-checked guard asserts no swept label NAFs a
+/// co-owner (spec-CR-r2 NTH-2).
+fn universe_v2_joint() -> Vec<ResourceLabel> {
+    use ControlMarking::*;
+    let set_s = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    };
+    let owners = set_s(&["USA", "KOR"]);
+    let levels = ["S", "TS"];
+    let rel_excl_pairs: [(Releasability, BTreeSet<String>); 6] = [
+        (Releasability::NoMarking, BTreeSet::new()),
+        (Releasability::Grant(set_s(&["AUS"])), BTreeSet::new()),
+        (
+            Releasability::Grant(set_s(&["AUS", "KOR"])),
+            BTreeSet::new(),
+        ),
+        (Releasability::Grant(set_s(&["UNCK"])), BTreeSet::new()),
+        (Releasability::Grant(set_s(&["UNCK"])), set_s(&["ZAF"])), // ZAF non-owner
+        (
+            Releasability::Grant(set_s(&["AUS", "KOR"])),
+            set_s(&["AUS"]),
+        ), // one-pair swap: AUS non-owner (was NAF KOR)
+    ];
+    let displays: [Option<Releasability>; 2] = [None, Some(Releasability::Grant(set_s(&["AUS"])))];
+    let controls_axis = [
+        Controls::empty(),
+        Controls::from_set([OrconUsGov].into_iter().collect()),
+        Controls::from_set([Orcon].into_iter().collect()),
+        Controls::from_set([Exdis].into_iter().collect()),
+        Controls::from_set([Nodis].into_iter().collect()),
+        Controls::from_set([Relido].into_iter().collect()),
+        Controls::from_set([Displayed].into_iter().collect()),
+    ];
+    let mut out = Vec::new();
+    for level in levels {
+        for (rel, excl) in &rel_excl_pairs {
+            for display in &displays {
+                for controls in &controls_axis {
+                    out.push(ResourceLabel {
+                        classification: class(level),
+                        ownership: Ownership::Joint {
+                            owners: owners.clone(),
+                        },
+                        categories: BTreeMap::new(),
+                        disclosure: Disclosure {
+                            release: rel.clone(),
+                            display: display.clone(),
+                            exclusions: excl.clone(),
+                        },
+                        controls: controls.clone(),
+                        caveats: BTreeSet::new(),
+                        compilation_level: None,
+                        need_to_know: None,
+                    });
+                }
+            }
+        }
+    }
+    assert_eq!(out.len(), 2 * 6 * 2 * 7); // 168
+    for l in &out {
+        // SF2 (as v2) + the #40 non-owner-NAF guard (C1 unreachability, machine-checked).
+        assert!(
+            l.disclosure.exclusions.is_empty()
+                || matches!(l.disclosure.release, Releasability::Grant(_)),
+            "SF2: a NAF exclusion must accompany a Grant release"
+        );
+        assert!(
+            l.disclosure.exclusions.is_disjoint(&owners),
+            "#40: no swept Joint label may NAF a co-owner (owner-in-X is InvalidLabel)"
+        );
+    }
+    out
+}
+
+#[test]
+fn joint_v2_order_and_join_laws() {
+    let spif = law_spif();
+    let u = universe_v2_joint();
+    let set_s = |xs: &[&str]| -> BTreeSet<String> { xs.iter().map(|s| s.to_string()).collect() };
+
+    // anti-vacuity (NTH-1): the co-owned resolved set is STRICTLY LARGER than the
+    // single-owner equivalent — KOR is eligible ONLY because it is a co-owner.
+    let joint_fvey =
+        Releasability::Grant(set_s(&["FVEY"])).eligible(&set_s(&["USA", "KOR"]), &spif);
+    let owned_fvey = Releasability::Grant(set_s(&["FVEY"])).eligible(&set_s(&["USA"]), &spif);
+    assert!(joint_fvey.permits("KOR") && !owned_fvey.permits("KOR"));
+
+    // cross-frame refusal: Owned{USA} ∨ Joint{USA,KOR} = None (different frames).
+    let owned = ResourceLabel {
+        ownership: Ownership::Owned {
+            owner: "USA".into(),
+        },
+        ..u[0].clone()
+    };
+    assert!(
+        owned.join(&u[0], &spif).is_none(),
+        "cross-frame join is None"
+    );
+
+    // full pairwise laws over the 168-label co-owned frame.
+    let mut join_some_count: usize = 0;
+    let mut antisymmetry_fires: usize = 0;
+    for a in &u {
+        assert!(le(a, a, &spif), "reflexivity");
+        let aa = a
+            .join(a, &spif)
+            .expect("∨ total over the co-owned sublattice");
+        assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
+    }
+    for a in &u {
+        for b in &u {
+            let ab = a.join(b, &spif).expect("∨ total");
+            join_some_count += 1;
+            let ba = b.join(a, &spif).expect("∨ total");
+            assert!(sem_eq(&ab, &ba, &spif), "commutativity");
+            let a_ab = a.join(&ab, &spif).expect("∨ total");
+            assert!(sem_eq(&a_ab, &ab, &spif), "absorption a∨(a∨b) ≈ a∨b");
+            assert!(le(a, &ab, &spif), "a ⊑ a∨b");
+            assert!(le(b, &ab, &spif), "b ⊑ a∨b");
+            if le(a, b, &spif) && le(b, a, &spif) {
+                assert!(sem_eq(a, b, &spif), "antisymmetry modulo sem_eq");
+                if a != b {
+                    antisymmetry_fires += 1;
+                }
+            }
+            assert!(a.controls.le(&ab.controls) && b.controls.le(&ab.controls));
+            assert!(ab.disclosure.exclusions.is_empty());
+        }
+    }
+    assert_eq!(join_some_count, 168 * 168);
+    assert!(
+        antisymmetry_fires > 0,
+        "joint antisymmetry suite is vacuous"
+    );
+
+    // associativity over a coverage-asserted stride subsample.
+    let sample: Vec<&ResourceLabel> = u.iter().step_by(4).collect();
+    assert!(sample.iter().any(|l| !l.disclosure.exclusions.is_empty()));
+    assert!(sample.iter().any(|l| l.disclosure.exclusions.is_empty()));
+    let mut assoc_checked: usize = 0;
+    for a in &sample {
+        for b in &sample {
+            let ab = a.join(b, &spif).expect("∨ total");
+            for c in &sample {
+                let bc = b.join(c, &spif).expect("∨ total");
+                let ab_c = ab.join(c, &spif).expect("∨ total");
+                let a_bc = a.join(&bc, &spif).expect("∨ total");
+                assert!(
+                    sem_eq(&ab_c, &a_bc, &spif),
+                    "associativity (a∨b)∨c ≈ a∨(b∨c) over the co-owned frame"
+                );
+                assoc_checked += 1;
+            }
+        }
+    }
+    assert_eq!(assoc_checked, sample.len().pow(3));
+}
+
 #[test]
 fn v2_axes_order_and_join_laws() {
     let spif = law_spif();

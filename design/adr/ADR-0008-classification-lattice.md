@@ -250,6 +250,42 @@ relation:
    the per-SPIF `Spif.registry` are RETIRED for the compiled `data/*.json`
    registries; NAF is now enforced.
 
+## Amendment — EPIC #33: multi-origin (JOINT co-ownership) evaluation (#40, 2026-08-07)
+
+Stage 1 recognized co-ownership as a well-formed marking but failed closed on it
+(`decide()` denied `Indeterminate`; the lattice ops refused `None`). #40 makes
+co-owned labels EVALUABLE.
+
+- **Co-owner-union eligibility.** The resolved eligible nation set for a co-owned
+  label is `(release-expansion) ∪ (all co-owners)` minus NAF exclusions (#26,
+  release relation only). Each co-owner is eligible to data it co-produced, in
+  addition to the release set. Flagship: `JOINT SECRET USA, KOR // REL FVEY` →
+  `{USA, KOR, AUS, GBR, CAN, NZL}`.
+- **Origin-as-a-set.** `Releasability::eligible`/`from_eligible` take the OWNER SET
+  (`&BTreeSet<String>`), replacing the single-origin scalar; `Disclosure::origin_of`
+  (the `|base| ≠ 1 → deny-all` guard) is RETIRED at the `Releasability::eligible`
+  layer — any non-empty owner set resolves there. `decide()` gate 4 then enforces
+  ownership WELL-FORMEDNESS per variant: `Owned` = exactly 1, `Joint` = ≥2
+  co-owners (its documented invariant); a directly-constructed singleton/empty
+  `Joint` is malformed → `Deny(Indeterminate)` (fail closed, as every `Joint` did
+  before #40). Single-owner is the exact special case `owners = {origin}`, so every
+  v1 single-owner law/vector is unchanged.
+- **`Joint` un-gated at `decide()` gate 4.** Gate 4 evaluates `Owned` AND `Joint`
+  (`ownership.base_set()`); `ConcealedForeign` still fails closed (Stage-5,
+  custodian-routed / OwnerConsent semantics deferred). The two-locus `validate_label`
+  is owner-set-aware, so co-owner-in-NAF is `InvalidLabel` at BOTH ingest and decide
+  (owner-never-excluded now reaches decide for Joint).
+- **Co-owned lattice proof.** The exhaustive law suite gains a co-owned frame sweep
+  (`Joint{USA,KOR}`, 168²). Its NAF axis names only NON-OWNER nations — a NAF on a
+  co-owner is `InvalidLabel`, not a lattice point; sweeping it would make
+  `from_eligible`'s `owners ⊆ nations` map lossy and break idempotence/associativity
+  (the same "validity-invariant → not a lattice point" discipline as #26's SF2). A
+  machine-checked guard asserts no swept label NAFs a co-owner.
+
+**Supersessions:** the Stage-1 `|base| ≠ 1 → deny-all` posture and the "Joint fails
+closed until Stage 5" notes are superseded — `Joint` is now evaluated; only
+`ConcealedForeign` remains Stage-5.
+
 ## Security control mapping (informative; per ADR-0001)
 
 Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is a WIRED CI CONTROL as of ADR-0016: the change-gated mutation job runs `cargo mutants` on this crate for every PR touching it and unconditionally on merge to main.

@@ -8,7 +8,7 @@
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
 use crate::ownership::Ownership;
-use crate::policy::{is_trigraph, CategoryKind, Spif};
+use crate::policy::{CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
 use std::collections::BTreeSet;
 
@@ -110,8 +110,10 @@ pub enum DenyReason {
 ///    `Option`; unknown → `Indeterminate`, never a mislabeled `Level`.
 /// 3. Category gates — per-tag dispatch on the SPIF-declared kind; empty
 ///    required-sets and unknown/Permissive kinds → `Indeterminate`.
-/// 4. Releasability — origin-validated, single nation-namespace eligibility
-///    (nationality ∈ resolved ∖ exclusions); two-locus with `validate_label`.
+/// 4. Releasability — owner-set-validated (Owned=1, Joint≥2 co-owners;
+///    ConcealedForeign fails closed). Resolved = (release-expansion) ∪ (all
+///    co-owners) − exclusions; eligible iff `nationality ∈ resolved`. Two-locus
+///    with `validate_label`.
 /// 5. Action — `DisplayOnly` blocks `Export` (Read/Display permitted at MVP;
 ///    recorded open question for LLM-endpoint principals).
 /// 6. Need-to-know — exact token match when the label demands one.
@@ -185,24 +187,30 @@ pub fn decide(
         }
     }
 
-    // Gate 4: releasability (origin-validated). Stage 1 wires only single-owner
-    // labels; Joint / ConcealedForeign fail closed until Stage 5 wires their
-    // semantics (plan Task 6 Q1 resolution).
-    let owner = match &resource.ownership {
-        Ownership::Owned { owner } => owner,
-        _ => return Decision::Deny(DenyReason::Indeterminate),
-    };
-    if !is_trigraph(owner) {
-        // rejects the Owned{""} sentinel and any malformed origin
+    // Gate 4: releasability. Evaluates single-owner `Owned` AND multi-owner
+    // `Joint` (#40 — each co-owner is eligible to data it co-produced, unioned
+    // with the release set). `ConcealedForeign` still fails closed until Stage 5
+    // wires its custodian-routed / OwnerConsent semantics.
+    // Structural frame well-formedness — the SINGLE source of truth shared with
+    // the lattice guard and `validate_label` (Owned=1 trigraph, Joint≥2 trigraphs,
+    // ConcealedForeign=trigraph custodian). A malformed frame (the `Owned{""}`
+    // sentinel, a directly-constructed singleton/empty `Joint`) fails closed —
+    // exactly as every `Joint` did before #40. No split-brain with ingest/derive.
+    if !resource.ownership.is_wellformed() {
         return Decision::Deny(DenyReason::Indeterminate);
     }
+    let owners = match &resource.ownership {
+        Ownership::Owned { .. } | Ownership::Joint { .. } => resource.ownership.base_set(),
+        // ConcealedForeign is well-formed but its custodian-routed / OwnerConsent
+        // semantics land in Stage 5 — fail closed until then.
+        Ownership::ConcealedForeign { .. } => return Decision::Deny(DenyReason::Indeterminate),
+    };
     // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
     // decision point, so a label that reached decide() WITHOUT passing
     // validate_label (the engine is a decision point, not the ingest gate) still
-    // denies structurally — owner-in-X / restriction-on-Public / unknown token
-    // never silently permit. `validate_label` is reached only for single-origin
-    // `Owned` here (Joint/ConcealedForeign short-circuit to Indeterminate above),
-    // exactly the safety subset it must cover.
+    // denies structurally — owner/co-owner-in-X / restriction-on-Public / unknown
+    // token never silently permit. `validate_label` is owner-set-aware, so it
+    // covers `Joint` co-owner-in-X exactly as it covers single-origin owner-in-X.
     if let Err(inv) = crate::label::validate_label(resource, spif) {
         return Decision::Deny(match inv {
             crate::label::LabelInvalidity::Element => DenyReason::InvalidElement,
@@ -211,7 +219,7 @@ pub fn decide(
     }
     if !resource
         .disclosure
-        .eligible_release(&resource.ownership.base_set(), spif)
+        .eligible_release(&owners, spif)
         .permits(&subject.nationality)
     {
         return Decision::Deny(DenyReason::Releasability);
@@ -564,16 +572,17 @@ mod tests {
     }
 
     #[test]
-    fn non_owned_ownership_fails_closed_stage1() {
-        // Stage 1 wires only single-owner labels; Joint / ConcealedForeign fail
-        // closed at gate 4 until Stage 5 wires their semantics (plan Task 6 Q1).
+    fn joint_evaluates_concealed_foreign_and_sentinel_fail_closed() {
+        // #40: JOINT is now EVALUATED (a co-owner is eligible to co-produced data).
+        // ConcealedForeign + the joint_from(∅) sentinel still fail closed.
         let mut joint = mk_resource("SECRET");
         joint.ownership = Ownership::Joint {
             owners: set(&["USA", "KOR"]),
         };
+        // NoMarking → eligible = {USA,KOR}; the USA-national subject is a co-owner → Permit.
         assert_eq!(
             run(&mk_subject("TOP_SECRET"), &joint, Action::Read),
-            Decision::Deny(DenyReason::Indeterminate)
+            Decision::Permit
         );
         let mut cf = mk_resource("SECRET");
         cf.ownership = Ownership::ConcealedForeign {

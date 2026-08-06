@@ -1,5 +1,6 @@
 //! Ownership axis (#25): who owns the information. The three grammars are
 //! MUTUALLY EXCLUSIVE (DoDM 5200.01 V2 §4). Generalizes v1 `origin`.
+use crate::policy::is_trigraph;
 use std::collections::BTreeSet;
 
 /// Who owns the information (EPIC #33 spec §2.1).
@@ -43,6 +44,31 @@ impl Ownership {
             Ownership::Owned { owner } => [owner.clone()].into_iter().collect(),
             Ownership::Joint { owners } => owners.clone(),
             Ownership::ConcealedForeign { custodian } => [custodian.clone()].into_iter().collect(),
+        }
+    }
+
+    /// Structural well-formedness of the ownership FRAME — the single source of
+    /// truth used by `decide()` gate 4, the lattice `⊑`/`∨` frame guard, and
+    /// `validate_label` (so the malformed-frame boundary can never split-brain).
+    ///
+    /// - `Owned` — its sole owner is a trigraph (rejects the `Owned{""}` /
+    ///   `joint_from(∅)` sentinel);
+    /// - `Joint` — at least TWO co-owners (its documented invariant; a
+    ///   directly-constructed singleton/empty `Joint` is MALFORMED), all
+    ///   trigraphs;
+    /// - `ConcealedForeign` — its custodian is a trigraph. (Structural only —
+    ///   the Stage-5 decide-time deferral of `ConcealedForeign` is a SEPARATE
+    ///   concern from frame well-formedness.)
+    ///
+    /// Trigraph shape only — nation RECOGNITION (ISO-3166 membership) is the
+    /// world-view check layered on top in `validate_label`.
+    pub fn is_wellformed(&self) -> bool {
+        match self {
+            Ownership::Owned { owner } => is_trigraph(owner),
+            Ownership::Joint { owners } => {
+                owners.len() >= 2 && owners.iter().all(|o| is_trigraph(o))
+            }
+            Ownership::ConcealedForeign { custodian } => is_trigraph(custodian),
         }
     }
 
@@ -96,6 +122,53 @@ mod tests {
         };
         assert_eq!(cf.owners(), None); // owners unknowable
         assert_eq!(cf.custodian(), Some("USA"));
+    }
+
+    #[test]
+    fn is_wellformed_by_variant() {
+        // Owned: exactly one trigraph owner.
+        assert!(Ownership::Owned {
+            owner: "USA".into()
+        }
+        .is_wellformed());
+        assert!(!Ownership::Owned {
+            owner: String::new()
+        }
+        .is_wellformed()); // sentinel
+        assert!(!Ownership::Owned {
+            owner: "usa".into()
+        }
+        .is_wellformed()); // non-trigraph
+                           // Joint: ≥2 trigraph co-owners.
+        assert!(Ownership::Joint {
+            owners: s(&["USA", "KOR"])
+        }
+        .is_wellformed());
+        assert!(Ownership::Joint {
+            owners: s(&["USA", "KOR", "JPN"])
+        }
+        .is_wellformed());
+        assert!(!Ownership::Joint {
+            owners: s(&["USA"])
+        }
+        .is_wellformed()); // singleton
+        assert!(!Ownership::Joint {
+            owners: BTreeSet::new()
+        }
+        .is_wellformed()); // empty
+        assert!(!Ownership::Joint {
+            owners: s(&["USA", "kor"])
+        }
+        .is_wellformed()); // non-trigraph member
+                           // ConcealedForeign: trigraph custodian.
+        assert!(Ownership::ConcealedForeign {
+            custodian: "DEU".into()
+        }
+        .is_wellformed());
+        assert!(!Ownership::ConcealedForeign {
+            custodian: String::new()
+        }
+        .is_wellformed());
     }
 
     #[test]
