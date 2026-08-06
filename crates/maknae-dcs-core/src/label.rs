@@ -484,12 +484,14 @@ fn categories_comparable(label: &ResourceLabel, spif: &Spif) -> bool {
     })
 }
 
-/// Every owner/custodian token in the ownership frame is a well-formed
-/// trigraph. `Owned{""}` (the `joint_from(∅)` sentinel) and any lowercase/
-/// wrong-length token fail — poisoning `⊑`/`join` to `None`, exactly as v1's
-/// `is_trigraph(&origin)` poisoned the single-origin case.
+/// The ownership FRAME is structurally well-formed — delegates to the single
+/// source of truth `Ownership::is_wellformed` (Owned=1 trigraph, Joint≥2
+/// trigraphs, ConcealedForeign=trigraph custodian). A malformed frame (the
+/// `Owned{""}` sentinel, a directly-constructed singleton/empty `Joint`, any
+/// non-trigraph token) poisons `⊑`/`join` to `None` — the same boundary
+/// `decide()` gate 4 and `validate_label` enforce, so they can never disagree.
 fn ownership_wellformed(o: &Ownership) -> bool {
-    o.base_set().iter().all(|t| is_trigraph(t))
+    o.is_wellformed()
 }
 
 /// The rank `decide()` actually enforces: `max(level, compilation-or-level)`.
@@ -725,7 +727,16 @@ fn rel_tokens_recognized(rel: &Releasability) -> Result<(), LabelInvalidity> {
 /// a `derive`-layer property (spec §2.3 total-∨/partial-derive split).
 pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInvalidity> {
     let d = &label.disclosure;
-    // (0) every owner/custodian is a recognized nation — the engine has a COMPLETE
+    // (0a) the ownership FRAME is structurally well-formed — Owned=1 trigraph,
+    //      Joint≥2 trigraphs (its documented invariant), ConcealedForeign=trigraph
+    //      custodian. A directly-constructed singleton/empty `Joint` or the
+    //      `Owned{""}` sentinel is a MALFORMED label. This is the SAME boundary
+    //      `decide()` gate 4 and the lattice `⊑`/`∨` frame guard enforce, so
+    //      `derive = validate_label ∘ ∨` can never emit a malformed frame.
+    if !label.ownership.is_wellformed() {
+        return Err(LabelInvalidity::Label);
+    }
+    // (0b) every owner/custodian is a recognized nation — the engine has a COMPLETE
     //     world view and refuses to adjudicate on an unrecognized owner trigraph.
     //     (`Owned("ZZZ")` with NoMarking would otherwise resolve to eligible
     //     {ZZZ} and permit a "ZZZ" nationality — a made-up nation.)
@@ -1053,6 +1064,19 @@ mod tests {
             validate_label(&l, &us_spif()),
             Err(LabelInvalidity::Element)
         ));
+    }
+
+    #[test]
+    fn singleton_joint_is_malformed_at_validate_and_derive() {
+        // #40 (Hobi P1): a singleton Joint violates the len≥2 invariant. The frame
+        // boundary must NOT split-brain — validate_label rejects it (matching gate 4),
+        // and the lattice poisons derive to None.
+        let l = joint_label(&["USA"]); // singleton Joint (malformed)
+        assert!(matches!(
+            validate_label(&l, &us_spif()),
+            Err(LabelInvalidity::Label)
+        ));
+        assert!(derive(&l, &l, &us_spif()).is_none());
     }
 
     #[test]

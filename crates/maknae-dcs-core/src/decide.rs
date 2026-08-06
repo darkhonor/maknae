@@ -8,7 +8,7 @@
 
 use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
 use crate::ownership::Ownership;
-use crate::policy::{is_trigraph, CategoryKind, Spif};
+use crate::policy::{CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
 use std::collections::BTreeSet;
 
@@ -191,22 +191,20 @@ pub fn decide(
     // `Joint` (#40 — each co-owner is eligible to data it co-produced, unioned
     // with the release set). `ConcealedForeign` still fails closed until Stage 5
     // wires its custodian-routed / OwnerConsent semantics.
-    let owners = match &resource.ownership {
-        Ownership::Owned { .. } => resource.ownership.base_set(),
-        // `Joint` requires ≥2 co-owners (its documented invariant). A directly-
-        // constructed singleton/empty `Joint` is a MALFORMED marking — fail closed,
-        // exactly as every `Joint` did before #40 (do not adjudicate a structurally
-        // invalid ownership frame).
-        Ownership::Joint { owners } if owners.len() >= 2 => resource.ownership.base_set(),
-        Ownership::Joint { .. } | Ownership::ConcealedForeign { .. } => {
-            return Decision::Deny(DenyReason::Indeterminate)
-        }
-    };
-    if !owners.iter().all(|o| is_trigraph(o)) {
-        // rejects the Owned{""} sentinel and any malformed owner trigraph. (The
-        // owner set is guaranteed non-empty here: Owned=1, Joint≥2.)
+    // Structural frame well-formedness — the SINGLE source of truth shared with
+    // the lattice guard and `validate_label` (Owned=1 trigraph, Joint≥2 trigraphs,
+    // ConcealedForeign=trigraph custodian). A malformed frame (the `Owned{""}`
+    // sentinel, a directly-constructed singleton/empty `Joint`) fails closed —
+    // exactly as every `Joint` did before #40. No split-brain with ingest/derive.
+    if !resource.ownership.is_wellformed() {
         return Decision::Deny(DenyReason::Indeterminate);
     }
+    let owners = match &resource.ownership {
+        Ownership::Owned { .. } | Ownership::Joint { .. } => resource.ownership.base_set(),
+        // ConcealedForeign is well-formed but its custodian-routed / OwnerConsent
+        // semantics land in Stage 5 — fail closed until then.
+        Ownership::ConcealedForeign { .. } => return Decision::Deny(DenyReason::Indeterminate),
+    };
     // Two-locus defense-in-depth (#26): re-run the ingest predicate at the
     // decision point, so a label that reached decide() WITHOUT passing
     // validate_label (the engine is a decision point, not the ingest gate) still
