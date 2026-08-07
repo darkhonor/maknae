@@ -68,6 +68,10 @@ pub struct Spif {
     home_nation: Option<String>,
     /// Tetragraphs a SPIF flags as expandable for banner roll-up (#31).
     expandable: BTreeSet<String>,
+    /// The classification floor (#27): a level at-or-above which (by this SPIF's
+    /// rank order) a classification is CLASSIFIED. `None` until a policy declares
+    /// it. Consumed by `is_classified` (DISPLAY ONLY is classified-only).
+    classified_floor: Option<String>,
 }
 
 impl Spif {
@@ -78,7 +82,23 @@ impl Spif {
             categories: BTreeMap::new(),
             home_nation: None,
             expandable: BTreeSet::new(),
+            classified_floor: None,
         }
+    }
+
+    /// Whether `c` is CLASSIFIED under this SPIF's declared floor (#27).
+    /// `Some(rank(c) >= rank(floor))`. `None` (fail closed) when the floor is
+    /// undeclared, the floor token is not a declared level, or `c`'s rank is
+    /// unknown/wrong-policy. Reads the per-SPIF floor — NO policy literal here;
+    /// other national systems declare their own floor (future #41).
+    pub fn is_classified(&self, c: &Classification) -> Option<bool> {
+        let floor = self.classified_floor.as_ref()?;
+        let floor_rank = self.rank(&Classification {
+            policy: self.policy.clone(),
+            name: floor.clone(),
+        })?;
+        let c_rank = self.rank(c)?;
+        Some(c_rank >= floor_rank)
     }
 
     /// The policy's own nation (#25 FGI `home_nation` gate), if declared.
@@ -131,6 +151,7 @@ pub struct SpifBuilder {
     categories: BTreeMap<String, CategoryKind>,
     home_nation: Option<String>,
     expandable: BTreeSet<String>,
+    classified_floor: Option<String>,
 }
 
 /// True iff `token` has the shape of a bare nation trigraph
@@ -163,6 +184,14 @@ impl SpifBuilder {
         self
     }
 
+    /// Declare the classification floor: any level at-or-above `level` (by this
+    /// SPIF's rank order) is CLASSIFIED (#27). US declares "CONFIDENTIAL". The
+    /// token MUST be a declared level; otherwise `is_classified` fails closed.
+    pub fn classified_floor(mut self, level: &str) -> Self {
+        self.classified_floor = Some(level.to_string());
+        self
+    }
+
     pub fn build(self) -> Spif {
         Spif {
             policy: self.policy,
@@ -170,6 +199,7 @@ impl SpifBuilder {
             categories: self.categories,
             home_nation: self.home_nation,
             expandable: self.expandable,
+            classified_floor: self.classified_floor,
         }
     }
 }
@@ -207,6 +237,41 @@ mod tests {
             }),
             None
         ); // wrong policy
+    }
+
+    #[test]
+    fn classified_floor_gates_by_rank_and_fails_closed() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        let c = |n: &str| Classification {
+            policy: PolicyId("US".into()),
+            name: n.into(),
+        };
+        assert_eq!(spif.is_classified(&c("UNCLASSIFIED")), Some(false)); // below floor
+        assert_eq!(spif.is_classified(&c("CONFIDENTIAL")), Some(true)); // at floor
+        assert_eq!(spif.is_classified(&c("TOP_SECRET")), Some(true)); // above floor
+        assert_eq!(spif.is_classified(&c("BOGUS")), None); // unknown rank → fail closed
+                                                           // floor token absent from levels → fail closed (misconfig)
+        let bad = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        assert_eq!(bad.is_classified(&c("SECRET")), None);
+        // no floor declared → fail closed
+        let none = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "SECRET"])
+            .build();
+        assert_eq!(none.is_classified(&c("SECRET")), None);
+        // wrong policy → fail closed (via rank)
+        assert_eq!(
+            spif.is_classified(&Classification {
+                policy: PolicyId("AUS".into()),
+                name: "SECRET".into()
+            }),
+            None
+        );
     }
 
     #[test]
