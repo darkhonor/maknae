@@ -268,11 +268,12 @@ fn absent_rel_both_directions() {
         read(&subject("US", "AUS"), &absent, &spif),
         Decision::Deny(DenyReason::Releasability)
     );
-    // explicit REL ∅ is the TOP: deny-all INCLUDING the origin
+    // #51: explicit REL ∅ is NOT an authorable marking — Empty is a fail-closed
+    // sentinel, rejected at ingest and (two-locus) at decide → InvalidLabel.
     let empty = resource("US", "USA", Releasability::Empty);
     assert_eq!(
         read(&subject("US", "USA"), &empty, &spif),
-        Decision::Deny(DenyReason::Releasability)
+        Decision::Deny(DenyReason::InvalidLabel)
     );
 }
 
