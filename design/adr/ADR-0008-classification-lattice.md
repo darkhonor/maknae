@@ -231,7 +231,12 @@ relation:
   MUST gate on classification ∈ {CONFIDENTIAL, SECRET, TOP_SECRET} — which is an
   explicit level set, NOT a rank heuristic, and therefore needs `Spif` support to
   declare which levels are classified (an unclassified-floor / classified-set
-  declaration the model does not yet carry — a #27 dependency).
+  declaration the model does not yet carry — a #27 dependency). **RESOLVED by #27
+  (below):** `SpifBuilder::classified_floor` + `Spif::is_classified` (US floor =
+  CONFIDENTIAL); the equivalence of `rank ≥ floor` to the explicit set holds under
+  the top-contiguity of US classified levels, and fail-closed-on-unknown-rank is
+  the safety net — NOT the reverted rank heuristic (this is a within-SPIF floor
+  test on the resource's own classification, not a cross-releasability comparison).
 - **"NOT AUTHORIZED FOR" is not a CAPCO/IC-Register formal marking** (operator-
   confirmed); it is Maknae's subtractive qualifier on a `REL TO`/`DISPLAY ONLY`
   grant, so its classification scope is INHERITED from the control it qualifies
@@ -285,6 +290,65 @@ co-owned labels EVALUABLE.
 **Supersessions:** the Stage-1 `|base| ≠ 1 → deny-all` posture and the "Joint fails
 closed until Stage 5" notes are superseded — `Joint` is now evaluated; only
 `ConcealedForeign` remains Stage-5.
+
+## Amendment — EPIC #33: DISPLAY ONLY + Obligation unification (#27, 2026-08-07)
+
+Stage 1 landed the display relation and the `Obligation` type-shell decide-inert;
+#27 makes DISPLAY ONLY a LIVE decision and retires the entire v1 `Caveat` concept
+into a single, unified handling vocabulary.
+
+- **DISPLAY ONLY is the display-eligibility RELATION, not a carried marking.** The
+  display-only band = `display-eligible ∖ release-eligible` (nations that may VIEW
+  but not RECEIVE). The `decide()` release/display matrix: release-eligible →
+  full access; display-only band → `PermitWithObligations{DisplayOnly}` on
+  `Display`, `Deny(Releasability)` on `Read`/`Export`; neither → `Deny`. The owner
+  is always release-eligible (owners-always-member, #40), so it is STRUCTURALLY
+  never in the display-only band — satisfying the IC-Register "USA is not on the
+  DISPLAY ONLY list" rule with no extra check.
+- **PDP/PEP + deny-biased contract.** The engine (PDP) EMITS the obligation; the
+  normative deny-biased contract (a PEP that cannot enforce an obligation MUST
+  treat the decision as `Deny`) is how the autonomous-agent case resolves to deny
+  at the PEP. The engine stays principal-agnostic.
+- **`Caveat` retired into one `Obligation` vocabulary.** The `Caveat` enum, the
+  `ResourceLabel.caveats` field, `decide()` gate-5 (`DisplayOnly`+`Export` →
+  `ActionForbidden`), and `DenyReason::ActionForbidden` are all REMOVED.
+  `ResourceLabel.obligations: BTreeSet<Obligation>` now carries the handling
+  markings `{NoEgress, OperatorOnly}` (kernel-hook-enforced, passed through to the
+  emitted set); `DisplayOnly` is DECISION-DERIVED, never carried — `validate_label`
+  enforces the carriable allow-list at both loci. The obligation model relocated
+  to the `label` layer (co-located with `ResourceLabel`) for the eventual #44
+  label-crate extraction (`decide` depends on `label`, not the reverse).
+- **Obligations lattice axis.** The v1 caveats subset-axis of `⊑`/`∨` moves to the
+  `⊑_obl` refinement order (`obligations_refine`): `self ⊑ other` iff self's
+  carried obligations are weaker-or-equal to other's; `∨` = the ⊑_obl LUB
+  (set-union for the carried atoms). The exhaustive law universe grows to 1152 over
+  the `{∅, {NoEgress}, {OperatorOnly}, {both}}` axis; antisymmetry is proven over
+  this atom-only universe (raw-`BTreeSet` `⊑_obl` is not antisymmetric once
+  `OriginatorControlled{scope}` enters — #48 must canonicalize first).
+- **`classified_floor` (per-SPIF).** `SpifBuilder::classified_floor` +
+  `Spif::is_classified` (fail-closed on undeclared floor / floor-not-a-level /
+  unknown rank). A non-empty display-only band requires `is_classified(level) ==
+  Some(true)` (DoDM V2 §e — DISPLAY ONLY is classified-only); the release-side NAF
+  remains level-agnostic (#26). No policy literal in `is_classified` — it reads the
+  per-SPIF floor.
+- **Initial state + extensible architecture (the distinguishing element).** This
+  implementation — and every current EPIC #33 issue — is US-classification-system
+  ONLY. The core is policy-parameterized: levels, categories, coalition rosters,
+  the classified floor, and the very EXISTENCE of a marking like DISPLAY ONLY are
+  supplied as consumed SPIF/registry DATA, with no policy constant in a decision
+  path. Other national systems are future DATA (#41 cross-system floors, #45
+  cross-system correlation), NEVER a core rewrite. Both the US-initial state AND
+  this data-parameterized extensibility are recorded here as the engine's
+  distinguishing (potentially patentable) characteristic.
+
+**Supersessions:** the Stage-1 "`Caveat` retires into `Obligation` at Stage 3 /
+gate-5 `DisplayOnly`-blocks-`Export` stays live" notes (`:97-99`, `:145-149`) and
+the "classified floor is a #27 dependency the model does not carry" note (`:227-234`)
+are superseded — the retirement and the floor are landed.
+
+**Deferred:** ORCON obligation emission → #48; cross-system correlation → #45;
+`ConcealedForeign` decide semantics → Stage-5; document-marking-string
+interpretation → the #44 interpretation/carrier crate.
 
 ## Security control mapping (informative; per ADR-0001)
 
