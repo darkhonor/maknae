@@ -282,9 +282,16 @@ co-owned labels EVALUABLE.
   (the same "validity-invariant → not a lattice point" discipline as #26's SF2). A
   machine-checked guard asserts no swept label NAFs a co-owner.
 
+- **`validate_rel` co-owner exemption (#25 closeout).** The ingest anti-duplication
+  predicate generalizes `origin: &str` → the owner SET: both clauses compute on
+  `expansion ∖ owners`, so a CO-OWNER may appear in `REL TO` even when a listed
+  tetragraph covers it (`REL TO USA, KOR, FVEY` on `JOINT{USA,KOR}` is valid),
+  un-deferring the JOINT co-owner exception. Single-owner is `owners = {origin}`.
+
 **Supersessions:** the Stage-1 `|base| ≠ 1 → deny-all` posture and the "Joint fails
 closed until Stage 5" notes are superseded — `Joint` is now evaluated; only
-`ConcealedForeign` remains Stage-5.
+`ConcealedForeign` remains Stage-5. With this + PR #46, the full **#25** JOINT
+co-ownership deliverable (model + evaluation + validate_rel) has landed.
 
 ## Security control mapping (informative; per ADR-0001)
 

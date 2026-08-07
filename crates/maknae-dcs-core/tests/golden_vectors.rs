@@ -306,13 +306,13 @@ fn display_only_blocks_export_only() {
 #[test]
 fn anti_duplication_ingest_validation() {
     let spif = us_spif();
-    match validate_rel(&set(&["USA", "GBR", "FVEY"]), "USA", &spif) {
+    match validate_rel(&set(&["USA", "GBR", "FVEY"]), &set(&["USA"]), &spif) {
         Err(RelValidationError::DuplicativeTetragraph { token, covered }) => {
             assert_eq!(token, "GBR");
             assert_eq!(covered, "FVEY");
         }
         other => panic!("expected DuplicativeTetragraph(GBR/FVEY), got {other:?}"),
     }
-    assert!(validate_rel(&set(&["USA", "FVEY"]), "USA", &spif).is_ok()); // origin exemption
-    assert!(validate_rel(&set(&["FVEY"]), "USA", &spif).is_ok());
+    assert!(validate_rel(&set(&["USA", "FVEY"]), &set(&["USA"]), &spif).is_ok()); // origin exemption
+    assert!(validate_rel(&set(&["FVEY"]), &set(&["USA"]), &spif).is_ok());
 }

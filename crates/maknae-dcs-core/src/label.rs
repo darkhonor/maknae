@@ -334,21 +334,24 @@ impl Disclosure {
 /// Ingest-time coalition validation (spec §6.3 anti-duplication). Two clauses:
 ///
 /// 1. Nation-vs-tetragraph — per `design/references/dcs-schema-migration.md`
-///    (REL TO validation rules): a listed NON-ORIGIN nation covered by a listed
-///    decomposable tetragraph's expansion is a duplicate. The ORIGIN trigraph
-///    is exempt: `REL TO USA, FVEY` (USA origin) is VALID per the reference.
+///    (REL TO validation rules): a listed NON-OWNER nation covered by a listed
+///    decomposable tetragraph's expansion is a duplicate. Every CO-OWNER is
+///    exempt: `REL TO USA, FVEY` (USA owner) is VALID, and for a JOINT label
+///    `REL TO USA, KOR, FVEY` (owners USA+KOR) is VALID even though FVEY covers
+///    KOR — a co-owner MAY appear in REL TO even when a listed tetragraph covers
+///    it (#25 co-owner exemption, un-deferring the JOINT case from the reference).
 /// 2. Tetragraph-vs-tetragraph — MAKNAE-LOCAL STRICTNESS (not in the DCS
 ///    reference): two listed decomposable tetragraphs whose expansions overlap
-///    BEYOND the origin are duplicative. Overlap is computed on
-///    `expansion ∖ {origin}`, so the origin exemption applies uniformly.
+///    BEYOND the owners are duplicative. Overlap is computed on
+///    `expansion ∖ owners`, so the co-owner exemption applies uniformly.
 ///
 /// Non-decomposable tokens are excluded (membership unknowable ⇒ duplication
-/// undetectable — intentional). The JOINT co-owner exception in the reference
-/// is out of MVP scope. This crate provides the predicate; the enforcement
-/// locus (kernel ingest / spifc) is recorded in the ADR.
+/// undetectable — intentional). This crate provides the predicate; the
+/// enforcement locus (kernel ingest / spifc) is recorded in the ADR. Single-owner
+/// is the special case `owners = {origin}`.
 pub fn validate_rel(
     grant: &BTreeSet<String>,
-    origin: &str,
+    owners: &BTreeSet<String>,
     spif: &Spif,
 ) -> Result<(), RelValidationError> {
     if grant.is_empty() {
@@ -359,13 +362,13 @@ pub fn validate_rel(
             return Err(RelValidationError::UnknownToken(token.clone()));
         }
     }
-    // Collect the decomposable tetragraphs and their origin-stripped expansions.
+    // Collect the decomposable tetragraphs and their owner-stripped expansions.
     let decomposable: Vec<(&String, BTreeSet<String>)> = grant
         .iter()
         .filter(|t| !is_trigraph(t))
         .filter_map(|t| match spif.expand_tetra(t) {
             TetraExpansion::Nations(mut members) => {
-                members.remove(origin);
+                members.retain(|m| !owners.contains(m));
                 Some((t, members))
             }
             _ => None,
@@ -377,8 +380,8 @@ pub fn validate_rel(
                 continue;
             }
             if is_trigraph(member) {
-                // Clause 1: non-origin nation covered by a listed tetragraph.
-                if member != origin && expansion.contains(member) {
+                // Clause 1: non-owner nation covered by a listed tetragraph.
+                if !owners.contains(member) && expansion.contains(member) {
                     return Err(RelValidationError::DuplicativeTetragraph {
                         token: member.clone(),
                         covered: (*tetra).clone(),
@@ -386,11 +389,12 @@ pub fn validate_rel(
                 }
             } else if let TetraExpansion::Nations(other) = spif.expand_tetra(member) {
                 // Clause 2 (Maknae-local): `member` is another listed coalition;
-                // if its ORIGIN-STRIPPED expansion overlaps this tetra's, they
+                // if its OWNER-STRIPPED expansion overlaps this tetra's, they
                 // are duplicative. Recompute the member's expansion directly (not
-                // via a lookup keyed on `member`) so the origin-exemption is the
+                // via a lookup keyed on `member`) so the co-owner-exemption is the
                 // load-bearing, mutation-testable operation.
-                let other: BTreeSet<String> = other.into_iter().filter(|m| *m != origin).collect();
+                let other: BTreeSet<String> =
+                    other.into_iter().filter(|m| !owners.contains(m)).collect();
                 if !expansion.is_disjoint(&other) {
                     return Err(RelValidationError::DuplicativeTetragraph {
                         token: member.clone(),
@@ -1677,9 +1681,9 @@ mod tests {
         //   INVALID: REL TO USA, GBR, FVEY   (GBR ∈ FVEY — duplicate)
         // FVEY comes from the GLOBAL registry now (D1); no per-SPIF roster.
         let spif = Spif::builder("US").build();
-        assert!(validate_rel(&set(&["USA", "FVEY"]), "USA", &spif).is_ok());
-        assert!(validate_rel(&set(&["USA", "DEU", "FVEY"]), "USA", &spif).is_ok());
-        match validate_rel(&set(&["USA", "GBR", "FVEY"]), "USA", &spif) {
+        assert!(validate_rel(&set(&["USA", "FVEY"]), &set(&["USA"]), &spif).is_ok());
+        assert!(validate_rel(&set(&["USA", "DEU", "FVEY"]), &set(&["USA"]), &spif).is_ok());
+        match validate_rel(&set(&["USA", "GBR", "FVEY"]), &set(&["USA"]), &spif) {
             Err(RelValidationError::DuplicativeTetragraph { token, covered }) => {
                 assert_eq!(token, "GBR"); // fires on GBR, not the exempt origin
                 assert_eq!(covered, "FVEY");
@@ -1687,15 +1691,39 @@ mod tests {
             other => panic!("expected DuplicativeTetragraph(GBR), got {other:?}"),
         }
         assert!(matches!(
-            validate_rel(&set(&[]), "USA", &spif),
+            validate_rel(&set(&[]), &set(&["USA"]), &spif),
             Err(RelValidationError::EmptyGrant)
         ));
         assert!(matches!(
-            validate_rel(&set(&["ZZZZ"]), "USA", &spif),
+            validate_rel(&set(&["ZZZZ"]), &set(&["USA"]), &spif),
             Err(RelValidationError::UnknownToken(_))
         ));
-        assert!(validate_rel(&set(&["FVEY"]), "USA", &spif).is_ok());
-        assert!(validate_rel(&set(&["KOR", "JPN"]), "USA", &spif).is_ok()); // bare trigraphs need no registration
+        assert!(validate_rel(&set(&["FVEY"]), &set(&["USA"]), &spif).is_ok());
+        assert!(validate_rel(&set(&["KOR", "JPN"]), &set(&["USA"]), &spif).is_ok());
+        // bare trigraphs need no registration
+    }
+
+    #[test]
+    fn validate_rel_coowner_exemption() {
+        // #25: a CO-OWNER may appear in REL TO even when a listed tetragraph
+        // covers it. GBR ∈ FVEY, so `REL USA, GBR, FVEY` is duplicative under a
+        // SINGLE owner {USA}...
+        let spif = Spif::builder("US").build();
+        match validate_rel(&set(&["USA", "GBR", "FVEY"]), &set(&["USA"]), &spif) {
+            Err(RelValidationError::DuplicativeTetragraph { token, .. }) => {
+                assert_eq!(token, "GBR")
+            }
+            other => panic!("expected DuplicativeTetragraph(GBR), got {other:?}"),
+        }
+        // ...but VALID when GBR is a CO-OWNER (JOINT{USA,GBR}) — the exemption
+        // computes on `expansion ∖ owners`, so GBR is not a duplicate.
+        assert!(validate_rel(&set(&["USA", "GBR", "FVEY"]), &set(&["USA", "GBR"]), &spif).is_ok());
+        // Clause 2 likewise: FVEY ⊂ UNCK overlaps beyond a single owner (duplicative),
+        // but with enough co-owners the overlap ∖ owners can clear (owner-stripped).
+        assert!(matches!(
+            validate_rel(&set(&["FVEY", "UNCK"]), &set(&["USA"]), &spif),
+            Err(RelValidationError::DuplicativeTetragraph { .. })
+        ));
     }
 
     #[test]
@@ -1708,10 +1736,10 @@ mod tests {
         // `REL TO USA, FVEY` — origin listed alongside its own tetragraph.)
         let spif = Spif::builder("US").build();
         // a single coalition alone has no overlap partner → VALID
-        assert!(validate_rel(&set(&["FVEY"]), "USA", &spif).is_ok());
+        assert!(validate_rel(&set(&["FVEY"]), &set(&["USA"]), &spif).is_ok());
         // FVEY ⊂ UNCK: overlap ∖ origin ⊇ {AUS,CAN,GBR,NZL} → duplicate
         assert!(matches!(
-            validate_rel(&set(&["FVEY", "UNCK"]), "USA", &spif),
+            validate_rel(&set(&["FVEY", "UNCK"]), &set(&["USA"]), &spif),
             Err(RelValidationError::DuplicativeTetragraph { .. })
         ));
     }
