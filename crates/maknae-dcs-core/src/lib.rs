@@ -19,13 +19,11 @@ pub mod registry;
 pub mod subject;
 
 pub use controls::{ControlMarking, Controls};
-pub use decide::{
-    audit, decide, obligation_refines, obligations_refine, Action, AuditRecord, Decision,
-    DenyReason, Obligation, Purpose, RedisseminationScope,
-};
+pub use decide::{audit, decide, Action, AuditRecord, Decision, DenyReason, Purpose};
 pub use label::{
-    derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
-    EligibleNations, LabelInvalidity, RelValidationError, Releasability, ResourceLabel,
+    derive, obligation_refines, obligations_refine, restrictive_dominates, validate_label,
+    validate_rel, Caveat, Disclosure, EligibleNations, LabelInvalidity, Obligation,
+    RedisseminationScope, RelValidationError, Releasability, ResourceLabel,
 };
 pub use ownership::Ownership;
 pub use policy::{

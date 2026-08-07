@@ -403,6 +403,51 @@ pub fn validate_rel(
     Ok(())
 }
 
+/// Redissemination scope for ORCON-family obligations (spec §2.3). Closed —
+/// extend only by ADR amendment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RedisseminationScope {
+    UsGov,
+}
+
+/// A closed obligation the engine attaches to a permit (spec §2.3). Co-located
+/// with `ResourceLabel` (the label carries `obligations`) for the eventual #44
+/// label-crate extraction — `decide` depends on `label`, not the reverse.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Obligation {
+    DisplayOnly,
+    OriginatorControlled { scope: Option<RedisseminationScope> },
+    OwnerConsent,
+    ReaderRecord,
+    NoEgress,
+    OperatorOnly,
+}
+
+/// The obligation-refinement order `⊑_obl` (spec §5): a SCOPED
+/// `OriginatorControlled` is WEAKER (redissemination pre-approved) than an
+/// unscoped one, so `OriginatorControlled{Some(_)} ⊑_obl OriginatorControlled{None}`;
+/// every other obligation compares only by identity. Returns true iff `a ⊑_obl b`
+/// (a is weaker-or-equal to b).
+pub fn obligation_refines(a: &Obligation, b: &Obligation) -> bool {
+    match (a, b) {
+        (
+            Obligation::OriginatorControlled { scope: sa },
+            Obligation::OriginatorControlled { scope: sb },
+        ) => match (sa, sb) {
+            (_, None) => true,            // anything ⊑ the strongest (unscoped)
+            (Some(x), Some(y)) => x == y, // identity among scoped
+            (None, Some(_)) => false,     // stronger ⋢ weaker
+        },
+        _ => a == b,
+    }
+}
+
+/// Set-level `⊑_obl` (Hoare/lower lift, spec §5 CR-r4 SF2): every obligation in
+/// `a` is refined by some obligation in `b`. Empty `a` ⊑_obl anything.
+pub fn obligations_refine(a: &BTreeSet<Obligation>, b: &BTreeSet<Obligation>) -> bool {
+    a.iter().all(|x| b.iter().any(|y| obligation_refines(x, y)))
+}
+
 /// Handling caveats carried on a label. `decide()` enforces ONLY
 /// `DisplayOnly` (blocks `Action::Export`); `NoEgress` and `OperatorOnly` are
 /// carried label data — joined by ∪, preserved through derivation — whose
@@ -812,6 +857,41 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn obligation_refinement_order() {
+        use Obligation::*;
+        // scoped OriginatorControlled is WEAKER ⊑_obl unscoped (stronger)
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled { scope: None },
+        ));
+        assert!(!obligation_refines(
+            &OriginatorControlled { scope: None },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // two scoped OriginatorControlled compare by identity of scope
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // identity for the other obligations
+        assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
+        assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
+        // set-level: {} ⊑_obl {OwnerConsent}; {OwnerConsent} ⋢ {}
+        let empty: BTreeSet<Obligation> = BTreeSet::new();
+        let owner: BTreeSet<Obligation> = [OwnerConsent].into_iter().collect();
+        assert!(obligations_refine(&empty, &owner));
+        assert!(!obligations_refine(&owner, &empty));
     }
 
     // Shared #26 test helpers (D7). `sub`/`purpose` are decide-path helpers used

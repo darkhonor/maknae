@@ -6,7 +6,7 @@
 //! categories ∧ nationality ∧ purpose ∧ action (releasability is decided by
 //! nationality alone under #26 — the coalition-credential arm is removed).
 
-use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
+use crate::label::{restrictive_dominates, Caveat, Obligation, ResourceLabel};
 use crate::ownership::Ownership;
 use crate::policy::{CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
@@ -34,52 +34,6 @@ pub enum Decision {
         obligations: BTreeSet<Obligation>,
     },
     Deny(DenyReason),
-}
-
-/// Redissemination scope for ORCON-family obligations (spec §2.3). Closed —
-/// extend only by ADR amendment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RedisseminationScope {
-    UsGov,
-}
-
-/// A closed obligation the engine attaches to a permit (spec §2.3). EMISSION
-/// (which obligations fire, and the `Caveat` retirement into these) is Stage 3;
-/// Stage 1 lands the type shell + the `⊑_obl` refinement order the monotonicity
-/// law consumes.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Obligation {
-    DisplayOnly,
-    OriginatorControlled { scope: Option<RedisseminationScope> },
-    OwnerConsent,
-    ReaderRecord,
-    NoEgress,
-    OperatorOnly,
-}
-
-/// The obligation-refinement order `⊑_obl` (spec §5): a SCOPED
-/// `OriginatorControlled` is WEAKER (redissemination pre-approved) than an
-/// unscoped one, so `OriginatorControlled{Some(_)} ⊑_obl OriginatorControlled{None}`;
-/// every other obligation compares only by identity. Returns true iff `a ⊑_obl b`
-/// (a is weaker-or-equal to b).
-pub fn obligation_refines(a: &Obligation, b: &Obligation) -> bool {
-    match (a, b) {
-        (
-            Obligation::OriginatorControlled { scope: sa },
-            Obligation::OriginatorControlled { scope: sb },
-        ) => match (sa, sb) {
-            (_, None) => true,            // anything ⊑ the strongest (unscoped)
-            (Some(x), Some(y)) => x == y, // identity among scoped
-            (None, Some(_)) => false,     // stronger ⋢ weaker
-        },
-        _ => a == b,
-    }
-}
-
-/// Set-level `⊑_obl` (Hoare/lower lift, spec §5 CR-r4 SF2): every obligation in
-/// `a` is refined by some obligation in `b`. Empty `a` ⊑_obl anything.
-pub fn obligations_refine(a: &BTreeSet<Obligation>, b: &BTreeSet<Obligation>) -> bool {
-    a.iter().all(|x| b.iter().any(|y| obligation_refines(x, y)))
 }
 
 /// Deny reasons are existence-agnostic: they never name a compartment,
@@ -301,41 +255,6 @@ mod tests {
         let b = DenyReason::InvalidLabel;
         assert_ne!(a, b);
         assert_ne!(a, DenyReason::Indeterminate);
-    }
-
-    #[test]
-    fn obligation_refinement_order() {
-        use Obligation::*;
-        // scoped OriginatorControlled is WEAKER ⊑_obl unscoped (stronger)
-        assert!(obligation_refines(
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-            &OriginatorControlled { scope: None },
-        ));
-        assert!(!obligation_refines(
-            &OriginatorControlled { scope: None },
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-        ));
-        // two scoped OriginatorControlled compare by identity of scope
-        assert!(obligation_refines(
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-        ));
-        // identity for the other obligations
-        assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
-        assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
-        // set-level: {} ⊑_obl {OwnerConsent}; {OwnerConsent} ⋢ {}
-        let empty: BTreeSet<Obligation> = BTreeSet::new();
-        let owner: BTreeSet<Obligation> = [OwnerConsent].into_iter().collect();
-        assert!(obligations_refine(&empty, &owner));
-        assert!(!obligations_refine(&owner, &empty));
     }
 
     // IDENTICAL builder chain to Task 8's pinned us_spif() — the tests below
