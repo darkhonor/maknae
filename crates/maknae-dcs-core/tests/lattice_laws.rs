@@ -8,15 +8,15 @@
 //! quantifier-direction and polarity bugs, which is its job.
 //!
 //! Universe (origin USA, policy US), enumerated in EXACTLY this nesting order
-//! (outermost → innermost): level, sci, releasability, caveats, compilation,
-//! ntk. Total 3·4·6·2·2·2 = 576 labels. Pairwise loops run the full 576²;
+//! (outermost → innermost): level, sci, releasability, obligations, compilation,
+//! ntk. Total 3·4·6·4·2·2 = 1152 labels. Pairwise loops run the full 1152²;
 //! triple-quantified laws (transitivity, associativity, leastness) run over a
 //! stride-13 subsample whose full-axis coverage is ASSERTED (the assertions,
 //! not the stride, are the guarantee).
 
 use maknae_dcs_core::{
-    decide, Action, CategoryKind, Caveat, Classification, ControlMarking, Controls, Decision,
-    Disclosure, Employment, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif,
+    decide, Action, CategoryKind, Classification, ControlMarking, Controls, Decision, Disclosure,
+    Employment, Obligation, Ownership, PolicyId, Purpose, Releasability, ResourceLabel, Spif,
     Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,15 +52,23 @@ fn universe() -> Vec<ResourceLabel> {
         Releasability::Grant(set(&["KOR"])),
         Releasability::Grant(set(&["AUS", "KOR"])),
     ];
-    let caveat_states: [&[Caveat]; 2] = [&[], &[Caveat::DisplayOnly]];
+    // Obligations axis (#27): the carriable atoms {∅, {NoEgress}, {OperatorOnly},
+    // {both}} ordered by ⊑_obl. DisplayOnly is decision-derived (not carried), so
+    // it is excluded from this axis.
+    let obligation_states: [&[Obligation]; 4] = [
+        &[],
+        &[Obligation::NoEgress],
+        &[Obligation::OperatorOnly],
+        &[Obligation::NoEgress, Obligation::OperatorOnly],
+    ];
     let comp_states = [None, Some("TS")];
     let ntk_states = [None, Some("OPLAN")];
 
-    let mut out = Vec::with_capacity(576);
+    let mut out = Vec::with_capacity(1152);
     for level in levels {
         for sci in sci_states {
             for rel in &rels {
-                for cavs in caveat_states {
+                for obs in obligation_states {
                     for comp in comp_states {
                         for ntk in ntk_states {
                             out.push(ResourceLabel {
@@ -80,7 +88,7 @@ fn universe() -> Vec<ResourceLabel> {
                                     exclusions: BTreeSet::new(),
                                 },
                                 controls: Controls::empty(),
-                                caveats: cavs.iter().copied().collect(),
+                                obligations: obs.iter().cloned().collect(),
                                 compilation_level: comp.map(class),
                                 need_to_know: ntk.map(|s| s.to_string()),
                             });
@@ -90,7 +98,7 @@ fn universe() -> Vec<ResourceLabel> {
             }
         }
     }
-    assert_eq!(out.len(), 576);
+    assert_eq!(out.len(), 1152);
     out
 }
 
@@ -127,7 +135,7 @@ fn sem_eq(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
         // way — two labels with equal RESOLVED release/display are sem_eq
         // regardless of their raw exclusion markings.
         && a.controls == b.controls
-        && a.caveats == b.caveats
+        && a.obligations == b.obligations
         && effective_rank(a, spif) == effective_rank(b, spif)
         && a.need_to_know == b.need_to_know
 }
@@ -138,7 +146,7 @@ fn le(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
 }
 
 fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
-    let sample: Vec<&ResourceLabel> = universe.iter().step_by(13).collect(); // 45 labels
+    let sample: Vec<&ResourceLabel> = universe.iter().step_by(13).collect(); // 89 labels
                                                                              // full-axis coverage assertions — the guarantee that the subsample is
                                                                              // non-degenerate on every axis (PartialEq-only distinct counting: no
                                                                              // Ord/Hash on Releasability, deliberately)
@@ -157,8 +165,8 @@ fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
         }
     }
     assert_eq!(distinct_rels.len(), 6);
-    assert!(sample.iter().any(|l| !l.caveats.is_empty()));
-    assert!(sample.iter().any(|l| l.caveats.is_empty()));
+    assert!(sample.iter().any(|l| !l.obligations.is_empty()));
+    assert!(sample.iter().any(|l| l.obligations.is_empty()));
     assert!(sample.iter().any(|l| l.compilation_level.is_some()));
     assert!(sample.iter().any(|l| l.compilation_level.is_none()));
     assert!(sample.iter().any(|l| l.need_to_know.is_some()));
@@ -172,17 +180,17 @@ fn order_and_join_laws() {
     let u = universe();
 
     // join totality: .expect, never if-let — and the counter pins the LOOP
-    // BOUNDS at the full 576² (a truncated loop can't silently shrink coverage)
+    // BOUNDS at the full 1152² (a truncated loop can't silently shrink coverage)
     let mut join_some_count: usize = 0;
 
-    // reflexivity over all 576
+    // reflexivity over all 1152
     for a in &u {
         assert!(le(a, a, &spif), "reflexivity");
         let aa = a.join(a, &spif).expect("join total over the law universe");
         assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
     }
 
-    // pairwise laws over the full 576²
+    // pairwise laws over the full 1152²
     for a in &u {
         for b in &u {
             let ab = a.join(b, &spif).expect("join total over the law universe");
@@ -215,7 +223,7 @@ fn order_and_join_laws() {
             ));
         }
     }
-    assert_eq!(join_some_count, 576 * 576);
+    assert_eq!(join_some_count, 1152 * 1152);
 
     // triple-quantified laws over the coverage-asserted stride sample
     let sample = stride_sample(&u);
@@ -321,7 +329,7 @@ fn universe_v2_axes() -> Vec<ResourceLabel> {
                             exclusions: excl.clone(),
                         },
                         controls: controls.clone(),
-                        caveats: BTreeSet::new(),
+                        obligations: BTreeSet::new(),
                         compilation_level: None,
                         need_to_know: None,
                     });
@@ -398,7 +406,7 @@ fn universe_v2_joint() -> Vec<ResourceLabel> {
                             exclusions: excl.clone(),
                         },
                         controls: controls.clone(),
-                        caveats: BTreeSet::new(),
+                        obligations: BTreeSet::new(),
                         compilation_level: None,
                         need_to_know: None,
                     });
@@ -609,10 +617,12 @@ fn dominance_monotonicity() {
     let u = universe();
 
     // subject panel: clearance {S,TS} × read_ins {∅, {A}, {A,B}} × purposes
-    // {∅, {OPLAN}} — 12 US subjects; × action {Read, Export} (Export makes the
-    // caveats-⊑ clause load-bearing under DisplayOnly). Plus one AUS-national
-    // subject so the releasability clause of ⊑ is load-bearing (gate 4
-    // distinguishes NoMarking/Grant states only for a non-origin nationality).
+    // {∅, {OPLAN}} — 12 US subjects; × action {Read, Export} to exercise the
+    // action-dispatch on both arms (the release/display matrix decides on the
+    // relation, not the action, for these display-None labels — obligation
+    // monotonicity rides the ⊑_obl axis). Plus one AUS-national subject so the
+    // releasability clause of ⊑ is load-bearing (gate 4 distinguishes
+    // NoMarking/Grant states only for a non-origin nationality).
     let mut panel: Vec<Subject> = Vec::new();
     for clearance in ["S", "TS"] {
         let read_in_states: [Option<&[&str]>; 3] = [None, Some(&["A"]), Some(&["A", "B"])];

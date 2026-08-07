@@ -44,7 +44,7 @@ pub fn mk_owned(origin: &str) -> ResourceLabel {
             exclusions: BTreeSet::new(),
         },
         controls: Controls::empty(),
-        caveats: BTreeSet::new(),
+        obligations: BTreeSet::new(),
         compilation_level: None,
         need_to_know: None,
     }

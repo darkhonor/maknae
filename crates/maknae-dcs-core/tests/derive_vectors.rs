@@ -39,7 +39,7 @@ fn label(ownership: Ownership, ntk: Option<&str>, controls: Controls) -> Resourc
             exclusions: BTreeSet::new(),
         },
         controls,
-        caveats: BTreeSet::new(),
+        obligations: BTreeSet::new(),
         compilation_level: None,
         need_to_know: ntk.map(|s| s.to_string()),
     }
