@@ -113,7 +113,7 @@ stages. Status stays **Proposed** pending the full Day-1 slate.
   strings are DATA. Stage 1 lands the loader + `is_known_*` API + the loader's
   fail-closed (empty/malformed → `Err`); `validate_label` enforcement is
   Stage 4. Grounded in EO 13556 + 32 CFR § 2002.16/§ 2002.4 (Lake).
-- **Proof:** the v1 576-label law suite is preserved (migrated); a v2-axes
+- **Proof:** the v1 576-label law suite is preserved (migrated; now 960 — see #27/#51 amendments); a v2-axes
   sweep (controls × display × exclusions) checks the pairwise laws over the full
   168² and associativity `(a∨b)∨c ≈ a∨(b∨c)` over a coverage-asserted stride
   subsample, establishing `∨` total AND associative over the fixed-ownership
@@ -393,7 +393,7 @@ Assessor framing: the engine upgrades the evidence class for access-enforcement 
 | Security attributes | STANAG-4774-shaped label; SPIF-owned category kinds | AC-16; AC-16(6) (attribute association) | ADatP-4774 §4.2/Table 7 |
 | Reference monitor | Pure/total/side-effect-free; exhaustively law-checked | AC-25 (always invoked, tamper-resistant, small enough to analyze) | NIST SP 800-53; DoD ZT RA |
 | Transmission of attributes | Label carried with resource through derivation | SC-16; SC-16(1) | STANAG 4778 (binding → ADR-0007) |
-| Verification | 576-label exhaustive law suite + golden vectors (CI); mutation gate wired in CI (ADR-0016 change-gated job, zero missed) | SA-11; SA-11(1) | The crate's `tests/` + `.github/workflows/ci.yml` `mutation` job |
+| Verification | Exhaustive law suite (currently **960**-label — see #27/#51 amendments; was 576 at Stage 1) + golden vectors (CI); mutation gate wired in CI (ADR-0016 change-gated job, zero missed) | SA-11; SA-11(1) | The crate's `tests/` + `.github/workflows/ci.yml` `mutation` job |
 
 The full control matrix belongs in the RMF package, not this ADR.
 

@@ -816,9 +816,7 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
     //      the origin (absolute denial) — not a valid policy state; it is retained
     //      ONLY as a fail-closed deny-all sentinel (`from_eligible` precondition-
     //      violation), never authored. Rejected at both loci (here + gate-4 re-run).
-    if label.disclosure.release == Releasability::Empty
-        || label.disclosure.display == Some(Releasability::Empty)
-    {
+    if d.release == Releasability::Empty || d.display == Some(Releasability::Empty) {
         return Err(LabelInvalidity::Label);
     }
     // (1) release + display tokens are recognized world-view elements.
