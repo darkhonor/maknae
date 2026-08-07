@@ -6,7 +6,7 @@
 //! informative) + releasability (three-state, origin-always-member,
 //! intersection-join, a SINGLE nation namespace — coalition tetragraphs
 //! decompose to member nations at expansion time, expand-or-deny, and NAF
-//! exclusions subtract from the resolved set) + caveats + compilation-level +
+//! exclusions subtract from the resolved set) + obligations + compilation-level +
 //! need-to-know. Deny-by-default; every degenerate input → `Deny`/grants-nothing.
 #![forbid(unsafe_code)]
 
@@ -19,13 +19,11 @@ pub mod registry;
 pub mod subject;
 
 pub use controls::{ControlMarking, Controls};
-pub use decide::{
-    audit, decide, obligation_refines, obligations_refine, Action, AuditRecord, Decision,
-    DenyReason, Obligation, Purpose, RedisseminationScope,
-};
+pub use decide::{audit, decide, Action, AuditRecord, Decision, DenyReason, Purpose};
 pub use label::{
-    derive, restrictive_dominates, validate_label, validate_rel, Caveat, Disclosure,
-    EligibleNations, LabelInvalidity, RelValidationError, Releasability, ResourceLabel,
+    derive, obligation_refines, obligations_refine, restrictive_dominates, validate_label,
+    validate_rel, Disclosure, EligibleNations, LabelInvalidity, Obligation, RedisseminationScope,
+    RelValidationError, Releasability, ResourceLabel,
 };
 pub use ownership::Ownership;
 pub use policy::{

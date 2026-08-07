@@ -6,7 +6,7 @@
 //! categories ∧ nationality ∧ purpose ∧ action (releasability is decided by
 //! nationality alone under #26 — the coalition-credential arm is removed).
 
-use crate::label::{restrictive_dominates, Caveat, ResourceLabel};
+use crate::label::{restrictive_dominates, Obligation, ResourceLabel};
 use crate::ownership::Ownership;
 use crate::policy::{CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
@@ -36,52 +36,6 @@ pub enum Decision {
     Deny(DenyReason),
 }
 
-/// Redissemination scope for ORCON-family obligations (spec §2.3). Closed —
-/// extend only by ADR amendment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RedisseminationScope {
-    UsGov,
-}
-
-/// A closed obligation the engine attaches to a permit (spec §2.3). EMISSION
-/// (which obligations fire, and the `Caveat` retirement into these) is Stage 3;
-/// Stage 1 lands the type shell + the `⊑_obl` refinement order the monotonicity
-/// law consumes.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Obligation {
-    DisplayOnly,
-    OriginatorControlled { scope: Option<RedisseminationScope> },
-    OwnerConsent,
-    ReaderRecord,
-    NoEgress,
-    OperatorOnly,
-}
-
-/// The obligation-refinement order `⊑_obl` (spec §5): a SCOPED
-/// `OriginatorControlled` is WEAKER (redissemination pre-approved) than an
-/// unscoped one, so `OriginatorControlled{Some(_)} ⊑_obl OriginatorControlled{None}`;
-/// every other obligation compares only by identity. Returns true iff `a ⊑_obl b`
-/// (a is weaker-or-equal to b).
-pub fn obligation_refines(a: &Obligation, b: &Obligation) -> bool {
-    match (a, b) {
-        (
-            Obligation::OriginatorControlled { scope: sa },
-            Obligation::OriginatorControlled { scope: sb },
-        ) => match (sa, sb) {
-            (_, None) => true,            // anything ⊑ the strongest (unscoped)
-            (Some(x), Some(y)) => x == y, // identity among scoped
-            (None, Some(_)) => false,     // stronger ⋢ weaker
-        },
-        _ => a == b,
-    }
-}
-
-/// Set-level `⊑_obl` (Hoare/lower lift, spec §5 CR-r4 SF2): every obligation in
-/// `a` is refined by some obligation in `b`. Empty `a` ⊑_obl anything.
-pub fn obligations_refine(a: &BTreeSet<Obligation>, b: &BTreeSet<Obligation>) -> bool {
-    a.iter().all(|x| b.iter().any(|y| obligation_refines(x, y)))
-}
-
 /// Deny reasons are existence-agnostic: they never name a compartment,
 /// program, or control — only the failing dimension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +45,6 @@ pub enum DenyReason {
     AffiliationControl,
     Releasability,
     NeedToKnow,
-    ActionForbidden,
     Indeterminate,
     PolicyMismatch,
     /// A trigraph/tetragraph outside the encoded world view (#26).
@@ -110,13 +63,16 @@ pub enum DenyReason {
 ///    `Option`; unknown → `Indeterminate`, never a mislabeled `Level`.
 /// 3. Category gates — per-tag dispatch on the SPIF-declared kind; empty
 ///    required-sets and unknown/Permissive kinds → `Indeterminate`.
-/// 4. Releasability — owner-set-validated (Owned=1, Joint≥2 co-owners;
-///    ConcealedForeign fails closed). Resolved = (release-expansion) ∪ (all
-///    co-owners) − exclusions; eligible iff `nationality ∈ resolved`. Two-locus
-///    with `validate_label`.
-/// 5. Action — `DisplayOnly` blocks `Export` (Read/Display permitted at MVP;
-///    recorded open question for LLM-endpoint principals).
-/// 6. Need-to-know — exact token match when the label demands one.
+/// 4. Releasability / display (#27) — owner-set-validated (Owned=1, Joint≥2
+///    co-owners; ConcealedForeign fails closed). Resolved = (release-expansion) ∪
+///    (all co-owners) − exclusions. Release-eligible → full access; the
+///    display-only band (display ∖ release) → a `DisplayOnly` obligation on
+///    `Display`, `Deny(Releasability)` on `Read`/`Export`; neither → deny.
+///    Two-locus with `validate_label` (which also gates DISPLAY-ONLY-is-classified).
+/// 5. Need-to-know — exact token match when the label demands one.
+///
+/// On permit, the resource's carried obligations (`NoEgress`/`OperatorOnly`) plus
+/// any decision-derived `DisplayOnly` are emitted as `PermitWithObligations`.
 pub fn decide(
     subject: &Subject,
     resource: &ResourceLabel,
@@ -217,27 +173,45 @@ pub fn decide(
             crate::label::LabelInvalidity::Label => DenyReason::InvalidLabel,
         });
     }
-    if !resource
+    // Release/display matrix (#27): release-eligible → full access; display-only
+    // band (display ∖ release) → DisplayOnly obligation on Display, deny receipt
+    // on Read/Export; neither → deny. The obligation is emitted at the tail
+    // (after NTK), so a display-only subject still passes gate 5 (NTK).
+    let release_ok = resource
         .disclosure
         .eligible_release(&owners, spif)
-        .permits(&subject.nationality)
-    {
-        return Decision::Deny(DenyReason::Releasability);
+        .permits(&subject.nationality);
+    let mut display_only = false;
+    if !release_ok {
+        let display_ok = resource
+            .disclosure
+            .eligible_display(&owners, spif)
+            .permits(&subject.nationality);
+        if display_ok && action == Action::Display {
+            display_only = true;
+        } else {
+            return Decision::Deny(DenyReason::Releasability);
+        }
     }
 
-    // Gate 5: action.
-    if resource.caveats.contains(&Caveat::DisplayOnly) && action == Action::Export {
-        return Decision::Deny(DenyReason::ActionForbidden);
-    }
-
-    // Gate 6: need-to-know.
+    // Gate 5 (need-to-know).
     if let Some(tk) = &resource.need_to_know {
         if !(subject.purposes.contains(tk) && purpose.0 == *tk) {
             return Decision::Deny(DenyReason::NeedToKnow);
         }
     }
 
-    Decision::Permit
+    // Emission (#27): the resource's carried obligations (NoEgress/OperatorOnly),
+    // plus the decision-derived DisplayOnly when this is a display-only-band grant.
+    let mut obligations = resource.obligations.clone();
+    if display_only {
+        obligations.insert(Obligation::DisplayOnly);
+    }
+    if obligations.is_empty() {
+        Decision::Permit
+    } else {
+        Decision::PermitWithObligations { obligations }
+    }
 }
 
 /// A pure, self-contained audit record of one decision (#26). The engine NEVER
@@ -303,41 +277,6 @@ mod tests {
         assert_ne!(a, DenyReason::Indeterminate);
     }
 
-    #[test]
-    fn obligation_refinement_order() {
-        use Obligation::*;
-        // scoped OriginatorControlled is WEAKER ⊑_obl unscoped (stronger)
-        assert!(obligation_refines(
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-            &OriginatorControlled { scope: None },
-        ));
-        assert!(!obligation_refines(
-            &OriginatorControlled { scope: None },
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-        ));
-        // two scoped OriginatorControlled compare by identity of scope
-        assert!(obligation_refines(
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-            &OriginatorControlled {
-                scope: Some(RedisseminationScope::UsGov)
-            },
-        ));
-        // identity for the other obligations
-        assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
-        assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
-        // set-level: {} ⊑_obl {OwnerConsent}; {OwnerConsent} ⋢ {}
-        let empty: BTreeSet<Obligation> = BTreeSet::new();
-        let owner: BTreeSet<Obligation> = [OwnerConsent].into_iter().collect();
-        assert!(obligations_refine(&empty, &owner));
-        assert!(!obligations_refine(&owner, &empty));
-    }
-
     // IDENTICAL builder chain to Task 8's pinned us_spif() — the tests below
     // need SCI registered (else compartment_deny yields Indeterminate, not
     // Compartment), LDC, EYES, HANDLING, and at least one unregistered tag.
@@ -389,7 +328,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: Some("OPLAN".into()),
         }
@@ -625,16 +564,111 @@ mod tests {
         );
     }
 
+    // NOTE: the v1 `display_only_blocks_export` (gate-5 `Caveat::DisplayOnly` +
+    // Export → ActionForbidden) is RETIRED (#27). DISPLAY ONLY is now the display
+    // relation — see `display_only_band_permits_display_with_obligation_denies_receipt`
+    // (unit) and `tests/display_only_vectors.rs` (integration).
+
     #[test]
-    fn display_only_blocks_export() {
+    fn carried_obligations_emitted_and_compose_with_display_only() {
+        use std::collections::BTreeSet;
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        // release-eligible USA reading a NoEgress resource → PWO{NoEgress}
         let mut r = mk_resource("SECRET");
-        r.caveats.insert(Caveat::DisplayOnly);
-        let s = mk_subject("TOP_SECRET");
-        assert_eq!(run(&s, &r, Action::Read), Decision::Permit);
-        assert_eq!(run(&s, &r, Action::Display), Decision::Permit);
+        r.need_to_know = None;
+        r.categories = std::collections::BTreeMap::new();
+        r.obligations = [Obligation::NoEgress].into_iter().collect();
+        let usa = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let ne: BTreeSet<Obligation> = [Obligation::NoEgress].into_iter().collect();
         assert_eq!(
-            run(&s, &r, Action::Export),
-            Decision::Deny(DenyReason::ActionForbidden)
+            decide(&usa, &r, Action::Read, &Purpose("X".into()), &spif),
+            Decision::PermitWithObligations { obligations: ne }
+        );
+        // display-only band + NoEgress on Display → PWO{DisplayOnly, NoEgress}
+        r.disclosure = Disclosure {
+            release: Releasability::NoMarking,
+            display: Some(Releasability::Grant(set(&["AUS"]))),
+            exclusions: BTreeSet::new(),
+        };
+        let aus = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "AUS".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let both: BTreeSet<Obligation> = [Obligation::DisplayOnly, Obligation::NoEgress]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            decide(&aus, &r, Action::Display, &Purpose("X".into()), &spif),
+            Decision::PermitWithObligations { obligations: both }
+        );
+    }
+
+    #[test]
+    fn display_only_band_permits_display_with_obligation_denies_receipt() {
+        use std::collections::BTreeSet;
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        // SECRET // REL USA // DISPLAY ONLY AUS: release = origin-only (NoMarking),
+        // display = {USA, AUS}. AUS is in the display-only band.
+        let mut r = mk_resource("SECRET");
+        r.need_to_know = None;
+        r.categories = std::collections::BTreeMap::new();
+        r.disclosure = Disclosure {
+            release: Releasability::NoMarking,
+            display: Some(Releasability::Grant(set(&["AUS"]))),
+            exclusions: BTreeSet::new(),
+        };
+        let aus = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "AUS".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let go = |s: &Subject, a: Action| decide(s, &r, a, &Purpose("OPLAN".into()), &spif);
+        // AUS Display → PWO{DisplayOnly}
+        let mut ob = BTreeSet::new();
+        ob.insert(Obligation::DisplayOnly);
+        assert_eq!(
+            go(&aus, Action::Display),
+            Decision::PermitWithObligations { obligations: ob }
+        );
+        // AUS Read / Export → Deny(Releasability)
+        assert_eq!(
+            go(&aus, Action::Read),
+            Decision::Deny(DenyReason::Releasability)
+        );
+        assert_eq!(
+            go(&aus, Action::Export),
+            Decision::Deny(DenyReason::Releasability)
+        );
+        // USA (owner, release-eligible) Read → Permit (no obligation)
+        let usa = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        assert_eq!(go(&usa, Action::Read), Decision::Permit);
+        // JPN (neither) Display → Deny(Releasability)
+        let jpn = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "JPN".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        assert_eq!(
+            go(&jpn, Action::Display),
+            Decision::Deny(DenyReason::Releasability)
         );
     }
 

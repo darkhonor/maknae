@@ -1,5 +1,5 @@
 //! Resource labels, releasability (a single resolved nation eligible set),
-//! caveats, and the label lattice: restriction-order `⊑` and derivation-join `∨`.
+//! obligations, and the label lattice: restriction-order `⊑` and derivation-join `∨`.
 //!
 //! Releasability orientation (ADR-0008 §2.4): restriction order — `∨` is the
 //! least-upper-bound, the MORE-restrictive combine. `⊤` (most restrictive) is
@@ -403,17 +403,49 @@ pub fn validate_rel(
     Ok(())
 }
 
-/// Handling caveats carried on a label. `decide()` enforces ONLY
-/// `DisplayOnly` (blocks `Action::Export`); `NoEgress` and `OperatorOnly` are
-/// carried label data — joined by ∪, preserved through derivation — whose
-/// enforcement locus is the kernel hooks (hook-E egress screen / session
-/// gating), not this crate's read decision. Deliberate MVP division of labor,
-/// recorded in ADR-0008.
+/// Redissemination scope for ORCON-family obligations (spec §2.3). Closed —
+/// extend only by ADR amendment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Caveat {
+pub enum RedisseminationScope {
+    UsGov,
+}
+
+/// A closed obligation the engine attaches to a permit (spec §2.3). Co-located
+/// with `ResourceLabel` (the label carries `obligations`) for the eventual #44
+/// label-crate extraction — `decide` depends on `label`, not the reverse.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Obligation {
+    DisplayOnly,
+    OriginatorControlled { scope: Option<RedisseminationScope> },
+    OwnerConsent,
+    ReaderRecord,
     NoEgress,
     OperatorOnly,
-    DisplayOnly,
+}
+
+/// The obligation-refinement order `⊑_obl` (spec §5): a SCOPED
+/// `OriginatorControlled` is WEAKER (redissemination pre-approved) than an
+/// unscoped one, so `OriginatorControlled{Some(_)} ⊑_obl OriginatorControlled{None}`;
+/// every other obligation compares only by identity. Returns true iff `a ⊑_obl b`
+/// (a is weaker-or-equal to b).
+pub fn obligation_refines(a: &Obligation, b: &Obligation) -> bool {
+    match (a, b) {
+        (
+            Obligation::OriginatorControlled { scope: sa },
+            Obligation::OriginatorControlled { scope: sb },
+        ) => match (sa, sb) {
+            (_, None) => true,            // anything ⊑ the strongest (unscoped)
+            (Some(x), Some(y)) => x == y, // identity among scoped
+            (None, Some(_)) => false,     // stronger ⋢ weaker
+        },
+        _ => a == b,
+    }
+}
+
+/// Set-level `⊑_obl` (Hoare/lower lift, spec §5 CR-r4 SF2): every obligation in
+/// `a` is refined by some obligation in `b`. Empty `a` ⊑_obl anything.
+pub fn obligations_refine(a: &BTreeSet<Obligation>, b: &BTreeSet<Obligation>) -> bool {
+    a.iter().all(|x| b.iter().any(|y| obligation_refines(x, y)))
 }
 
 /// Restrictive (containment) dominance: subject holds ⊇ resource, per tag.
@@ -454,9 +486,12 @@ pub struct ResourceLabel {
     pub disclosure: Disclosure,
     /// Dissemination controls (#27): the product-of-chains controls lattice.
     pub controls: Controls,
-    /// v1 caveats. RETAINED in Stage 1 (gate-5 DisplayOnly-blocks-Export stays
-    /// live); retired into `Obligation` in Stage 3.
-    pub caveats: BTreeSet<Caveat>,
+    /// Carried handling obligations (#27): `NoEgress`/`OperatorOnly` only —
+    /// enforced by the kernel hooks (hook-E egress screen / session gating), not
+    /// this crate's read decision. `DisplayOnly` is DECISION-DERIVED (from the
+    /// display relation), never carried; the carriable set is enforced by
+    /// `validate_label`. Joined by the ⊑_obl LUB, preserved through derivation.
+    pub obligations: BTreeSet<Obligation>,
     /// Raise-above-join floor (OCA compilation determination); `None` = no
     /// floor. A compilation at-or-below the level is semantically identical
     /// to `None` (both enforce the same effective rank).
@@ -519,7 +554,7 @@ impl ResourceLabel {
     ///   strictly more marked — absent-in-other = holds nothing = not ⊑);
     /// - `eligible(other) ⊆ eligible(self)` (fewer eligible = more
     ///   restrictive);
-    /// - caveats ⊆;
+    /// - obligations: ⊑_obl refinement (self weaker-or-equal to other);
     /// - need-to-know: `(None, _)` ok; `(Some(a), Some(b))` ok iff `a == b`;
     ///   `(Some, None)` → NOT ⊑.
     ///
@@ -561,13 +596,15 @@ impl ResourceLabel {
         let disclosure_ok = self.disclosure.le(&other.disclosure, &base, spif);
         // controls ⊑ (product-of-chains: per-chain rank + non-chain ⊆)
         let controls_ok = self.controls.le(&other.controls);
-        let caveats_ok = self.caveats.is_subset(&other.caveats);
+        // obligations axis (#27): ⊑_obl refinement — self weaker-or-equal to
+        // other (polarity of the retired `self.caveats ⊆ other.caveats`).
+        let obligations_ok = obligations_refine(&self.obligations, &other.obligations);
         let ntk_ok = match (&self.need_to_know, &other.need_to_know) {
             (None, _) => true,
             (Some(a), Some(b)) => a == b,
             (Some(_), None) => false,
         };
-        Some(levels_ok && categories_ok && disclosure_ok && controls_ok && caveats_ok && ntk_ok)
+        Some(levels_ok && categories_ok && disclosure_ok && controls_ok && obligations_ok && ntk_ok)
     }
 
     /// Lattice-join `∨` = least-upper-bound = the MORE-restrictive combine.
@@ -593,7 +630,7 @@ impl ResourceLabel {
     /// unconditionally total — they never return `Option`.
     ///
     /// Combine rule: max rank; ∪ categories per-tag; ∩ releasability
-    /// re-canonicalized via [`Releasability::from_eligible`]; ∪ caveats;
+    /// re-canonicalized via [`Releasability::from_eligible`]; ∪ obligations;
     /// compilation
     /// `(None, x) | (x, None) → x`, `(Some, Some)` → higher rank;
     /// need-to-know `(None, None) → None`, one `Some` → that `Some`, equal
@@ -650,7 +687,12 @@ impl ResourceLabel {
         let disclosure = self.disclosure.join(&other.disclosure, &base, spif);
         // controls ∨: per-chain max + non-chain union (total, validity-agnostic)
         let controls = self.controls.join(&other.controls);
-        let caveats: BTreeSet<Caveat> = self.caveats.union(&other.caveats).copied().collect();
+        // obligations ∨ = ⊑_obl LUB = set-union for the carried atoms (#27).
+        let obligations: BTreeSet<Obligation> = self
+            .obligations
+            .union(&other.obligations)
+            .cloned()
+            .collect();
         let compilation_level = match (&self.compilation_level, &other.compilation_level) {
             (None, None) => None,
             (Some(c), None) | (None, Some(c)) => {
@@ -681,7 +723,7 @@ impl ResourceLabel {
             categories,
             disclosure,
             controls,
-            caveats,
+            obligations,
             compilation_level,
             need_to_know,
         })
@@ -745,6 +787,16 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
             return Err(LabelInvalidity::Element);
         }
     }
+    // (0c) carried obligations (#27) may be ONLY the currently-carriable atoms.
+    //      `DisplayOnly` is DECISION-DERIVED (never carried — decide() emits it
+    //      from the display relation); `OriginatorControlled` (#48) and
+    //      `OwnerConsent`/`ReaderRecord` (Stage-5) are not yet carriable. Enforces
+    //      the "decision-derived only" invariant at ingest AND (two-locus) at gate-4.
+    for ob in &label.obligations {
+        if !matches!(ob, Obligation::NoEgress | Obligation::OperatorOnly) {
+            return Err(LabelInvalidity::Label);
+        }
+    }
     // (1) release + display tokens are recognized world-view elements.
     rel_tokens_recognized(&d.release)?;
     if let Some(disp) = &d.display {
@@ -787,6 +839,16 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
     if !d.display_covers_release(&base, spif) {
         return Err(LabelInvalidity::Label);
     }
+    // (6) DISPLAY ONLY is classified-only (#27, DoDM V2 §e). A non-empty
+    //     display-only band (display ⊋ release) requires a CLASSIFIED level.
+    //     Band non-empty ⟺ release ⊆ display (checked in (5)) AND display ⊄ release.
+    //     `is_classified` fails closed (None) on unknown/undeclared floor → deny.
+    let rel_e = d.eligible_release(&base, spif);
+    let disp_e = d.eligible_display(&base, spif);
+    let band_nonempty = !disp_e.is_subset_of(&rel_e);
+    if band_nonempty && spif.is_classified(&label.classification) != Some(true) {
+        return Err(LabelInvalidity::Label);
+    }
     Ok(())
 }
 
@@ -812,6 +874,41 @@ mod tests {
 
     fn set(xs: &[&str]) -> BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn obligation_refinement_order() {
+        use Obligation::*;
+        // scoped OriginatorControlled is WEAKER ⊑_obl unscoped (stronger)
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled { scope: None },
+        ));
+        assert!(!obligation_refines(
+            &OriginatorControlled { scope: None },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // two scoped OriginatorControlled compare by identity of scope
+        assert!(obligation_refines(
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+            &OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov)
+            },
+        ));
+        // identity for the other obligations
+        assert!(obligation_refines(&DisplayOnly, &DisplayOnly));
+        assert!(!obligation_refines(&DisplayOnly, &OwnerConsent));
+        // set-level: {} ⊑_obl {OwnerConsent}; {OwnerConsent} ⋢ {}
+        let empty: BTreeSet<Obligation> = BTreeSet::new();
+        let owner: BTreeSet<Obligation> = [OwnerConsent].into_iter().collect();
+        assert!(obligations_refine(&empty, &owner));
+        assert!(!obligations_refine(&owner, &empty));
     }
 
     // Shared #26 test helpers (D7). `sub`/`purpose` are decide-path helpers used
@@ -842,7 +939,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         }
@@ -1016,6 +1113,65 @@ mod tests {
     }
 
     #[test]
+    fn carried_obligations_allow_list() {
+        let spif = us_spif();
+        let mut l = mk_owned("USA");
+        l.obligations = [Obligation::NoEgress, Obligation::OperatorOnly]
+            .into_iter()
+            .collect();
+        assert_eq!(validate_label(&l, &spif), Ok(())); // both carriable
+        for bad in [
+            Obligation::DisplayOnly,
+            Obligation::OwnerConsent,
+            Obligation::ReaderRecord,
+            Obligation::OriginatorControlled { scope: None },
+        ] {
+            let mut b = mk_owned("USA");
+            b.obligations = [bad.clone()].into_iter().collect();
+            assert!(
+                matches!(validate_label(&b, &spif), Err(LabelInvalidity::Label)),
+                "{bad:?} must not be carriable"
+            );
+        }
+    }
+
+    #[test]
+    fn display_only_band_requires_classified() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        let mk = |lvl: &str| ResourceLabel {
+            classification: crate::policy::Classification {
+                policy: crate::policy::PolicyId("US".into()),
+                name: lvl.into(),
+            },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
+            categories: std::collections::BTreeMap::new(),
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,                  // origin-only
+                display: Some(Releasability::Grant(set(&["AUS"]))), // band = {AUS}
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
+            obligations: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        assert!(matches!(
+            validate_label(&mk("UNCLASSIFIED"), &spif),
+            Err(LabelInvalidity::Label)
+        )); // band on unclassified → invalid
+        assert_eq!(validate_label(&mk("SECRET"), &spif), Ok(())); // band on classified → valid
+                                                                  // no band (display None) on unclassified stays valid (rule fires only on a band)
+        let mut nb = mk("UNCLASSIFIED");
+        nb.disclosure.display = None;
+        assert_eq!(validate_label(&nb, &spif), Ok(()));
+    }
+
+    #[test]
     fn owner_in_x_is_invalid_single_origin() {
         // Task 9 (spec §6): the owner is never excluded.
         let mut l = mk_owned("USA");
@@ -1131,7 +1287,7 @@ mod tests {
             categories: BTreeMap::new(),
             disclosure,
             controls,
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };
@@ -1201,7 +1357,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };
@@ -1245,7 +1401,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };
@@ -1262,11 +1418,11 @@ mod tests {
     }
 
     #[test]
-    fn join_carries_caveats_by_union_and_max_compilation() {
+    fn join_carries_obligations_by_union_and_max_compilation() {
         let spif = Spif::builder("US")
             .levels(&["UNCLASSIFIED", "SECRET", "TOP_SECRET"])
             .build();
-        let base = |cavs: &[Caveat], comp: Option<&str>| ResourceLabel {
+        let base = |obs: &[Obligation], comp: Option<&str>| ResourceLabel {
             classification: Classification {
                 policy: PolicyId("US".into()),
                 name: "SECRET".into(),
@@ -1281,17 +1437,20 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: cavs.iter().cloned().collect(),
+            obligations: obs.iter().cloned().collect(),
             compilation_level: comp.map(|n| Classification {
                 policy: PolicyId("US".into()),
                 name: n.into(),
             }),
             need_to_know: None,
         };
-        let a = base(&[Caveat::NoEgress], Some("SECRET"));
-        let b = base(&[Caveat::OperatorOnly], Some("TOP_SECRET"));
+        let a = base(&[Obligation::NoEgress], Some("SECRET"));
+        let b = base(&[Obligation::OperatorOnly], Some("TOP_SECRET"));
         let j = a.join(&b, &spif).unwrap();
-        assert!(j.caveats.contains(&Caveat::NoEgress) && j.caveats.contains(&Caveat::OperatorOnly)); // ∪ carried
+        assert!(
+            j.obligations.contains(&Obligation::NoEgress)
+                && j.obligations.contains(&Obligation::OperatorOnly)
+        ); // ∪ carried
         assert_eq!(j.compilation_level.unwrap().name, "TOP_SECRET"); // max floor
     }
 
@@ -1316,7 +1475,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: comp.map(|n| Classification {
                 policy: PolicyId("US".into()),
                 name: n.into(),
@@ -1355,7 +1514,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: ntk.map(|s| s.to_string()),
         };
@@ -1399,7 +1558,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };
@@ -1445,7 +1604,7 @@ mod tests {
                 exclusions: BTreeSet::new(),
             },
             controls: Controls::empty(),
-            caveats: BTreeSet::new(),
+            obligations: BTreeSet::new(),
             compilation_level: None,
             need_to_know: None,
         };

@@ -6,9 +6,9 @@
 //! deny through gate 4 (releasability) instead of gate 1 (policy).
 
 use maknae_dcs_core::{
-    decide, validate_rel, Action, CategoryKind, Caveat, Classification, Controls, Decision,
-    DenyReason, Disclosure, Employment, Ownership, PolicyId, Purpose, RelValidationError,
-    Releasability, ResourceLabel, Spif, Subject,
+    decide, validate_rel, Action, CategoryKind, Classification, Controls, Decision, DenyReason,
+    Disclosure, Employment, Ownership, PolicyId, Purpose, RelValidationError, Releasability,
+    ResourceLabel, Spif, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -71,7 +71,7 @@ fn resource(policy: &str, origin: &str, rel: Releasability) -> ResourceLabel {
             exclusions: BTreeSet::new(),
         },
         controls: Controls::empty(),
-        caveats: BTreeSet::new(),
+        obligations: BTreeSet::new(),
         compilation_level: None,
         need_to_know: None,
     }
@@ -288,20 +288,9 @@ fn cross_policy_unmapped_denies() {
     );
 }
 
-#[test]
-fn display_only_blocks_export_only() {
-    let spif = us_spif();
-    let mut r = resource("US", "USA", Releasability::NoMarking);
-    r.caveats.insert(Caveat::DisplayOnly);
-    let s = subject("US", "USA");
-    let run = |action: Action| decide(&s, &r, action, &Purpose(String::new()), &spif);
-    assert_eq!(run(Action::Read), Decision::Permit);
-    assert_eq!(run(Action::Display), Decision::Permit);
-    assert_eq!(
-        run(Action::Export),
-        Decision::Deny(DenyReason::ActionForbidden)
-    );
-}
+// The v1 `display_only_blocks_export_only` (gate-5 `Caveat::DisplayOnly` + Export
+// → ActionForbidden) is RETIRED (#27) — DISPLAY ONLY is now the display relation,
+// covered by `tests/display_only_vectors.rs`.
 
 #[test]
 fn anti_duplication_ingest_validation() {
