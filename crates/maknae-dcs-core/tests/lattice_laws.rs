@@ -9,7 +9,7 @@
 //!
 //! Universe (origin USA, policy US), enumerated in EXACTLY this nesting order
 //! (outermost → innermost): level, sci, releasability, obligations, compilation,
-//! ntk. Total 3·4·6·4·2·2 = 1152 labels. Pairwise loops run the full 1152²;
+//! ntk. Total 3·4·5·4·2·2 = 960 labels. Pairwise loops run the full 960²;
 //! triple-quantified laws (transitivity, associativity, leastness) run over a
 //! stride-13 subsample whose full-axis coverage is ASSERTED (the assertions,
 //! not the stride, are the guarantee).
@@ -44,9 +44,10 @@ fn universe() -> Vec<ResourceLabel> {
     let levels = ["U", "S", "TS"];
     // empty set = key omitted, per the category-map invariant
     let sci_states: [Option<&[&str]>; 4] = [None, Some(&["A"]), Some(&["B"]), Some(&["A", "B"])];
+    // #51: Empty (REL ∅) is NOT a lattice point — it is a fail-closed sentinel,
+    // non-authorable. The rel-axis ⊤ is NoMarking (= REL {owners}/NOFORN).
     let rels = [
         Releasability::NoMarking,
-        Releasability::Empty,
         Releasability::Public,
         Releasability::Grant(set(&["AUS"])),
         Releasability::Grant(set(&["KOR"])),
@@ -64,7 +65,7 @@ fn universe() -> Vec<ResourceLabel> {
     let comp_states = [None, Some("TS")];
     let ntk_states = [None, Some("OPLAN")];
 
-    let mut out = Vec::with_capacity(1152);
+    let mut out = Vec::with_capacity(960);
     for level in levels {
         for sci in sci_states {
             for rel in &rels {
@@ -98,7 +99,7 @@ fn universe() -> Vec<ResourceLabel> {
             }
         }
     }
-    assert_eq!(out.len(), 1152);
+    assert_eq!(out.len(), 960);
     out
 }
 
@@ -146,7 +147,7 @@ fn le(a: &ResourceLabel, b: &ResourceLabel, spif: &Spif) -> bool {
 }
 
 fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
-    let sample: Vec<&ResourceLabel> = universe.iter().step_by(13).collect(); // 89 labels
+    let sample: Vec<&ResourceLabel> = universe.iter().step_by(13).collect(); // 74 labels
                                                                              // full-axis coverage assertions — the guarantee that the subsample is
                                                                              // non-degenerate on every axis (PartialEq-only distinct counting: no
                                                                              // Ord/Hash on Releasability, deliberately)
@@ -164,7 +165,7 @@ fn stride_sample(universe: &[ResourceLabel]) -> Vec<&ResourceLabel> {
             distinct_rels.push(&l.disclosure.release);
         }
     }
-    assert_eq!(distinct_rels.len(), 6);
+    assert_eq!(distinct_rels.len(), 5);
     assert!(sample.iter().any(|l| !l.obligations.is_empty()));
     assert!(sample.iter().any(|l| l.obligations.is_empty()));
     assert!(sample.iter().any(|l| l.compilation_level.is_some()));
@@ -180,17 +181,17 @@ fn order_and_join_laws() {
     let u = universe();
 
     // join totality: .expect, never if-let — and the counter pins the LOOP
-    // BOUNDS at the full 1152² (a truncated loop can't silently shrink coverage)
+    // BOUNDS at the full 960² (a truncated loop can't silently shrink coverage)
     let mut join_some_count: usize = 0;
 
-    // reflexivity over all 1152
+    // reflexivity over all 960
     for a in &u {
         assert!(le(a, a, &spif), "reflexivity");
         let aa = a.join(a, &spif).expect("join total over the law universe");
         assert!(sem_eq(&aa, a, &spif), "idempotence a∨a ≈ a");
     }
 
-    // pairwise laws over the full 1152²
+    // pairwise laws over the full 960²
     for a in &u {
         for b in &u {
             let ab = a.join(b, &spif).expect("join total over the law universe");
@@ -223,7 +224,7 @@ fn order_and_join_laws() {
             ));
         }
     }
-    assert_eq!(join_some_count, 1152 * 1152);
+    assert_eq!(join_some_count, 960 * 960);
 
     // triple-quantified laws over the coverage-asserted stride sample
     let sample = stride_sample(&u);
