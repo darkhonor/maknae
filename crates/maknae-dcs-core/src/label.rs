@@ -832,6 +832,16 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
     if !d.display_covers_release(&base, spif) {
         return Err(LabelInvalidity::Label);
     }
+    // (6) DISPLAY ONLY is classified-only (#27, DoDM V2 §e). A non-empty
+    //     display-only band (display ⊋ release) requires a CLASSIFIED level.
+    //     Band non-empty ⟺ release ⊆ display (checked in (5)) AND display ⊄ release.
+    //     `is_classified` fails closed (None) on unknown/undeclared floor → deny.
+    let rel_e = d.eligible_release(&base, spif);
+    let disp_e = d.eligible_display(&base, spif);
+    let band_nonempty = !disp_e.is_subset_of(&rel_e);
+    if band_nonempty && spif.is_classified(&label.classification) != Some(true) {
+        return Err(LabelInvalidity::Label);
+    }
     Ok(())
 }
 
@@ -1093,6 +1103,42 @@ mod tests {
             exclusions: set(&["ZAF"]),
         };
         assert!(d.eligible_display(&base, &spif).permits("ZAF"));
+    }
+
+    #[test]
+    fn display_only_band_requires_classified() {
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        let mk = |lvl: &str| ResourceLabel {
+            classification: crate::policy::Classification {
+                policy: crate::policy::PolicyId("US".into()),
+                name: lvl.into(),
+            },
+            ownership: Ownership::Owned {
+                owner: "USA".into(),
+            },
+            categories: std::collections::BTreeMap::new(),
+            disclosure: Disclosure {
+                release: Releasability::NoMarking,                  // origin-only
+                display: Some(Releasability::Grant(set(&["AUS"]))), // band = {AUS}
+                exclusions: BTreeSet::new(),
+            },
+            controls: Controls::empty(),
+            caveats: BTreeSet::new(),
+            compilation_level: None,
+            need_to_know: None,
+        };
+        assert!(matches!(
+            validate_label(&mk("UNCLASSIFIED"), &spif),
+            Err(LabelInvalidity::Label)
+        )); // band on unclassified → invalid
+        assert_eq!(validate_label(&mk("SECRET"), &spif), Ok(())); // band on classified → valid
+                                                                  // no band (display None) on unclassified stays valid (rule fires only on a band)
+        let mut nb = mk("UNCLASSIFIED");
+        nb.disclosure.display = None;
+        assert_eq!(validate_label(&nb, &spif), Ok(()));
     }
 
     #[test]

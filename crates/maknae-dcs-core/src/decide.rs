@@ -171,12 +171,25 @@ pub fn decide(
             crate::label::LabelInvalidity::Label => DenyReason::InvalidLabel,
         });
     }
-    if !resource
+    // Release/display matrix (#27): release-eligible → full access; display-only
+    // band (display ∖ release) → DisplayOnly obligation on Display, deny receipt
+    // on Read/Export; neither → deny. The obligation is emitted at the tail
+    // (after NTK), so a display-only subject still passes gate 6.
+    let release_ok = resource
         .disclosure
         .eligible_release(&owners, spif)
-        .permits(&subject.nationality)
-    {
-        return Decision::Deny(DenyReason::Releasability);
+        .permits(&subject.nationality);
+    let mut display_only = false;
+    if !release_ok {
+        let display_ok = resource
+            .disclosure
+            .eligible_display(&owners, spif)
+            .permits(&subject.nationality);
+        if display_ok && action == Action::Display {
+            display_only = true;
+        } else {
+            return Decision::Deny(DenyReason::Releasability);
+        }
     }
 
     // Gate 5: action.
@@ -191,6 +204,13 @@ pub fn decide(
         }
     }
 
+    // Emission: a display-only-band grant carries the DisplayOnly obligation.
+    // (Task 4 folds in the resource's carried obligations.)
+    if display_only {
+        let mut obligations = BTreeSet::new();
+        obligations.insert(Obligation::DisplayOnly);
+        return Decision::PermitWithObligations { obligations };
+    }
     Decision::Permit
 }
 
@@ -554,6 +574,66 @@ mod tests {
         assert_eq!(
             run(&s, &r, Action::Export),
             Decision::Deny(DenyReason::ActionForbidden)
+        );
+    }
+
+    #[test]
+    fn display_only_band_permits_display_with_obligation_denies_receipt() {
+        use std::collections::BTreeSet;
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        // SECRET // REL USA // DISPLAY ONLY AUS: release = origin-only (NoMarking),
+        // display = {USA, AUS}. AUS is in the display-only band.
+        let mut r = mk_resource("SECRET");
+        r.need_to_know = None;
+        r.categories = std::collections::BTreeMap::new();
+        r.disclosure = Disclosure {
+            release: Releasability::NoMarking,
+            display: Some(Releasability::Grant(set(&["AUS"]))),
+            exclusions: BTreeSet::new(),
+        };
+        let aus = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "AUS".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let go = |s: &Subject, a: Action| decide(s, &r, a, &Purpose("OPLAN".into()), &spif);
+        // AUS Display → PWO{DisplayOnly}
+        let mut ob = BTreeSet::new();
+        ob.insert(Obligation::DisplayOnly);
+        assert_eq!(
+            go(&aus, Action::Display),
+            Decision::PermitWithObligations { obligations: ob }
+        );
+        // AUS Read / Export → Deny(Releasability)
+        assert_eq!(
+            go(&aus, Action::Read),
+            Decision::Deny(DenyReason::Releasability)
+        );
+        assert_eq!(
+            go(&aus, Action::Export),
+            Decision::Deny(DenyReason::Releasability)
+        );
+        // USA (owner, release-eligible) Read → Permit (no obligation)
+        let usa = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        assert_eq!(go(&usa, Action::Read), Decision::Permit);
+        // JPN (neither) Display → Deny(Releasability)
+        let jpn = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "JPN".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        assert_eq!(
+            go(&jpn, Action::Display),
+            Decision::Deny(DenyReason::Releasability)
         );
     }
 

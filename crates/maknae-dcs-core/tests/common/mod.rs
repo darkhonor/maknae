@@ -5,6 +5,11 @@
 //! label.rs unit D7 helpers, and construct a US-policy subject/label whose
 //! clearance clears the label under `us_spif()` so every NAF vector reaches
 //! gate 4 (releasability) — the deciding gate — rather than denying earlier.
+//!
+//! `#![allow(dead_code)]`: this module is compiled once per integration-test
+//! binary; each binary uses a different subset of the shared helpers, so a
+//! helper unused BY ONE binary is not dead — the standard `common/mod.rs` idiom.
+#![allow(dead_code)]
 
 use maknae_dcs_core::{
     Classification, Controls, Disclosure, Employment, Ownership, PolicyId, Purpose, Releasability,
@@ -74,6 +79,38 @@ pub fn joint(owners: &[&str]) -> ResourceLabel {
         },
         ..mk_owned("USA")
     }
+}
+
+/// US-policy SPIF with the long classification tokens + classified_floor
+/// (#27 DISPLAY ONLY vectors — the "U"/"S"/"TS" `us_spif()` has no floor).
+pub fn us_classified_spif() -> Spif {
+    Spif::builder("US")
+        .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+        .classified_floor("CONFIDENTIAL")
+        .build()
+}
+
+/// `mk_owned` at a long-token classification level (for the classified-floor
+/// vectors). NoMarking release, everything else empty.
+pub fn mk_owned_classified(origin: &str, level: &str) -> ResourceLabel {
+    let mut r = mk_owned(origin);
+    r.classification = Classification {
+        policy: PolicyId("US".into()),
+        name: level.into(),
+    };
+    r
+}
+
+/// A subject cleared under the LONG-token SPIF (clearance TOP_SECRET clears any
+/// `us_classified_spif()` level) — the "TS"-clearance `sub()` has no rank there
+/// and would gate-2 Deny(Indeterminate). Nationality `nat`, all sets empty.
+pub fn sub_classified(nat: &str) -> Subject {
+    let mut s = sub(nat);
+    s.clearance = Classification {
+        policy: PolicyId("US".into()),
+        name: "TOP_SECRET".into(),
+    };
+    s
 }
 
 /// A ConcealedForeign label (Stage-5, still fails closed at decide).
