@@ -176,7 +176,7 @@ pub fn decide(
     // Release/display matrix (#27): release-eligible → full access; display-only
     // band (display ∖ release) → DisplayOnly obligation on Display, deny receipt
     // on Read/Export; neither → deny. The obligation is emitted at the tail
-    // (after NTK), so a display-only subject still passes gate 6.
+    // (after NTK), so a display-only subject still passes gate 5 (NTK).
     let release_ok = resource
         .disclosure
         .eligible_release(&owners, spif)
