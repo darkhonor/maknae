@@ -38,9 +38,9 @@ Operationally, this partitions every design choice in the SPIF/decision surface 
 
 Honesty required by the contract itself: the `ControlMarking` axis is currently **structure**, not data, and it is **US-shaped**.
 
-- `ControlMarking` (`src/controls.rs`) is a **closed 18-variant enum** — its own doc states "adding a control is a deliberate ADR amendment," i.e. a recompile. A foreign system cannot declare its own control vocabulary.
-- `CHAINS` (`controls.rs`) hard-codes **US IC-Register precedence** (`ORCON > ORCON-USGOV`, `NODIS > EXDIS`, …) as an engine `const`.
-- `validate_label` (`src/label.rs`, the `(0e)` block from #48) matches `ControlMarking::Orcon/OrconUsGov/Relido` **literals** — a US policy constant live in the decision path *today* (gate-4 re-runs it).
+- `ControlMarking` (`crates/maknae-dcs-core/src/controls.rs`) is a **closed 18-variant enum** — its own doc states "adding a control is a deliberate ADR amendment," i.e. a recompile. A foreign system cannot declare its own control vocabulary.
+- `CHAINS` (`crates/maknae-dcs-core/src/controls.rs`) hard-codes **US IC-Register precedence** (`ORCON > ORCON-USGOV`, `NODIS > EXDIS`, …) as an engine `const`.
+- `validate_label` (`crates/maknae-dcs-core/src/label.rs`, the `(0e)` block from #48) matches `ControlMarking::Orcon/OrconUsGov/Relido` **literals** — a US policy constant live in the decision path *today* (gate-4 re-runs it).
 
 The #31 Part-1 constraint table (§3) relocates co-occurrence *rules* (e.g. `ORCON ⊻ RELIDO`) to data, but it does **not** by itself make the control *vocabulary* or its *precedence* declarable — those remain a closed engine enum + const. Per §1's own stop-and-reconsider rule ("a US-only *structure* is a defect"), this is the defect to resolve for true multi-system support: the control vocabulary and its precedence chains must become SPIF/registry **data** (a closed-enum→declared-set migration), tracked as its own follow-up (see Consequences). Until then, the honest status is: **schema methods (`rank`, `is_classified`, `expand_tetra`) carry no policy constant; `validate_label`/controls still do.**
 
