@@ -22,6 +22,7 @@ This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers a
 | 0014 | Subject-context envelope (max-TTL, revocation) | docket | Proposed (docket) |
 | 0015 | Vendor substrate / `untrusted-adjacent` | #20 | Proposed (docket) |
 | 0016 | Risk-tiered test coverage (tiers, mutation, fail-closed gate) | #24 | Accepted (operator-ratified 2026-08-04) |
+| 0017 | SPIF schema & multi-system extensibility contract | #31 | Proposed (consolidates SPIF-schema decisions; ratification gated with EPIC #33 / ADR-0008) |
 
 Claiming a new number: next unallocated integer, recorded here in the same commit that adds the ADR (or that reserves the slot with a `Proposed (docket)` row and its driving issue). Statuses use the ADR-0001 vocabulary: `Proposed` (awaiting team review or a confirming spike), `Accepted` (operator- or team-ratified), plus `Proposed (docket)`/`Deferred` for allocated-but-unwritten slots. A docket slot's `Proposed` is weaker than a written ADR's `Proposed`: the RL#1 docket SUGGESTED these decisions — the review generated proposed content, not validated content — and each slot's problem statement is re-validated against the current corpus when its work cycle arrives. A number is a bookmark, not a commitment; slots may be collapsed, merged, or struck at validation.
 
