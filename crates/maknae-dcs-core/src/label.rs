@@ -3,7 +3,8 @@
 //!
 //! Releasability orientation (ADR-0008 §2.4): restriction order — `∨` is the
 //! least-upper-bound, the MORE-restrictive combine. `⊤` (most restrictive) is
-//! explicit `REL ∅` (releasable to no one, including the origin); `⊥` (least
+//! `REL {owners}` = `NoMarking`/NOFORN (origin-only); `REL ∅`/`Empty` is a
+//! fail-closed deny-all sentinel, not authorable (#51). `⊥` (least
 //! restrictive, the join identity) is `REL ALL`/public. The origin nation is
 //! always a member of any non-empty REL set; an ABSENT REL marking computes to
 //! `REL {origin}` (NOFORN-equivalent), never to ⊥. Join on releasability is
@@ -25,7 +26,10 @@ pub enum Releasability {
     /// INVARIANT: non-empty (a would-be `Grant(∅)` is the `NoMarking` state).
     /// The origin is always eligible whether or not it is listed.
     Grant(BTreeSet<String>),
-    /// Explicit `REL ∅` — releasable to none, INCLUDING the origin (`⊤`).
+    /// Fail-closed **deny-all sentinel** (#51): the `∅` eligible set. NOT an
+    /// authorable marking and NOT the lattice `⊤` (the ⊤ is `{owners}` =
+    /// `NoMarking`/NOFORN); `validate_label` rejects it. Only legitimate producer:
+    /// `from_eligible` on a precondition violation (an eligible set missing an owner).
     Empty,
     /// Explicit `REL ALL` — everyone (`⊥`, the join identity).
     Public,
@@ -42,7 +46,8 @@ pub enum Releasability {
 pub enum EligibleNations {
     /// `⊥` — public, everyone eligible.
     Universe,
-    /// Finite eligibility; empty set = deny-all = `⊤`.
+    /// Finite eligibility; empty set = fail-closed deny-all sentinel (#51 — not
+    /// the lattice `⊤`; the ⊤ is `{owners}`).
     Set {
         /// Nation trigraphs, matched against `Subject::nationality`.
         nations: BTreeSet<String>,
@@ -130,6 +135,12 @@ impl Releasability {
     /// Canonicalize an eligible set back to the unique `Releasability` form:
     /// `Universe → Public`; ∅ → `Empty`; nations `== owners` → `NoMarking`;
     /// else `Grant(nations ∖ owners)` — guaranteed non-empty.
+    ///
+    /// The `∅ → Empty` case is a **fail-closed deny-all sentinel**, NOT a canonical
+    /// authorable form (#51): both `Empty`-returning branches below (`nations` empty,
+    /// or an owner absent) are only reachable from invalid/precondition-violating
+    /// input — a join of owner-containing sets always retains the owners, so a valid
+    /// derivation never lands here.
     ///
     /// Precondition (#40): `e` was produced by [`Releasability::eligible`] or
     /// [`EligibleNations::join`] with the same OWNER SET (every non-empty such
@@ -801,6 +812,13 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
             return Err(LabelInvalidity::Label);
         }
     }
+    // (0d) REL ∅ / display ∅ is not an authorable marking (#51). `Empty` excludes
+    //      the origin (absolute denial) — not a valid policy state; it is retained
+    //      ONLY as a fail-closed deny-all sentinel (`from_eligible` precondition-
+    //      violation), never authored. Rejected at both loci (here + gate-4 re-run).
+    if d.release == Releasability::Empty || d.display == Some(Releasability::Empty) {
+        return Err(LabelInvalidity::Label);
+    }
     // (1) release + display tokens are recognized world-view elements.
     rel_tokens_recognized(&d.release)?;
     if let Some(disp) = &d.display {
@@ -1173,6 +1191,27 @@ mod tests {
         let mut nb = mk("UNCLASSIFIED");
         nb.disclosure.display = None;
         assert_eq!(validate_label(&nb, &spif), Ok(()));
+    }
+
+    #[test]
+    fn empty_release_or_display_is_not_authorable() {
+        // #51: REL ∅ (origin-excluding) is not a valid marking — Empty is a
+        // fail-closed sentinel only, never authored. Rejected at ingest (both fields).
+        let spif = us_spif();
+        let mut r = mk_owned("USA");
+        r.disclosure.release = Releasability::Empty;
+        assert!(matches!(
+            validate_label(&r, &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        let mut d = mk_owned("USA");
+        d.disclosure.display = Some(Releasability::Empty);
+        assert!(matches!(
+            validate_label(&d, &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        // a normal NoMarking label still validates (guard is Empty-specific)
+        assert_eq!(validate_label(&mk_owned("USA"), &spif), Ok(()));
     }
 
     #[test]
@@ -1671,7 +1710,7 @@ mod tests {
     fn empty_denies_all_including_origin() {
         let spif = Spif::builder("US").build();
         let e = Releasability::Empty.eligible(&one("USA"), &spif);
-        assert!(!e.permits("USA")); // ⊤ — deny even origin
+        assert!(!e.permits("USA")); // sentinel deny-all — denies even the origin (fail-closed)
         assert!(!e.permits("AUS"));
     }
 
