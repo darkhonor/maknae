@@ -22,7 +22,7 @@ Rationale of record:
 ## Consequences
 
 - Policy engine selection interacts with this ADR (Cedar is Rust-native; see ADR-0003).
-- `maknae-dcs-core` (shared lattice/label crate, container-architecture §6) is Rust, seeded by the Microkosmos extraction.
+- A DCS-aware build's classification/label evaluation depends on an external Rust DCS library (container-architecture §6), reached through Maknae's policy-agnostic authorization seam; that library's implementation lives in a separate private library, not this repo.
 - No other container inherits a Rust obligation — language-per-action stands (container-architecture §1.2).
 - Kernel crates carry `#![forbid(unsafe_code)]`; `unsafe` is confined to vetted dependencies (e.g., the `aws-lc-rs` FFI boundary) and tracked via `cargo-geiger` / `cargo-deny` policy in CI. This commitment is load-bearing for the control mapping below — Rust's guarantees are claims about *safe* Rust, and this is what makes that claim auditable.
 

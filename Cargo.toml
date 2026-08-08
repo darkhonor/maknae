@@ -4,7 +4,6 @@ members = [
   "crates/maknae-audit",
   "crates/maknae-audit-append",
   "crates/maknae-config",
-  "crates/maknae-dcs-core",
   "crates/maknae-kernel",
   "crates/maknae-llm",
   "crates/maknae-mcp",

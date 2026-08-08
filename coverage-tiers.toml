@@ -21,23 +21,16 @@ exclude = [
 
 [t1]
 floor_production_region = 95
-files = [
-  "crates/maknae-dcs-core/src/decide.rs",
-  "crates/maknae-dcs-core/src/label.rs",
-  "crates/maknae-dcs-core/src/policy.rs",
-  "crates/maknae-dcs-core/src/subject.rs",
-  # EPIC #33 Stage 1 vocabulary (security-critical lattice/registry logic):
-  # a broken controls join can derive a label less restrictive than its
-  # sources; a registry that fails OPEN on an unknown marking emits false
-  # assurance; ownership frames gate the whole releasability path.
-  "crates/maknae-dcs-core/src/controls.rs",
-  "crates/maknae-dcs-core/src/ownership.rs",
-  "crates/maknae-dcs-core/src/registry.rs",
-]
+# EMPTY at present. The security-critical DCS crate (maknae-dcs-core: lattice,
+# label, dominance, registry, ownership, controls) was relocated to a private
+# library; no in-tree production code carries a T1 obligation until Maknae's
+# security substance is rebuilt against the authorization seam. Re-populate as
+# T1 crates land.
+files = []
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
-# third parties. Zero missed mutants required; TIMEOUT = investigate-failure.
-mutants_crates = ["maknae-dcs-core"]
+# third parties. EMPTY while no security-critical crate is in-tree (see above).
+mutants_crates = []
 
 [t2]
 floor_production_region = 90
@@ -49,32 +42,24 @@ files = []
 # Re-baselining (extend cohort + recompute floor) is deliberate and recorded
 # here with provenance. Floor is int-only: floor(measured on the CI lane).
 ratchet_floor = 97
-ratchet_cohort = [
-  "crates/maknae-dcs-core/src/decide.rs",
-  "crates/maknae-dcs-core/src/label.rs",
-  "crates/maknae-dcs-core/src/policy.rs",
-  "crates/maknae-dcs-core/src/subject.rs",
-  "crates/maknae-dcs-core/src/controls.rs",
-  "crates/maknae-dcs-core/src/ownership.rs",
-  "crates/maknae-dcs-core/src/registry.rs",
-]
+# EMPTY cohort: the ratcheted maknae-dcs-core production files were relocated
+# to a private library. The floor value is retained as the high-water mark to
+# re-baseline against when T1 production code returns; with an empty cohort the
+# gate has no files to measure (inert, not lowered).
+ratchet_cohort = []
 
 [project.ratchet_provenance]
-# Re-baselined for EPIC #33 Stage 1: cohort extended by ownership.rs /
-# controls.rs / registry.rs (deliberate, ADR-0016 §4). floor stays 97 =
-# floor(97.88). CI (ubuntu) remains authoritative; this value is the clean
-# dev-host worktree measurement (the in-place dev target dir can report low
-# from mixed cargo-test/llvm-cov runs — measure in a fresh checkout).
+# Cohort emptied 2026-08-08 when the DCS engine (maknae-dcs-core) was relocated
+# to a private library. The prior baseline (value 97.88, 2026-08-05, EPIC #33
+# Stage 1 cohort of decide/label/policy/subject/controls/ownership/registry) is
+# preserved here as provenance; floor 97 stands as the re-baseline target. When
+# T1 production code lands again, re-measure and record a fresh cohort.
 value = 97.88
 date = "2026-08-05"
 lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merge"
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
 
 # ---- T3: report-only, per-file justification (never a blanket glob) --------
-
-[[t3]]
-path = "crates/maknae-dcs-core/src/lib.rs"
-why = "module decls + re-exports only; no logic"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

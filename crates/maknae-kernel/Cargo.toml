@@ -10,7 +10,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-maknae-dcs-core = { path = "../maknae-dcs-core" }
 maknae-proto = { path = "../maknae-proto" }
 maknae-spif = { path = "../maknae-spif" }
 maknae-subject-ctx = { path = "../maknae-subject-ctx" }

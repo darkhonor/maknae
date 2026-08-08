@@ -13,7 +13,7 @@ This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers a
 | 0005 | Enforcement locus & TCB boundary | #3 | Accepted (operator-ratified 2026-08-03) |
 | 0006 | Single-source-of-truth doctrine for the corpus | docket | Proposed (docket) |
 | 0007 | Key & signature model (STANAG 4778 binding) | #5 | Proposed (docket) — first among the remaining semantic ADRs |
-| 0008 | Classification lattice & dominance engine | #6 | Proposed (implemented in `maknae-dcs-core`; ratification gated on EPIC #33 Day-1 marking completeness) |
+| 0008 | Classification lattice & dominance engine | #6 | Relocated — the DCS classification engine and its ADR moved to a separate private library; slot retained as design intent (DCS-aware Maknae depends on that external library through the authorization seam), not an in-repo decision |
 | 0009 | Output-interface MLS | #7 | Proposed (docket) |
 | 0010 | Quarantine taint | #8 | Deferred (moot at MVP — consumer-only lake; re-validated at constellation) |
 | 0011 | Promotion | #9 | Deferred (moot until constellation) |
@@ -22,7 +22,7 @@ This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers a
 | 0014 | Subject-context envelope (max-TTL, revocation) | docket | Proposed (docket) |
 | 0015 | Vendor substrate / `untrusted-adjacent` | #20 | Proposed (docket) |
 | 0016 | Risk-tiered test coverage (tiers, mutation, fail-closed gate) | #24 | Accepted (operator-ratified 2026-08-04) |
-| 0017 | SPIF schema & multi-system extensibility contract | #31 | Proposed (consolidates SPIF-schema decisions; ratification gated with EPIC #33 / ADR-0008) |
+| 0017 | SPIF schema & multi-system extensibility contract | #31 | Relocated — moved to the private DCS library alongside ADR-0008; slot retained as design intent, not an in-repo decision |
 
 Claiming a new number: next unallocated integer, recorded here in the same commit that adds the ADR (or that reserves the slot with a `Proposed (docket)` row and its driving issue). Statuses use the ADR-0001 vocabulary: `Proposed` (awaiting team review or a confirming spike), `Accepted` (operator- or team-ratified), plus `Proposed (docket)`/`Deferred` for allocated-but-unwritten slots. A docket slot's `Proposed` is weaker than a written ADR's `Proposed`: the RL#1 docket SUGGESTED these decisions — the review generated proposed content, not validated content — and each slot's problem statement is re-validated against the current corpus when its work cycle arrives. A number is a bookmark, not a commitment; slots may be collapsed, merged, or struck at validation.
 
