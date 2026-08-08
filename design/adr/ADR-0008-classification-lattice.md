@@ -382,6 +382,55 @@ never derivable (intersection of owner-containing sets retains the owners).
 place above). ADR-0008 is Proposed / not final; this is pre-approval refinement.
 This targeted fix is NOT the pending ADR consolidation review (separate task).
 
+## Amendment — ORCON obligation emission (#48, 2026-08-08)
+
+PR #39 landed the `ControlMarking`/`Controls` vocabulary but deliberately did not
+wire the control axis into `decide()`. #48 wires it (US classification system only;
+policy-parameterized). Validated against the Lake (IC Register 2016; DoDM 5200.01-V2).
+
+- **Emission (decision-derived).** `decide()` reads the canonical `resource.controls`
+  and emits `Obligation::OriginatorControlled { scope }`: `Orcon` → `scope: None`;
+  `OrconUsGov` → `scope: Some(RedisseminationScope::UsGov)`. `OriginatorControlled`
+  is **decision-derived** (emitted, like `DisplayOnly`), NEVER carried — so the
+  carried-obligations lattice axis is unchanged (stays atom-only), and the #27
+  antisymmetry caveat ("`⊑_obl` non-antisymmetric once `OriginatorControlled{scope}`
+  enters a carried set") is **resolved by construction**: it never enters a carried
+  set, and canonical `Controls` holds ≤1 ORCON-family marking so the emitted set has
+  ≤1 `OriginatorControlled`. ORCON emission is **action-independent** (unlike
+  `DisplayOnly`). Composes with `DisplayOnly` + carried obligations in one set.
+- **Precedence.** `ORCON > ORCON-USGOV` (IC Register :7229/:7392/:7407) is the
+  existing `CHAINS` entry `(Orcon, OrconUsGov)` (Orcon dominant); `Controls`
+  canonicalization reduces a commingled set to `{Orcon}` → emits `scope: None`.
+- **Validity (`validate_label`, both loci).** ORCON/ORCON-USGOV are **incompatible
+  with RELIDO** → `InvalidLabel` (Register :7225/:7388 — "May not be used with
+  RELIDO"; RELIDO delegates release to an SFDRA, ORCON reserves it to the
+  originator). ORCON/ORCON-USGOV are **classified-only** → `InvalidLabel` when
+  `!is_classified` (Register :7222; DoDM :5323 — TS/S/C), reusing #27's per-SPIF
+  `classified_floor` (fail-closed; no US constant).
+- **`RedisseminationScope::UsGov` scope (Register :7341).** Pre-approved further
+  dissemination WITHOUT originator approval to US Government Executive Branch
+  departments/agencies (unconditional); and to congressional Intelligence
+  Committees ONLY for disseminated analytic products (DAPs — not raw/unevaluated
+  intelligence), per originating-agency/OLA consultation. Other US recipients still
+  require originator approval. The engine emits the scope token; the PEP honors the
+  precise contours (deny-biased: cannot obtain originator approval → Deny).
+- **System-residency resolved as PEP handling, NOT an engine obligation.** ORCON-USGOV
+  "may not reside in / transit unclassified systems" (Register :7423) is stated as a
+  property of the marked information; the issue's Boundary lists "system gating" as
+  *how a PEP honors an obligation*. The engine — a pure PDP with no knowledge of the
+  execution system's classification — emits `OriginatorControlled{Some(UsGov)}`
+  (which represents the whole ORCON-USGOV marking); the PEP that honors it MUST
+  satisfy the system-residency constraint (deny-biased). A machine-explicit
+  no-unclassified-systems obligation is a possible future refinement, out of #48.
+
+**Deferred / flagged:** `ControlMarking::{NoEgress, OperatorOnly}` duplicate
+`Obligation::{NoEgress, OperatorOnly}` (PR #39 controls vocabulary vs #27 carried
+obligations) — `decide()` emits these from the carried `obligations` field; the
+`ControlMarking` variants are vestigial for emission. Out of #48 scope; candidate
+cleanup. RELIDO emits nothing (read only for the ORCON exclusion). US-initial +
+extensible reaffirmed. ADR-0008 remains **Proposed / not final** (no consolidation
+until the whole epic is done).
+
 ## Security control mapping (informative; per ADR-0001)
 
 Assessor framing: the engine upgrades the evidence class for access-enforcement from procedural attestation to mechanized proof — the lattice laws and fail-closed totality are exhaustively machine-checked in CI (`cargo test --workspace`). The mutation gate (spec §6.5, surviving mutants are release blockers) is a WIRED CI CONTROL as of ADR-0016: the change-gated mutation job runs `cargo mutants` on this crate for every PR touching it and unconditionally on merge to main.
