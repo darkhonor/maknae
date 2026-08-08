@@ -25,17 +25,12 @@ name = "maknae-config"
 version = "0.0.0"
 
 [[package]]
-name = "maknae-dcs-core"
-version = "0.0.0"
-
-[[package]]
 name = "maknae-kernel"
 version = "0.0.0"
 dependencies = [
  "maknae-audit",
  "maknae-audit-append",
  "maknae-config",
- "maknae-dcs-core",
  "maknae-proto",
  "maknae-spif",
  "maknae-subject-ctx",

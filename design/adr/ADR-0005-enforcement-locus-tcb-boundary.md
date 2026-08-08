@@ -28,7 +28,7 @@ A Multi-Level Secure system must be able to answer "where does enforcement actua
 
 - Enforcement has a physical locus a defender can point at (the `maknaed` process boundary), which is what the reference-monitor / TCB-boundary property requires.
 - The near-term posture is honestly *weaker* than the ratified end-state (D4 Layer-2 collapse: at MVP the PDP and sole PEP are one process); this is stated, not hidden, and the ratified shape returns at constellation.
-- Semantic contracts (lattice ADR-0008, keys ADR-0007, subject-context ADR-0014, GUC/write-path, audit) remain owed and gate later component work; this ADR fixes only topology and the trust boundary.
+- Semantic contracts (classification/label evaluation — now an external DCS library reached via the authorization seam; keys ADR-0007, subject-context ADR-0014, GUC/write-path, audit) remain owed and gate later component work; this ADR fixes only topology and the trust boundary.
 - This deliverable is the **scaffold**: every crate is a documented stub. Component bodies land in later spec→plan→implement cycles.
 
 ## Security control mapping (informative; per ADR-0001)
