@@ -422,6 +422,13 @@ pub fn validate_rel(
 /// extend only by ADR amendment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RedisseminationScope {
+    /// ORCON-USGOV pre-approved redissemination scope (IC Register :7341):
+    /// further dissemination WITHOUT originator approval to US Government
+    /// Executive Branch departments/agencies (unconditional); and to congressional
+    /// Intelligence Committees ONLY for disseminated analytic products (DAPs — "not
+    /// unevaluated or raw intelligence"), per originating-agency/OLA consultation.
+    /// Any other US recipient still requires originator approval. The PEP honors
+    /// the precise contours; the engine only emits the scope token (#48).
     UsGov,
 }
 

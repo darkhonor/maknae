@@ -6,7 +6,8 @@
 //! categories ∧ nationality ∧ purpose ∧ action (releasability is decided by
 //! nationality alone under #26 — the coalition-credential arm is removed).
 
-use crate::label::{restrictive_dominates, Obligation, ResourceLabel};
+use crate::controls::ControlMarking;
+use crate::label::{restrictive_dominates, Obligation, RedisseminationScope, ResourceLabel};
 use crate::ownership::Ownership;
 use crate::policy::{CategoryKind, Spif};
 use crate::subject::{affiliation_satisfies, Subject};
@@ -206,6 +207,21 @@ pub fn decide(
     let mut obligations = resource.obligations.clone();
     if display_only {
         obligations.insert(Obligation::DisplayOnly);
+    }
+    // #48: ORCON emission from the canonical controls axis. Canonical Controls
+    // holds ≤1 ORCON-family marking; the `else if` (Orcon-first) also honors the
+    // ORCON > ORCON-USGOV precedence as defense-in-depth. OriginatorControlled is
+    // decision-derived (never carried). Action-independent (unlike DisplayOnly).
+    if resource.controls.as_set().contains(&ControlMarking::Orcon) {
+        obligations.insert(Obligation::OriginatorControlled { scope: None });
+    } else if resource
+        .controls
+        .as_set()
+        .contains(&ControlMarking::OrconUsGov)
+    {
+        obligations.insert(Obligation::OriginatorControlled {
+            scope: Some(RedisseminationScope::UsGov),
+        });
     }
     if obligations.is_empty() {
         Decision::Permit
@@ -669,6 +685,111 @@ mod tests {
         assert_eq!(
             go(&jpn, Action::Display),
             Decision::Deny(DenyReason::Releasability)
+        );
+    }
+
+    #[test]
+    fn orcon_emission_and_precedence_and_action_independence() {
+        use crate::controls::{ControlMarking, Controls};
+        use crate::label::RedisseminationScope;
+        use std::collections::BTreeSet;
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        let base = |ctrls: &[ControlMarking]| {
+            let mut r = mk_resource("SECRET");
+            r.need_to_know = None;
+            r.categories = std::collections::BTreeMap::new();
+            r.controls = Controls::from_set(ctrls.iter().copied().collect());
+            r
+        };
+        let subj = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let go = |r: &ResourceLabel, a: Action| decide(&subj, r, a, &Purpose("X".into()), &spif);
+        let oc_none: BTreeSet<Obligation> = [Obligation::OriginatorControlled { scope: None }]
+            .into_iter()
+            .collect();
+        let oc_usgov: BTreeSet<Obligation> = [Obligation::OriginatorControlled {
+            scope: Some(RedisseminationScope::UsGov),
+        }]
+        .into_iter()
+        .collect();
+        // ORCON → OriginatorControlled{None}
+        assert_eq!(
+            go(&base(&[ControlMarking::Orcon]), Action::Read),
+            Decision::PermitWithObligations {
+                obligations: oc_none.clone()
+            }
+        );
+        // ORCON-USGOV → OriginatorControlled{Some(UsGov)}
+        assert_eq!(
+            go(&base(&[ControlMarking::OrconUsGov]), Action::Read),
+            Decision::PermitWithObligations {
+                obligations: oc_usgov
+            }
+        );
+        // precedence: {Orcon, OrconUsGov} canonicalizes to {Orcon} → OriginatorControlled{None}
+        assert_eq!(
+            go(
+                &base(&[ControlMarking::Orcon, ControlMarking::OrconUsGov]),
+                Action::Read
+            ),
+            Decision::PermitWithObligations {
+                obligations: oc_none.clone()
+            }
+        );
+        // action-independence: ORCON emits identically on Read/Display/Export
+        for a in [Action::Read, Action::Display, Action::Export] {
+            assert_eq!(
+                go(&base(&[ControlMarking::Orcon]), a),
+                Decision::PermitWithObligations {
+                    obligations: oc_none.clone()
+                }
+            );
+        }
+        // no ORCON control → plain Permit
+        assert_eq!(
+            go(&base(&[ControlMarking::Imcon]), Action::Read),
+            Decision::Permit
+        );
+        // composition: ORCON + carried NoEgress → {OriginatorControlled{None}, NoEgress}
+        let mut r = base(&[ControlMarking::Orcon]);
+        r.obligations = [Obligation::NoEgress].into_iter().collect();
+        let both: BTreeSet<Obligation> = [
+            Obligation::OriginatorControlled { scope: None },
+            Obligation::NoEgress,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            go(&r, Action::Read),
+            Decision::PermitWithObligations { obligations: both }
+        );
+        // composition: display-only band (foreign viewer) + ORCON on Display →
+        // {DisplayOnly, OriginatorControlled{None}} — two decision-derived obligations.
+        let mut rb = base(&[ControlMarking::Orcon]);
+        rb.disclosure.display = Some(Releasability::Grant(set(&["AUS"])));
+        let aus = {
+            let mut s = mk_subject("TOP_SECRET");
+            s.nationality = "AUS".into();
+            s.read_ins = std::collections::BTreeMap::new();
+            s
+        };
+        let disp_orcon: BTreeSet<Obligation> = [
+            Obligation::DisplayOnly,
+            Obligation::OriginatorControlled { scope: None },
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            decide(&aus, &rb, Action::Display, &Purpose("X".into()), &spif),
+            Decision::PermitWithObligations {
+                obligations: disp_orcon
+            }
         );
     }
 
