@@ -11,7 +11,7 @@
 //! set INTERSECTION of the resolved eligible nations (#26: coalition tetragraphs
 //! decompose to member nations at expansion time — a single nation namespace).
 
-use crate::controls::Controls;
+use crate::controls::{ControlMarking, Controls};
 use crate::ownership::Ownership;
 use crate::policy::{is_trigraph, Spif, TetraExpansion};
 use crate::registry;
@@ -826,6 +826,20 @@ pub fn validate_label(label: &ResourceLabel, spif: &Spif) -> Result<(), LabelInv
     if d.release == Releasability::Empty || d.display == Some(Releasability::Empty) {
         return Err(LabelInvalidity::Label);
     }
+    // (0e) ORCON validity (#48). ORCON/ORCON-USGOV are incompatible with RELIDO
+    //      (IC Register :7225/:7388) and are classified-only (Register :7222; DoDM
+    //      :5323 — TS/S/C). `is_classified` fails closed (None → reject) on an
+    //      undeclared floor / unknown rank. Enforced at both loci (here + gate-4).
+    let cs = label.controls.as_set();
+    let has_orcon = cs.contains(&ControlMarking::Orcon) || cs.contains(&ControlMarking::OrconUsGov);
+    if has_orcon {
+        if cs.contains(&ControlMarking::Relido) {
+            return Err(LabelInvalidity::Label);
+        }
+        if spif.is_classified(&label.classification) != Some(true) {
+            return Err(LabelInvalidity::Label);
+        }
+    }
     // (1) release + display tokens are recognized world-view elements.
     rel_tokens_recognized(&d.release)?;
     if let Some(disp) = &d.display {
@@ -1198,6 +1212,48 @@ mod tests {
         let mut nb = mk("UNCLASSIFIED");
         nb.disclosure.display = None;
         assert_eq!(validate_label(&nb, &spif), Ok(()));
+    }
+
+    #[test]
+    fn orcon_relido_and_orcon_unclassified_are_invalid() {
+        use crate::controls::{ControlMarking, Controls};
+        let spif = Spif::builder("US")
+            .levels(&["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP_SECRET"])
+            .classified_floor("CONFIDENTIAL")
+            .build();
+        let mk = |lvl: &str, ctrls: &[ControlMarking]| {
+            let mut l = mk_owned("USA");
+            l.classification = crate::policy::Classification {
+                policy: crate::policy::PolicyId("US".into()),
+                name: lvl.into(),
+            };
+            l.controls = Controls::from_set(ctrls.iter().copied().collect());
+            l
+        };
+        use ControlMarking::*;
+        // ORCON × RELIDO — both arms
+        assert!(matches!(
+            validate_label(&mk("SECRET", &[Orcon, Relido]), &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        assert!(matches!(
+            validate_label(&mk("SECRET", &[OrconUsGov, Relido]), &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        // ORCON on unclassified — both arms
+        assert!(matches!(
+            validate_label(&mk("UNCLASSIFIED", &[Orcon]), &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        assert!(matches!(
+            validate_label(&mk("UNCLASSIFIED", &[OrconUsGov]), &spif),
+            Err(LabelInvalidity::Label)
+        ));
+        // valid: ORCON on classified, no RELIDO
+        assert_eq!(validate_label(&mk("SECRET", &[Orcon]), &spif), Ok(()));
+        assert_eq!(validate_label(&mk("SECRET", &[OrconUsGov]), &spif), Ok(()));
+        // RELIDO alone (no ORCON) is fine
+        assert_eq!(validate_label(&mk("SECRET", &[Relido]), &spif), Ok(()));
     }
 
     #[test]
