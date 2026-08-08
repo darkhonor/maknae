@@ -73,7 +73,9 @@ pub enum DenyReason {
 /// 5. Need-to-know — exact token match when the label demands one.
 ///
 /// On permit, the resource's carried obligations (`NoEgress`/`OperatorOnly`) plus
-/// any decision-derived `DisplayOnly` are emitted as `PermitWithObligations`.
+/// any decision-derived `DisplayOnly` (display band) and `OriginatorControlled{scope}`
+/// (ORCON/ORCON-USGOV from the canonical controls axis, #48) are emitted as
+/// `PermitWithObligations`.
 pub fn decide(
     subject: &Subject,
     resource: &ResourceLabel,

@@ -1168,6 +1168,11 @@ mod tests {
             Obligation::OwnerConsent,
             Obligation::ReaderRecord,
             Obligation::OriginatorControlled { scope: None },
+            // #48: ORCON obligations are decision-derived (emitted), never carried —
+            // BOTH scopes rejected as carried (RC7: OriginatorControlled emission-only).
+            Obligation::OriginatorControlled {
+                scope: Some(RedisseminationScope::UsGov),
+            },
         ] {
             let mut b = mk_owned("USA");
             b.obligations = [bad.clone()].into_iter().collect();

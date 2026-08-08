@@ -77,5 +77,15 @@ fn orcon_relido_and_unclassified_rejected_both_arms() {
             validate_label(&r, &spif),
             Err(LabelInvalidity::Label)
         ));
+        assert_eq!(
+            decide(
+                &sub_classified("USA"),
+                &r,
+                Action::Read,
+                &purpose(""),
+                &spif
+            ),
+            Decision::Deny(DenyReason::InvalidLabel)
+        );
     }
 }
