@@ -55,9 +55,27 @@ pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
     Verdict::NotApplicable
 }
 
-/// Holds N backends; `decide` composes their verdicts via [`combine`]. Spec
-/// §13/§14 (N-ary MAC ∧ DAC). The kernel constructs this in a DCS build; a
-/// non-DCS build can use a single backend directly.
+/// Invoke a backend behind a **panic boundary** (spec §6, §15.4). A buggy or
+/// hostile `Authorizer` that panics is converted to `Indeterminate` — which
+/// `combine`/`finalize` turn into `Deny` — instead of letting the panic escape
+/// and crash the PDP or bypass composition. Any PDP host (the kernel) that
+/// invokes a single backend directly should route through this too.
+///
+/// `AssertUnwindSafe` is sound here: `decide` takes `&self`/`&Request` and
+/// returns an owned `Verdict`; a panic mid-decide leaves no shared state we
+/// observe — we discard the operand and deny.
+///
+/// (Relies on unwinding panics; under `panic = "abort"` a panicking backend
+/// aborts the process, which is still fail-closed — no wrong `Permit` is served.)
+pub fn guarded_decide(a: &dyn Authorizer, req: &Request) -> Verdict {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.decide(req)))
+        .unwrap_or(Verdict::Indeterminate)
+}
+
+/// Holds N backends; `decide` composes their verdicts via [`combine`], each
+/// behind [`guarded_decide`]. Spec §13/§14 (N-ary MAC ∧ DAC). The kernel
+/// constructs this in a DCS build; a non-DCS build can use a single backend
+/// directly (still via `guarded_decide`).
 pub struct ConjunctionAuthorizer {
     operands: Vec<Box<dyn Authorizer>>,
 }
@@ -70,7 +88,12 @@ impl ConjunctionAuthorizer {
 
 impl Authorizer for ConjunctionAuthorizer {
     fn decide(&self, req: &Request) -> Verdict {
-        combine(self.operands.iter().map(|a| a.decide(req)).collect())
+        combine(
+            self.operands
+                .iter()
+                .map(|a| guarded_decide(a.as_ref(), req))
+                .collect(),
+        )
     }
 }
 
@@ -211,5 +234,37 @@ mod tests {
             })),
         ]);
         assert!(matches!(c.decide(&req()), Verdict::Permit { .. }));
+    }
+
+    // ---- panic boundary (spec §6, §15.4) ----
+
+    struct Panics;
+    impl Authorizer for Panics {
+        fn decide(&self, _r: &Request) -> Verdict {
+            panic!("hostile/buggy backend");
+        }
+    }
+
+    #[test]
+    fn guarded_decide_converts_panic_to_indeterminate() {
+        // asserts Indeterminate specifically (not NotApplicable) so a mutant
+        // swapping the fallback is caught.
+        assert!(matches!(
+            guarded_decide(&Panics, &req()),
+            Verdict::Indeterminate
+        ));
+    }
+
+    #[test]
+    fn conjunction_denies_on_backend_panic_not_crash() {
+        // a panicking operand alongside a Permit must Deny, never fail-open,
+        // never escape the panic.
+        let c = ConjunctionAuthorizer::new(vec![
+            Box::new(Fixed(Verdict::Permit {
+                obligations: vec![],
+            })),
+            Box::new(Panics),
+        ]);
+        assert!(matches!(c.decide(&req()), Verdict::Deny { .. }));
     }
 }
