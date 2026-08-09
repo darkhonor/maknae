@@ -18,9 +18,16 @@
 //! permission-gated (`cfg(unix)`; non-Unix refuses), merge/precedence-resolved,
 //! with a schema-agnostic registry ([`SectionSpec`]/[`load_config`]). `core` is a
 //! reserved, base-only, optional section owned internally.
+//!
+//! Cycle ②c: the **core-section classification ceiling** — [`ceiling_from_core`]
+//! reads `core.handling.ceiling` (the lake's vocabulary, verbatim) into a typed
+//! [`Ceiling`] and projects it to the coarse ingest gate ([`Ceiling::ingest_posture`]
+//! → [`IngestPosture`]). Absent → Public baseline; present → strictly validated
+//! (`lake.schema.json` port); present-but-invalid → [`ConfigError::InvalidCeiling`].
 #![forbid(unsafe_code)]
 
 mod builder;
+mod ceiling;
 mod document;
 mod error;
 mod loader;
@@ -29,6 +36,7 @@ mod value;
 
 pub use loader::load_config;
 
+pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;
 pub use value::Value;
