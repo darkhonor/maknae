@@ -8,6 +8,7 @@ members = [
   "crates/maknae-llm",
   "crates/maknae-mcp",
   "crates/maknae-proto",
+  "crates/maknae-security",
   "crates/maknae-spif",
   "crates/maknae-spif-compile",
   "crates/maknae-subject-ctx",

@@ -21,16 +21,23 @@ exclude = [
 
 [t1]
 floor_production_region = 95
-# EMPTY at present. The security-critical DCS crate (maknae-dcs-core: lattice,
-# label, dominance, registry, ownership, controls) was relocated to a private
-# library; no in-tree production code carries a T1 obligation until Maknae's
-# security substance is rebuilt against the authorization seam. Re-populate as
-# T1 crates land.
-files = []
+# The authorization seam (maknae-security): the fail-closed reference-monitor
+# contract + composition. A broken combine/finalize/merge can return Permit for
+# a deny — the exact T1 line-drawing rule. Re-populates the cohort emptied when
+# the DCS engine relocated (2026-08-08).
+files = [
+  "crates/maknae-security/src/value.rs",
+  "crates/maknae-security/src/obligation.rs",
+  "crates/maknae-security/src/verdict.rs",
+  "crates/maknae-security/src/compose.rs",
+]
+# request.rs (pure struct decls) and authorizer.rs (trait decl only) have no
+# executable production regions → T3, not T1 (see below). The mutation set is the
+# whole crate regardless of tier, so they are still mutation-covered.
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
-# third parties. EMPTY while no security-critical crate is in-tree (see above).
-mutants_crates = []
+# third parties. Zero missed mutants required.
+mutants_crates = ["maknae-security"]
 
 [t2]
 floor_production_region = 90
@@ -41,21 +48,23 @@ files = []
 # new files meet their tier bars but do not implicitly join the cohort.
 # Re-baselining (extend cohort + recompute floor) is deliberate and recorded
 # here with provenance. Floor is int-only: floor(measured on the CI lane).
-ratchet_floor = 97
-# EMPTY cohort: the ratcheted maknae-dcs-core production files were relocated
-# to a private library. The floor value is retained as the high-water mark to
-# re-baseline against when T1 production code returns; with an empty cohort the
-# gate has no files to measure (inert, not lowered).
-ratchet_cohort = []
+ratchet_floor = 100
+# Re-baselined 2026-08-09 for the maknae-security seam (fresh cohort — the prior
+# maknae-dcs-core cohort relocated to a private library). Floor recomputed from a
+# clean measurement, NOT inherited from the DCS-era 97.88.
+ratchet_cohort = [
+  "crates/maknae-security/src/value.rs",
+  "crates/maknae-security/src/obligation.rs",
+  "crates/maknae-security/src/verdict.rs",
+  "crates/maknae-security/src/compose.rs",
+]
 
 [project.ratchet_provenance]
-# Cohort emptied 2026-08-08 when the DCS engine (maknae-dcs-core) was relocated
-# to a private library. The prior baseline (value 97.88, 2026-08-05, EPIC #33
-# Stage 1 cohort of decide/label/policy/subject/controls/ownership/registry) is
-# preserved here as provenance; floor 97 stands as the re-baseline target. When
-# T1 production code lands again, re-measure and record a fresh cohort.
-value = 97.88
-date = "2026-08-05"
+# Fresh cohort for the maknae-security seam crate. floor = floor(measured
+# production-region aggregate). DCS-era provenance (97.88, 2026-08-05) is
+# superseded — that cohort left with the private DCS library.
+value = 100.0
+date = "2026-08-09"
 lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merge"
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
 
@@ -84,6 +93,18 @@ why = "scaffold stub — re-tier at body landing"
 [[t3]]
 path = "crates/maknae-config/src/lib.rs"
 why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-security/src/lib.rs"
+why = "module declarations + re-exports only; no logic (the four logic files are T1)"
+
+[[t3]]
+path = "crates/maknae-security/src/request.rs"
+why = "type declarations (subject/resource/action/context/request) + derives; no hand-written executable logic that could turn a deny into a permit"
+
+[[t3]]
+path = "crates/maknae-security/src/authorizer.rs"
+why = "trait declaration only; no hand-written executable logic (impls live in backends)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
