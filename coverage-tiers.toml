@@ -48,6 +48,9 @@ files = [
   # mis-read ceiling widens the ingest gate → T1. In [t1].files ONLY (own 95%
   # floor; NOT ratchet_cohort, per ②a Task 8).
   "crates/maknae-config/src/ceiling.rs",
+  # kernel config-boot: the boot gate resolves the runtime ingest posture and must
+  # fail closed. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
+  "crates/maknae-kernel/src/boot.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -134,7 +137,7 @@ why = "bare Value enum + derives; no hand-written executable logic (zero product
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
-why = "scaffold stub — re-tier at body landing (T1 candidate: reference-monitor host)"
+why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"
