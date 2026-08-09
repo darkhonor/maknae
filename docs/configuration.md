@@ -76,7 +76,11 @@ path involved is checked: **no world/other permission bits at all** (`mode & 0o0
 
 Additional file rules:
 
-- A config path that is a **symlink** is refused.
+- **Symlinks inside the config tree are refused** — the base file `maknae.yaml`, the
+  `config.d/` directory, and every loaded `config.d/` entry must be real, not symlinks.
+  The **top-level `<config-dir>` itself may be a symlink**: it is canonicalized first,
+  then its (real) target is permission-checked. Symlink rejection applies to the
+  *contents* (the injection surface), not to the operator-chosen root path.
 - A config file that is **not a regular file** (FIFO, socket, device, directory) is
   refused *before* it is opened.
 - The group is a **trusted boundary** (group-readable/writable `660`/`770` are valid) —
@@ -154,31 +158,42 @@ past the *public* gate. The vocabulary is reused **verbatim** from the lake
 (`lake.yaml` / `lake.schema.json`), so the lake and the optional DCS classification
 backend read the same declaration.
 
-**The rule:**
+> **How it is read.** Loading the config *directory* carries the `core` section
+> verbatim (like any section) — the directory load does **not** itself validate the
+> ceiling. The ceiling is validated when Maknae **reads** it, through the typed reader
+> `ceiling_from_core`, which the kernel invokes at startup. The rule and errors below
+> describe that read. (Kernel wiring is forthcoming; until it lands, the reader exists
+> but nothing invokes it end-to-end.)
+
+**The rule** (applied when the ceiling is read):
 
 - **Absent → Public.** If `core`, or `core.handling`, is absent, the instance runs at
   the **Public baseline** — reach and ingest *publicly available* information only.
   This is the default deployment state; **you do not need to write it down.**
 - **Present → validated.** If `core.handling` is present, it is validated **strictly**
   (below). A conformant block is accepted.
-- **Present but invalid → refused.** A present-but-malformed `handling` block fails the
-  load (`InvalidCeiling`). It is **not** clamped or guessed. Omit the block for Public;
-  write it *completely and correctly* for anything above Public.
+- **Present but invalid → refused.** A present-but-malformed `handling` block is
+  rejected when the ceiling is read (`InvalidCeiling`) — the read fails, and the kernel
+  refuses to start. It is **not** clamped or guessed. Omit the block for Public; write
+  it *completely and correctly* for anything above Public.
 
 **The ingest gate** is a single coarse bit derived from the ceiling:
 
 | Posture | When |
 |---|---|
-| **`Public`** (reach-only) | the ceiling is **byte-for-byte** the baseline |
+| **`Public`** (reach-only) | the ceiling's **parsed values** equal the baseline |
 | **`Gated`** | the ceiling differs from the baseline in **any** way — higher, lower, or lateral (e.g. a higher level, CUI, SCI, a releasability set, a non-public *or empty* dissemination, or an accreditation reference) |
 
-The gate is `Public` **iff** the ceiling equals the baseline exactly; **any** deviation
-reads as `Gated` — including a more-*restrictive*-looking one (an empty
-`dissemination_permitted`, say). The coarse bit only answers "is this the wide-open
-Public default, or has the operator declared *something else*?"; interpreting *what*
-was declared (fine-grained lattice/dominance) is the optional DCS backend's job. The
-only way to reach `Gated` is a **valid, present** ceiling that differs from the
-baseline; no absence, typo, wrong type, or unknown key can widen the gate.
+The comparison is on the **parsed ceiling values**, not the source text — cosmetic YAML
+differences (quoting, whitespace, key order, flow vs. block) that parse to the same
+values are still `Public`. The gate is `Public` **iff** the parsed ceiling equals the
+baseline; **any** value deviation reads as `Gated` — including a
+more-*restrictive*-looking one (an empty `dissemination_permitted`, say). The coarse
+bit only answers "is this the wide-open Public default, or has the operator declared
+*something else*?"; interpreting *what* was declared (fine-grained lattice/dominance)
+is the optional DCS backend's job. The only way to reach `Gated` is a **valid, present**
+ceiling whose values differ from the baseline; no absence, typo, wrong type, or unknown
+key can widen the gate.
 
 #### `core.handling` fields
 
@@ -284,7 +299,10 @@ partial or wrong value is ever produced.
 
 ## 8. Validation and errors (fail-closed catalogue)
 
-Every failure below refuses the load. The names are the loader's error variants.
+Every failure below refuses the operation. The names are the config crate's error
+variants. All but the last are raised by the **directory load** itself; `InvalidCeiling`
+is raised by the **typed ceiling read** (`ceiling_from_core`, §4.1), which the kernel
+performs after the load.
 
 | Condition | Error |
 |---|---|
