@@ -30,14 +30,21 @@ files = [
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
   "crates/maknae-security/src/compose.rs",
+  # maknae-config loading core (parses untrusted config → policy; a mis-parse or
+  # dup-key bypass loads the wrong policy). value.rs is a bare enum (no production
+  # regions) → T3 below.
+  "crates/maknae-config/src/error.rs",
+  "crates/maknae-config/src/scalar.rs",
+  "crates/maknae-config/src/builder.rs",
+  "crates/maknae-config/src/lib.rs",
 ]
-# request.rs (pure struct decls) and authorizer.rs (trait decl only) have no
-# executable production regions → T3, not T1 (see below). The mutation set is the
-# whole crate regardless of tier, so they are still mutation-covered.
+# maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
+# declarations (no executable production regions) → T3, not T1. The mutation set
+# is the whole crate regardless of tier, so they stay mutation-covered.
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security"]
+mutants_crates = ["maknae-security", "maknae-config"]
 
 [t2]
 floor_production_region = 90
@@ -48,22 +55,30 @@ files = []
 # new files meet their tier bars but do not implicitly join the cohort.
 # Re-baselining (extend cohort + recompute floor) is deliberate and recorded
 # here with provenance. Floor is int-only: floor(measured on the CI lane).
-ratchet_floor = 100
-# Re-baselined 2026-08-09 for the maknae-security seam (fresh cohort — the prior
-# maknae-dcs-core cohort relocated to a private library). Floor recomputed from a
-# clean measurement, NOT inherited from the DCS-era 97.88.
+ratchet_floor = 99
+# Re-baselined 2026-08-09. Cohort = maknae-security seam (100%) + maknae-config
+# loading core. maknae-config/src/builder.rs sits at 98.31% region coverage: its
+# 3 uncovered regions are the provably-unreachable `if let Some(Partial::Seq/Map)
+# = stack.pop()` else-arms on Sequence/Mapping end (the parser guarantees balanced
+# Start/End, so pop() always matches) — defensive, uncoverable. Aggregate 99.23%
+# → floor(99.23) = 99. A justified cohort-extension re-baseline (ADR-0016 §4), not
+# a discretionary lowering; each T1 file still clears its own 95% floor.
 ratchet_cohort = [
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
   "crates/maknae-security/src/compose.rs",
+  "crates/maknae-config/src/error.rs",
+  "crates/maknae-config/src/scalar.rs",
+  "crates/maknae-config/src/builder.rs",
+  "crates/maknae-config/src/lib.rs",
 ]
 
 [project.ratchet_provenance]
-# Fresh cohort for the maknae-security seam crate. floor = floor(measured
-# production-region aggregate). DCS-era provenance (97.88, 2026-08-05) is
-# superseded — that cohort left with the private DCS library.
-value = 100.0
+# Cohort = maknae-security (100%) + maknae-config loading core. floor =
+# floor(measured aggregate). builder.rs's 3 unreachable defensive pop() branches
+# hold the aggregate at 99.23%. DCS-era provenance (97.88) superseded.
+value = 99.23
 date = "2026-08-09"
 lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merge"
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
@@ -91,10 +106,6 @@ path = "crates/maknae-audit/src/lib.rs"
 why = "scaffold stub — re-tier at body landing"
 
 [[t3]]
-path = "crates/maknae-config/src/lib.rs"
-why = "scaffold stub — re-tier at body landing"
-
-[[t3]]
 path = "crates/maknae-security/src/lib.rs"
 why = "module declarations + re-exports only; no logic (the four logic files are T1)"
 
@@ -105,6 +116,10 @@ why = "type declarations (subject/resource/action/context/request) + derives; no
 [[t3]]
 path = "crates/maknae-security/src/authorizer.rs"
 why = "trait declaration only; no hand-written executable logic (impls live in backends)"
+
+[[t3]]
+path = "crates/maknae-config/src/value.rs"
+why = "bare Value enum + derives; no hand-written executable logic (zero production regions)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
