@@ -7,6 +7,18 @@
 - **Supersedes:** Extends ADR-0002 (kernel is Rust) to all Maknae-authored components. Full container-architecture / abac supersession list is in the source spec header.
 - **Source spec:** `~/claude-memory/maknae/specs/2026-08-03-maknae-rust-workspace-topology-design.md` (v6.1; converged through the team's critical-review loop + operator review)
 
+> **Amendment (2026-08-10).** Decision 5's external-lake mechanism — the "boot-time
+> classification-match check (lake ceiling must be dominated by Maknae's authorization)"
+> reading `~/knowledgebase/lake.yaml` — is **superseded** by the embedded-config model.
+> Maknae is a separate product: it reads **only** its own config (`/etc/maknae`); the
+> standalone knowledge lake is prior-art reference, **never cloned, mounted, or read at
+> runtime**. The instance's authorization is `core.handling.ceiling` (`maknae-config`
+> cycle ②c), read at boot into a coarse `Public`/`Gated` ingest posture. Cross-object /
+> cross-file classification **dominance** remains deferred to the DCS scalpel. The
+> enforcement-locus / TCB-boundary substance of this ADR (decisions 1–4, 6–8) is
+> unchanged; only decision 5's lake-read *mechanism* is retired.
+> Ref: `~/claude-memory/maknae/specs/2026-08-09-maknae-kernel-config-boot.md`.
+
 ## Context
 
 A Multi-Level Secure system must be able to answer "where does enforcement actually live?" — the reference-monitor question (NIST SP 800-53 AC-25; DoD Zero Trust Reference Architecture's policy-decision/enforcement split). Enforcement that is only a function call inside a single address space has no locus a defender can point at: one memory-safety defect or dependency compromise in the untrusted agent loop reaches the decision logic directly. Maknae is therefore built as a native, all-Rust application (RPM/DEB/macOS + OCI) so the **process boundary can *be* the trust boundary**.
@@ -19,7 +31,7 @@ A Multi-Level Secure system must be able to answer "where does enforcement actua
 2. **Split kernel from birth (Approach B):** `maknaed` (trust plane) and `maknae` (CLI, untrusted interaction plane) are separate processes over a Unix socket, mutually authenticated with **mTLS (Vault-issued plane certs) + peer-creds**.
 3. **Structural capability separation (P1/P2):** privileged capabilities (`maknae-kernel`, `-subject-ctx-mint`, `-audit-append`, `-spif-compile`) live in separate crates the untrusted CLI cannot depend on; CI proves absence three ways (invert-tree resolver witness, shipped-artifact symbol/inventory witness, synthesized-fixture negative controls) and proves the gates fire.
 4. **Dual Vault-client identity (Microkosmos ADR 0006 + Consul-mesh):** both planes authenticate to the same Vault with their own AppRole + matching per-plane policy scoped to `pki/sign/<plane-role>`; keypairs generated locally, memory-only, fail-closed with no file fallback.
-5. **Consumer-only lake:** Maknae mounts a read-only, externally-curated lake; the only MVP gate is a boot-time classification-match check (lake ceiling must be dominated by Maknae's authorization). No ingest at MVP.
+5. **Consumer-only lake:** Maknae mounts a read-only, externally-curated lake; the only MVP gate is a boot-time classification-match check (lake ceiling must be dominated by Maknae's authorization). No ingest at MVP. **[Mechanism superseded 2026-08-10 — see the Amendment at the top of this ADR: Maknae reads only its own `/etc/maknae` config; no external lake read / no dominance boot gate.]**
 6. **Single session label, computed once** at hook C, reused for RLS and the hook-E egress screen; MVP labels are conservative/lake-wide (per-object derivation is DCS-engine work).
 7. **`maknae-spifc`** is setup-only tooling; the daemon holds no DDL credentials.
 8. **Configuration is YAML files, never ENV values;** dual-target packaging from one source tree; OpenAI-compatible model endpoints with per-endpoint dominance ceilings; MCP-client OAuth held in the trust plane.

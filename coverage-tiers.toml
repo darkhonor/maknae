@@ -48,6 +48,9 @@ files = [
   # mis-read ceiling widens the ingest gate → T1. In [t1].files ONLY (own 95%
   # floor; NOT ratchet_cohort, per ②a Task 8).
   "crates/maknae-config/src/ceiling.rs",
+  # kernel config-boot: the boot gate resolves the runtime ingest posture and must
+  # fail closed. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
+  "crates/maknae-kernel/src/boot.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -55,7 +58,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel"]
 
 [t2]
 floor_production_region = 90
@@ -98,7 +101,7 @@ command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
-why = "scaffold stub — re-tier at body landing (T1 candidate per the line-drawing rule: trust-plane entry point)"
+why = "thin main: arg resolve + boot + exit mapping; behavior exercised by tests/boot.rs"
 
 [[t3]]
 path = "bins/maknae/src/main.rs"
@@ -134,7 +137,7 @@ why = "bare Value enum + derives; no hand-written executable logic (zero product
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
-why = "scaffold stub — re-tier at body landing (T1 candidate: reference-monitor host)"
+why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"

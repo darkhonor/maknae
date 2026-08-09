@@ -33,6 +33,23 @@ values"*).
 Because the location is caller-supplied, this reference describes the **contents and
 rules** of the directory, independent of where a given deployment mounts it.
 
+### 1.1 How Maknae reads it at boot
+
+The trust-plane daemon (`maknaed`) resolves the config directory — a positional
+argument, defaulting to **`/etc/maknae`** — loads it, reads `core.handling.ceiling`
+into the runtime **ingest posture**, and **refuses to start (exit 1)** on any config
+error. A successful boot exits 0; there is **no run loop yet**, so `maknaed` is
+boot-check-only for now (under a `Type=simple` supervisor this reads as "started then
+exited" — expected until the run loop lands).
+
+- An **empty or `core`-less `maknae.yaml`** boots at the **Public baseline** (§4.1).
+- An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1) —
+  a fresh install with no `/etc/maknae` does not come up.
+- **Migration note:** the ceiling is read **only** from `core.handling.ceiling`. A
+  `handling` block placed under `lake` (as one might do migrating from an older
+  external-lake model) is **ignored** — the instance boots at Public. Put the ceiling
+  under `core`.
+
 ---
 
 ## 2. Directory layout
@@ -233,14 +250,14 @@ refuses the load. It never silently becomes `Gated`.
 
 ## 5. The `lake` section
 
-Maknae's long-term memory (the **lake**) does not carry its own config file — it reads
-its configuration from Maknae. **This reference — not the lake — is the authority for
-Maknae's `lake` section.** The lake *embedded in* a Maknae deployment is **mostly the
-same as, but not identical to,** a standalone lake's `lake.yaml`; where they differ,
-this document governs for a Maknae deployment.
+The **`lake`** section configures **Maknae's own** long-term-memory subsystem — a
+forthcoming Maknae feature, informed by the design of the standalone knowledge lake but
+a **separate product**. Maknae has no `~/knowledgebase`; it does not clone, mount, or
+read the standalone lake at runtime — that lake is **prior-art reference only**. This
+document is the authority for Maknae's `lake` section.
 
 - Its **classification ceiling** and **identity** come from **`core`** (§4) — one
-  declaration, inherited by the lake.
+  declaration.
 - Its **lake-specific** settings live in a **`lake`** section:
 
 ```yaml
@@ -250,15 +267,12 @@ lake:
   framework: {...}
 ```
 
-Today Maknae only **stores** a registered `lake` section in the loaded document
-(available to a consumer via the section accessor). There is **no lake integration yet**
-— nothing forwards the section to the lake, and neither the keys nor the shape are
-validated. Forwarding and validation land **when the lake integration is wired**
-(forthcoming); until then, a `lake` section is inert (stored, not effective). The
-`in_scope_domains`, `corpus_topology`, and `framework` keys will be documented in full
-**in this reference** as that integration lands. They parallel a standalone lake's
-fields, but a Maknae-embedded lake may diverge, so treat this document as the source of
-truth for a Maknae deployment.
+Today the `lake` section is **registered (reserved, inert)** at boot: a present `lake`
+block loads and is carried in the document (available to a consumer via the section
+accessor), but **nothing reads it yet** — neither the keys nor the shape are validated,
+and nothing is forwarded anywhere. The memory subsystem that consumes it lands in a
+following cycle; its `in_scope_domains`, `corpus_topology`, and `framework` keys will be
+documented in full **in this reference** as that subsystem is built.
 
 `core` is recognized **internally** and must **not** be registered — registering it is
 a `ReservedSection` error. The `lake` section, like any extension (§3), is **registered
