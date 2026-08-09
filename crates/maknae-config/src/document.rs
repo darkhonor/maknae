@@ -37,13 +37,19 @@ pub struct Document {
 impl Document {
     /// Loader-only constructor.
     pub(crate) fn new(sections: Vec<(String, Value, Source)>, overrides: Vec<Override>) -> Self {
-        Document { sections, overrides }
+        Document {
+            sections,
+            overrides,
+        }
     }
 
     /// The section's `Value`, or `None` for a registered-optional-absent (or
     /// unregistered) name. The subsystem parses the `Value` itself.
     pub fn section(&self, name: &str) -> Option<&Value> {
-        self.sections.iter().find(|(n, _, _)| n == name).map(|(_, v, _)| v)
+        self.sections
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, v, _)| v)
     }
 
     /// The audit trail of which source won each overridden section.
@@ -62,7 +68,11 @@ mod tests {
         let doc = Document::new(
             vec![
                 ("core".into(), Value::Int(1), Source::Base),
-                ("authz".into(), Value::Int(2), Source::ConfigD("cfg.yaml".into())),
+                (
+                    "authz".into(),
+                    Value::Int(2),
+                    Source::ConfigD("cfg.yaml".into()),
+                ),
             ],
             vec![Override {
                 section: "authz".into(),
