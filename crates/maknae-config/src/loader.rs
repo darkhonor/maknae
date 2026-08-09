@@ -36,7 +36,9 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
 
     let lst = std::fs::symlink_metadata(path).map_err(io_err)?; // missing → Io (cycle ① contract)
     if lst.file_type().is_symlink() {
-        return Err(ConfigError::Symlink { path: path.display().to_string() });
+        return Err(ConfigError::Symlink {
+            path: path.display().to_string(),
+        });
     }
     if !lst.file_type().is_file() {
         // Reject FIFOs/sockets/devices/dirs BEFORE the open: `File::open` on a FIFO
@@ -44,7 +46,10 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
         // maknae.yaml that is a FIFO would wedge the process). The residual
         // regular→FIFO lstat→open race is the same trusted-group-bounded race as the
         // symlink one; O_NONBLOCK+libc would close it fully (deferred with O_NOFOLLOW).
-        return Err(ConfigError::Io(format!("not a regular file: {}", path.display())));
+        return Err(ConfigError::Io(format!(
+            "not a regular file: {}",
+            path.display()
+        )));
     }
     let mut file = std::fs::File::open(path).map_err(io_err)?;
     let meta = file.metadata().map_err(io_err)?;
@@ -64,10 +69,14 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
 fn validate_specs(specs: &[SectionSpec]) -> Result<(), ConfigError> {
     for (i, s) in specs.iter().enumerate() {
         if s.name == CORE_SECTION {
-            return Err(ConfigError::ReservedSection { section: s.name.clone() });
+            return Err(ConfigError::ReservedSection {
+                section: s.name.clone(),
+            });
         }
         if specs[..i].iter().any(|p| p.name == s.name) {
-            return Err(ConfigError::DuplicateSpec { section: s.name.clone() });
+            return Err(ConfigError::DuplicateSpec {
+                section: s.name.clone(),
+            });
         }
     }
     Ok(())
@@ -90,7 +99,10 @@ impl<'a> Registry<'a> {
         name == CORE_SECTION || self.specs.iter().any(|s| s.name == name)
     }
     pub(crate) fn required_extensions(&self) -> impl Iterator<Item = &str> {
-        self.specs.iter().filter(|s| s.required).map(|s| s.name.as_str())
+        self.specs
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.name.as_str())
     }
 }
 
@@ -142,12 +154,17 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
     if cd_present {
         let m = std::fs::symlink_metadata(&cd).map_err(io_err)?;
         if m.file_type().is_symlink() {
-            return Err(ConfigError::Symlink { path: cd.display().to_string() });
+            return Err(ConfigError::Symlink {
+                path: cd.display().to_string(),
+            });
         }
         if !m.is_dir() {
             // Synthesized Io (config.d exists but is the wrong kind of thing) rather
             // than a converted io::Error — io_err deliberately does NOT apply here.
-            return Err(ConfigError::Io(format!("config.d is not a directory: {}", cd.display())));
+            return Err(ConfigError::Io(format!(
+                "config.d is not a directory: {}",
+                cd.display()
+            )));
         }
         if !mode_is_secure(m.mode()) {
             return Err(ConfigError::InsecurePermissions {
@@ -167,7 +184,9 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
             let ft = ent.file_type().map_err(io_err)?;
             // (2) symlink or subdirectory → error (checked before extension)
             if ft.is_symlink() {
-                return Err(ConfigError::Symlink { path: ent.path().display().to_string() });
+                return Err(ConfigError::Symlink {
+                    path: ent.path().display().to_string(),
+                });
             }
             if ft.is_dir() {
                 return Err(ConfigError::Io(format!(
@@ -217,7 +236,8 @@ pub(crate) fn assemble(
     // sections; a non-Map/Null root → NotAMap.
     let mut parsed: Vec<(Source, Vec<(String, Value)>)> = Vec::new();
     for (source, body) in buffers {
-        let map = match load_str(&body)? { // cycle ①: parse errors propagate as-is
+        let map = match load_str(&body)? {
+            // cycle ①: parse errors propagate as-is
             Value::Null => Vec::new(),
             Value::Map(m) => m,
             _ => {
@@ -240,7 +260,10 @@ pub(crate) fn assemble(
         for (key, val) in map {
             // (3a) unknown (matches no spec and isn't reserved)
             if !reg.is_known(&key) {
-                return Err(ConfigError::UnknownSection { section: key, source_path });
+                return Err(ConfigError::UnknownSection {
+                    section: key,
+                    source_path,
+                });
             }
             match &source {
                 Source::Base => {
@@ -278,7 +301,9 @@ pub(crate) fn assemble(
     // (4) required extensions must be present.
     for name in reg.required_extensions() {
         if !sections.iter().any(|(n, _, _)| n == name) {
-            return Err(ConfigError::MissingSection { section: name.to_string() });
+            return Err(ConfigError::MissingSection {
+                section: name.to_string(),
+            });
         }
     }
 
@@ -318,7 +343,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn spec(name: &str, required: bool) -> SectionSpec {
-        SectionSpec { name: name.into(), required }
+        SectionSpec {
+            name: name.into(),
+            required,
+        }
     }
 
     // ---- spec validation + registry (platform-agnostic) ----
@@ -359,18 +387,31 @@ mod tests {
 
     // ---- assemble: merge / precedence (platform-agnostic) ----
 
-    fn reg(specs: &[SectionSpec]) -> Registry<'_> { Registry { specs } }
-    fn base(body: &str) -> (Source, String) { (Source::Base, body.into()) }
-    fn cd(name: &str, body: &str) -> (Source, String) { (Source::ConfigD(name.into()), body.into()) }
+    fn reg(specs: &[SectionSpec]) -> Registry<'_> {
+        Registry { specs }
+    }
+    fn base(body: &str) -> (Source, String) {
+        (Source::Base, body.into())
+    }
+    fn cd(name: &str, body: &str) -> (Source, String) {
+        (Source::ConfigD(name.into()), body.into())
+    }
 
     #[test]
     fn base_plus_configd_override_recorded() {
         let specs = [spec("authz", false)];
         let doc = assemble(
-            vec![base("core:\n  a: 1\nauthz:\n  x: 1\n"), cd("z.yaml", "authz:\n  x: 2\n")],
+            vec![
+                base("core:\n  a: 1\nauthz:\n  x: 1\n"),
+                cd("z.yaml", "authz:\n  x: 2\n"),
+            ],
             &reg(&specs),
-        ).unwrap();
-        assert_eq!(doc.section("authz"), Some(&Value::Map(vec![("x".into(), Value::Int(2))])));
+        )
+        .unwrap();
+        assert_eq!(
+            doc.section("authz"),
+            Some(&Value::Map(vec![("x".into(), Value::Int(2))]))
+        );
         assert_eq!(doc.overrides().len(), 1);
         assert_eq!(doc.overrides()[0].section, "authz");
         assert!(matches!(doc.overrides()[0].winner, Source::ConfigD(_)));
@@ -392,13 +433,19 @@ mod tests {
         // base label, config.d → the file's path label.
         let specs: [SectionSpec; 0] = [];
         match assemble(vec![base("mystery:\n  a: 1\n")], &reg(&specs)) {
-            Err(ConfigError::UnknownSection { section, source_path }) => {
+            Err(ConfigError::UnknownSection {
+                section,
+                source_path,
+            }) => {
                 assert_eq!(section, "mystery");
                 assert_eq!(source_path, "maknae.yaml");
             }
             other => panic!("expected UnknownSection from base, got {other:?}"),
         }
-        match assemble(vec![base(""), cd("z.yaml", "weird:\n  a: 1\n")], &reg(&specs)) {
+        match assemble(
+            vec![base(""), cd("z.yaml", "weird:\n  a: 1\n")],
+            &reg(&specs),
+        ) {
             Err(ConfigError::UnknownSection { source_path, .. }) => {
                 assert_eq!(source_path, "z.yaml");
             }
@@ -412,7 +459,10 @@ mod tests {
         // a *later* buffer must win over an UnknownSection in an *earlier* one.
         let specs: [SectionSpec; 0] = [];
         assert!(matches!(
-            assemble(vec![base("mystery:\n  a: 1\n"), cd("z.yaml", "- 1\n- 2\n")], &reg(&specs)),
+            assemble(
+                vec![base("mystery:\n  a: 1\n"), cd("z.yaml", "- 1\n- 2\n")],
+                &reg(&specs)
+            ),
             Err(ConfigError::NotAMap { .. })
         ));
     }
@@ -421,7 +471,10 @@ mod tests {
     fn core_in_configd_rejected() {
         let specs: [SectionSpec; 0] = [];
         assert!(matches!(
-            assemble(vec![base("core:\n  a: 1\n"), cd("z.yaml", "core:\n  a: 2\n")], &reg(&specs)),
+            assemble(
+                vec![base("core:\n  a: 1\n"), cd("z.yaml", "core:\n  a: 2\n")],
+                &reg(&specs)
+            ),
             Err(ConfigError::CoreOverride)
         ));
     }
@@ -478,7 +531,10 @@ mod tests {
     fn optional_core_present_in_base_ok() {
         let specs: [SectionSpec; 0] = [];
         let doc = assemble(vec![base("core:\n  a: 1\n")], &reg(&specs)).unwrap();
-        assert_eq!(doc.section("core"), Some(&Value::Map(vec![("a".into(), Value::Int(1))])));
+        assert_eq!(
+            doc.section("core"),
+            Some(&Value::Map(vec![("a".into(), Value::Int(1))]))
+        );
     }
 
     // ---- unix: secure per-file read (cfg(unix)) ----
@@ -512,7 +568,9 @@ mod tests {
         write_mode(&p, "x: 1\n", 0o644);
         let got = read_secure(&p);
         let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(ConfigError::InsecurePermissions { mode, .. }) if mode & 0o007 != 0));
+        assert!(
+            matches!(got, Err(ConfigError::InsecurePermissions { mode, .. }) if mode & 0o007 != 0)
+        );
     }
 
     #[cfg(unix)]
@@ -584,7 +642,9 @@ mod tests {
     struct Dir(PathBuf);
     #[cfg(unix)]
     impl Drop for Dir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
     #[cfg(unix)]
     fn new_dir(tag: &str) -> Dir {
@@ -622,8 +682,8 @@ mod tests {
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
         put(&cd, "b.yml", "llm:\n  x: 1\n", 0o640);
         put(&cd, "a.yaml", "authz:\n  y: 1\n", 0o640);
-        put(&cd, "README.md", "ignore me\n", 0o640);   // ignored
-        put(&cd, ".#a.yaml", "dotfile\n", 0o640);       // skipped (dotfile)
+        put(&cd, "README.md", "ignore me\n", 0o640); // ignored
+        put(&cd, ".#a.yaml", "dotfile\n", 0o640); // skipped (dotfile)
         let bufs = scan_dir(&d.0).unwrap();
         // base, then a.yaml, then b.yml
         assert_eq!(bufs.len(), 3);
@@ -644,7 +704,10 @@ mod tests {
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o772)).unwrap();
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::InsecurePermissions { .. })));
+        assert!(matches!(
+            scan_dir(&d.0),
+            Err(ConfigError::InsecurePermissions { .. })
+        ));
     }
 
     #[cfg(unix)]
