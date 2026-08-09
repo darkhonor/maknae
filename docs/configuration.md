@@ -69,7 +69,11 @@ The configuration can carry policy, so it must not be world-accessible. On Unix,
 path involved is checked: **no world/other permission bits at all** (`mode & 0o007 == 0`
 — no world read, write, *or* execute).
 
-| Path | Valid modes | Rejected |
+The **only** check is `mode & 0o007 == 0` — *any* mode with no world/other bit is
+valid (`600`, `640`, `660`, `440`, `750`, `770`, `700`, …); the modes below are
+**recommended examples**, not an exhaustive allowlist.
+
+| Path | Recommended modes | Rejected |
 |---|---|---|
 | Config files (`maknae.yaml`, `config.d/*.yaml`) | `640`, `660`, `600` | anything with a world/other bit (e.g. `644`) |
 | Directories (`<config-dir>`, `config.d/`) | `750`, `770`, `700` | anything with a world/other bit (e.g. `775`, world-writable `0o772`) |
@@ -97,12 +101,19 @@ Additional file rules:
 ## 3. Sections and precedence
 
 A configuration file is a YAML **mapping** whose top-level keys are **sections**. Each
-section's value is itself a mapping owned by one subsystem.
+section is owned by one subsystem; a section's value is *conventionally* a mapping, but
+**the config loader is schema-agnostic** — it carries whatever `Value` the section
+holds and does **not** enforce its shape. The **owning subsystem** validates the
+section when it reads it. So a wrong-shaped section (e.g. `core: 1`, `lake: false`)
+*loads*; it is caught — or, per §4.1 for a non-map `core`, treated as the Public
+baseline — only when its consumer reads it.
 
-- **`core`** is owned by `maknae-config` itself (§4).
+- **`core`** is owned by `maknae-config` itself (§4). A non-map `core` value yields no
+  `handling` block → the Public baseline (§4.1).
 - Every other section is an **extension** owned by a subsystem, which must be
   **registered** before load. An **unregistered** top-level key is a hard error
-  (`UnknownSection`) — a typo'd or unknown section never loads silently.
+  (`UnknownSection`) — a typo'd or unknown section never loads silently. (The section's
+  *shape* is still the subsystem's to validate.)
 
 ### 3.1 Merge and precedence
 
