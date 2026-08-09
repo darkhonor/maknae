@@ -12,6 +12,12 @@
 //! best-effort (a downstream workspace / `RUSTFLAGS=-Cpanic=abort` can override).
 //! Even then the failure mode is a **process abort (fail-closed)** on a malformed/
 //! deep config: no wrong `Value` is ever produced — never a fail-open.
+//!
+//! Cycle ②a: the **document model + extension registry** — a config *directory*
+//! (`maknae.yaml` + `config.d/*.{yaml,yml}`) → a [`Document`] of named sections,
+//! permission-gated (`cfg(unix)`; non-Unix refuses), merge/precedence-resolved,
+//! with a schema-agnostic registry ([`SectionSpec`]/[`load_config`]). `core` is a
+//! reserved, base-only, optional section owned internally.
 #![forbid(unsafe_code)]
 
 mod builder;

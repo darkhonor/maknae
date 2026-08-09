@@ -247,27 +247,38 @@ pub(crate) fn assemble(
 /// permission-gated read is `cfg(unix)`, and non-Unix refuses to load.
 pub fn load_config(dir: &Path, specs: &[SectionSpec]) -> Result<Document, ConfigError> {
     validate_specs(specs)?;
-    load_config_impl(dir, specs)
-}
 
-#[cfg(not(unix))]
-fn load_config_impl(_dir: &Path, _specs: &[SectionSpec]) -> Result<Document, ConfigError> {
-    Err(ConfigError::PermissionsUnsupported)
-}
+    #[cfg(not(unix))]
+    {
+        // The Unix permission model is unavailable on this target; refuse to load
+        // rather than proceed unchecked (spec §3, fail-closed). Not exercisable on
+        // a unix CI runner, hence no mutation/coverage obligation on this block.
+        let _ = (dir, specs);
+        return Err(ConfigError::PermissionsUnsupported);
+    }
 
-#[cfg(unix)]
-fn load_config_impl(dir: &Path, specs: &[SectionSpec]) -> Result<Document, ConfigError> {
-    let buffers = scan_dir(dir)?;
-    assemble(buffers, &Registry { specs })
+    #[cfg(unix)]
+    {
+        let buffers = scan_dir(dir)?;
+        assemble(buffers, &Registry { specs })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn spec(name: &str, required: bool) -> SectionSpec {
         SectionSpec { name: name.into(), required }
     }
+
+    // ---- spec validation + registry (platform-agnostic) ----
 
     #[test]
     fn validate_rejects_reserved_name() {
@@ -302,223 +313,10 @@ mod tests {
         assert!(!reg.is_known("nope"));
         assert_eq!(reg.required_extensions().collect::<Vec<_>>(), vec!["authz"]);
     }
-}
 
-#[cfg(all(test, unix))]
-mod unix_read_tests {
-    use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    // Each test uses a unique temp path (no external tempdir dep).
-    fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("maknae_2a_{}_{name}", std::process::id()))
-    }
-
-    fn write_mode(path: &std::path::Path, body: &str, mode: u32) {
-        let mut f = std::fs::File::create(path).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    #[test]
-    fn secure_read_ok_640() {
-        let p = tmp("ok");
-        write_mode(&p, "x: 1\n", 0o640);
-        let got = read_secure(&p);
-        let _ = std::fs::remove_file(&p);
-        assert_eq!(got.unwrap(), "x: 1\n");
-    }
-
-    #[test]
-    fn world_readable_file_rejected() {
-        let p = tmp("644");
-        write_mode(&p, "x: 1\n", 0o644);
-        let got = read_secure(&p);
-        let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(ConfigError::InsecurePermissions { mode, .. }) if mode & 0o007 != 0));
-    }
-
-    #[test]
-    fn symlink_rejected() {
-        let target = tmp("sl_target");
-        let link = tmp("sl_link");
-        write_mode(&target, "x: 1\n", 0o640);
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let got = read_secure(&link);
-        let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_file(&target);
-        assert!(matches!(got, Err(ConfigError::Symlink { .. })));
-    }
-
-    #[test]
-    fn missing_file_is_io() {
-        let got = read_secure(&tmp("nope_never_created"));
-        assert!(matches!(got, Err(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn non_utf8_at_secure_mode_is_io() {
-        // A 0o640 file with invalid UTF-8: passes the symlink + mode checks, fails
-        // at read_to_string (InvalidData) → Io. Covers read_secure's read arm; the
-        // spec §3 non-UTF-8→Io claim is a NEW path (does not reuse cycle ①'s load_file).
-        let p = tmp("badutf8");
-        std::fs::write(&p, [0xff, 0xfe, 0x00]).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let got = read_secure(&p);
-        let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn mode_mask_helper() {
-        assert!(mode_is_secure(0o640) && mode_is_secure(0o600));
-        assert!(!mode_is_secure(0o644) && !mode_is_secure(0o642) && !mode_is_secure(0o641));
-    }
-}
-
-#[cfg(all(test, unix))]
-mod unix_scan_tests {
-    use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    struct Dir(PathBuf);
-    impl Drop for Dir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
-    }
-    fn new_dir(tag: &str) -> Dir {
-        let p = std::env::temp_dir().join(format!("maknae_2a_scan_{}_{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o750)).unwrap();
-        Dir(p)
-    }
-    fn put(dir: &std::path::Path, name: &str, body: &str, mode: u32) {
-        let p = dir.join(name);
-        let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    #[test]
-    fn base_only_when_no_config_d() {
-        let d = new_dir("baseonly");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let bufs = scan_dir(&d.0).unwrap();
-        assert_eq!(bufs.len(), 1);
-        assert!(matches!(bufs[0].0, Source::Base));
-    }
-
-    #[test]
-    fn config_d_files_sorted_and_yml_included() {
-        let d = new_dir("sorted");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let cd = d.0.join("config.d");
-        std::fs::create_dir(&cd).unwrap();
-        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
-        put(&cd, "b.yml", "llm:\n  x: 1\n", 0o640);
-        put(&cd, "a.yaml", "authz:\n  y: 1\n", 0o640);
-        put(&cd, "README.md", "ignore me\n", 0o640);   // ignored
-        put(&cd, ".#a.yaml", "dotfile\n", 0o640);       // skipped (dotfile)
-        let bufs = scan_dir(&d.0).unwrap();
-        // base, then a.yaml, then b.yml
-        assert_eq!(bufs.len(), 3);
-        assert!(matches!(bufs[0].0, Source::Base));
-        match (&bufs[1].0, &bufs[2].0) {
-            (Source::ConfigD(p1), Source::ConfigD(p2)) => {
-                assert!(p1.ends_with("a.yaml") && p2.ends_with("b.yml"));
-            }
-            _ => panic!("expected two ConfigD sources in lexical order"),
-        }
-    }
-
-    #[test]
-    fn world_writable_config_d_rejected() {
-        let d = new_dir("wwcd");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let cd = d.0.join("config.d");
-        std::fs::create_dir(&cd).unwrap();
-        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o772)).unwrap();
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::InsecurePermissions { .. })));
-    }
-
-    #[test]
-    fn symlinked_config_d_entry_rejected() {
-        let d = new_dir("slentry");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let cd = d.0.join("config.d");
-        std::fs::create_dir(&cd).unwrap();
-        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
-        let target = d.0.join("outside.yaml");
-        put(&d.0, "outside.yaml", "authz:\n  y: 1\n", 0o640);
-        std::os::unix::fs::symlink(&target, cd.join("evil.yaml")).unwrap();
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
-    }
-
-    #[test]
-    fn subdir_in_config_d_rejected() {
-        let d = new_dir("subdir");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let cd = d.0.join("config.d");
-        std::fs::create_dir(&cd).unwrap();
-        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
-        let sub = cd.join("nested.yaml"); // a *directory* named like a yaml file
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn config_d_itself_a_symlink_rejected() {
-        // LOCKED §3 control: the config.d SUBDIR must be a real dir, not a symlink.
-        // (Distinct from an entry INSIDE config.d being a symlink.)
-        let d = new_dir("cdsymlink");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        let real = d.0.join("real_confd");
-        std::fs::create_dir(&real).unwrap();
-        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o750)).unwrap();
-        std::os::unix::fs::symlink(&real, d.0.join("config.d")).unwrap();
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
-    }
-
-    #[test]
-    fn config_d_is_a_regular_file_rejected() {
-        // The `!m.is_dir()` arm: a plain file named config.d.
-        let d = new_dir("cdfile");
-        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
-        put(&d.0, "config.d", "not a dir\n", 0o640);
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn missing_base_is_io() {
-        let d = new_dir("nobase");
-        // no maknae.yaml
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn nonexistent_dir_is_io() {
-        // canonicalize() fails on a non-existent path → Io (covers the canonicalize
-        // error arm + io_err's body; root-safe, unlike a File::open EACCES test).
-        let p = std::env::temp_dir().join(format!("maknae_2a_nope_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        assert!(matches!(scan_dir(&p), Err(ConfigError::Io(_))));
-    }
-}
-
-#[cfg(test)]
-mod assemble_tests {
-    use super::*;
-    use crate::Value;
+    // ---- assemble: merge / precedence (platform-agnostic) ----
 
     fn reg(specs: &[SectionSpec]) -> Registry<'_> { Registry { specs } }
-    fn spec(name: &str, required: bool) -> SectionSpec { SectionSpec { name: name.into(), required } }
-
     fn base(body: &str) -> (Source, String) { (Source::Base, body.into()) }
     fn cd(name: &str, body: &str) -> (Source, String) { (Source::ConfigD(name.into()), body.into()) }
 
@@ -607,5 +405,228 @@ mod assemble_tests {
         let specs: [SectionSpec; 0] = [];
         let doc = assemble(vec![base("core:\n  a: 1\n")], &reg(&specs)).unwrap();
         assert_eq!(doc.section("core"), Some(&Value::Map(vec![("a".into(), Value::Int(1))])));
+    }
+
+    // ---- unix: secure per-file read (cfg(unix)) ----
+
+    #[cfg(unix)]
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("maknae_2a_{}_{name}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn write_mode(path: &std::path::Path, body: &str, mode: u32) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_read_ok_640() {
+        let p = tmp("ok");
+        write_mode(&p, "x: 1\n", 0o640);
+        let got = read_secure(&p);
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), "x: 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_readable_file_rejected() {
+        let p = tmp("644");
+        write_mode(&p, "x: 1\n", 0o644);
+        let got = read_secure(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(matches!(got, Err(ConfigError::InsecurePermissions { mode, .. }) if mode & 0o007 != 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_rejected() {
+        let target = tmp("sl_target");
+        let link = tmp("sl_link");
+        write_mode(&target, "x: 1\n", 0o640);
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let got = read_secure(&link);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+        assert!(matches!(got, Err(ConfigError::Symlink { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_file_is_io() {
+        let got = read_secure(&tmp("nope_never_created"));
+        assert!(matches!(got, Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_at_secure_mode_is_io() {
+        // A 0o640 file with invalid UTF-8: passes the symlink + mode checks, fails
+        // at read_to_string (InvalidData) → Io. Covers read_secure's read arm; the
+        // spec §3 non-UTF-8→Io claim is a NEW path (does not reuse cycle ①'s load_file).
+        let p = tmp("badutf8");
+        std::fs::write(&p, [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let got = read_secure(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(matches!(got, Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_mask_helper() {
+        assert!(mode_is_secure(0o640) && mode_is_secure(0o600));
+        assert!(!mode_is_secure(0o644) && !mode_is_secure(0o642) && !mode_is_secure(0o641));
+    }
+
+    // ---- unix: config-dir scan + classification (cfg(unix)) ----
+
+    #[cfg(unix)]
+    struct Dir(PathBuf);
+    #[cfg(unix)]
+    impl Drop for Dir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    #[cfg(unix)]
+    fn new_dir(tag: &str) -> Dir {
+        let p = std::env::temp_dir().join(format!("maknae_2a_scan_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o750)).unwrap();
+        Dir(p)
+    }
+    #[cfg(unix)]
+    fn put(dir: &std::path::Path, name: &str, body: &str, mode: u32) {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn base_only_when_no_config_d() {
+        let d = new_dir("baseonly");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let bufs = scan_dir(&d.0).unwrap();
+        assert_eq!(bufs.len(), 1);
+        assert!(matches!(bufs[0].0, Source::Base));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_d_files_sorted_and_yml_included() {
+        let d = new_dir("sorted");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "b.yml", "llm:\n  x: 1\n", 0o640);
+        put(&cd, "a.yaml", "authz:\n  y: 1\n", 0o640);
+        put(&cd, "README.md", "ignore me\n", 0o640);   // ignored
+        put(&cd, ".#a.yaml", "dotfile\n", 0o640);       // skipped (dotfile)
+        let bufs = scan_dir(&d.0).unwrap();
+        // base, then a.yaml, then b.yml
+        assert_eq!(bufs.len(), 3);
+        assert!(matches!(bufs[0].0, Source::Base));
+        match (&bufs[1].0, &bufs[2].0) {
+            (Source::ConfigD(p1), Source::ConfigD(p2)) => {
+                assert!(p1.ends_with("a.yaml") && p2.ends_with("b.yml"));
+            }
+            _ => panic!("expected two ConfigD sources in lexical order"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_config_d_rejected() {
+        let d = new_dir("wwcd");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o772)).unwrap();
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::InsecurePermissions { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_config_d_entry_rejected() {
+        let d = new_dir("slentry");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let target = d.0.join("outside.yaml");
+        put(&d.0, "outside.yaml", "authz:\n  y: 1\n", 0o640);
+        std::os::unix::fs::symlink(&target, cd.join("evil.yaml")).unwrap();
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subdir_in_config_d_rejected() {
+        let d = new_dir("subdir");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let sub = cd.join("nested.yaml"); // a *directory* named like a yaml file
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_d_itself_a_symlink_rejected() {
+        // LOCKED §3 control: the config.d SUBDIR must be a real dir, not a symlink.
+        // (Distinct from an entry INSIDE config.d being a symlink.)
+        let d = new_dir("cdsymlink");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let real = d.0.join("real_confd");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::os::unix::fs::symlink(&real, d.0.join("config.d")).unwrap();
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_d_is_a_regular_file_rejected() {
+        // The `!m.is_dir()` arm: a plain file named config.d. Assert the SYNTHESIZED
+        // message (not just Io): with the `!m.is_dir()` guard mutated away, a regular
+        // config.d falls through to read_dir → also Io, but with a different (os-error)
+        // message — so a bare `Err(Io)` assert wouldn't kill that mutant.
+        let d = new_dir("cdfile");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        put(&d.0, "config.d", "not a dir\n", 0o640);
+        match scan_dir(&d.0) {
+            Err(ConfigError::Io(msg)) => {
+                assert!(msg.contains("config.d is not a directory"), "msg: {msg}");
+            }
+            other => panic!("expected Io(config.d is not a directory), got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_base_is_io() {
+        let d = new_dir("nobase");
+        // no maknae.yaml
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonexistent_dir_is_io() {
+        // canonicalize() fails on a non-existent path → Io (covers the canonicalize
+        // error arm + io_err's body; root-safe, unlike a File::open EACCES test).
+        let p = std::env::temp_dir().join(format!("maknae_2a_nope_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        assert!(matches!(scan_dir(&p), Err(ConfigError::Io(_))));
     }
 }

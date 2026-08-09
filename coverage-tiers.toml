@@ -37,6 +37,13 @@ files = [
   "crates/maknae-config/src/scalar.rs",
   "crates/maknae-config/src/builder.rs",
   "crates/maknae-config/src/lib.rs",
+  # cycle ②a: the document model + extension registry. loader.rs is the
+  # permission gate + merge/precedence (a mis-parse loads the wrong policy or a
+  # weakened ceiling → T1). document.rs has executable regions (section() scan).
+  # In [t1].files ONLY — NOT ratchet_cohort (each clears its own 95% floor; the
+  # 99 aggregate is the seam+cycle-① cohort, ADR-0016 §4).
+  "crates/maknae-config/src/document.rs",
+  "crates/maknae-config/src/loader.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
