@@ -29,7 +29,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Panic strategy must be unwind (maknae-config catch_unwind boundary depends on it)
         run: |
-          if grep -rEln 'panic[[:space:]]*=[[:space:]]*"abort"' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml; then
+          if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
             echo "ERROR: a manifest sets panic = \"abort\"; maknae-config's fail-closed parse boundary requires unwind"; exit 1
           fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)

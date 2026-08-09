@@ -149,8 +149,17 @@ fn v_scalar_typing() {
 
 #[test]
 fn v_inf_rejected() {
+    // both spellings of infinity: the literal `.inf` and the overflow `1e999`
     assert!(matches!(
         load_str("x: .inf\n"),
+        Err(ConfigError::Parse { .. })
+    ));
+    assert!(matches!(
+        load_str("x: 1e999\n"),
+        Err(ConfigError::Parse { .. })
+    ));
+    assert!(matches!(
+        load_str("x: -1e999\n"),
         Err(ConfigError::Parse { .. })
     ));
 }

@@ -45,9 +45,9 @@ impl Builder {
     }
 
     /// The `(line, col)` stashed just before the depth `panic!`, read after
-    /// `catch_unwind` catches it. Our depth panic is the only panic that occurs
-    /// (yaml-rust2's internal asserts are unreachable in practice), so this is
-    /// always the depth violation's location when a catch fires.
+    /// `catch_unwind` catches it. The depth panic is the only panic reached in
+    /// fuzzing (yaml-rust2's internal asserts were not triggered by any tested
+    /// input), so this is the depth violation's location when a catch fires.
     pub(crate) fn depth_loc(&self) -> (usize, usize) {
         self.depth_loc
     }

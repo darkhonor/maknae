@@ -18,7 +18,13 @@ pub(crate) fn resolve_scalar(value: String, style: TScalarStyle) -> Result<Value
         Yaml::Null => Ok(Value::Null),
         Yaml::Boolean(b) => Ok(Value::Bool(b)),
         Yaml::Integer(i) => Ok(Value::Int(i)),
-        Yaml::Real(s) => f64::from_str(&s).map(Value::Float).map_err(|_| ()),
+        // Reject non-finite: `f64::from_str` returns Ok(inf) on magnitude overflow
+        // (`1e999`), not Err — so filter for finiteness, else the ".inf"/"1e999"
+        // spellings of infinity would diverge (a config needs no infinities).
+        Yaml::Real(s) => match f64::from_str(&s) {
+            Ok(f) if f.is_finite() => Ok(Value::Float(f)),
+            _ => Err(()),
+        },
         // String (reachable, e.g. "hi") + the variants from_str cannot emit → string.
         _ => Ok(Value::Str(value)),
     }
@@ -67,5 +73,15 @@ mod tests {
     #[test]
     fn unparseable_real_is_err() {
         assert_eq!(resolve_scalar(".inf".into(), TScalarStyle::Plain), Err(()));
+    }
+
+    #[test]
+    fn overflow_to_infinity_is_err() {
+        // `1e999` parses to Ok(inf) via f64::from_str — must be rejected, not carried.
+        assert_eq!(resolve_scalar("1e999".into(), TScalarStyle::Plain), Err(()));
+        assert_eq!(
+            resolve_scalar("-1e999".into(), TScalarStyle::Plain),
+            Err(())
+        );
     }
 }
