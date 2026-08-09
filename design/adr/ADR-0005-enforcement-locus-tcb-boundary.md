@@ -7,6 +7,18 @@
 - **Supersedes:** Extends ADR-0002 (kernel is Rust) to all Maknae-authored components. Full container-architecture / abac supersession list is in the source spec header.
 - **Source spec:** `~/claude-memory/maknae/specs/2026-08-03-maknae-rust-workspace-topology-design.md` (v6.1; converged through the team's critical-review loop + operator review)
 
+> **Amendment (2026-08-10).** Decision 5's external-lake mechanism — the "boot-time
+> classification-match check (lake ceiling must be dominated by Maknae's authorization)"
+> reading `~/knowledgebase/lake.yaml` — is **superseded** by the embedded-config model.
+> Maknae is a separate product: it reads **only** its own config (`/etc/maknae`); the
+> standalone knowledge lake is prior-art reference, **never cloned, mounted, or read at
+> runtime**. The instance's authorization is `core.handling.ceiling` (`maknae-config`
+> cycle ②c), read at boot into a coarse `Public`/`Gated` ingest posture. Cross-object /
+> cross-file classification **dominance** remains deferred to the DCS scalpel. The
+> enforcement-locus / TCB-boundary substance of this ADR (decisions 1–4, 6–8) is
+> unchanged; only decision 5's lake-read *mechanism* is retired.
+> Ref: `~/claude-memory/maknae/specs/2026-08-09-maknae-kernel-config-boot.md`.
+
 ## Context
 
 A Multi-Level Secure system must be able to answer "where does enforcement actually live?" — the reference-monitor question (NIST SP 800-53 AC-25; DoD Zero Trust Reference Architecture's policy-decision/enforcement split). Enforcement that is only a function call inside a single address space has no locus a defender can point at: one memory-safety defect or dependency compromise in the untrusted agent loop reaches the decision logic directly. Maknae is therefore built as a native, all-Rust application (RPM/DEB/macOS + OCI) so the **process boundary can *be* the trust boundary**.
