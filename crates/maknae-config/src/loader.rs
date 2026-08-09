@@ -25,10 +25,10 @@ pub(crate) fn mode_is_secure(mode: u32) -> bool {
     mode & 0o007 == 0
 }
 
-/// Secure read (spec §3): lstat symlink screen → open → fstat mode on the open
-/// fd → read from that same fd. The checked inode and the read inode are one
-/// open fd — the read-reopen TOCTOU is closed. Symlink *detection* is a bounded
-/// lstat→open race within the trusted-group dir boundary (spec §3, honest scope).
+/// Secure read (spec §3): lstat screen (symlink + regular-file) → open → fstat mode
+/// on the open fd → read from that same fd. The checked inode and the read inode are
+/// one open fd — the read-reopen TOCTOU is closed. Symlink/type *detection* is a
+/// bounded lstat→open race within the trusted-group dir boundary (spec §3).
 #[cfg(unix)]
 pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
     use std::io::Read;
@@ -37,6 +37,14 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
     let lst = std::fs::symlink_metadata(path).map_err(io_err)?; // missing → Io (cycle ① contract)
     if lst.file_type().is_symlink() {
         return Err(ConfigError::Symlink { path: path.display().to_string() });
+    }
+    if !lst.file_type().is_file() {
+        // Reject FIFOs/sockets/devices/dirs BEFORE the open: `File::open` on a FIFO
+        // (O_RDONLY) BLOCKS until a writer appears → startup hang (a config file named
+        // maknae.yaml that is a FIFO would wedge the process). The residual
+        // regular→FIFO lstat→open race is the same trusted-group-bounded race as the
+        // symlink one; O_NONBLOCK+libc would close it fully (deferred with O_NOFOLLOW).
+        return Err(ConfigError::Io(format!("not a regular file: {}", path.display())));
     }
     let mut file = std::fs::File::open(path).map_err(io_err)?;
     let meta = file.metadata().map_err(io_err)?;
@@ -547,6 +555,27 @@ mod tests {
     fn mode_mask_helper() {
         assert!(mode_is_secure(0o640) && mode_is_secure(0o600));
         assert!(!mode_is_secure(0o644) && !mode_is_secure(0o642) && !mode_is_secure(0o641));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_file_rejected() {
+        // A non-regular config path (here a directory; a FIFO is the motivating case
+        // — File::open on a FIFO O_RDONLY would block until a writer appears) is
+        // rejected by the pre-open `!is_file()` gate with the "not a regular file"
+        // message. Asserting the message (not just Io) kills the `delete !` mutant:
+        // without the gate, a directory falls through to read_to_string → EISDIR Io
+        // whose message differs. (Deterministic + no hang risk, unlike a FIFO probe.)
+        let p = tmp("isdir");
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let got = read_secure(&p);
+        let _ = std::fs::remove_dir_all(&p);
+        match got {
+            Err(ConfigError::Io(msg)) => assert!(msg.contains("not a regular file"), "msg: {msg}"),
+            other => panic!("expected Io(not a regular file), got {other:?}"),
+        }
     }
 
     // ---- unix: config-dir scan + classification (cfg(unix)) ----
