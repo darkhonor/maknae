@@ -11,7 +11,7 @@ on:
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
 env:
-  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security"
+  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-kernel"
 
 jobs:
   build-and-gate:
@@ -34,7 +34,7 @@ jobs:
           fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc maknae-security maknae-config; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-kernel; do cargo clippy -p "$p" --all-targets -- -D warnings; done
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done

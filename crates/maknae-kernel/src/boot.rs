@@ -4,7 +4,8 @@
 //! own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec, Value,
+    ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec,
+    Value,
 };
 use std::path::Path;
 
@@ -97,7 +98,12 @@ mod tests {
     #[test]
     fn baseline_core_boots_public() {
         let d = new_dir("baseline");
-        put(&d.0, "maknae.yaml", "core:\n  identity:\n    name: test\n", 0o640);
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  identity:\n    name: test\n",
+            0o640,
+        );
         let cfg = boot(&d.0).expect("boots");
         assert_eq!(cfg.ceiling(), &maknae_config::Ceiling::baseline());
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
@@ -120,7 +126,10 @@ mod tests {
         put(&d.0, "maknae.yaml", SECRET_CORE, 0o640);
         let cfg = boot(&d.0).expect("boots");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
-        assert_eq!(cfg.ceiling().classification, maknae_config::Classification::Secret);
+        assert_eq!(
+            cfg.ceiling().classification,
+            maknae_config::Classification::Secret
+        );
     }
 
     #[cfg(unix)]

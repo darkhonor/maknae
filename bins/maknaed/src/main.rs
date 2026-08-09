@@ -8,7 +8,10 @@ fn main() {
         .unwrap_or_else(|| "/etc/maknae".to_string());
     match maknae_kernel::boot(std::path::Path::new(&dir)) {
         Ok(cfg) => {
-            println!("maknaed: booted; ingest posture = {:?}", cfg.ingest_posture());
+            println!(
+                "maknaed: booted; ingest posture = {:?}",
+                cfg.ingest_posture()
+            );
             std::process::exit(0);
         }
         Err(e) => {

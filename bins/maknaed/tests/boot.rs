@@ -33,7 +33,12 @@ fn put(dir: &Path, name: &str, body: &str, mode: u32) {
 #[test]
 fn good_config_exits_zero() {
     let d = new_dir("good");
-    put(&d.0, "maknae.yaml", "core:\n  identity:\n    name: t\n", 0o640);
+    put(
+        &d.0,
+        "maknae.yaml",
+        "core:\n  identity:\n    name: t\n",
+        0o640,
+    );
     let status = Command::new(bin()).arg(&d.0).status().unwrap();
     assert_eq!(status.code(), Some(0), "good config should boot (exit 0)");
 }
@@ -43,7 +48,11 @@ fn unknown_section_exits_one() {
     let d = new_dir("bad");
     put(&d.0, "maknae.yaml", "mystery:\n  a: 1\n", 0o640);
     let status = Command::new(bin()).arg(&d.0).status().unwrap();
-    assert_eq!(status.code(), Some(1), "unknown section should refuse (exit 1)");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "unknown section should refuse (exit 1)"
+    );
 }
 
 #[test]
@@ -52,5 +61,9 @@ fn absent_dir_exits_one() {
         .arg("/nonexistent/maknae_it_absent")
         .status()
         .unwrap();
-    assert_eq!(status.code(), Some(1), "absent config dir should refuse (exit 1)");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "absent config dir should refuse (exit 1)"
+    );
 }

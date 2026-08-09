@@ -58,7 +58,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel"]
 
 [t2]
 floor_production_region = 90
@@ -101,7 +101,7 @@ command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
-why = "scaffold stub — re-tier at body landing (T1 candidate per the line-drawing rule: trust-plane entry point)"
+why = "thin main: arg resolve + boot + exit mapping; behavior exercised by tests/boot.rs"
 
 [[t3]]
 path = "bins/maknae/src/main.rs"
