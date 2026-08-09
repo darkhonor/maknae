@@ -142,13 +142,20 @@ fn parse_handling(handling: &Value) -> Result<Ceiling, ConfigError> {
         None => return Err(err("core.handling: missing 'accreditation_ref'")),
         Some(Value::Null) => None,
         Some(Value::Str(s)) => Some(s.clone()),
-        Some(_) => return Err(err("core.handling.accreditation_ref must be a string or null")),
+        Some(_) => {
+            return Err(err(
+                "core.handling.accreditation_ref must be a string or null",
+            ))
+        }
     };
     let ceiling = get(hmap, "ceiling").ok_or_else(|| err("core.handling: missing 'ceiling'"))?;
     parse_ceiling(ceiling, accreditation_ref)
 }
 
-fn parse_ceiling(ceiling: &Value, accreditation_ref: Option<String>) -> Result<Ceiling, ConfigError> {
+fn parse_ceiling(
+    ceiling: &Value,
+    accreditation_ref: Option<String>,
+) -> Result<Ceiling, ConfigError> {
     const KEYS: [&str; 6] = [
         "classification",
         "sci",
@@ -172,8 +179,8 @@ fn parse_ceiling(ceiling: &Value, accreditation_ref: Option<String>) -> Result<C
             .ok_or_else(|| err(format!("classification: unrecognized level '{raw}'")))?
     };
     let sci = as_bool(field(m, "sci")?).ok_or_else(|| err("sci must be a boolean"))?;
-    let cui_permitted =
-        as_bool(field(m, "cui_permitted")?).ok_or_else(|| err("cui_permitted must be a boolean"))?;
+    let cui_permitted = as_bool(field(m, "cui_permitted")?)
+        .ok_or_else(|| err("cui_permitted must be a boolean"))?;
     let releasable_to = as_str_vec(field(m, "releasable_to")?)
         .ok_or_else(|| err("releasable_to must be an array of strings"))?;
     let cui_categories_permitted = as_str_vec(field(m, "cui_categories_permitted")?)
@@ -204,7 +211,10 @@ mod tests {
         assert!(b.releasable_to.is_empty());
         assert!(!b.cui_permitted);
         assert!(b.cui_categories_permitted.is_empty());
-        assert_eq!(b.dissemination_permitted, vec!["Distribution Statement A".to_string()]);
+        assert_eq!(
+            b.dissemination_permitted,
+            vec!["Distribution Statement A".to_string()]
+        );
         assert_eq!(b.accreditation_ref, None);
         assert_eq!(b.ingest_posture(), IngestPosture::Public);
     }
@@ -226,13 +236,25 @@ mod tests {
         assert_eq!(c.ingest_posture(), IngestPosture::Gated, "releasable_to");
         let mut c = Ceiling::baseline();
         c.cui_categories_permitted = vec!["SP-PRVCY".into()];
-        assert_eq!(c.ingest_posture(), IngestPosture::Gated, "cui_categories_permitted");
+        assert_eq!(
+            c.ingest_posture(),
+            IngestPosture::Gated,
+            "cui_categories_permitted"
+        );
         let mut c = Ceiling::baseline();
         c.dissemination_permitted = vec!["Distribution Statement C".into()];
-        assert_eq!(c.ingest_posture(), IngestPosture::Gated, "dissemination_permitted");
+        assert_eq!(
+            c.ingest_posture(),
+            IngestPosture::Gated,
+            "dissemination_permitted"
+        );
         let mut c = Ceiling::baseline();
         c.accreditation_ref = Some("ATO-123".into());
-        assert_eq!(c.ingest_posture(), IngestPosture::Gated, "accreditation_ref");
+        assert_eq!(
+            c.ingest_posture(),
+            IngestPosture::Gated,
+            "accreditation_ref"
+        );
     }
 
     use crate::{load_str, ConfigError, Value};
@@ -243,17 +265,9 @@ mod tests {
     }
 
     // A full, conformant, baseline `handling` block (all six + accreditation_ref).
-    const BASE: &str = "\
-handling:
-  ceiling:
-    classification: UNCLASSIFIED
-    sci: false
-    releasable_to: []
-    cui_permitted: false
-    cui_categories_permitted: []
-    dissemination_permitted: [\"Distribution Statement A\"]
-  accreditation_ref: null
-";
+    // `\n`-escaped (not a `"\`-continuation literal) so no YAML line sits at column 0
+    // inside the test module — the coverage gate splits production/test at column 0.
+    const BASE: &str = "handling:\n  ceiling:\n    classification: UNCLASSIFIED\n    sci: false\n    releasable_to: []\n    cui_permitted: false\n    cui_categories_permitted: []\n    dissemination_permitted: [\"Distribution Statement A\"]\n  accreditation_ref: null\n";
 
     #[test]
     fn absent_core_is_baseline_public() {
@@ -354,7 +368,10 @@ handling:
         ] {
             let v = core(&BASE.replace(line, ""));
             assert!(
-                matches!(ceiling_from_core(Some(&v)), Err(ConfigError::InvalidCeiling { .. })),
+                matches!(
+                    ceiling_from_core(Some(&v)),
+                    Err(ConfigError::InvalidCeiling { .. })
+                ),
                 "removing {line:?} should be InvalidCeiling"
             );
         }
@@ -405,7 +422,10 @@ handling:
         for y in bad {
             let v = core(&y);
             assert!(
-                matches!(ceiling_from_core(Some(&v)), Err(ConfigError::InvalidCeiling { .. })),
+                matches!(
+                    ceiling_from_core(Some(&v)),
+                    Err(ConfigError::InvalidCeiling { .. })
+                ),
                 "expected InvalidCeiling for yaml:\n{y}"
             );
         }

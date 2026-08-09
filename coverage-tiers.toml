@@ -44,6 +44,10 @@ files = [
   # 99 aggregate is the seam+cycle-① cohort, ADR-0016 §4).
   "crates/maknae-config/src/document.rs",
   "crates/maknae-config/src/loader.rs",
+  # cycle ②c: the classification ceiling parse + coarse ingest projection. A
+  # mis-read ceiling widens the ingest gate → T1. In [t1].files ONLY (own 95%
+  # floor; NOT ratchet_cohort, per ②a Task 8).
+  "crates/maknae-config/src/ceiling.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
