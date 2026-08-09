@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod builder;
+mod ceiling;
 mod document;
 mod error;
 mod loader;
@@ -29,6 +30,7 @@ mod value;
 
 pub use loader::load_config;
 
+pub use ceiling::{Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;
 pub use value::Value;
