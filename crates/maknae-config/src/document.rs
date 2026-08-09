@@ -28,6 +28,7 @@ pub struct Override {
 }
 
 /// The assembled document: named sections + the audit trail of overrides.
+#[derive(Debug)]
 pub struct Document {
     sections: Vec<(String, Value, Source)>,
     overrides: Vec<Override>,

@@ -66,10 +66,14 @@ fn validate_specs(specs: &[SectionSpec]) -> Result<(), ConfigError> {
 }
 
 /// Name lookups over the validated extension specs plus the reserved `core`.
+// Consumed only by the `#[cfg(unix)]` arm of `load_config` (+ tests); on a non-unix
+// build the crate still compiles to the `PermissionsUnsupported` refusal.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct Registry<'a> {
     pub(crate) specs: &'a [SectionSpec],
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl<'a> Registry<'a> {
     pub(crate) fn is_reserved(&self, name: &str) -> bool {
         name == CORE_SECTION
@@ -113,6 +117,17 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
     let cd = root.join("config.d");
     let mut cd_files: Vec<std::path::PathBuf> = Vec::new();
     match std::fs::symlink_metadata(&cd) {
+        // Any lstat failure → treat config.d as absent (base only). This does NOT
+        // silently drop a present config.d: config.d and maknae.yaml are siblings
+        // under `root`, so every realistic fault that fails lstat(config.d)
+        // (EACCES/ENOTDIR/ELOOP: root not searchable or an ancestor fault) ALSO
+        // fails the base read below → the whole load is refused (Io). The only
+        // residual is an EIO on config.d's inode with the base inode intact
+        // (astronomically rare) — and even then a missing section fails *closed*
+        // (§5 ②c seam obligation: absent core → most-restrictive; extension
+        // defaults are each subsystem's fail-closed concern), never open.
+        // (A NotFound-only guard here would add a branch no test can portably
+        // trigger — an equivalent mutant — for no fail-closed gain.)
         Err(_) => { /* absent → base only */ }
         Ok(m) if m.file_type().is_symlink() => {
             return Err(ConfigError::Symlink { path: cd.display().to_string() });
@@ -173,27 +188,46 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
 /// Parse each buffer and merge into a `Document` (spec §4 precedence): base
 /// first, then `config.d/` in the given (already-sorted) order. Whole-section
 /// replacement; ambiguity across config.d is an error, never last-wins.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn source_label(source: &Source) -> String {
+    match source {
+        Source::Base => "maknae.yaml".to_string(),
+        Source::ConfigD(p) => p.display().to_string(),
+    }
+}
+
+// Consumed only by the `#[cfg(unix)]` arm of `load_config` (+ tests).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn assemble(
     buffers: Vec<(Source, String)>,
     reg: &Registry,
 ) -> Result<Document, ConfigError> {
+    // Phase 2 (spec §4): parse EVERY buffer before collecting any section, so a
+    // Parse/NotAMap fault in any file is surfaced ahead of a section-name error in
+    // another (the spec's numbered precedence: parse < collect). Empty (Null) → no
+    // sections; a non-Map/Null root → NotAMap.
+    let mut parsed: Vec<(Source, Vec<(String, Value)>)> = Vec::new();
+    for (source, body) in buffers {
+        let map = match load_str(&body)? { // cycle ①: parse errors propagate as-is
+            Value::Null => Vec::new(),
+            Value::Map(m) => m,
+            _ => {
+                let source_path = source_label(&source);
+                return Err(ConfigError::NotAMap { source_path });
+            }
+        };
+        parsed.push((source, map));
+    }
+
+    // Phase 3: collect sections with precedence (Unknown → CoreOverride → Duplicate).
     // sections: name -> (value, winning source). from_configd: which section a
     // config.d file already supplied (the cross-config.d duplicate guard).
     let mut sections: Vec<(String, Value, Source)> = Vec::new();
     let mut overrides: Vec<Override> = Vec::new();
     let mut from_configd: Vec<String> = Vec::new();
 
-    for (source, body) in buffers {
-        let source_path = match &source {
-            Source::Base => "maknae.yaml".to_string(),
-            Source::ConfigD(p) => p.display().to_string(),
-        };
-        let value = load_str(&body)?; // cycle ①: parse errors propagate as-is
-        let map = match value {
-            Value::Null => continue,               // empty file → no sections
-            Value::Map(m) => m,
-            _ => return Err(ConfigError::NotAMap { source_path }),
-        };
+    for (source, map) in parsed {
+        let source_path = source_label(&source);
         for (key, val) in map {
             // (3a) unknown (matches no spec and isn't reserved)
             if !reg.is_known(&key) {
@@ -340,6 +374,37 @@ mod tests {
         assert!(matches!(
             assemble(vec![base("mystery:\n  a: 1\n")], &reg(&specs)),
             Err(ConfigError::UnknownSection { section, .. }) if section == "mystery"
+        ));
+    }
+
+    #[test]
+    fn unknown_section_reports_source_path() {
+        // Pin source_label (§5: UnknownSection carries the offending file): base → the
+        // base label, config.d → the file's path label.
+        let specs: [SectionSpec; 0] = [];
+        match assemble(vec![base("mystery:\n  a: 1\n")], &reg(&specs)) {
+            Err(ConfigError::UnknownSection { section, source_path }) => {
+                assert_eq!(section, "mystery");
+                assert_eq!(source_path, "maknae.yaml");
+            }
+            other => panic!("expected UnknownSection from base, got {other:?}"),
+        }
+        match assemble(vec![base(""), cd("z.yaml", "weird:\n  a: 1\n")], &reg(&specs)) {
+            Err(ConfigError::UnknownSection { source_path, .. }) => {
+                assert_eq!(source_path, "z.yaml");
+            }
+            other => panic!("expected UnknownSection from config.d, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_precedes_unknown_across_buffers() {
+        // Spec §4: parse (phase 2) precedes section collection (phase 3). A NotAMap in
+        // a *later* buffer must win over an UnknownSection in an *earlier* one.
+        let specs: [SectionSpec; 0] = [];
+        assert!(matches!(
+            assemble(vec![base("mystery:\n  a: 1\n"), cd("z.yaml", "- 1\n- 2\n")], &reg(&specs)),
+            Err(ConfigError::NotAMap { .. })
         ));
     }
 
