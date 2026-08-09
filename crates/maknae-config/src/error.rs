@@ -43,6 +43,8 @@ pub enum ConfigError {
     ReservedSection { section: String },
     /// Duplicate section names within the caller's specs (spec §5).
     DuplicateSpec { section: String },
+    /// The `core.handling` classification ceiling is present but invalid (spec ②c §4).
+    InvalidCeiling { reason: String },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -104,6 +106,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::DuplicateSpec { section } => {
                 write!(f, "section '{section}' registered more than once")
             }
+            ConfigError::InvalidCeiling { reason } => {
+                write!(f, "invalid core classification ceiling: {reason}")
+            }
         }
     }
 }
@@ -134,6 +139,16 @@ mod tests {
             col: 4,
         };
         assert!(format!("{p}").contains("bad") && format!("{p}").contains("2:4"));
+    }
+
+    #[test]
+    fn display_covers_invalid_ceiling() {
+        let e = ConfigError::InvalidCeiling {
+            reason: "classification: unrecognized level 'SEKRET'".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("ceiling") && s.contains("SEKRET"), "Display was: {s}");
+        let _: &dyn std::error::Error = &e;
     }
 
     #[test]
