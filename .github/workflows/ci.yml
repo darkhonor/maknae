@@ -11,7 +11,7 @@ on:
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
 env:
-  MUTANTS_PATHS: "crates/maknae-security"
+  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security"
 
 jobs:
   build-and-gate:
@@ -27,9 +27,14 @@ jobs:
           cargo install rust-audit-info --locked
       - name: fmt
         run: cargo fmt --all --check
+      - name: Panic strategy must be unwind (maknae-config catch_unwind boundary depends on it)
+        run: |
+          if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
+            echo "ERROR: a manifest sets panic = \"abort\"; maknae-config's fail-closed parse boundary requires unwind"; exit 1
+          fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc maknae-security; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security maknae-config; do cargo clippy -p "$p" --all-targets -- -D warnings; done
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
