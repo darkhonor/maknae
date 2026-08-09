@@ -277,8 +277,8 @@ security-relevant input.
   signed integer (no silent lossy conversion).
 - **Nesting deeper than 128 levels.**
 
-Malformed input always fails closed to a `Parse` error — no partial or wrong value is
-ever produced.
+Malformed input always fails closed to a hard error (the exact variant per §8) — no
+partial or wrong value is ever produced.
 
 ---
 
@@ -288,7 +288,7 @@ Every failure below refuses the load. The names are the loader's error variants.
 
 | Condition | Error |
 |---|---|
-| Missing `maknae.yaml`, unreadable file, invalid UTF-8, or a non-regular file (FIFO/socket/device) | `Io` |
+| Missing `maknae.yaml`, unreadable file, invalid UTF-8, or a non-regular file (FIFO/socket/device/directory) | `Io` |
 | Malformed / rejected YAML (see §7) | `Parse` |
 | Duplicate mapping key within a file | `DuplicateKey` |
 | A config file or directory with world/other permission bits | `InsecurePermissions` |
