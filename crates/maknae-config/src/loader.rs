@@ -116,62 +116,63 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
     // read below (base first), so the buffer order stays base-then-config.d.
     let cd = root.join("config.d");
     let mut cd_files: Vec<std::path::PathBuf> = Vec::new();
-    match std::fs::symlink_metadata(&cd) {
-        // Any lstat failure → treat config.d as absent (base only). This does NOT
-        // silently drop a present config.d: config.d and maknae.yaml are siblings
-        // under `root`, so every realistic fault that fails lstat(config.d)
-        // (EACCES/ENOTDIR/ELOOP: root not searchable or an ancestor fault) ALSO
-        // fails the base read below → the whole load is refused (Io). The only
-        // residual is an EIO on config.d's inode with the base inode intact
-        // (astronomically rare) — and even then a missing section fails *closed*
-        // (§5 ②c seam obligation: absent core → most-restrictive; extension
-        // defaults are each subsystem's fail-closed concern), never open.
-        // (A NotFound-only guard here would add a branch no test can portably
-        // trigger — an equivalent mutant — for no fail-closed gain.)
-        Err(_) => { /* absent → base only */ }
-        Ok(m) if m.file_type().is_symlink() => {
+
+    // Detect config.d POSITIVELY as a `root` directory entry (root is a readable dir
+    // — maknae.yaml is read from it below). This distinguishes a genuine absence from
+    // a stat fault WITHOUT an error-kind guard: if config.d is present, any later stat
+    // fault propagates via `?` (fail-closed — a present-but-unreadable config.d refuses
+    // the load, never silently degrades to base-only); a true absence just yields
+    // base-only. (Avoids the `e.kind()==NotFound` guard, which would be an untestable
+    // equivalent mutant.)
+    let mut cd_present = false;
+    for ent in std::fs::read_dir(&root).map_err(io_err)? {
+        if ent.map_err(io_err)?.file_name() == std::ffi::OsStr::new("config.d") {
+            cd_present = true;
+        }
+    }
+
+    if cd_present {
+        let m = std::fs::symlink_metadata(&cd).map_err(io_err)?;
+        if m.file_type().is_symlink() {
             return Err(ConfigError::Symlink { path: cd.display().to_string() });
         }
-        Ok(m) if !m.is_dir() => {
-            // NB: these two arms *synthesize* an Io message (config.d exists but is
-            // the wrong kind of thing) rather than *converting* an io::Error — so
-            // `io_err` deliberately does NOT apply here. Don't "unify" them with it.
+        if !m.is_dir() {
+            // Synthesized Io (config.d exists but is the wrong kind of thing) rather
+            // than a converted io::Error — io_err deliberately does NOT apply here.
             return Err(ConfigError::Io(format!("config.d is not a directory: {}", cd.display())));
         }
-        Ok(m) => {
-            if !mode_is_secure(m.mode()) {
-                return Err(ConfigError::InsecurePermissions {
-                    path: cd.display().to_string(),
-                    mode: m.mode(),
-                });
-            }
-            // Enumerate immediate entries; classify by the §2 ordered sequence.
-            let rd = std::fs::read_dir(&cd).map_err(io_err)?;
-            for ent in rd {
-                let ent = ent.map_err(io_err)?;
-                let name = ent.file_name().to_string_lossy().into_owned();
-                // (1) dotfile → skip
-                if name.starts_with('.') {
-                    continue;
-                }
-                let ft = ent.file_type().map_err(io_err)?;
-                // (2) symlink or subdirectory → error (checked before extension)
-                if ft.is_symlink() {
-                    return Err(ConfigError::Symlink { path: ent.path().display().to_string() });
-                }
-                if ft.is_dir() {
-                    return Err(ConfigError::Io(format!(
-                        "config.d entry is a directory: {}",
-                        ent.path().display()
-                    )));
-                }
-                // (3) regular .yaml/.yml → load; (4) other regular → ignore
-                if ft.is_file() && is_yaml_ext(&name) {
-                    cd_files.push(ent.path());
-                }
-            }
-            cd_files.sort(); // lexical by full path (same parent → by filename)
+        if !mode_is_secure(m.mode()) {
+            return Err(ConfigError::InsecurePermissions {
+                path: cd.display().to_string(),
+                mode: m.mode(),
+            });
         }
+        // Enumerate immediate entries; classify by the §2 ordered sequence.
+        let rd = std::fs::read_dir(&cd).map_err(io_err)?;
+        for ent in rd {
+            let ent = ent.map_err(io_err)?;
+            let name = ent.file_name().to_string_lossy().into_owned();
+            // (1) dotfile → skip
+            if name.starts_with('.') {
+                continue;
+            }
+            let ft = ent.file_type().map_err(io_err)?;
+            // (2) symlink or subdirectory → error (checked before extension)
+            if ft.is_symlink() {
+                return Err(ConfigError::Symlink { path: ent.path().display().to_string() });
+            }
+            if ft.is_dir() {
+                return Err(ConfigError::Io(format!(
+                    "config.d entry is a directory: {}",
+                    ent.path().display()
+                )));
+            }
+            // (3) regular .yaml/.yml → load; (4) other regular → ignore
+            if ft.is_file() && is_yaml_ext(&name) {
+                cd_files.push(ent.path());
+            }
+        }
+        cd_files.sort(); // lexical by full path (same parent → by filename)
     }
 
     // Now read contents in one buffer-before-parse pass: base (required — missing
