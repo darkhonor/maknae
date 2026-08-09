@@ -138,12 +138,15 @@ mod tests {
     }
 
     #[test]
-    fn wide_shallow_ok() {
-        // 200 flat sibling keys — depth stays shallow. Pins the depth *decrement*:
-        // a dropped `-= 1` would accumulate depth across siblings and falsely panic.
+    fn wide_shallow_container_siblings_ok() {
+        // 200 sibling *containers* (`k{i}: [i]`), each opening+closing a sequence.
+        // Depth returns to baseline after every sibling, so this stays well under
+        // the 128 ceiling — but ONLY if the decrement works. A dropped `-= 1` would
+        // accumulate depth across siblings and falsely panic around the 127th.
+        // (cargo-mutants does not mutate `saturating_sub`, so this test is the guard.)
         let mut s = String::new();
         for i in 0..200 {
-            s.push_str(&format!("k{i}: {i}\n"));
+            s.push_str(&format!("k{i}: [{i}]\n"));
         }
         assert!(load_str(&s).is_ok());
     }
