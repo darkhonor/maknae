@@ -35,10 +35,6 @@ pub struct Document {
 
 impl Document {
     /// Loader-only constructor.
-    // `allow(dead_code)`: the sole non-test caller (`loader::assemble`) lands in
-    // Task 6; this allow is removed there so each intermediate commit is
-    // `-D warnings`-clean.
-    #[allow(dead_code)]
     pub(crate) fn new(sections: Vec<(String, Value, Source)>, overrides: Vec<Override>) -> Self {
         Document { sections, overrides }
     }

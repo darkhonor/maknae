@@ -5,8 +5,8 @@
 // (unused-import is an error under CI's `-D warnings`): Task 3 needs only
 // `SectionSpec`; Task 5 adds `Source`; Task 6 adds `Document`/`Override` +
 // `load_str`/`Value`.
-use crate::document::{SectionSpec, Source};
-use crate::ConfigError;
+use crate::document::{Document, Override, SectionSpec, Source};
+use crate::{load_str, ConfigError, Value};
 use std::path::Path;
 
 pub(crate) const CORE_SECTION: &str = "core";
@@ -68,13 +68,10 @@ pub(crate) fn validate_specs(specs: &[SectionSpec]) -> Result<(), ConfigError> {
 }
 
 /// Name lookups over the validated extension specs plus the reserved `core`.
-// `allow(dead_code)`: sole non-test caller is `assemble` (Task 6); removed there.
-#[allow(dead_code)]
 pub(crate) struct Registry<'a> {
     pub(crate) specs: &'a [SectionSpec],
 }
 
-#[allow(dead_code)]
 impl<'a> Registry<'a> {
     pub(crate) fn is_reserved(&self, name: &str) -> bool {
         name == CORE_SECTION
@@ -175,6 +172,80 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
         out.push((Source::ConfigD(p), body));
     }
     Ok(out)
+}
+
+/// Parse each buffer and merge into a `Document` (spec §4 precedence): base
+/// first, then `config.d/` in the given (already-sorted) order. Whole-section
+/// replacement; ambiguity across config.d is an error, never last-wins.
+// `allow(dead_code)`: sole non-test caller is `load_config_impl` (Task 7); removed there.
+#[allow(dead_code)]
+pub(crate) fn assemble(
+    buffers: Vec<(Source, String)>,
+    reg: &Registry,
+) -> Result<Document, ConfigError> {
+    // sections: name -> (value, winning source). from_configd: which section a
+    // config.d file already supplied (the cross-config.d duplicate guard).
+    let mut sections: Vec<(String, Value, Source)> = Vec::new();
+    let mut overrides: Vec<Override> = Vec::new();
+    let mut from_configd: Vec<String> = Vec::new();
+
+    for (source, body) in buffers {
+        let source_path = match &source {
+            Source::Base => "maknae.yaml".to_string(),
+            Source::ConfigD(p) => p.display().to_string(),
+        };
+        let value = load_str(&body)?; // cycle ①: parse errors propagate as-is
+        let map = match value {
+            Value::Null => continue,               // empty file → no sections
+            Value::Map(m) => m,
+            _ => return Err(ConfigError::NotAMap { source_path }),
+        };
+        for (key, val) in map {
+            // (3a) unknown (matches no spec and isn't reserved)
+            if !reg.is_known(&key) {
+                return Err(ConfigError::UnknownSection { section: key, source_path });
+            }
+            match &source {
+                Source::Base => {
+                    // core allowed in base; a base can't collide with itself (dup keys
+                    // already rejected by cycle ①), so just record.
+                    sections.push((key, val, Source::Base));
+                }
+                Source::ConfigD(p) => {
+                    // (3b) reserved core in config.d → CoreOverride
+                    if reg.is_reserved(&key) {
+                        return Err(ConfigError::CoreOverride);
+                    }
+                    // (3c) same section in two config.d files → DuplicateSection
+                    if from_configd.iter().any(|n| n == &key) {
+                        return Err(ConfigError::DuplicateSection { section: key });
+                    }
+                    from_configd.push(key.clone());
+                    // config.d wins: replace a base section (record the override) or add.
+                    if let Some(slot) = sections.iter_mut().find(|(n, _, _)| n == &key) {
+                        overrides.push(Override {
+                            section: key.clone(),
+                            winner: Source::ConfigD(p.clone()),
+                            shadowed: slot.2.clone(),
+                        });
+                        slot.1 = val;
+                        slot.2 = Source::ConfigD(p.clone());
+                    } else {
+                        sections.push((key, val, Source::ConfigD(p.clone())));
+                    }
+                }
+            }
+        }
+    }
+
+    // (4) required extensions must be present.
+    for name in reg.required_extensions() {
+        if !sections.iter().any(|(n, _, _)| n == name) {
+            return Err(ConfigError::MissingSection { section: name.to_string() });
+        }
+    }
+
+    Ok(Document::new(sections, overrides))
 }
 
 #[cfg(test)]
@@ -424,5 +495,104 @@ mod unix_scan_tests {
         let p = std::env::temp_dir().join(format!("maknae_2a_nope_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         assert!(matches!(scan_dir(&p), Err(ConfigError::Io(_))));
+    }
+}
+
+#[cfg(test)]
+mod assemble_tests {
+    use super::*;
+    use crate::Value;
+
+    fn reg(specs: &[SectionSpec]) -> Registry<'_> { Registry { specs } }
+    fn spec(name: &str, required: bool) -> SectionSpec { SectionSpec { name: name.into(), required } }
+
+    fn base(body: &str) -> (Source, String) { (Source::Base, body.into()) }
+    fn cd(name: &str, body: &str) -> (Source, String) { (Source::ConfigD(name.into()), body.into()) }
+
+    #[test]
+    fn base_plus_configd_override_recorded() {
+        let specs = [spec("authz", false)];
+        let doc = assemble(
+            vec![base("core:\n  a: 1\nauthz:\n  x: 1\n"), cd("z.yaml", "authz:\n  x: 2\n")],
+            &reg(&specs),
+        ).unwrap();
+        assert_eq!(doc.section("authz"), Some(&Value::Map(vec![("x".into(), Value::Int(2))])));
+        assert_eq!(doc.overrides().len(), 1);
+        assert_eq!(doc.overrides()[0].section, "authz");
+        assert!(matches!(doc.overrides()[0].winner, Source::ConfigD(_)));
+        assert!(matches!(doc.overrides()[0].shadowed, Source::Base));
+    }
+
+    #[test]
+    fn unknown_section_rejected() {
+        let specs: [SectionSpec; 0] = [];
+        assert!(matches!(
+            assemble(vec![base("mystery:\n  a: 1\n")], &reg(&specs)),
+            Err(ConfigError::UnknownSection { section, .. }) if section == "mystery"
+        ));
+    }
+
+    #[test]
+    fn core_in_configd_rejected() {
+        let specs: [SectionSpec; 0] = [];
+        assert!(matches!(
+            assemble(vec![base("core:\n  a: 1\n"), cd("z.yaml", "core:\n  a: 2\n")], &reg(&specs)),
+            Err(ConfigError::CoreOverride)
+        ));
+    }
+
+    #[test]
+    fn duplicate_section_across_configd_rejected() {
+        let specs = [spec("authz", false)];
+        assert!(matches!(
+            assemble(
+                vec![base("core:\n  a: 1\n"), cd("a.yaml", "authz:\n  x: 1\n"), cd("b.yaml", "authz:\n  x: 2\n")],
+                &reg(&specs)),
+            Err(ConfigError::DuplicateSection { section }) if section == "authz"
+        ));
+    }
+
+    #[test]
+    fn missing_required_extension_rejected() {
+        let specs = [spec("authz", true)];
+        assert!(matches!(
+            assemble(vec![base("core:\n  a: 1\n")], &reg(&specs)),
+            Err(ConfigError::MissingSection { section }) if section == "authz"
+        ));
+    }
+
+    #[test]
+    fn missing_optional_extension_ok() {
+        // An OPTIONAL, absent extension must NOT error. Kills the `|s| true`
+        // mutant in `required_extensions` (treating optional as required):
+        // without this vector, a mutant that yields MissingSection for `llm`
+        // survives (every other vector registers only present/required specs).
+        let specs = [spec("llm", false)];
+        let doc = assemble(vec![base("core:\n  a: 1\n")], &reg(&specs)).unwrap();
+        assert_eq!(doc.section("llm"), None);
+    }
+
+    #[test]
+    fn empty_base_no_configd_is_empty_doc() {
+        let specs: [SectionSpec; 0] = [];
+        let doc = assemble(vec![base("")], &reg(&specs)).unwrap();
+        assert_eq!(doc.section("core"), None);
+        assert!(doc.overrides().is_empty());
+    }
+
+    #[test]
+    fn non_map_base_is_not_a_map() {
+        let specs: [SectionSpec; 0] = [];
+        assert!(matches!(
+            assemble(vec![base("- 1\n- 2\n")], &reg(&specs)),
+            Err(ConfigError::NotAMap { .. })
+        ));
+    }
+
+    #[test]
+    fn optional_core_present_in_base_ok() {
+        let specs: [SectionSpec; 0] = [];
+        let doc = assemble(vec![base("core:\n  a: 1\n")], &reg(&specs)).unwrap();
+        assert_eq!(doc.section("core"), Some(&Value::Map(vec![("a".into(), Value::Int(1))])));
     }
 }
