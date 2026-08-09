@@ -100,11 +100,11 @@ why = "module declarations + re-exports only; no logic (the four logic files are
 
 [[t3]]
 path = "crates/maknae-security/src/request.rs"
-why = "pure type declarations (subject/resource/action/context/request) + derives; no executable production regions"
+why = "type declarations (subject/resource/action/context/request) + derives; no hand-written executable logic that could turn a deny into a permit"
 
 [[t3]]
 path = "crates/maknae-security/src/authorizer.rs"
-why = "trait declaration only; no executable production regions (impls live in backends)"
+why = "trait declaration only; no hand-written executable logic (impls live in backends)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"

@@ -8,18 +8,38 @@
 
 use crate::obligation::Obligation;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The internal four-valued verdict. `Default` is the fail-closed identity
+/// `NotApplicable` (which `finalize` maps to `Deny`) — a defaulted verdict is
+/// never a fail-open. Making `Default` production (not test-only) also lets
+/// `cargo-mutants` generate viable `-> Default::default()` mutants for
+/// `combine`/`decide`, so the fail-closed core is actually mutation-exercised.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Verdict {
-    Permit { obligations: Vec<Obligation> },
-    Deny { reason: String },
+    Permit {
+        obligations: Vec<Obligation>,
+    },
+    Deny {
+        reason: String,
+    },
+    #[default]
     NotApplicable,
     Indeterminate,
 }
 
+/// The binary public decision. `Default` is `Deny` (fail-closed); its variants
+/// carry fields, so it cannot be a `#[default]`-derive and is written by hand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Permit { obligations: Vec<Obligation> },
     Deny { reason: String },
+}
+
+impl Default for Decision {
+    fn default() -> Self {
+        Decision::Deny {
+            reason: "default (fail-closed)".into(),
+        }
+    }
 }
 
 /// Kernel→PEP boundary: anything that is not a definite `Permit` collapses to
@@ -40,6 +60,12 @@ pub fn finalize(v: Verdict) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_are_fail_closed() {
+        assert_eq!(Verdict::default(), Verdict::NotApplicable);
+        assert!(matches!(Decision::default(), Decision::Deny { .. }));
+    }
 
     #[test]
     fn finalize_permit_passes_through() {

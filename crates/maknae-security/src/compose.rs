@@ -196,7 +196,10 @@ mod tests {
                 reason: "mac".into(),
             })),
         ]);
-        assert!(matches!(c.decide(&req()), Verdict::Deny { .. }));
+        match c.decide(&req()) {
+            Verdict::Deny { reason } => assert_eq!(reason, "mac"), // operand reason propagates
+            _ => panic!("must deny"),
+        }
     }
 
     #[test]
