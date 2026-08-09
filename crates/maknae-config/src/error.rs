@@ -147,7 +147,10 @@ mod tests {
             reason: "classification: unrecognized level 'SEKRET'".into(),
         };
         let s = format!("{e}");
-        assert!(s.contains("ceiling") && s.contains("SEKRET"), "Display was: {s}");
+        assert!(
+            s.contains("ceiling") && s.contains("SEKRET"),
+            "Display was: {s}"
+        );
         let _: &dyn std::error::Error = &e;
     }
 
