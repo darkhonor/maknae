@@ -250,12 +250,15 @@ lake:
   framework: {...}
 ```
 
-Today Maknae **carries** the `lake` section verbatim — it validates that the section is
-well-formed and hands it to the lake, but does not yet type-validate its individual
-keys. The `in_scope_domains`, `corpus_topology`, and `framework` keys are documented in
-full **in this reference** as the lake integration lands. They parallel a standalone
-lake's fields, but a Maknae-embedded lake may diverge, so treat this document as the
-source of truth for a Maknae deployment.
+Today Maknae only **stores** a registered `lake` section in the loaded document
+(available to a consumer via the section accessor). There is **no lake integration yet**
+— nothing forwards the section to the lake, and neither the keys nor the shape are
+validated. Forwarding and validation land **when the lake integration is wired**
+(forthcoming); until then, a `lake` section is inert (stored, not effective). The
+`in_scope_domains`, `corpus_topology`, and `framework` keys will be documented in full
+**in this reference** as that integration lands. They parallel a standalone lake's
+fields, but a Maknae-embedded lake may diverge, so treat this document as the source of
+truth for a Maknae deployment.
 
 `core` is recognized **internally** and must **not** be registered — registering it is
 a `ReservedSection` error. The `lake` section, like any extension (§3), is **registered
