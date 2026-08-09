@@ -33,9 +33,10 @@ pub fn load_str(input: &str) -> Result<Value, ConfigError> {
         parser.load(&mut builder, true) // multi = true → we count DocumentStart ourselves
     }));
     match scan {
-        // Caught unwind: our depth panic is the only panic that occurs (verified —
-        // yaml-rust2's internal asserts are unreachable in practice), so `depth_loc`
-        // holds the violation's location.
+        // Caught unwind. Our depth panic is the only panic reached in practice
+        // (extensive fuzzing surfaced no yaml-rust2 internal panic), and `depth_loc`
+        // holds its location. A hypothetical parser-internal panic would also be
+        // caught here and reported as a depth error — fail-closed, if imprecise.
         Err(_) => {
             let (line, col) = builder.depth_loc();
             Err(ConfigError::Parse {
@@ -134,6 +135,17 @@ mod tests {
     fn boundary_128_accepted() {
         let ok = "[".repeat(128) + &"]".repeat(128);
         assert!(load_str(&ok).is_ok());
+    }
+
+    #[test]
+    fn wide_shallow_ok() {
+        // 200 flat sibling keys — depth stays shallow. Pins the depth *decrement*:
+        // a dropped `-= 1` would accumulate depth across siblings and falsely panic.
+        let mut s = String::new();
+        for i in 0..200 {
+            s.push_str(&format!("k{i}: {i}\n"));
+        }
+        assert!(load_str(&s).is_ok());
     }
 
     #[test]
