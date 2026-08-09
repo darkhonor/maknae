@@ -162,6 +162,11 @@ fn v_inf_rejected() {
         load_str("x: -1e999\n"),
         Err(ConfigError::Parse { .. })
     ));
+    // i64-overflow integer must not silently become a lossy Float
+    assert!(matches!(
+        load_str("x: 99999999999999999999999\n"),
+        Err(ConfigError::Parse { .. })
+    ));
 }
 
 // ---- happy path ----

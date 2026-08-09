@@ -18,13 +18,21 @@ pub(crate) fn resolve_scalar(value: String, style: TScalarStyle) -> Result<Value
         Yaml::Null => Ok(Value::Null),
         Yaml::Boolean(b) => Ok(Value::Bool(b)),
         Yaml::Integer(i) => Ok(Value::Int(i)),
-        // Reject non-finite: `f64::from_str` returns Ok(inf) on magnitude overflow
-        // (`1e999`), not Err — so filter for finiteness, else the ".inf"/"1e999"
-        // spellings of infinity would diverge (a config needs no infinities).
-        Yaml::Real(s) => match f64::from_str(&s) {
-            Ok(f) if f.is_finite() => Ok(Value::Float(f)),
-            _ => Err(()),
-        },
+        // A `Real` reaches here only when yaml-rust2's `i64` parse failed but its
+        // `parse_f64` succeeded. Reject two silent mis-values:
+        //  - non-finite: `f64::from_str` returns Ok(inf) on overflow (`1e999`/`.inf`),
+        //    not Err — so the ".inf"/"1e999" spellings must not diverge;
+        //  - integer-shaped `Real` (no `.`/`e`): an i64 OVERFLOW (`999…9`) that would
+        //    become a *lossy* `Float` — reject rather than silently lose precision.
+        // (Other resolution — e.g. signed `-0x1` → String — is faithful yaml-rust2
+        // behavior, not lossy; typed/range validation is a cycle-② schema concern.)
+        Yaml::Real(s) => {
+            let integer_shaped = !s.contains(['.', 'e', 'E']);
+            match f64::from_str(&s) {
+                Ok(f) if f.is_finite() && !integer_shaped => Ok(Value::Float(f)),
+                _ => Err(()),
+            }
+        }
         // String (reachable, e.g. "hi") + the variants from_str cannot emit → string.
         _ => Ok(Value::Str(value)),
     }
@@ -82,6 +90,28 @@ mod tests {
         assert_eq!(
             resolve_scalar("-1e999".into(), TScalarStyle::Plain),
             Err(())
+        );
+    }
+
+    #[test]
+    fn i64_overflow_integer_is_err_not_lossy_float() {
+        // an integer too big for i64 must not silently become a lossy Float
+        assert_eq!(
+            resolve_scalar("99999999999999999999999".into(), TScalarStyle::Plain),
+            Err(())
+        );
+        assert_eq!(
+            resolve_scalar("9223372036854775808".into(), TScalarStyle::Plain), // i64::MAX + 1
+            Err(())
+        );
+        // genuine floats (with '.'/'e') still accepted
+        assert_eq!(
+            resolve_scalar("1e3".into(), TScalarStyle::Plain),
+            Ok(Value::Float(1000.0))
+        );
+        assert_eq!(
+            resolve_scalar("2.5".into(), TScalarStyle::Plain),
+            Ok(Value::Float(2.5))
         );
     }
 }
