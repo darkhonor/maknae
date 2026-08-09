@@ -8,11 +8,10 @@ on:
 # ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
 # (drift = gate FAIL). Comma-separated repo-relative crate dirs. Do not add a
 # second MUTANTS_PATHS: line anywhere in this file (multi-match = hard FAIL).
-# EMPTY at present: the security-critical DCS crate was relocated to a private
-# library; no in-tree crate carries a mutation obligation until Maknae's
-# security substance is rebuilt against the authorization seam.
+# The authorization seam (maknae-security) is the in-tree security-critical crate
+# carrying the mutation obligation (ADR-0016 T1, zero missed).
 env:
-  MUTANTS_PATHS: ""
+  MUTANTS_PATHS: "crates/maknae-security"
 
 jobs:
   build-and-gate:
@@ -30,7 +29,7 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security; do cargo clippy -p "$p" --all-targets -- -D warnings; done
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done

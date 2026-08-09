@@ -51,6 +51,10 @@ name = "maknae-proto"
 version = "0.0.0"
 
 [[package]]
+name = "maknae-security"
+version = "0.0.0"
+
+[[package]]
 name = "maknae-spif"
 version = "0.0.0"
 
