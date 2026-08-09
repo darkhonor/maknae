@@ -77,7 +77,7 @@ fn get<'a>(m: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
 }
 
 fn field<'a>(m: &'a [(String, Value)], key: &str) -> Result<&'a Value, ConfigError> {
-    get(m, key).ok_or_else(|| err(format!("core.handling.ceiling: missing '{key}'")))
+    get(m, key).ok_or_else(|| err(format!("handling.ceiling: missing '{key}'")))
 }
 
 fn as_bool(v: &Value) -> Option<bool> {
@@ -130,25 +130,21 @@ pub fn ceiling_from_core(core: Option<&Value>) -> Result<Ceiling, ConfigError> {
 }
 
 fn parse_handling(handling: &Value) -> Result<Ceiling, ConfigError> {
-    let hmap = as_map(handling).ok_or_else(|| err("core.handling is not a map"))?;
+    let hmap = as_map(handling).ok_or_else(|| err("handling is not a map"))?;
     // additionalProperties: false
     for (k, _) in hmap {
         if k != "ceiling" && k != "accreditation_ref" {
-            return Err(err(format!("core.handling: unknown key '{k}'")));
+            return Err(err(format!("handling: unknown key '{k}'")));
         }
     }
     // required: [ceiling, accreditation_ref]
     let accreditation_ref = match get(hmap, "accreditation_ref") {
-        None => return Err(err("core.handling: missing 'accreditation_ref'")),
+        None => return Err(err("handling: missing 'accreditation_ref'")),
         Some(Value::Null) => None,
         Some(Value::Str(s)) => Some(s.clone()),
-        Some(_) => {
-            return Err(err(
-                "core.handling.accreditation_ref must be a string or null",
-            ))
-        }
+        Some(_) => return Err(err("handling.accreditation_ref must be a string or null")),
     };
-    let ceiling = get(hmap, "ceiling").ok_or_else(|| err("core.handling: missing 'ceiling'"))?;
+    let ceiling = get(hmap, "ceiling").ok_or_else(|| err("handling: missing 'ceiling'"))?;
     parse_ceiling(ceiling, accreditation_ref)
 }
 
@@ -164,11 +160,11 @@ fn parse_ceiling(
         "cui_categories_permitted",
         "dissemination_permitted",
     ];
-    let m = as_map(ceiling).ok_or_else(|| err("core.handling.ceiling is not a map"))?;
+    let m = as_map(ceiling).ok_or_else(|| err("handling.ceiling is not a map"))?;
     // additionalProperties: false
     for (k, _) in m {
         if !KEYS.contains(&k.as_str()) {
-            return Err(err(format!("core.handling.ceiling: unknown key '{k}'")));
+            return Err(err(format!("handling.ceiling: unknown key '{k}'")));
         }
     }
     // required + typed (field() errors on a missing required key)
@@ -384,6 +380,9 @@ mod tests {
             //  each_missing_ceiling_field_is_invalid)
             // handling missing accreditation_ref
             BASE.replace("  accreditation_ref: null\n", ""),
+            // a bare `handling:` (present key, null value) is a malformed block, not
+            // "absent" → InvalidCeiling (fail closed; omit the key entirely for baseline)
+            "handling:\n".to_string(),
             // handling missing ceiling (accreditation_ref present, no ceiling)
             "handling:\n  accreditation_ref: null\n".to_string(),
             // additionalProperties: unknown key at the HANDLING level
