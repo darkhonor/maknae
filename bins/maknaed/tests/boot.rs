@@ -56,6 +56,32 @@ fn unknown_section_exits_one() {
 }
 
 #[test]
+fn invalid_ceiling_exits_one() {
+    let d = new_dir("badceil");
+    // a present but unrecognized classification → InvalidCeiling → exit 1
+    let body = "core:\n  handling:\n    ceiling:\n      classification: SEKRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    put(&d.0, "maknae.yaml", body, 0o640);
+    let status = Command::new(bin()).arg(&d.0).status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "invalid ceiling should refuse (exit 1)"
+    );
+}
+
+#[test]
+fn world_readable_exits_one() {
+    let d = new_dir("644");
+    put(&d.0, "maknae.yaml", "core: {}\n", 0o644);
+    let status = Command::new(bin()).arg(&d.0).status().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "world-readable config should refuse (exit 1)"
+    );
+}
+
+#[test]
 fn absent_dir_exits_one() {
     let status = Command::new(bin())
         .arg("/nonexistent/maknae_it_absent")
