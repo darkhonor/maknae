@@ -18,7 +18,7 @@ or weakened configuration.
 ## 1. Where the configuration lives
 
 Maknae's configuration is a **directory** of YAML files, not a single file and not
-environment variables (ADR-0005 §8: *"Configuration is YAML files, never ENV
+environment variables (ADR-0005, decision 8: *"Configuration is YAML files, never ENV
 values"*).
 
 - In a deployment it is the **`authority-config` volume** (see
@@ -169,12 +169,16 @@ backend read the same declaration.
 
 | Posture | When |
 |---|---|
-| **`Public`** (reach-only) | the ceiling equals the baseline exactly |
-| **`Gated`** | any above-baseline signal is declared (a higher level, CUI, SCI, a releasability set, a non-public dissemination, or an accreditation reference) |
+| **`Public`** (reach-only) | the ceiling is **byte-for-byte** the baseline |
+| **`Gated`** | the ceiling differs from the baseline in **any** way — higher, lower, or lateral (e.g. a higher level, CUI, SCI, a releasability set, a non-public *or empty* dissemination, or an accreditation reference) |
 
-The only way to reach `Gated` is a **valid, present, above-baseline** ceiling. No
-absence, typo, wrong type, or unknown key can widen the gate. (Fine-grained
-lattice/dominance evaluation is the optional DCS backend's job, not this gate's.)
+The gate is `Public` **iff** the ceiling equals the baseline exactly; **any** deviation
+reads as `Gated` — including a more-*restrictive*-looking one (an empty
+`dissemination_permitted`, say). The coarse bit only answers "is this the wide-open
+Public default, or has the operator declared *something else*?"; interpreting *what*
+was declared (fine-grained lattice/dominance) is the optional DCS backend's job. The
+only way to reach `Gated` is a **valid, present** ceiling that differs from the
+baseline; no absence, typo, wrong type, or unknown key can widen the gate.
 
 #### `core.handling` fields
 
@@ -227,8 +231,10 @@ full **in this reference** as the lake integration lands. They parallel a standa
 lake's fields, but a Maknae-embedded lake may diverge, so treat this document as the
 source of truth for a Maknae deployment.
 
-`core` and `lake` must be **registered** by the deployment so they are recognized as
-known sections.
+`core` is recognized **internally** and must **not** be registered — registering it is
+a `ReservedSection` error. The `lake` section, like any extension (§3), is **registered
+by the caller** (the kernel, when it is wired); an unregistered `lake` section would be
+an `UnknownSection` error.
 
 ---
 
@@ -260,9 +266,9 @@ security-relevant input.
   string `1`, `1` is the integer).
 - A single leading byte-order mark (BOM) is stripped.
 
-**Rejected (each is a hard `Parse` error):**
+**Rejected (each refuses the load with a hard error — see §8 for the exact variant):**
 
-- **Duplicate mapping keys** — never last-wins.
+- **Duplicate mapping keys** — never last-wins (a `DuplicateKey` error, not `Parse`).
 - **Aliases** (`*anchor`) and **tags** (`!!str`, `!foo`). An anchor definition on its
   own is inert (the value builds), but *referencing* it via an alias is rejected.
 - **Multiple documents** (`---` separators).
@@ -282,7 +288,7 @@ Every failure below refuses the load. The names are the loader's error variants.
 
 | Condition | Error |
 |---|---|
-| Missing `maknae.yaml`, unreadable file, or invalid UTF-8 | `Io` |
+| Missing `maknae.yaml`, unreadable file, invalid UTF-8, or a non-regular file (FIFO/socket/device) | `Io` |
 | Malformed / rejected YAML (see §7) | `Parse` |
 | Duplicate mapping key within a file | `DuplicateKey` |
 | A config file or directory with world/other permission bits | `InsecurePermissions` |
