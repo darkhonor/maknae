@@ -20,7 +20,8 @@ mod error;
 mod loader;
 mod scalar;
 mod value;
-// `pub use loader::load_config;` — enabled in Task 7
+
+pub use loader::load_config;
 
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;

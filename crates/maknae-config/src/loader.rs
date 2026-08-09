@@ -53,9 +53,7 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
 
 /// Validate the caller's specs before any file is read (spec §5): reject a
 /// reserved name and duplicate names. Fail-closed on caller misuse.
-// `allow(dead_code)`: sole non-test caller is `load_config` (Task 7); removed there.
-#[allow(dead_code)]
-pub(crate) fn validate_specs(specs: &[SectionSpec]) -> Result<(), ConfigError> {
+fn validate_specs(specs: &[SectionSpec]) -> Result<(), ConfigError> {
     for (i, s) in specs.iter().enumerate() {
         if s.name == CORE_SECTION {
             return Err(ConfigError::ReservedSection { section: s.name.clone() });
@@ -95,9 +93,7 @@ fn is_yaml_ext(name: &str) -> bool {
 /// then `config.d/` files lexically by filename. All perm/symlink/io violations
 /// abort here, before any parse (spec §4(1): dir + config.d checked, *then* files
 /// read — so a world-writable `config.d/` is caught before a bad base is opened).
-// `allow(dead_code)`: sole non-test caller is `load_config_impl` (Task 7); removed there.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError> {
     use std::os::unix::fs::MetadataExt;
 
@@ -177,8 +173,6 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
 /// Parse each buffer and merge into a `Document` (spec §4 precedence): base
 /// first, then `config.d/` in the given (already-sorted) order. Whole-section
 /// replacement; ambiguity across config.d is an error, never last-wins.
-// `allow(dead_code)`: sole non-test caller is `load_config_impl` (Task 7); removed there.
-#[allow(dead_code)]
 pub(crate) fn assemble(
     buffers: Vec<(Source, String)>,
     reg: &Registry,
@@ -246,6 +240,25 @@ pub(crate) fn assemble(
     }
 
     Ok(Document::new(sections, overrides))
+}
+
+/// Load a config directory into a `Document` (spec §2–§6). Spec validation is
+/// platform-independent and runs first (fail-closed on caller misuse); the
+/// permission-gated read is `cfg(unix)`, and non-Unix refuses to load.
+pub fn load_config(dir: &Path, specs: &[SectionSpec]) -> Result<Document, ConfigError> {
+    validate_specs(specs)?;
+    load_config_impl(dir, specs)
+}
+
+#[cfg(not(unix))]
+fn load_config_impl(_dir: &Path, _specs: &[SectionSpec]) -> Result<Document, ConfigError> {
+    Err(ConfigError::PermissionsUnsupported)
+}
+
+#[cfg(unix)]
+fn load_config_impl(dir: &Path, specs: &[SectionSpec]) -> Result<Document, ConfigError> {
+    let buffers = scan_dir(dir)?;
+    assemble(buffers, &Registry { specs })
 }
 
 #[cfg(test)]
