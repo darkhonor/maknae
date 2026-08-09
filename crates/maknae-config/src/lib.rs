@@ -15,10 +15,12 @@
 #![forbid(unsafe_code)]
 
 mod builder;
+mod document;
 mod error;
 mod scalar;
 mod value;
 
+pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;
 pub use value::Value;
 
