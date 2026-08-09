@@ -22,4 +22,8 @@ pub use compose::{combine, ConjunctionAuthorizer};
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{Action, Context, Request, Resource, Subject};
 pub use value::{AttrValue, Attributes};
+// NOTE: `Verdict` and `Decision` implement `Default` as a deliberate *fail-closed
+// contract* (`NotApplicable`→Deny / `Deny`), not an incidental derive. Downstream
+// consumers may rely on a defaulted verdict/decision never being a fail-open;
+// `defaults_are_fail_closed` (verdict.rs) guards it.
 pub use verdict::{finalize, Decision, Verdict};
