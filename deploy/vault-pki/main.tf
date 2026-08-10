@@ -25,7 +25,21 @@ resource "vault_mount" "maknae_int" {
   path                  = var.int_mount_path
   type                  = "pki"
   description           = "Maknae Intermediate CA (issues plane leaves)"
-  max_lease_ttl_seconds = var.int_ttl_seconds # >= leaf_ttl_seconds (see variables.tf)
+  max_lease_ttl_seconds = var.int_ttl_seconds # >= leaf_ttl_seconds (enforced below)
+
+  # Fail closed at PLAN time if an override inverts the lifetime hierarchy. Vault would
+  # otherwise reject the apply or silently cap leaves below their configured role TTL,
+  # leaving the PKI immediately unusable. Preconditions (TF >= 1.2) reference vars only.
+  lifecycle {
+    precondition {
+      condition     = var.root_ttl_seconds >= var.int_ttl_seconds
+      error_message = "root_ttl_seconds (${var.root_ttl_seconds}) must be >= int_ttl_seconds (${var.int_ttl_seconds}): the root must outlive the intermediate it signs."
+    }
+    precondition {
+      condition     = var.int_ttl_seconds >= var.leaf_ttl_seconds
+      error_message = "int_ttl_seconds (${var.int_ttl_seconds}) must be >= leaf_ttl_seconds (${var.leaf_ttl_seconds}): the intermediate mount max_lease caps leaf TTLs, so a smaller value silently truncates plane certs."
+    }
+  }
 }
 
 resource "vault_pki_secret_backend_intermediate_cert_request" "maknae_int" {

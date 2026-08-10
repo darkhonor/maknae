@@ -49,3 +49,16 @@ output "maknae_approle_name" {
   description = "AppRole role name for the CLI plane."
   value       = vault_approle_auth_backend_role.maknae.role_name
 }
+
+# RoleID is the NON-SECRET half of the AppRole credential (a stable identifier, like a
+# username); it cannot authenticate without a SecretID, which is delivered out-of-band
+# (operational step, see README). Both planes need their RoleID to log in, so expose it.
+output "maknaed_role_id" {
+  description = "AppRole RoleID for the trust plane (maknaed). Non-secret; pair with an out-of-band SecretID to log in."
+  value       = vault_approle_auth_backend_role.maknaed.role_id
+}
+
+output "maknae_role_id" {
+  description = "AppRole RoleID for the CLI plane (maknae). Non-secret; pair with an out-of-band SecretID to log in."
+  value       = vault_approle_auth_backend_role.maknae.role_id
+}
