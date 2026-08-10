@@ -20,6 +20,7 @@ mod plane;
 mod plane_verify;
 mod resolver;
 mod socket;
+mod tls;
 mod verify;
 
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};

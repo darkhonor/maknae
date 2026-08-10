@@ -7,6 +7,8 @@ use crate::{
     assert_fips_provider, generate_plane_csr, load_ca_pin, load_vault_config,
     verify::verify_plane_uri_san, Plane, VaultError,
 };
+use arc_swap::ArcSwapOption;
+use rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -16,7 +18,6 @@ use zeroize::Zeroizing;
 
 struct IdentityInner {
     leaf_pem: String,
-    #[allow(dead_code)] // consumed by the Stage-2 rustls config builder
     key_der: Zeroizing<Vec<u8>>,
     chain_pem: Vec<String>,
 }
@@ -36,7 +37,6 @@ impl PlaneIdentity {
     }
     /// The private key in DER (crate-internal only — used to build the rustls
     /// `CertifiedKey` in `tls.rs`; never handed to a caller).
-    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
     pub(crate) fn key_der(&self) -> &[u8] {
         &self.0.key_der
     }
@@ -54,6 +54,10 @@ pub struct PlaneClient {
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
     /// the actual token TTL rather than a hardcoded assumption. 0 until first mint.
     lease_secs: Arc<AtomicU64>,
+    /// The server resolver's cert slot (set only when a PlaneListener is bound; None for
+    /// the CLI). Stored/cleared IN THE SAME critical section as the identity write so the
+    /// resolver never lags the identity.
+    cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -152,7 +156,14 @@ impl PlaneClient {
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
             lease_secs: Arc::new(AtomicU64::new(0)),
+            cert_sink: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Attach the server resolver's cert slot (called by `PlaneListener::bind`). After this,
+    /// every `mint()`/renewal-expiry updates the slot in lock-step with the identity.
+    pub(crate) fn attach_cert_sink(&self, slot: Arc<ArcSwapOption<CertifiedKey>>) {
+        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(slot);
     }
 
     /// The live mint: authenticate → CSR → `pki/sign` → hold memory-only. Stores a
@@ -188,7 +199,30 @@ impl PlaneClient {
             key_der,
             chain_pem,
         }));
-        *self.identity.write().expect("identity lock poisoned") = Some(id.clone());
+        // Build the rustls CertifiedKey first — if it fails, revoke the just-issued token
+        // (best-effort) rather than dropping the guard and leaking a usable token.
+        let sink = self
+            .cert_sink
+            .read()
+            .expect("cert_sink lock poisoned")
+            .clone();
+        let built = match &sink {
+            Some(_) => match crate::tls::certified_key_from_identity(&id) {
+                Ok(ck) => Some(ck),
+                Err(e) => {
+                    let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        {
+            let mut guard = self.identity.write().expect("identity lock poisoned");
+            *guard = Some(id.clone());
+            if let (Some(slot), Some(ck)) = (sink.as_ref(), built) {
+                slot.store(Some(ck));
+            }
+        }
         Ok(id)
     }
 
@@ -218,12 +252,10 @@ impl PlaneClient {
 
     /// The deployment id (crate-internal — the verifier needs it to compute the expected
     /// peer URI-SAN).
-    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
     pub(crate) fn deployment_id(&self) -> &str {
         &self.deployment_id
     }
     /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
-    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
     pub(crate) fn plane(&self) -> Plane {
         self.plane
     }
@@ -248,12 +280,17 @@ impl PlaneClient {
         let client = Arc::clone(&self.client);
         let lease_secs = Arc::clone(&self.lease_secs);
         let identity = Arc::clone(&self.identity);
+        let cert_sink = Arc::clone(&self.cert_sink);
         // Once renewal can no longer continue, the leaf's usefulness is bounded by the
         // token's remaining TTL — so INVALIDATE the identity here rather than trusting the
         // caller to observe the join handle. current_identity() then returns None (fail
-        // closed) even if nobody is watching the handle.
+        // closed) even if nobody is watching the handle. The resolver's cert slot is
+        // cleared in lock-step so a bound listener also stops presenting a leaf.
         let expire = move || {
             *identity.write().expect("identity lock poisoned") = None;
+            if let Some(slot) = cert_sink.read().expect("cert_sink lock poisoned").as_ref() {
+                slot.store(None);
+            }
             VaultError::RenewalExpired
         };
         tokio::spawn(async move {
