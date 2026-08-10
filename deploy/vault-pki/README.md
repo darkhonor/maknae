@@ -66,7 +66,10 @@ are present (a permissive role is still schema-valid) — that is a review conce
   under an enterprise root. That is a **dev** choice; production chaining is a later delta.
 - **`deployment_id`.** A wrong value silently mislabels every cert. The no-default +
   validation block forces an explicit choice; still pick it deliberately (it is the
-  shared "this is dev" guard with the dedicated-root decision).
+  shared "this is dev" guard with the dedicated-root decision). It is constrained to
+  `[A-Za-z0-9._-]` because Vault's `allowed_uri_sans` treats `*` as a **glob** — a `*`
+  in `deployment_id` would make the leaf SAN `maknae://*/plane/...` match *any*
+  deployment and defeat plane isolation; the charset guard blocks that.
 - **`revoke` is mount-wide.** Vault has no per-role revoke path, so either plane's token
   can revoke the *other* plane's live cert (a cross-plane DoS, bounded by requiring the
   target serial — no `list` is granted). Revocation denies service; it never forges
