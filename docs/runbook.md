@@ -103,3 +103,80 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
 
 Nothing to clean — the leaf and key are memory-only and gone when the process exits; the
 token is revoked on `shutdown`. The single-use SecretID is consumed by the login.
+
+---
+
+## Chapter 2 — Plane-to-plane mTLS (`maknae-vault` Stage 2)
+
+Prove the two planes establish a **mutually-authenticated TLS 1.3 channel over a local
+Unix domain socket**, each verifying the peer's `maknae://<deployment_id>/plane/<other>`
+URI-SAN, and the daemon captures the peer's kernel credentials. This is the second live
+milestone (the transport; the daemon run-loop + CLI arrive in Stage 3).
+
+### Prerequisites
+
+- Chapter 1 works (both planes can mint a leaf against your Vault).
+- **Two config dirs** — one per plane — each a Chapter-1 layout with its own RoleID +
+  response-wrapped SecretID:
+  - **kernel** → `~/.maknae` (`maknaed-approle-id`, `maknaed-secret-id`, the shared
+    `tls/` CAs, `maknae.yaml`).
+  - **cli** → `~/.maknae-cli` (`maknae-approle-id`, `maknae-secret-id`, the same `tls/`
+    CAs, `maknae.yaml`). The CLI plane uses the `maknae` AppRole role + `maknae-cli` PKI
+    role; copy the `tls/` dir and `maknae.yaml` from `~/.maknae`, then add the CLI RoleID
+    and a freshly-wrapped CLI SecretID.
+
+### 1. Seed both response-wrapped SecretIDs (just-in-time)
+
+```bash
+export VAULT_ADDR="https://vault.example.internal:8200"   # already authed with root
+# kernel plane:
+vault write -wrap-ttl=90s -f auth/maknae-approle/role/maknaed/secret-id   # → 0o400 ~/.maknae/maknaed-secret-id
+# cli plane:
+vault write -wrap-ttl=90s -f auth/maknae-approle/role/maknae/secret-id     # → 0o400 ~/.maknae-cli/maknae-secret-id
+```
+Deliver each returned `wrapping_info.token` to the matching `…-secret-id` file
+(`umask 077; printf '%s' '<token>' > <path>; chmod 400 <path>`), as in Chapter 1 §3.
+
+### 2. Socket dir + the `maknae` group (defense-in-depth outer fence)
+
+The listener binds a pathname socket in a directory the daemon owns and only it can write.
+The socket is group-gated `0660`; the operator account joins the `maknae` group so the CLI
+can `connect()`. Group membership is **only** the outer fence — a valid plane cert (mTLS)
+is still required to authenticate.
+
+- **Linux (Debian/RHEL)** — systemd provisions the dir: `RuntimeDirectory=maknae`
+  (`/run/maknae`, `_maknae:maknae`, `0750`); add the operator to `maknae`
+  (`usermod -aG maknae <you>`).
+- **macOS (arm64)** — launchd (or `mkdir`) creates e.g. `/usr/local/var/run/maknae`
+  owned by the service account, `0750`; add the operator to `maknae` via `dscl`.
+
+The client library **verifies the parent dir's ownership + mode before binding** and
+refuses (fail-closed) if it is group/other-writable — so this step is checked, not assumed.
+
+### 3. Run the live loopback
+
+```bash
+export MAKNAE_KERNEL_DIR="$HOME/.maknae"
+export MAKNAE_CLI_DIR="$HOME/.maknae-cli"
+cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
+```
+
+Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS`.
+
+### What it proves
+
+- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted P-384
+  leaf and verifies the peer's leaf carries **exactly** the expected
+  `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
+  the aws-lc-rs FIPS provider.
+- **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
+  (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`+`LOCAL_PEERPID` on macOS). The transport
+  *reports* these; uid **policy** + audit are the Stage-3 daemon's job.
+- **Fail-closed** — a wrong-plane, expired, foreign-CA, absent, or extra-SAN peer cert
+  aborts the handshake (see the in-process negative suite); a listener whose identity was
+  cleared (renewal expired) presents no leaf and the handshake fails.
+
+### Teardown
+
+The socket file is removed at the end of the run; leaves + keys are memory-only and gone
+when the process exits; both tokens are revoked on `shutdown`.
