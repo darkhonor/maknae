@@ -52,7 +52,7 @@ Maknae's architecture rests on signatures, but the base (non-DCS) product must h
 |---|---|---|---|
 | Channel authentication/integrity | mTLS plane certs | SC-8; SC-8(1); IA-9 | not AU-10 (no durable non-repudiation) |
 | Content integrity | SHA-256 hashes | SI-7 | change-detection, not authoritative signing |
-| Audit integrity | hash-chained audit records (+ optional signed checkpoints) | AU-9; AU-9(3); AU-10 (COULD) | AU-9 needs an externalized anchor (above) |
+| Audit integrity | hash-chained audit records (+ optional signed checkpoints) | AU-9 (partial); AU-9(3) *full only with the externalized anchor*; AU-10 (COULD) | bare chain = partial AU-9 (recomputable by a trust-plane compromise); the signed/exported checkpoint completes AU-9(3) tamper-evidence (see the anchoring precondition above) |
 | Supply-chain provenance | GPG-signed tags/releases + committed provider lock | SR-4 | SR-11 shipped-artifact authenticity is partial/deferred |
 
 The full control matrix belongs in the RMF package, not this ADR.
