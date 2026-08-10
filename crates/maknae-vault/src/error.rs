@@ -25,6 +25,10 @@ pub enum VaultError {
     /// A sensitive credential file has unsafe permissions (group/other access) or is a
     /// symlink — refused before reading (fail-closed).
     InsecureCredential { path: PathBuf, detail: String },
+    /// The Unix permission model is unavailable on this target, so a sensitive credential
+    /// file's owner-only permissions cannot be verified — refuse rather than read it
+    /// unchecked (fail-closed; mirrors `maknae-config`'s non-Unix refusal).
+    PermissionsUnsupported,
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
     /// A response-wrapped SecretID could not be unwrapped (already used / expired).
@@ -58,6 +62,10 @@ impl std::fmt::Display for VaultError {
             VaultError::InsecureCredential { path, detail } => {
                 write!(f, "refusing credential file {}: {detail}", path.display())
             }
+            VaultError::PermissionsUnsupported => write!(
+                f,
+                "cannot verify credential-file permissions on this (non-Unix) target — refusing to read (fail closed)"
+            ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
             VaultError::WrapUnwrap(msg) => write!(
                 f,
