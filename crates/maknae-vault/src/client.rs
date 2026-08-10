@@ -211,17 +211,28 @@ impl PlaneClient {
     /// `mint()`** — there is no token to renew before minting. If called before (lease
     /// still 0), the task fails closed immediately (`RenewalExpired`) rather than
     /// guessing an interval. The handle resolves to `RenewalExpired` when the token can
-    /// no longer be renewed (token_max_ttl reached / revoked) — re-authenticate then.
+    /// no longer be renewed (token_max_ttl reached / revoked); at that point the shared
+    /// identity is CLEARED so `current_identity()` returns `None` (fail closed) whether or
+    /// not the caller observes the handle — re-authenticate to mint a fresh leaf.
     pub fn spawn_renewal(&self) -> tokio::task::JoinHandle<VaultError> {
         let client = Arc::clone(&self.client);
         let lease_secs = Arc::clone(&self.lease_secs);
+        let identity = Arc::clone(&self.identity);
+        // Once renewal can no longer continue, the leaf's usefulness is bounded by the
+        // token's remaining TTL — so INVALIDATE the identity here rather than trusting the
+        // caller to observe the join handle. current_identity() then returns None (fail
+        // closed) even if nobody is watching the handle.
+        let expire = move || {
+            *identity.write().expect("identity lock poisoned") = None;
+            VaultError::RenewalExpired
+        };
         tokio::spawn(async move {
             loop {
                 // Fail closed if spawned before mint() — no token to renew, and we must
                 // never guess an interval that could outlast a short lease.
                 let lease = lease_secs.load(Ordering::Relaxed);
                 if lease == 0 {
-                    return VaultError::RenewalExpired;
+                    return expire();
                 }
                 // Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the
                 // lease so even a sub-60s TTL renews before it expires.
@@ -232,7 +243,7 @@ impl PlaneClient {
                 // shortens the lease, so the next delay must track the current one.
                 match vaultrs::token::renew_self(&*c, None).await {
                     Ok(auth) => lease_secs.store(auth.lease_duration, Ordering::Relaxed),
-                    Err(_) => return VaultError::RenewalExpired,
+                    Err(_) => return expire(),
                 }
             }
         })
