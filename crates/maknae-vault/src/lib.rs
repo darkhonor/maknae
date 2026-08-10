@@ -22,6 +22,8 @@ mod resolver;
 mod socket;
 mod stream;
 mod tls;
+#[cfg(test)]
+mod transport_tests;
 mod verify;
 
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
