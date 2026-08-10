@@ -60,8 +60,9 @@ resource "vault_pki_secret_backend_role" "maknae_kernel" {
   key_bits       = 384
   signature_bits = 384
 
-  allowed_uri_sans = ["maknae://${var.deployment_id}/plane/kernel"]
-  use_csr_sans     = true # honor the plane's URI-SAN as presented in its CSR
+  allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/kernel"]
+  use_csr_sans        = true  # honor the plane's URI-SAN as presented in its CSR
+  use_csr_common_name = false # the URI-SAN is the WHOLE identity — never take a CN from the CSR
 
   allow_ip_sans               = false
   allow_localhost             = false
@@ -85,8 +86,9 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
   key_bits       = 384
   signature_bits = 384
 
-  allowed_uri_sans = ["maknae://${var.deployment_id}/plane/cli"]
-  use_csr_sans     = true
+  allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/cli"]
+  use_csr_sans        = true
+  use_csr_common_name = false # the URI-SAN is the WHOLE identity — never take a CN from the CSR
 
   allow_ip_sans               = false
   allow_localhost             = false
