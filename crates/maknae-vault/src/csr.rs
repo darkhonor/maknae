@@ -64,6 +64,15 @@ pub fn csr_is_p384(pem: &str) -> bool {
         == P384_UNCOMPRESSED_POINT_LEN
 }
 
+/// True iff the CSR matches the required plane-cert shape: empty subject, EXACTLY one
+/// URI SAN == `want_uri_san`, and EC P-384. This is the fail-closed self-check that
+/// `csr_gen::generate_plane_csr` applies to its own output. The AND-decision lives
+/// here (T1, mutation-covered — the negative tests prove it REJECTS a bad shape) so
+/// that `csr_gen.rs` is left with only external-error plumbing (T3).
+pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str) -> bool {
+    csr_has_empty_subject(pem) && csr_single_uri_san(pem, want_uri_san) && csr_is_p384(pem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +153,25 @@ mod tests {
         assert!(!csr_has_empty_subject("garbage"));
         assert!(!csr_single_uri_san("garbage", "x"));
         assert!(!csr_is_p384("garbage"));
+    }
+
+    #[test]
+    fn matches_plane_shape_accepts_and_rejects_each_failure() {
+        let want = "maknae://d/plane/kernel";
+        // Good shape: empty subject, one URI-SAN == want, P-384.
+        let good = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P384_SHA384);
+        assert!(csr_matches_plane_shape(&good, want));
+        // Each SINGLE failing dimension must flip it to false (this also kills the
+        // `&&`->`||` mutants — with only one predicate false, `||` would still be true).
+        let cn = make_csr(Some("x"), &[want], &rcgen::PKCS_ECDSA_P384_SHA384); // subject not empty
+        assert!(!csr_matches_plane_shape(&cn, want));
+        let wrong_san = make_csr(
+            None,
+            &["maknae://d/plane/cli"],
+            &rcgen::PKCS_ECDSA_P384_SHA384,
+        );
+        assert!(!csr_matches_plane_shape(&wrong_san, want)); // SAN != want
+        let p256 = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P256_SHA256); // not P-384
+        assert!(!csr_matches_plane_shape(&p256, want));
     }
 }
