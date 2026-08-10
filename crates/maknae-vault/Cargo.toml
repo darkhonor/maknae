@@ -14,8 +14,7 @@ maknae-config = { path = "../maknae-config" }
 vaultrs = { version = "=0.7.4", default-features = false, features = ["rustls"] }  # its reqwest uses the installed FIPS default (§6.1); reqwest/tokio-tls are transitive
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
-rustls-pemfile = "2"
-x509-parser = "0.16"
+x509-parser = "0.16"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

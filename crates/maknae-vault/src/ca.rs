@@ -3,7 +3,6 @@
 //! rides the `pki/sign` response). Stage 2's rustls transport consumes these. The
 //! root is config-pinned (a spoofed Vault cannot swap the trust anchor).
 use crate::VaultError;
-use std::io::BufReader;
 use std::path::Path;
 
 /// The pinned CA material (DER). Root is the trust anchor; intermediate builds chains.
@@ -13,18 +12,18 @@ pub struct CaBundle {
 }
 
 /// Parse the FIRST certificate from a PEM file into DER. Fail-closed on
-/// missing/malformed/empty.
+/// missing/malformed/empty (via `x509-parser`; rustls-pemfile is unmaintained).
 fn first_cert_der(path: &Path) -> Result<Vec<u8>, VaultError> {
     let bytes = std::fs::read(path).map_err(|source| VaultError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut reader = BufReader::new(&bytes[..]);
-    let first = rustls_pemfile::certs(&mut reader)
-        .next()
-        .ok_or(VaultError::Pem("no certificate in PEM"))?
+    let (_, pem) = x509_parser::pem::parse_x509_pem(&bytes)
         .map_err(|_| VaultError::Pem("malformed certificate PEM"))?;
-    Ok(first.as_ref().to_vec())
+    if pem.label != "CERTIFICATE" {
+        return Err(VaultError::Pem("not a CERTIFICATE PEM"));
+    }
+    Ok(pem.contents)
 }
 
 /// Load `<dir>/tls/maknae-root-ca.crt` + `<dir>/tls/maknae-int-ca.crt`.
@@ -43,8 +42,11 @@ mod tests {
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir()
-                .join(format!("maknae-vault-ca-{}-{}", std::process::id(), tag));
+            let p = std::env::temp_dir().join(format!(
+                "maknae-vault-ca-{}-{}",
+                std::process::id(),
+                tag
+            ));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(p.join("tls")).unwrap();
             TempDir(p)

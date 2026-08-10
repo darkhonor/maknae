@@ -51,6 +51,16 @@ files = [
   # kernel config-boot: the boot gate resolves the runtime ingest posture and must
   # fail closed. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
   "crates/maknae-kernel/src/boot.rs",
+  # maknae-vault Stage 1: the plane-cert client's PURE decision logic. The URI-SAN
+  # verifier is the register's single consciously-owned code; the CSR shape + config
+  # + FIPS decision are fail-closed gates. Each in [t1].files ONLY (own 95% floor;
+  # NOT ratchet_cohort). The network/keygen/provider I/O (auth/client/ca/fips_glue)
+  # is T3 + excluded from mutation via the workspace-root mutants.toml.
+  "crates/maknae-vault/src/verify.rs",
+  "crates/maknae-vault/src/csr.rs",
+  "crates/maknae-vault/src/plane.rs",
+  "crates/maknae-vault/src/config.rs",
+  "crates/maknae-vault/src/fips.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -58,7 +68,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault"]
 
 [t2]
 floor_production_region = 90
@@ -169,7 +179,31 @@ why = "scaffold stub — re-tier at body landing"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"
-why = "scaffold stub — re-tier at body landing"
+why = "module declarations + re-exports; the decision logic is verify/csr/plane/config/fips (T1)"
+
+[[t3]]
+path = "crates/maknae-vault/src/error.rs"
+why = "VaultError enum + Display/From declarations; no decision logic"
+
+[[t3]]
+path = "crates/maknae-vault/src/fips_glue.rs"
+why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result decision is in fips.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-vault/src/ca.rs"
+why = "PEM file I/O for the CA-pin loader; fixture-tested for coverage, mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-vault/src/csr_gen.rs"
+why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the pure shape predicates it self-checks are csr.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-vault/src/auth.rs"
+why = "AppRole login + sys/wrapping/unwrap — live-Vault I/O; exercised by the gated live-smoke, mutation-excluded"
+
+[[t3]]
+path = "crates/maknae-vault/src/client.rs"
+why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
 
 # [[exception]] — documented-not-tested (none at adoption). Removes every code
 # region whose line_start falls within [anchor, end_anchor] from numerator AND

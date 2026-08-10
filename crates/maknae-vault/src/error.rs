@@ -15,7 +15,10 @@ pub enum VaultError {
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// A file could not be read.
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
     /// A response-wrapped SecretID could not be unwrapped (already used / expired).
