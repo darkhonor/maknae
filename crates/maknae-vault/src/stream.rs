@@ -92,9 +92,19 @@ pub struct PlaneListener {
     acceptor: TlsAcceptor,
     expect: Plane,
     deployment_id: String,
+    /// The bound pathname socket — unlinked on drop (tokio/std `UnixListener` leaves it).
+    path: std::path::PathBuf,
     /// Detaches this listener's cert sink from the client on drop (frees the client to bind
     /// a replacement listener). Field order places it last so it drops after the others.
     _sink_guard: crate::client::CertSinkGuard,
+}
+
+impl Drop for PlaneListener {
+    fn drop(&mut self) {
+        // Remove the pathname socket so a retired listener leaves no stale endpoint behind
+        // (best-effort — bind_listener's stale-socket detection would also reclaim it).
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl PlaneListener {
@@ -116,12 +126,22 @@ impl PlaneListener {
         // attach registers the slot AND seeds it from the current identity atomically under
         // the identity lock (fail-closed against a racing renewal-expiry — codex r1); the
         // returned guard detaches the sink when this listener drops (codex r6).
-        let sink_guard = client.attach_cert_sink(resolver.slot())?;
+        let sink_guard = match client.attach_cert_sink(resolver.slot()) {
+            Ok(g) => g,
+            Err(e) => {
+                // attach failed AFTER we bound the socket — unlink it so we don't leave a
+                // stale endpoint behind (codex r7).
+                drop(listener);
+                let _ = std::fs::remove_file(path);
+                return Err(e);
+            }
+        };
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(cfg),
             expect: client.plane().peer(),
             deployment_id: client.deployment_id().to_string(),
+            path: path.to_path_buf(),
             _sink_guard: sink_guard,
         })
     }
