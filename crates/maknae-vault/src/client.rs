@@ -61,6 +61,36 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
         })
 }
 
+/// Read a SENSITIVE credential file (the wrapped SecretID). Refuse a symlink or any
+/// group/other access BEFORE reading — the wrapping token must never be world-readable
+/// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
+fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(VaultError::InsecureCredential {
+            path: path.to_path_buf(),
+            detail: "is a symlink".to_string(),
+        });
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(VaultError::InsecureCredential {
+            path: path.to_path_buf(),
+            detail: format!("mode {mode:o} allows group/other access (require 0600 or stricter)"),
+        });
+    }
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .map_err(|source| VaultError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 /// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, VaultError> {
     let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
@@ -81,8 +111,10 @@ impl PlaneClient {
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
         let prefix = plane.config_prefix();
+        // RoleID is non-secret (an identifier); the wrapped SecretID is sensitive and
+        // must be owner-only (perm-checked, no symlink).
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
-        let wrapped_secret_id = read_trimmed(&dir.join(format!("{prefix}-secret-id")))?;
+        let wrapped_secret_id = read_secret_credential(&dir.join(format!("{prefix}-secret-id")))?;
         let vault_ca = dir.join("tls").join("vault-ca.crt");
         let settings = VaultClientSettingsBuilder::default()
             .address(cfg.addr)
@@ -176,8 +208,11 @@ impl PlaneClient {
                 };
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 let c = client.lock().await;
-                if vaultrs::token::renew_self(&*c, None).await.is_err() {
-                    return VaultError::RenewalExpired;
+                // Update the lease from THIS renewal's response — near token_max_ttl Vault
+                // shortens the lease, so the next delay must track the current one.
+                match vaultrs::token::renew_self(&*c, None).await {
+                    Ok(auth) => lease_secs.store(auth.lease_duration, Ordering::Relaxed),
+                    Err(_) => return VaultError::RenewalExpired,
                 }
             }
         })
@@ -189,5 +224,35 @@ impl PlaneClient {
         if let Err(e) = vaultrs::token::revoke_self(&*client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tmpfile(name: &str, mode: u32) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("mv-cred-{}-{}", std::process::id(), name));
+        std::fs::write(&p, "wrapped-token-xyz").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn secret_credential_rejects_group_other_access() {
+        let p = tmpfile("open", 0o644);
+        assert!(matches!(
+            read_secret_credential(&p),
+            Err(VaultError::InsecureCredential { .. })
+        ));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn secret_credential_accepts_owner_only() {
+        let p = tmpfile("secure", 0o600);
+        assert_eq!(read_secret_credential(&p).unwrap(), "wrapped-token-xyz");
+        let _ = std::fs::remove_file(&p);
     }
 }
