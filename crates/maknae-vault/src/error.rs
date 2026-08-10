@@ -41,6 +41,17 @@ pub enum VaultError {
     Sign(String),
     /// The renewable token hit `token_max_ttl` — the caller must re-authenticate.
     RenewalExpired,
+    /// The UDS parent directory has unsafe ownership/permissions — refused before bind.
+    InsecureSocketDir { path: PathBuf, detail: String },
+    /// Binding/listening on the UDS failed (incl. a live socket already present).
+    SocketBind(String),
+    /// Peer-credential capture failed — a local connection whose kernel creds cannot be
+    /// read cannot be policed by the daemon, so it is refused (fail closed).
+    PeerCred(String),
+    /// The TLS handshake failed (chain invalid/expired, foreign CA, absent client cert).
+    Handshake(String),
+    /// The peer leaf's plane URI-SAN was wrong/absent/extra (wraps the T1 verifier error).
+    PeerIdentity(crate::VerifyError),
 }
 
 impl std::fmt::Display for VaultError {
@@ -78,6 +89,13 @@ impl std::fmt::Display for VaultError {
                 f,
                 "token reached max_ttl — re-authentication with a fresh SecretID required"
             ),
+            VaultError::InsecureSocketDir { path, detail } => {
+                write!(f, "refusing UDS dir {}: {detail}", path.display())
+            }
+            VaultError::SocketBind(msg) => write!(f, "UDS bind failed: {msg}"),
+            VaultError::PeerCred(msg) => write!(f, "peer-credential capture failed: {msg}"),
+            VaultError::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
+            VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
         }
     }
 }
@@ -87,5 +105,26 @@ impl std::error::Error for VaultError {}
 impl From<maknae_config::ConfigError> for VaultError {
     fn from(e: maknae_config::ConfigError) -> Self {
         VaultError::Config(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transport_variants_display() {
+        let cases: Vec<VaultError> = vec![
+            VaultError::InsecureSocketDir {
+                path: PathBuf::from("/run/maknae"),
+                detail: "mode 0777".into(),
+            },
+            VaultError::SocketBind("addr in use".into()),
+            VaultError::PeerCred("getsockopt failed".into()),
+            VaultError::Handshake("bad cert".into()),
+            VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
+        ];
+        for e in cases {
+            assert!(!format!("{e}").is_empty());
+        }
     }
 }
