@@ -17,6 +17,7 @@ mod fips;
 mod fips_glue;
 mod peercred;
 mod plane;
+mod plane_verify;
 mod resolver;
 mod socket;
 mod verify;
