@@ -154,9 +154,35 @@ impl PlaneClient {
             );
         }
 
+        // Any failure AFTER the token is installed must revoke the just-issued token —
+        // otherwise `client.mint().await?` drops the client (shutdown() never runs) and
+        // leaks a usable privileged token until its TTL.
+        let (key_der, leaf_pem, chain_pem) = match self.sign_leaf(&client).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+                return Err(e);
+            }
+        };
+
+        let id = PlaneIdentity(Arc::new(IdentityInner {
+            leaf_pem,
+            key_der,
+            chain_pem,
+        }));
+        *self.identity.write().expect("identity lock poisoned") = Some(id.clone());
+        Ok(id)
+    }
+
+    /// CSR → `pki/sign` → returned-leaf SAN self-check. Split out so `mint` has a single
+    /// post-auth cleanup point (revoke-on-failure).
+    async fn sign_leaf(
+        &self,
+        client: &VaultClient,
+    ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
         let (key_der, csr_pem) = generate_plane_csr(self.plane, &self.deployment_id)?;
         let resp = vaultrs::pki::cert::ca::sign(
-            &*client,
+            client,
             INT_PKI_MOUNT,
             self.plane.pki_sign_role(),
             &csr_pem,
@@ -165,19 +191,11 @@ impl PlaneClient {
         )
         .await
         .map_err(|e| VaultError::Sign(e.to_string()))?;
-
         // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
         let leaf_der = pem_to_der(&resp.certificate)?;
         verify_plane_uri_san(&leaf_der, self.plane, &self.deployment_id)
             .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
-
-        let id = PlaneIdentity(Arc::new(IdentityInner {
-            leaf_pem: resp.certificate,
-            key_der,
-            chain_pem: resp.ca_chain.unwrap_or_default(),
-        }));
-        *self.identity.write().expect("identity lock poisoned") = Some(id.clone());
-        Ok(id)
+        Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
     }
 
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
