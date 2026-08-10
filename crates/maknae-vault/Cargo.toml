@@ -10,3 +10,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+maknae-config = { path = "../maknae-config" }
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["fips"] }
+rustls-pemfile = "2"
+x509-parser = "0.16"
+zeroize = "1"
+# Vault-I/O deps (vaultrs, reqwest, tokio) are added in Task 7 once the Task-0 probe
+# confirms the FIPS reqwest-client injection / feature set.
+
+[dev-dependencies]
