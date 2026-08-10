@@ -46,6 +46,10 @@ pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
 /// cannot protect a non-TLS connection), and a malformed URL would panic vaultrs's
 /// builder — both rejected fail-closed here.
 pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
+    // `url` requires a non-empty host for the special `https` scheme — verified
+    // empirically: "https://", "https://:8200", and "https://user@:9" all fail to parse
+    // with "empty host". So once parse succeeds AND the scheme is https, a host is
+    // guaranteed; a separate empty-host branch would be unreachable (and untestable).
     let url =
         url::Url::parse(addr).map_err(|e| VaultError::InvalidAddr(format!("{addr:?}: {e}")))?;
     if url.scheme() != "https" {
@@ -53,9 +57,6 @@ pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
             "{addr:?}: scheme must be https (got {:?}) — plaintext would disclose credentials",
             url.scheme()
         )));
-    }
-    if url.host_str().map(|h| h.is_empty()).unwrap_or(true) {
-        return Err(VaultError::InvalidAddr(format!("{addr:?}: no host")));
     }
     Ok(())
 }
@@ -104,6 +105,31 @@ mod tests {
         assert_eq!(get_str(&m, "n"), None); // non-Str
         assert_eq!(get_str(&m, "z"), None); // absent
         assert_eq!(get_str(&Value::Int(1), "a"), None); // non-Map
+    }
+
+    #[test]
+    fn validate_vault_addr_guard() {
+        assert!(validate_vault_addr("https://v.example:8200").is_ok());
+        // Plaintext http:// — would disclose the wrapping token / SecretID / Vault token.
+        assert!(matches!(
+            validate_vault_addr("http://v.example:8200"),
+            Err(VaultError::InvalidAddr(_))
+        ));
+        // Any non-https scheme is refused.
+        assert!(matches!(
+            validate_vault_addr("ftp://v.example"),
+            Err(VaultError::InvalidAddr(_))
+        ));
+        // Malformed URL fails closed (would otherwise panic vaultrs's builder).
+        assert!(matches!(
+            validate_vault_addr("not a url"),
+            Err(VaultError::InvalidAddr(_))
+        ));
+        // Empty-host https fails at parse (url guarantees a host for the https scheme).
+        assert!(matches!(
+            validate_vault_addr("https://:8200"),
+            Err(VaultError::InvalidAddr(_))
+        ));
     }
 
     #[test]

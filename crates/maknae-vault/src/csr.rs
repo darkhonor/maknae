@@ -183,6 +183,18 @@ mod tests {
     }
 
     #[test]
+    fn valid_pem_envelope_garbage_der_all_false() {
+        // A well-formed PEM envelope whose DER is NOT a valid CSR: parse_csr succeeds
+        // (base64 decodes), then X509CertificationRequest::from_der fails — every
+        // predicate must return false (covers the from_der Err arm in each).
+        let g =
+            "-----BEGIN CERTIFICATE REQUEST-----\nAQIDBA==\n-----END CERTIFICATE REQUEST-----\n";
+        assert!(!csr_has_empty_subject(g));
+        assert!(!csr_single_uri_san(g, "maknae://d/plane/kernel"));
+        assert!(!csr_is_p384(g));
+    }
+
+    #[test]
     fn matches_plane_shape_accepts_and_rejects_each_failure() {
         let want = "maknae://d/plane/kernel";
         // Good shape: empty subject, one URI-SAN == want, P-384.
