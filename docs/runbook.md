@@ -47,6 +47,15 @@ chmod 600 ~/.maknae/maknae.yaml
 > The `deployment_id` MUST equal the value baked into the Vault roles' `allowed_uri_sans`,
 > or `pki/sign` rejects the CSR's URI-SAN.
 
+> **Non-default mounts.** If you overrode the deploy module's `approle_path` or
+> `int_mount_path`, set the matching keys under `vault:` — they default to
+> `maknae-approle` / `maknae-pki-int` when absent:
+> ```yaml
+> vault:
+>   approle_mount: <your approle_path>
+>   pki_int_mount: <your int_mount_path>
+> ```
+
 ### 2. Point the vars
 
 ```bash

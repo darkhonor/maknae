@@ -6,10 +6,21 @@ use crate::VaultError;
 use maknae_config::{load_config, SectionSpec, Value};
 use std::path::Path;
 
+/// Default Vault mount paths — MUST match the deploy module's `approle_path` /
+/// `int_mount_path` variable defaults (deploy/vault-pki/variables.tf). Overridable via
+/// the `vault.approle_mount` / `vault.pki_int_mount` config keys so a deployment that
+/// overrides those Terraform vars stays compatible with the client.
+pub const DEFAULT_APPROLE_MOUNT: &str = "maknae-approle";
+pub const DEFAULT_PKI_INT_MOUNT: &str = "maknae-pki-int";
+
 /// The non-sensitive Vault settings.
 pub struct VaultConfig {
     pub addr: String,
     pub deployment_id: String,
+    /// AppRole auth mount (Terraform `approle_path`); defaults to `maknae-approle`.
+    pub approle_mount: String,
+    /// Intermediate PKI mount (Terraform `int_mount_path`); defaults to `maknae-pki-int`.
+    pub pki_int_mount: String,
 }
 
 /// Pull a string value out of a `Value::Map` by key. `Value` exposes no accessor.
@@ -85,9 +96,18 @@ pub fn load_vault_config(dir: &Path) -> Result<VaultConfig, VaultError> {
         .ok_or(VaultError::MissingKey("deployment_id"))?
         .to_string();
     validate_deployment_id(&deployment_id)?;
+    // Mount paths are OPTIONAL — absent keys fall back to the Terraform-default mounts.
+    let approle_mount = get_str(vault, "approle_mount")
+        .unwrap_or(DEFAULT_APPROLE_MOUNT)
+        .to_string();
+    let pki_int_mount = get_str(vault, "pki_int_mount")
+        .unwrap_or(DEFAULT_PKI_INT_MOUNT)
+        .to_string();
     Ok(VaultConfig {
         addr,
         deployment_id,
+        approle_mount,
+        pki_int_mount,
     })
 }
 
@@ -182,6 +202,22 @@ mod tests {
         let c = load_vault_config(&d.0).unwrap();
         assert_eq!(c.addr, "https://v.example:8200");
         assert_eq!(c.deployment_id, "dev-01");
+        // Absent mount keys → Terraform-default mounts.
+        assert_eq!(c.approle_mount, DEFAULT_APPROLE_MOUNT);
+        assert_eq!(c.pki_int_mount, DEFAULT_PKI_INT_MOUNT);
+    }
+
+    #[test]
+    fn mount_paths_honor_overrides() {
+        let d = TempDir::new("mounts");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\n  approle_mount: alt-approle\n  \
+             pki_int_mount: alt-pki-int\ncore:\n  deployment_id: dev-01\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.approle_mount, "alt-approle");
+        assert_eq!(c.pki_int_mount, "alt-pki-int");
     }
 
     #[test]
