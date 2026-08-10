@@ -35,13 +35,6 @@ pub(crate) fn certified_key_from_identity(
     Ok(Arc::new(CertifiedKey::new(chain, key)))
 }
 
-pub(crate) fn certified_key_from(client: &PlaneClient) -> Result<Arc<CertifiedKey>, VaultError> {
-    let id = client
-        .current_identity()
-        .ok_or_else(|| VaultError::Handshake("no minted identity".into()))?;
-    certified_key_from_identity(&id)
-}
-
 /// Server config: dynamic resolver (fail-closed when empty) + client-auth via the custom
 /// client-cert verifier expecting the peer plane.
 pub(crate) fn server_config(
@@ -100,8 +93,6 @@ mod tests {
             );
             let _c: Result<Arc<rustls::ClientConfig>, VaultError> =
                 client_config(client, ca, Plane::Kernel);
-            let _k: Result<Arc<rustls::sign::CertifiedKey>, VaultError> =
-                certified_key_from(client);
         }
     };
 }

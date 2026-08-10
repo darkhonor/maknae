@@ -160,10 +160,22 @@ impl PlaneClient {
         })
     }
 
-    /// Attach the server resolver's cert slot (called by `PlaneListener::bind`). After this,
-    /// every `mint()`/renewal-expiry updates the slot in lock-step with the identity.
-    pub(crate) fn attach_cert_sink(&self, slot: Arc<ArcSwapOption<CertifiedKey>>) {
-        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(slot);
+    /// Attach the server resolver's cert slot AND seed it from the current identity, both
+    /// under the identity READ lock. Renewal-expiry takes the identity WRITE lock, so
+    /// holding the read lock here excludes it: the seed cannot race an expiry that would
+    /// otherwise clear the slot and leave this call restoring a retired cert. After this,
+    /// `mint()`/expiry keep the slot in lock-step with the identity.
+    pub(crate) fn attach_cert_sink(
+        &self,
+        slot: Arc<ArcSwapOption<CertifiedKey>>,
+    ) -> Result<(), VaultError> {
+        let id_guard = self.identity.read().expect("identity lock poisoned");
+        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(Arc::clone(&slot));
+        if let Some(id) = id_guard.as_ref() {
+            let ck = crate::tls::certified_key_from_identity(id)?;
+            slot.store(Some(ck));
+        }
+        Ok(())
     }
 
     /// The live mint: authenticate → CSR → `pki/sign` → hold memory-only. Stores a
