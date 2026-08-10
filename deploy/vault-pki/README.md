@@ -27,7 +27,16 @@ separate, following cycles.
 ## Requirements
 
 - Terraform `>= 1.5`, `hashicorp/vault` provider `~> 5.0` (pinned in
-  `.terraform.lock.hcl` to the validated `5.10.1`).
+  `.terraform.lock.hcl` to the validated `5.10.1`). The lock carries `h1:` + registry
+  `zh:` hashes for **linux and darwin, amd64 and arm64**, so a clean `terraform init`
+  is reproducible on any of them without lock drift. To refresh after a version bump,
+  regenerate for all supported platforms (not a single-platform `init`, which records
+  only the local hash):
+  ```bash
+  terraform providers lock \
+    -platform=linux_amd64 -platform=linux_arm64 \
+    -platform=darwin_amd64 -platform=darwin_arm64
+  ```
 - A reachable Vault with a token that can create PKI mounts, roles, policies, and an
   AppRole auth mount. Provide it via the environment — **never in code**:
   ```bash
