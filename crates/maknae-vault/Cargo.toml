@@ -18,7 +18,10 @@ x509-parser = "0.16"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmainta
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false }  # its rustls uses the installed FIPS provider (§4.1)
+arc-swap = "1"                                                  # hot-path ResolvesServerCert swap (Microkosmos pattern)
+nix = { version = "0.31", default-features = false, features = ["socket", "user"] }  # socket=peer-creds; user=geteuid (dir-owner check)
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util"] }
