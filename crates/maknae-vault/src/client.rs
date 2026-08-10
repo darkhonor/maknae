@@ -211,29 +211,38 @@ impl PlaneClient {
             key_der,
             chain_pem,
         }));
-        // Build the rustls CertifiedKey first — if it fails, revoke the just-issued token
-        // (best-effort) rather than dropping the guard and leaking a usable token.
-        let sink = self
-            .cert_sink
-            .read()
-            .expect("cert_sink lock poisoned")
-            .clone();
-        let built = match &sink {
-            Some(_) => match crate::tls::certified_key_from_identity(&id) {
-                Ok(ck) => Some(ck),
-                Err(e) => {
-                    let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
-                    return Err(e);
-                }
-            },
-            None => None,
-        };
-        {
+        // Commit under the identity WRITE lock, reading the sink + building the CertifiedKey
+        // INSIDE it, so a racing attach_cert_sink (which registers/seeds under the identity
+        // lock) is fully serialized — no window where mint installs a new identity while the
+        // resolver keeps the old cert, and no window where attach seeds a retired cert. The
+        // build is synchronous, so nothing is awaited while the std lock is held; the only
+        // await (token revoke on build failure) happens AFTER the guard is dropped, and the
+        // identity is NOT committed on that failure path (fail closed).
+        let build_result: Result<(), VaultError> = {
             let mut guard = self.identity.write().expect("identity lock poisoned");
-            *guard = Some(id.clone());
-            if let (Some(slot), Some(ck)) = (sink.as_ref(), built) {
-                slot.store(Some(ck));
+            let sink = self
+                .cert_sink
+                .read()
+                .expect("cert_sink lock poisoned")
+                .clone();
+            match sink {
+                Some(slot) => match crate::tls::certified_key_from_identity(&id) {
+                    Ok(ck) => {
+                        *guard = Some(id.clone());
+                        slot.store(Some(ck));
+                        Ok(())
+                    }
+                    Err(e) => Err(e), // do NOT commit identity; revoke below (outside the lock)
+                },
+                None => {
+                    *guard = Some(id.clone());
+                    Ok(())
+                }
             }
+        };
+        if let Err(e) = build_result {
+            let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+            return Err(e);
         }
         Ok(id)
     }
