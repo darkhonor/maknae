@@ -34,6 +34,12 @@ impl PlaneIdentity {
     pub fn chain_pem(&self) -> &[String] {
         &self.0.chain_pem
     }
+    /// The private key in DER (crate-internal only — used to build the rustls
+    /// `CertifiedKey` in `tls.rs`; never handed to a caller).
+    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
+    pub(crate) fn key_der(&self) -> &[u8] {
+        &self.0.key_der
+    }
 }
 
 /// The Stage-1 plane-cert client.
@@ -208,6 +214,18 @@ impl PlaneClient {
         verify_plane_uri_san(&leaf_der, self.plane, &self.deployment_id)
             .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
         Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
+    }
+
+    /// The deployment id (crate-internal — the verifier needs it to compute the expected
+    /// peer URI-SAN).
+    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
+    pub(crate) fn deployment_id(&self) -> &str {
+        &self.deployment_id
+    }
+    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
+    #[allow(dead_code)] // consumed by tls.rs in Task 8; allow removed there
+    pub(crate) fn plane(&self) -> Plane {
+        self.plane
     }
 
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
