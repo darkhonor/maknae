@@ -858,6 +858,7 @@ dependencies = [
  "rustls",
  "serde",
  "tokio",
+ "url",
  "vaultrs",
  "x509-parser",
  "zeroize",

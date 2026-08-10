@@ -14,6 +14,9 @@ pub enum VaultError {
     MissingKey(&'static str),
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
+    /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
+    /// credentials; the CA cert cannot protect a plaintext connection).
+    InvalidAddr(String),
     /// A file could not be read.
     Io {
         path: PathBuf,
@@ -50,6 +53,7 @@ impl std::fmt::Display for VaultError {
                 "deployment_id {id:?} is invalid: must be non-empty and match ^[A-Za-z0-9._-]+$ \
                  (a glob/slash would corrupt the plane URI-SAN)"
             ),
+            VaultError::InvalidAddr(msg) => write!(f, "invalid vault.addr: {msg}"),
             VaultError::Io { path, source } => write!(f, "reading {}: {source}", path.display()),
             VaultError::InsecureCredential { path, detail } => {
                 write!(f, "refusing credential file {}: {detail}", path.display())

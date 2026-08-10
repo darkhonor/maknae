@@ -41,8 +41,27 @@ pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
     }
 }
 
+/// `vault.addr` must be a well-formed `https://` URL. A plaintext `http://` addr
+/// would send the wrapping token / SecretID / Vault token in the clear (the CA cert
+/// cannot protect a non-TLS connection), and a malformed URL would panic vaultrs's
+/// builder — both rejected fail-closed here.
+pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
+    let url =
+        url::Url::parse(addr).map_err(|e| VaultError::InvalidAddr(format!("{addr:?}: {e}")))?;
+    if url.scheme() != "https" {
+        return Err(VaultError::InvalidAddr(format!(
+            "{addr:?}: scheme must be https (got {:?}) — plaintext would disclose credentials",
+            url.scheme()
+        )));
+    }
+    if url.host_str().map(|h| h.is_empty()).unwrap_or(true) {
+        return Err(VaultError::InvalidAddr(format!("{addr:?}: no host")));
+    }
+    Ok(())
+}
+
 /// Load `vault.addr` + `deployment_id` (from `core` first, else `vault`) from the
-/// config dir; validate `deployment_id`. Fail-closed on any absent/invalid field.
+/// config dir; validate both. Fail-closed on any absent/invalid field.
 pub fn load_vault_config(dir: &Path) -> Result<VaultConfig, VaultError> {
     let doc = load_config(
         dir,
@@ -57,6 +76,7 @@ pub fn load_vault_config(dir: &Path) -> Result<VaultConfig, VaultError> {
     let addr = get_str(vault, "addr")
         .ok_or(VaultError::MissingKey("vault.addr"))?
         .to_string();
+    validate_vault_addr(&addr)?;
     let deployment_id = doc
         .section("core")
         .and_then(|c| get_str(c, "deployment_id"))
