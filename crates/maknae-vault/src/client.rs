@@ -63,7 +63,6 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// group/other access BEFORE reading — the wrapping token must never be world-readable
 /// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
 fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
-    use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
         path: path.to_path_buf(),
         source,
@@ -74,19 +73,33 @@ fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
             detail: "is a symlink".to_string(),
         });
     }
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(VaultError::InsecureCredential {
-            path: path.to_path_buf(),
-            detail: format!("mode {mode:o} allows group/other access (require 0600 or stricter)"),
-        });
+    // Non-Unix has no owner-only permission model to check → refuse rather than read the
+    // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
+    // a unix CI runner, hence no mutation/coverage obligation on the non-unix arm.
+    #[cfg(not(unix))]
+    {
+        let _ = &meta;
+        Err(VaultError::PermissionsUnsupported)
     }
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .map_err(|source| VaultError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(VaultError::InsecureCredential {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "mode {mode:o} allows group/other access (require 0600 or stricter)"
+                ),
+            });
+        }
+        std::fs::read_to_string(path)
+            .map(|s| s.trim().to_string())
+            .map_err(|source| VaultError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
 }
 
 /// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
@@ -257,7 +270,9 @@ impl PlaneClient {
     }
 }
 
-#[cfg(test)]
+// The credential-permission tests exercise the Unix-only mode check; gate the whole
+// module to unix so the crate still compiles + tests on non-Unix targets.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
