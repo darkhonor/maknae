@@ -122,8 +122,12 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
 # ---- Per-plane policies — signing-scoped isolation ------------------------------
 # Paths INTERPOLATE from the mount resource (heredoc supports ${..}); a hardcoded
 # literal would silently 403 an overridden-mount deployment.
-# renew-self / lookup-self are re-granted explicitly because token_no_default_policy
-# (AppRoles below) drops Vault's built-in `default` policy — its sole grantor.
+# renew-self / lookup-self / revoke-self are re-granted explicitly because
+# token_no_default_policy (AppRoles below) drops Vault's built-in `default` policy —
+# its sole grantor. revoke-self lets the maknae-vault plane client revoke its token on
+# shutdown per ADR-0005 (zero-trust: don't leave a usable token to live out its TTL).
+# Without it the client's best-effort shutdown revoke 403s and the token lingers until
+# token_ttl expires.
 resource "vault_policy" "maknae_kernel" {
   name   = "maknae-kernel"
   policy = <<-EOT
@@ -132,6 +136,7 @@ resource "vault_policy" "maknae_kernel" {
     path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
     path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/revoke-self" { capabilities = ["update"] }
   EOT
 }
 
@@ -143,6 +148,7 @@ resource "vault_policy" "maknae_cli" {
     path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
     path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/revoke-self" { capabilities = ["update"] }
   EOT
 }
 
