@@ -170,11 +170,13 @@ impl PlaneClient {
         slot: Arc<ArcSwapOption<CertifiedKey>>,
     ) -> Result<(), VaultError> {
         let id_guard = self.identity.read().expect("identity lock poisoned");
-        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(Arc::clone(&slot));
+        // Build + seed the new slot BEFORE replacing the registered sink, so a build failure
+        // returns Err without ever swapping out (orphaning) an existing listener's sink.
         if let Some(id) = id_guard.as_ref() {
             let ck = crate::tls::certified_key_from_identity(id)?;
             slot.store(Some(ck));
         }
+        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(slot);
         Ok(())
     }
 
@@ -344,6 +346,22 @@ impl PlaneClient {
 
     /// Best-effort revoke on shutdown; failure is logged, never blocks exit.
     pub async fn shutdown(self) {
+        // Retire the transport credential FIRST — clear the resolver slot (a live listener
+        // stops presenting a leaf) and the identity — so shutdown actually retires the cert
+        // regardless of whether the token revoke below succeeds. Same lock-step order as
+        // `expire` (slot before identity, under the identity write guard).
+        {
+            let mut guard = self.identity.write().expect("identity lock poisoned");
+            if let Some(slot) = self
+                .cert_sink
+                .read()
+                .expect("cert_sink lock poisoned")
+                .as_ref()
+            {
+                slot.store(None);
+            }
+            *guard = None;
+        }
         let client = self.client.lock().await;
         if let Err(e) = vaultrs::token::revoke_self(&*client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");

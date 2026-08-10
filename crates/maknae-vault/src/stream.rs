@@ -102,11 +102,13 @@ impl PlaneListener {
     /// registers with the reactor and panics otherwise).
     pub fn bind(path: &Path, client: &PlaneClient, ca: &CaBundle) -> Result<Self, VaultError> {
         let resolver = Arc::new(PlaneCertResolver::new_empty());
-        // Registers the slot AND seeds it from the current identity atomically under the
-        // identity lock (fail-closed against a racing renewal-expiry — codex r1).
-        client.attach_cert_sink(resolver.slot())?;
-        let cfg = tls::server_config(client, ca, resolver)?;
+        let cfg = tls::server_config(client, ca, Arc::clone(&resolver))?;
         let listener = socket::bind_listener(path)?;
+        // Attach LAST — after every other fallible step has succeeded — so a failed
+        // config/bind never replaces (orphans) an existing listener's sink (codex r4).
+        // attach registers the slot AND seeds it from the current identity atomically under
+        // the identity lock (fail-closed against a racing renewal-expiry — codex r1).
+        client.attach_cert_sink(resolver.slot())?;
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(cfg),
