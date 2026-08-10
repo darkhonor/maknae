@@ -165,11 +165,15 @@ impl PlaneClient {
         let lease_secs = Arc::clone(&self.lease_secs);
         tokio::spawn(async move {
             loop {
-                // Renew at ~2/3 of the token's ACTUAL lease (derived from the mint's
-                // lease_duration, not a hardcoded assumption), floored at 60s. A lease
-                // of 0 (not yet minted) waits the 60s floor and re-checks.
+                // Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the
+                // lease so a short (sub-60s) TTL renews before it expires. Only the
+                // not-yet-minted case (lease == 0) waits a fixed 60s and re-checks.
                 let lease = lease_secs.load(Ordering::Relaxed);
-                let wait = (lease * 2 / 3).max(60);
+                let wait = if lease == 0 {
+                    60
+                } else {
+                    (lease * 2 / 3).max(1)
+                };
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 let c = client.lock().await;
                 if vaultrs::token::renew_self(&*c, None).await.is_err() {

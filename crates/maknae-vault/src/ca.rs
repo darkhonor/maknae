@@ -4,6 +4,7 @@
 //! root is config-pinned (a spoofed Vault cannot swap the trust anchor).
 use crate::VaultError;
 use std::path::Path;
+use x509_parser::prelude::FromDer;
 
 /// The pinned CA material (DER). Root is the trust anchor; intermediate builds chains.
 pub struct CaBundle {
@@ -23,6 +24,11 @@ fn first_cert_der(path: &Path) -> Result<Vec<u8>, VaultError> {
     if pem.label != "CERTIFICATE" {
         return Err(VaultError::Pem("not a CERTIFICATE PEM"));
     }
+    // Validate the DER actually parses as an X.509 certificate NOW — a valid PEM
+    // envelope around garbage/truncated bytes must fail at load, not later in the
+    // transport (fail-closed, as the CA-pin loader advertises).
+    x509_parser::certificate::X509Certificate::from_der(&pem.contents)
+        .map_err(|_| VaultError::Pem("CA certificate DER is not a valid X.509 certificate"))?;
     Ok(pem.contents)
 }
 
@@ -85,6 +91,20 @@ mod tests {
     fn malformed_pem_fails_closed() {
         let d = TempDir::new("bad");
         std::fs::write(d.0.join("tls/maknae-root-ca.crt"), "not a pem").unwrap();
+        std::fs::write(d.0.join("tls/maknae-int-ca.crt"), self_signed_pem()).unwrap();
+        assert!(matches!(load_ca_pin(&d.0), Err(VaultError::Pem(_))));
+    }
+
+    #[test]
+    fn valid_envelope_garbage_der_fails_at_load() {
+        // A valid CERTIFICATE PEM envelope whose base64 decodes to non-cert bytes
+        // must fail NOW (not later in the transport).
+        let d = TempDir::new("garbageder");
+        std::fs::write(
+            d.0.join("tls/maknae-root-ca.crt"),
+            "-----BEGIN CERTIFICATE-----\nAAAAAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
         std::fs::write(d.0.join("tls/maknae-int-ca.crt"), self_signed_pem()).unwrap();
         assert!(matches!(load_ca_pin(&d.0), Err(VaultError::Pem(_))));
     }

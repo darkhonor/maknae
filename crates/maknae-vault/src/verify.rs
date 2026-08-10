@@ -29,27 +29,35 @@ pub fn verify_plane_uri_san(
 ) -> Result<(), VerifyError> {
     let (_, cert) =
         X509Certificate::from_der(peer_cert_der).map_err(|_| VerifyError::ParseError)?;
+    // Collect ALL SANs of ANY type — the plane URI must be the leaf's ONLY SAN, so a
+    // rogue DNS/IP/email SAN alongside it is a rejectable second identity (defense in
+    // depth: do NOT rely on Vault's role config for this).
+    let mut all_sans: Vec<String> = Vec::new();
     let mut uris: Vec<String> = Vec::new();
     for ext in cert.extensions() {
         if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
             for gn in &san.general_names {
+                all_sans.push(format!("{gn:?}"));
                 if let GeneralName::URI(u) = gn {
                     uris.push(u.to_string());
                 }
             }
         }
     }
-    if uris.is_empty() {
+    if all_sans.is_empty() {
         return Err(VerifyError::NoUriSan);
     }
-    if uris.len() > 1 {
+    if all_sans.len() > 1 {
+        // more than one SAN of ANY type (e.g. the plane URI + a DNS SAN)
         return Err(VerifyError::ExtraSans);
     }
+    // Exactly one SAN — it must be the expected plane URI.
     let want = expect.uri_san(deployment_id);
-    if uris[0] != want {
-        return Err(VerifyError::WrongSan { found: uris });
+    if uris.len() == 1 && uris[0] == want {
+        Ok(())
+    } else {
+        Err(VerifyError::WrongSan { found: all_sans })
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -92,16 +100,45 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn rejects_absent_uri_san() {
-        // A DNS SAN, no URI SAN.
+    fn cert_with_sans(sans: Vec<rcgen::SanType>) -> Vec<u8> {
         let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
-        params.subject_alt_names = vec![rcgen::SanType::DnsName("example.com".try_into().unwrap())];
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.subject_alt_names = sans;
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-        let der = params.self_signed(&key).unwrap().der().as_ref().to_vec();
+        params.self_signed(&key).unwrap().der().as_ref().to_vec()
+    }
+
+    #[test]
+    fn rejects_dns_only_san() {
+        // A single DNS SAN (one SAN, but not the plane URI) → rejected.
+        let der = cert_with_sans(vec![rcgen::SanType::DnsName(
+            "example.com".try_into().unwrap(),
+        )]);
+        assert!(matches!(
+            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            Err(VerifyError::WrongSan { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_no_san_at_all() {
+        let der = cert_with_sans(vec![]);
         assert_eq!(
             verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::NoUriSan)
+        );
+    }
+
+    #[test]
+    fn rejects_plane_uri_plus_rogue_dns() {
+        // The expected plane URI PLUS a rogue DNS SAN — the P1 codex caught: must reject.
+        let der = cert_with_sans(vec![
+            rcgen::SanType::URI("maknae://dev-01/plane/kernel".try_into().unwrap()),
+            rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
+        ]);
+        assert_eq!(
+            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            Err(VerifyError::ExtraSans)
         );
     }
 
