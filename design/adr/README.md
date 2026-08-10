@@ -10,9 +10,9 @@ This directory holds Maknae's ADRs (practice established by ADR-0001). Numbers a
 | 0002 | Kernel is Rust | — | Accepted |
 | 0003 | Cedar policy engine | — | Accepted (re-decision pending D17/native-Rust pivot — see topology spec) |
 | 0004 | Storage / label integrity model | docket | Proposed (docket) |
-| 0005 | Enforcement locus & TCB boundary | #3 | Accepted (operator-ratified 2026-08-03) |
+| 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | #3 | Accepted (operator-ratified 2026-08-03; finalized 2026-08-10) |
 | 0006 | Single-source-of-truth doctrine for the corpus | docket | Proposed (docket) |
-| 0007 | Key & signature model (STANAG 4778 binding) | #5 | Proposed (docket) — first among the remaining semantic ADRs |
+| 0007 | Key & signature model (non-DCS core) — STANAG 4778 label-binding **Relocated** to the private DCS library (rust-dcs #21); slot renamed + reused for the core key/signature model (mTLS, content hashes, audit hash-chain, GPG release/tag signing) | #5 | Accepted (operator-ratified 2026-08-10) |
 | 0008 | Classification lattice & dominance engine | #6 | Relocated — the DCS classification engine and its ADR moved to a separate private library; slot retained as design intent (DCS-aware Maknae depends on that external library through the authorization seam), not an in-repo decision |
 | 0009 | Output-interface MLS | #7 | Proposed (docket) |
 | 0010 | Quarantine taint | #8 | Deferred (moot at MVP — consumer-only lake; re-validated at constellation) |
