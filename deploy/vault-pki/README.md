@@ -77,14 +77,24 @@ are present (a permissive role is still schema-valid) — that is a review conce
 
 ## Operational follow-up: SecretID delivery (not Terraform)
 
-Terraform provisions the roles that *can* issue SecretIDs; it does not generate or
-deliver them. After apply, issue a response-wrapped single-use SecretID per plane and
-deliver it to that plane's `0o400` file (note the `auth/` mount prefix):
+AppRole login needs **two** things: the **RoleID** (non-secret, stable) and a
+**SecretID** (secret, single-use). Terraform provisions both roles and outputs the
+RoleIDs; it does not generate or deliver SecretIDs.
+
+Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config):
+
+```bash
+terraform output -raw maknaed_role_id   # trust plane
+terraform output -raw maknae_role_id    # CLI plane
+```
+
+Then issue a response-wrapped single-use SecretID per plane and deliver it to that
+plane's `0o400` file (note the `auth/` mount prefix):
 
 ```bash
 vault write -wrap-ttl=90s -f auth/<approle-path>/role/maknaed/secret-id
 vault write -wrap-ttl=90s -f auth/<approle-path>/role/maknae/secret-id
 ```
 
-The plane unwraps at startup, logs in, and background-renews until `token_max_ttl`,
-then fails closed and awaits a fresh SecretID.
+Each plane logs in with `role_id` + the unwrapped `secret_id`, then background-renews
+until `token_max_ttl`, then fails closed and awaits a fresh SecretID.
