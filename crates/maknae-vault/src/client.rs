@@ -170,13 +170,23 @@ impl PlaneClient {
         slot: Arc<ArcSwapOption<CertifiedKey>>,
     ) -> Result<(), VaultError> {
         let id_guard = self.identity.read().expect("identity lock poisoned");
-        // Build + seed the new slot BEFORE replacing the registered sink, so a build failure
-        // returns Err without ever swapping out (orphaning) an existing listener's sink.
+        let mut sink_guard = self.cert_sink.write().expect("cert_sink lock poisoned");
+        // ONE client backs at most ONE listener. Reject a second active bind rather than
+        // silently orphaning the first listener's sink — an orphaned sink would keep serving
+        // a stale cert that mint/expiry/shutdown no longer update (codex r5). Held across the
+        // is_some check + set so two concurrent binds can't both win.
+        if sink_guard.is_some() {
+            return Err(VaultError::SocketBind(
+                "this PlaneClient already backs a listener (one client backs one listener)".into(),
+            ));
+        }
+        // Build + seed the new slot BEFORE registering it, so a build failure returns Err
+        // without ever registering a half-initialized sink.
         if let Some(id) = id_guard.as_ref() {
             let ck = crate::tls::certified_key_from_identity(id)?;
             slot.store(Some(ck));
         }
-        *self.cert_sink.write().expect("cert_sink lock poisoned") = Some(slot);
+        *sink_guard = Some(slot);
         Ok(())
     }
 
