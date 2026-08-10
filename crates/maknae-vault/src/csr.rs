@@ -24,7 +24,10 @@ pub fn csr_has_empty_subject(pem: &str) -> bool {
     csr.certification_request_info.subject.iter().count() == 0
 }
 
-/// True iff the CSR carries EXACTLY one URI SAN equal to `want`.
+/// True iff the CSR carries EXACTLY one SAN of ANY type, and that sole SAN is a URI
+/// equal to `want`. A rogue DNS/IP/email SAN alongside the plane URI is rejected — the
+/// same URI-SAN-ONLY shape the returned-leaf verifier enforces (defense in depth: do
+/// NOT rely on the Vault role config to strip a second identity).
 pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
     let Some(der) = parse_csr(pem) else {
         return false;
@@ -32,11 +35,13 @@ pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
     let Ok((_, csr)) = X509CertificationRequest::from_der(&der) else {
         return false;
     };
+    let mut all_sans = 0usize;
     let mut uris: Vec<String> = Vec::new();
     if let Some(exts) = csr.requested_extensions() {
         for ext in exts {
             if let ParsedExtension::SubjectAlternativeName(san) = ext {
                 for gn in &san.general_names {
+                    all_sans += 1;
                     if let GeneralName::URI(u) = gn {
                         uris.push(u.to_string());
                     }
@@ -44,7 +49,7 @@ pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
             }
         }
     }
-    uris.len() == 1 && uris[0] == want
+    all_sans == 1 && uris.len() == 1 && uris[0] == want
 }
 
 /// True iff the CSR's public key is EC on the P-384 curve (by the uncompressed
@@ -130,6 +135,28 @@ mod tests {
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
         assert!(!csr_single_uri_san(&two, "maknae://d/plane/kernel")); // two SANs
+    }
+
+    /// Build a CSR with an empty subject and an arbitrary mix of SAN types (P-384).
+    fn make_csr_sans(sans: Vec<rcgen::SanType>) -> String {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.subject_alt_names = sans;
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        params.serialize_request(&key).unwrap().pem().unwrap()
+    }
+
+    #[test]
+    fn rejects_plane_uri_plus_rogue_dns() {
+        // The expected plane URI PLUS a rogue DNS SAN — must be rejected as URI-only,
+        // exactly as the returned-leaf verifier does (codex r6 P2).
+        let want = "maknae://d/plane/kernel";
+        let mixed = make_csr_sans(vec![
+            rcgen::SanType::URI(want.try_into().unwrap()),
+            rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
+        ]);
+        assert!(!csr_single_uri_san(&mixed, want)); // second (DNS) SAN → reject
+        assert!(!csr_matches_plane_shape(&mixed, want));
     }
 
     #[test]
