@@ -14,10 +14,6 @@ use tokio::sync::Mutex;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
 use zeroize::Zeroizing;
 
-// Stage-1 mount defaults (match the merged Terraform defaults; overridable later).
-const APPROLE_MOUNT: &str = "maknae-approle";
-const INT_PKI_MOUNT: &str = "maknae-pki-int";
-
 struct IdentityInner {
     leaf_pem: String,
     #[allow(dead_code)] // consumed by the Stage-2 rustls config builder
@@ -45,6 +41,8 @@ pub struct PlaneClient {
     plane: Plane,
     deployment_id: String,
     auth: AppRoleAuth,
+    /// Intermediate PKI mount for `pki/sign` (from config; Terraform `int_mount_path`).
+    pki_int_mount: String,
     client: Arc<Mutex<VaultClient>>,
     identity: Arc<RwLock<Option<PlaneIdentity>>>,
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
@@ -129,8 +127,9 @@ impl PlaneClient {
             auth: AppRoleAuth {
                 role_id,
                 wrapped_secret_id,
-                approle_mount: APPROLE_MOUNT.to_string(),
+                approle_mount: cfg.approle_mount,
             },
+            pki_int_mount: cfg.pki_int_mount,
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
             lease_secs: Arc::new(AtomicU64::new(0)),
@@ -183,7 +182,7 @@ impl PlaneClient {
         let (key_der, csr_pem) = generate_plane_csr(self.plane, &self.deployment_id)?;
         let resp = vaultrs::pki::cert::ca::sign(
             client,
-            INT_PKI_MOUNT,
+            &self.pki_int_mount,
             self.plane.pki_sign_role(),
             &csr_pem,
             "", // empty CN — the role sets require_cn=false / use_csr_common_name=false
