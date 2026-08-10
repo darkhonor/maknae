@@ -8,6 +8,7 @@ use crate::{
     verify::verify_plane_uri_san, Plane, VaultError,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
@@ -46,6 +47,9 @@ pub struct PlaneClient {
     auth: AppRoleAuth,
     client: Arc<Mutex<VaultClient>>,
     identity: Arc<RwLock<Option<PlaneIdentity>>>,
+    /// The last mint's token lease (seconds); drives the renewal interval so it tracks
+    /// the actual token TTL rather than a hardcoded assumption. 0 until first mint.
+    lease_secs: Arc<AtomicU64>,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -61,6 +65,9 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, VaultError> {
     let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
         .map_err(|_| VaultError::Pem("signed leaf: malformed PEM"))?;
+    if parsed.label != "CERTIFICATE" {
+        return Err(VaultError::Pem("signed leaf: not a CERTIFICATE PEM"));
+    }
     Ok(parsed.contents)
 }
 
@@ -94,6 +101,7 @@ impl PlaneClient {
             },
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
+            lease_secs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -103,6 +111,16 @@ impl PlaneClient {
         let mut client = self.client.lock().await;
         let token = self.auth.authenticate(&client).await?;
         client.set_token(&token.client_token);
+        // Record the actual lease so spawn_renewal renews on the real TTL; surface a
+        // non-renewable token (a role misconfig) rather than silently failing later.
+        self.lease_secs
+            .store(token.lease_duration, Ordering::Relaxed);
+        if !token.renewable {
+            eprintln!(
+                "maknae-vault: WARNING — minted token is not renewable; background \
+                 renewal will fail closed at its TTL (check the AppRole role config)"
+            );
+        }
 
         let (key_der, csr_pem) = generate_plane_csr(self.plane, &self.deployment_id)?;
         let resp = vaultrs::pki::cert::ca::sign(
@@ -144,10 +162,15 @@ impl PlaneClient {
     /// (token_max_ttl reached / revoked) — the caller must then re-authenticate.
     pub fn spawn_renewal(&self) -> tokio::task::JoinHandle<VaultError> {
         let client = Arc::clone(&self.client);
+        let lease_secs = Arc::clone(&self.lease_secs);
         tokio::spawn(async move {
             loop {
-                // Renew well within token_ttl (default 20m → every ~10m).
-                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                // Renew at ~2/3 of the token's ACTUAL lease (derived from the mint's
+                // lease_duration, not a hardcoded assumption), floored at 60s. A lease
+                // of 0 (not yet minted) waits the 60s floor and re-checks.
+                let lease = lease_secs.load(Ordering::Relaxed);
+                let wait = (lease * 2 / 3).max(60);
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 let c = client.lock().await;
                 if vaultrs::token::renew_self(&*c, None).await.is_err() {
                     return VaultError::RenewalExpired;
