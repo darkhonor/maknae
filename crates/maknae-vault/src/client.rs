@@ -1,0 +1,169 @@
+//! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (response-wrapped
+//! SecretID) → P-384 CSR → `pki/sign` → memory-only leaf. The identity is Arc-backed
+//! (cheap snapshot; key wiped on drop). Renewal runs on a shared handle so serving and
+//! renewal can proceed concurrently.
+use crate::auth::AppRoleAuth;
+use crate::{
+    assert_fips_provider, generate_plane_csr, load_ca_pin, load_vault_config,
+    verify::verify_plane_uri_san, Plane, VaultError,
+};
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex;
+use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
+use zeroize::Zeroizing;
+
+// Stage-1 mount defaults (match the merged Terraform defaults; overridable later).
+const APPROLE_MOUNT: &str = "maknae-approle";
+const INT_PKI_MOUNT: &str = "maknae-pki-int";
+
+struct IdentityInner {
+    leaf_pem: String,
+    #[allow(dead_code)] // consumed by the Stage-2 rustls config builder
+    key_der: Zeroizing<Vec<u8>>,
+    chain_pem: Vec<String>,
+}
+
+/// A minted plane identity — cheaply cloneable (Arc), private key wiped on drop.
+#[derive(Clone)]
+pub struct PlaneIdentity(Arc<IdentityInner>);
+
+impl PlaneIdentity {
+    /// The signed leaf certificate (PEM).
+    pub fn leaf_pem(&self) -> &str {
+        &self.0.leaf_pem
+    }
+    /// The issuing CA chain (PEM), as returned by `pki/sign`.
+    pub fn chain_pem(&self) -> &[String] {
+        &self.0.chain_pem
+    }
+}
+
+/// The Stage-1 plane-cert client.
+pub struct PlaneClient {
+    plane: Plane,
+    deployment_id: String,
+    auth: AppRoleAuth,
+    client: Arc<Mutex<VaultClient>>,
+    identity: Arc<RwLock<Option<PlaneIdentity>>>,
+}
+
+fn read_trimmed(path: &Path) -> Result<String, VaultError> {
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .map_err(|source| VaultError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
+fn pem_to_der(pem: &str) -> Result<Vec<u8>, VaultError> {
+    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    let first = rustls_pemfile::certs(&mut reader)
+        .next()
+        .ok_or(VaultError::Pem("signed leaf: no PEM cert"))?
+        .map_err(|_| VaultError::Pem("signed leaf: malformed PEM"))?;
+    Ok(first.as_ref().to_vec())
+}
+
+impl PlaneClient {
+    /// Build from a config dir. **LOAD-BEARING ordering:** `assert_fips_provider()`
+    /// runs first — before the Vault client is built — so reqwest reads the FIPS
+    /// default (§6.1), never falling back to ring. Fail-closed throughout.
+    pub fn from_config_dir(dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+        assert_fips_provider()?;
+        let cfg = load_vault_config(dir)?;
+        // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
+        let _ca = load_ca_pin(dir)?;
+        let prefix = plane.config_prefix();
+        let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
+        let wrapped_secret_id = read_trimmed(&dir.join(format!("{prefix}-secret-id")))?;
+        let vault_ca = dir.join("tls").join("vault-ca.crt");
+        let settings = VaultClientSettingsBuilder::default()
+            .address(cfg.addr)
+            .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
+            .build()
+            .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
+        let client =
+            VaultClient::new(settings).map_err(|e| VaultError::Auth(format!("vault client: {e}")))?;
+        Ok(Self {
+            plane,
+            deployment_id: cfg.deployment_id,
+            auth: AppRoleAuth {
+                role_id,
+                wrapped_secret_id,
+                approle_mount: APPROLE_MOUNT.to_string(),
+            },
+            client: Arc::new(Mutex::new(client)),
+            identity: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// The live mint: authenticate → CSR → `pki/sign` → hold memory-only. Stores a
+    /// snapshot and returns a clone.
+    pub async fn mint(&self) -> Result<PlaneIdentity, VaultError> {
+        let mut client = self.client.lock().await;
+        let token = self.auth.authenticate(&client).await?;
+        client.set_token(&token.client_token);
+
+        let (key_der, csr_pem) = generate_plane_csr(self.plane, &self.deployment_id)?;
+        let resp = vaultrs::pki::cert::ca::sign(
+            &*client,
+            INT_PKI_MOUNT,
+            self.plane.pki_sign_role(),
+            &csr_pem,
+            "", // empty CN — the role sets require_cn=false / use_csr_common_name=false
+            None,
+        )
+        .await
+        .map_err(|e| VaultError::Sign(e.to_string()))?;
+
+        // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
+        let leaf_der = pem_to_der(&resp.certificate)?;
+        verify_plane_uri_san(&leaf_der, self.plane, &self.deployment_id)
+            .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
+
+        let id = PlaneIdentity(Arc::new(IdentityInner {
+            leaf_pem: resp.certificate,
+            key_der,
+            chain_pem: resp.ca_chain.unwrap_or_default(),
+        }));
+        *self
+            .identity
+            .write()
+            .expect("identity lock poisoned") = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
+    pub fn current_identity(&self) -> Option<PlaneIdentity> {
+        self.identity.read().expect("identity lock poisoned").clone()
+    }
+
+    /// Spawn the background token-renewal loop on a SHARED handle (not `&mut self`, so
+    /// serving and renewal proceed concurrently). The returned handle resolves to the
+    /// fail-closed reason (`RenewalExpired`) when the token can no longer be renewed
+    /// (token_max_ttl reached / revoked) — the caller must then re-authenticate.
+    pub fn spawn_renewal(&self) -> tokio::task::JoinHandle<VaultError> {
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            loop {
+                // Renew well within token_ttl (default 20m → every ~10m).
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                let c = client.lock().await;
+                if vaultrs::token::renew_self(&*c, None).await.is_err() {
+                    return VaultError::RenewalExpired;
+                }
+            }
+        })
+    }
+
+    /// Best-effort revoke on shutdown; failure is logged, never blocks exit.
+    pub async fn shutdown(self) {
+        let client = self.client.lock().await;
+        if let Err(e) = vaultrs::token::revoke_self(&*client).await {
+            eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
+        }
+    }
+}
