@@ -19,6 +19,9 @@ pub enum VaultError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// A sensitive credential file has unsafe permissions (group/other access) or is a
+    /// symlink — refused before reading (fail-closed).
+    InsecureCredential { path: PathBuf, detail: String },
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
     /// A response-wrapped SecretID could not be unwrapped (already used / expired).
@@ -48,6 +51,9 @@ impl std::fmt::Display for VaultError {
                  (a glob/slash would corrupt the plane URI-SAN)"
             ),
             VaultError::Io { path, source } => write!(f, "reading {}: {source}", path.display()),
+            VaultError::InsecureCredential { path, detail } => {
+                write!(f, "refusing credential file {}: {detail}", path.display())
+            }
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
             VaultError::WrapUnwrap(msg) => write!(
                 f,
