@@ -68,6 +68,19 @@ fn mk_leaf_extra_san(ca: &Ca, uri: &str) -> (Vec<CertificateDer<'static>>, Vec<u
     )
 }
 
+/// A real intermediate CA signed by `root` (for the root-only-anchor topology test).
+fn mk_intermediate(root: &Ca) -> Ca {
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let cert = p.signed_by(&kp, &root.cert, &root.kp).unwrap();
+    Ca {
+        der: cert.der().to_vec(),
+        kp,
+        cert,
+    }
+}
+
 fn server_cfg(
     chain: Vec<CertificateDer<'static>>,
     key: Vec<u8>,
@@ -211,6 +224,40 @@ async fn rejects_foreign_ca() {
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
+}
+
+#[tokio::test]
+async fn root_only_anchor_with_presented_intermediate() {
+    // The load-bearing pin property: RootCertStore holds the ROOT only; the intermediate
+    // must ride the peer-presented chain, never be trusted as an anchor. Real 3-level
+    // topology root→int→leaf (unlike the other tests where root==int).
+    provider();
+    let root = mk_ca();
+    let int = mk_intermediate(&root);
+    let cab = CaBundle {
+        root_der: root.der.clone(),
+        int_der: int.der.clone(),
+    };
+    // leaves signed by the INTERMEDIATE; mk_leaf presents chain [leaf, int].
+    let (kchain, kkey) = mk_leaf(&int, "maknae://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&int, "maknae://d/plane/cli", false);
+    // Happy: present [leaf, int] → path-builds to the pinned root.
+    let s = server_cfg(kchain.clone(), kkey.clone(), &cab, Plane::Cli);
+    let c = client_cfg(cchain.clone(), ckey.clone(), &cab, Plane::Kernel, true);
+    handshake(s, c)
+        .await
+        .expect("root-anchored, intermediate-presented mutual auth");
+
+    // Withhold the intermediate: present [leaf] ONLY → cannot path-build to the root → fail.
+    let (mut kleaf, mut cleaf) = (kchain, cchain);
+    kleaf.truncate(1);
+    cleaf.truncate(1);
+    let s2 = server_cfg(kleaf, kkey, &cab, Plane::Cli);
+    let c2 = client_cfg(cleaf, ckey, &cab, Plane::Kernel, true);
+    assert!(
+        handshake(s2, c2).await.is_err(),
+        "withheld intermediate must fail (root is the only anchor)"
+    );
 }
 
 #[tokio::test]

@@ -97,6 +97,9 @@ pub struct PlaneListener {
 impl PlaneListener {
     /// Bind a group-gated listener presenting this client's live leaf, requiring the peer
     /// to prove `plane == this.plane().peer()`.
+    ///
+    /// **Must be called from within a Tokio runtime** (it binds a `UnixListener`, which
+    /// registers with the reactor and panics otherwise).
     pub fn bind(path: &Path, client: &PlaneClient, ca: &CaBundle) -> Result<Self, VaultError> {
         let resolver = Arc::new(PlaneCertResolver::new_empty());
         client.attach_cert_sink(resolver.slot());

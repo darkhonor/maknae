@@ -36,6 +36,9 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 /// Bind a group-gated (0660) listener. Fail-closed if the parent dir is unsafe. A stale
 /// socket is removed ONLY if it is actually a socket AND the dir was verified owner-only
 /// above (so an attacker cannot have planted it); otherwise bind surfaces the error.
+///
+/// **Must be called from within a Tokio runtime** — `tokio::net::UnixListener::bind`
+/// registers with the reactor and panics ("there is no reactor running") otherwise.
 pub(crate) fn bind_listener(path: &Path) -> Result<tokio::net::UnixListener, VaultError> {
     verify_parent_dir(path)?;
     match std::fs::symlink_metadata(path) {

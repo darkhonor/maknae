@@ -287,10 +287,15 @@ impl PlaneClient {
         // closed) even if nobody is watching the handle. The resolver's cert slot is
         // cleared in lock-step so a bound listener also stops presenting a leaf.
         let expire = move || {
-            *identity.write().expect("identity lock poisoned") = None;
+            // Hold the identity write guard across BOTH mutations so a racing mint (which
+            // also takes identity.write()) cannot interleave into a torn state, and clear
+            // the resolver slot FIRST so a bound listener stops presenting a leaf at or
+            // before the identity clears (maximal fail-closed retirement).
+            let mut guard = identity.write().expect("identity lock poisoned");
             if let Some(slot) = cert_sink.read().expect("cert_sink lock poisoned").as_ref() {
                 slot.store(None);
             }
+            *guard = None;
             VaultError::RenewalExpired
         };
         tokio::spawn(async move {
