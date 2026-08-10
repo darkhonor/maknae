@@ -6,9 +6,18 @@ yanked = "deny"
 
 [bans]
 multiple-versions = "warn"
+# maknae-vault FIPS posture (spec §6.2): the Vault-HTTPS leg must be rustls-aws-lc-fips,
+# never the OpenSSL path. `ring` and `aws-lc-sys` are NOT banned — both are present-but-dead
+# and unbannable (aws-lc-sys pulled by rcgen[aws_lc_rs]; ring is reqwest's bundled fallback,
+# never used once the FIPS provider is installed). The runtime `.fips()` assertion is the gate.
+deny = [
+  { name = "native-tls" },
+  { name = "openssl-sys" },
+]
 
 [licenses]
-allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+# OpenSSL: AWS-LC (aws-lc-fips-sys) carries the OpenSSL license alongside ISC/Apache-2.0.
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL"]
 confidence-threshold = 0.9
 
 [sources]
