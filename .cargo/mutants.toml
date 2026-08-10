@@ -1,0 +1,15 @@
+# cargo-mutants config (read even under `cargo mutants --package`, from the workspace
+# root where the CI gate invokes it). The exclude_globs are path-scoped to maknae-vault,
+# so they do NOT affect the other mutated crates (config/security/kernel mutate their own
+# files). Scope maknae-vault mutation to the pure T1 decision logic — the excluded files
+# are network/keygen/provider I/O that cannot be unit-killed without a live Vault and are
+# T3-tiered + exercised by the gated live-smoke.
+exclude_globs = [
+  "crates/maknae-vault/src/auth.rs",       # AppRole login + sys/wrapping/unwrap — live-Vault I/O
+  "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown — network I/O
+  "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
+  "crates/maknae-vault/src/csr_gen.rs",    # rcgen keygen I/O (non-deterministic); pure shape checks are csr.rs (T1)
+  "crates/maknae-vault/src/fips_glue.rs",  # process-global provider fetch (T3)
+  "crates/maknae-vault/src/error.rs",      # Display/From declarations
+  "crates/maknae-vault/src/lib.rs",        # re-exports
+]

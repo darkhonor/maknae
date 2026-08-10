@@ -48,5 +48,7 @@ async fn mint_kernel_leaf_against_live_vault() {
     );
 
     client.shutdown().await;
-    println!("LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), revoked on shutdown");
+    println!(
+        "LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), revoked on shutdown"
+    );
 }

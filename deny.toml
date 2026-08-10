@@ -16,8 +16,8 @@ deny = [
 ]
 
 [licenses]
-# OpenSSL: AWS-LC (aws-lc-fips-sys) carries the OpenSSL license alongside ISC/Apache-2.0.
-allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL"]
+# OpenSSL: AWS-LC (aws-lc-fips-sys). CDLA-Permissive-2.0: a data crate in the vaultrs tree.
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.9
 
 [sources]

@@ -54,7 +54,10 @@ mod tests {
         assert_eq!(Plane::Kernel.approle_role(), "maknaed");
         assert_eq!(Plane::Kernel.pki_sign_role(), "maknae-kernel");
         assert_eq!(Plane::Kernel.config_prefix(), "maknaed");
-        assert_eq!(Plane::Kernel.uri_san("dev-01"), "maknae://dev-01/plane/kernel");
+        assert_eq!(
+            Plane::Kernel.uri_san("dev-01"),
+            "maknae://dev-01/plane/kernel"
+        );
     }
 
     #[test]

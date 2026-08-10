@@ -15,12 +15,15 @@ pub struct VaultConfig {
 /// Pull a string value out of a `Value::Map` by key. `Value` exposes no accessor.
 pub(crate) fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     match v {
-        Value::Map(entries) => entries.iter().find(|(k, _)| k == key).and_then(|(_, val)| {
-            match val {
-                Value::Str(s) => Some(s.as_str()),
-                _ => None,
-            }
-        }),
+        Value::Map(entries) => {
+            entries
+                .iter()
+                .find(|(k, _)| k == key)
+                .and_then(|(_, val)| match val {
+                    Value::Str(s) => Some(s.as_str()),
+                    _ => None,
+                })
+        }
         _ => None,
     }
 }
@@ -48,7 +51,9 @@ pub fn load_vault_config(dir: &Path) -> Result<VaultConfig, VaultError> {
             required: true,
         }],
     )?;
-    let vault = doc.section("vault").ok_or(VaultError::MissingKey("vault"))?;
+    let vault = doc
+        .section("vault")
+        .ok_or(VaultError::MissingKey("vault"))?;
     let addr = get_str(vault, "addr")
         .ok_or(VaultError::MissingKey("vault.addr"))?
         .to_string();

@@ -21,6 +21,8 @@ mod tests {
     #[test]
     fn fips_result_both_branches() {
         assert!(fips_result(true).is_ok());
-        assert!(matches!(fips_result(false), Err(VaultError::FipsUnavailable)));
+        // `is_err()` (not `matches!`) — FipsUnavailable is the only Err variant, and
+        // a `matches!` leaves an uncovered `_ => false` arm.
+        assert!(fips_result(false).is_err());
     }
 }

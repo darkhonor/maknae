@@ -27,7 +27,8 @@ pub fn verify_plane_uri_san(
     expect: Plane,
     deployment_id: &str,
 ) -> Result<(), VerifyError> {
-    let (_, cert) = X509Certificate::from_der(peer_cert_der).map_err(|_| VerifyError::ParseError)?;
+    let (_, cert) =
+        X509Certificate::from_der(peer_cert_der).map_err(|_| VerifyError::ParseError)?;
     let mut uris: Vec<String> = Vec::new();
     for ext in cert.extensions() {
         if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
@@ -95,8 +96,7 @@ mod tests {
     fn rejects_absent_uri_san() {
         // A DNS SAN, no URI SAN.
         let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
-        params.subject_alt_names =
-            vec![rcgen::SanType::DnsName("example.com".try_into().unwrap())];
+        params.subject_alt_names = vec![rcgen::SanType::DnsName("example.com".try_into().unwrap())];
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let der = params.self_signed(&key).unwrap().der().as_ref().to_vec();
         assert_eq!(
@@ -107,10 +107,8 @@ mod tests {
 
     #[test]
     fn rejects_extra_sans() {
-        let der = leaf_with_uri_sans(&[
-            "maknae://dev-01/plane/kernel",
-            "maknae://dev-01/plane/cli",
-        ]);
+        let der =
+            leaf_with_uri_sans(&["maknae://dev-01/plane/kernel", "maknae://dev-01/plane/cli"]);
         assert_eq!(
             verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::ExtraSans)

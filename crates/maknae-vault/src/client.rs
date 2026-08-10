@@ -59,12 +59,9 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 
 /// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, VaultError> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
-    let first = rustls_pemfile::certs(&mut reader)
-        .next()
-        .ok_or(VaultError::Pem("signed leaf: no PEM cert"))?
+    let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
         .map_err(|_| VaultError::Pem("signed leaf: malformed PEM"))?;
-    Ok(first.as_ref().to_vec())
+    Ok(parsed.contents)
 }
 
 impl PlaneClient {
@@ -85,8 +82,8 @@ impl PlaneClient {
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
             .build()
             .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
-        let client =
-            VaultClient::new(settings).map_err(|e| VaultError::Auth(format!("vault client: {e}")))?;
+        let client = VaultClient::new(settings)
+            .map_err(|e| VaultError::Auth(format!("vault client: {e}")))?;
         Ok(Self {
             plane,
             deployment_id: cfg.deployment_id,
@@ -129,16 +126,16 @@ impl PlaneClient {
             key_der,
             chain_pem: resp.ca_chain.unwrap_or_default(),
         }));
-        *self
-            .identity
-            .write()
-            .expect("identity lock poisoned") = Some(id.clone());
+        *self.identity.write().expect("identity lock poisoned") = Some(id.clone());
         Ok(id)
     }
 
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
     pub fn current_identity(&self) -> Option<PlaneIdentity> {
-        self.identity.read().expect("identity lock poisoned").clone()
+        self.identity
+            .read()
+            .expect("identity lock poisoned")
+            .clone()
     }
 
     /// Spawn the background token-renewal loop on a SHARED handle (not `&mut self`, so
