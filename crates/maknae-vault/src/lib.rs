@@ -15,6 +15,7 @@ mod csr_gen;
 mod error;
 mod fips;
 mod fips_glue;
+mod peercred;
 mod plane;
 mod verify;
 
@@ -25,6 +26,7 @@ pub use config::{load_vault_config, validate_deployment_id, VaultConfig};
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
 pub use fips_glue::assert_fips_provider;
+pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use verify::{verify_plane_uri_san, VerifyError};
 
