@@ -17,6 +17,7 @@ mod fips;
 mod fips_glue;
 mod peercred;
 mod plane;
+mod socket;
 mod verify;
 
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
