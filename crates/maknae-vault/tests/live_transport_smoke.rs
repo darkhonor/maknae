@@ -5,6 +5,7 @@
 //!   MAKNAE_KERNEL_DIR=~/.maknae MAKNAE_CLI_DIR=~/.maknae-cli \
 //!     cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
 #![cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -15,7 +16,12 @@ async fn plane_to_plane_roundtrip() {
         .ok();
     let kdir = std::env::var("MAKNAE_KERNEL_DIR").expect("set MAKNAE_KERNEL_DIR");
     let cdir = std::env::var("MAKNAE_CLI_DIR").expect("set MAKNAE_CLI_DIR");
-    let sock = std::env::temp_dir().join(format!("maknae-live-{}.sock", std::process::id()));
+    // The socket's parent dir must be owner-only (PlaneListener::bind refuses a
+    // group/other-writable dir like /tmp, mode 1777) — create a private 0700 subdir.
+    let sockdir = std::env::temp_dir().join(format!("maknae-live-{}", std::process::id()));
+    std::fs::create_dir_all(&sockdir).unwrap();
+    std::fs::set_permissions(&sockdir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock = sockdir.join("maknae.sock");
 
     let kclient = maknae_vault::PlaneClient::from_config_dir(
         std::path::Path::new(&kdir),
@@ -36,7 +42,12 @@ async fn plane_to_plane_roundtrip() {
 
     let srv = tokio::spawn(async move {
         let mut s = listener.accept().await.expect("accept");
-        assert_eq!(s.peer_uri_san(), "maknae://vmhomelab/plane/cli");
+        // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
+        let san = s.peer_uri_san();
+        assert!(
+            san.starts_with("maknae://") && san.ends_with("/plane/cli"),
+            "kernel must see the cli plane URI-SAN, got {san}"
+        );
         let mut buf = [0u8; 5];
         s.read_exact(&mut buf).await.unwrap();
         s.write_all(b"pong!").await.unwrap();
@@ -46,7 +57,11 @@ async fn plane_to_plane_roundtrip() {
     let mut c = maknae_vault::PlaneConnector::connect(&sock, &cclient, &cca)
         .await
         .expect("connect");
-    assert_eq!(c.peer_uri_san(), "maknae://vmhomelab/plane/kernel");
+    let csan = c.peer_uri_san();
+    assert!(
+        csan.starts_with("maknae://") && csan.ends_with("/plane/kernel"),
+        "cli must see the kernel plane URI-SAN, got {csan}"
+    );
     c.write_all(b"hello").await.unwrap();
     c.flush().await.unwrap();
     let mut resp = [0u8; 5];
@@ -55,6 +70,6 @@ async fn plane_to_plane_roundtrip() {
     assert_eq!(&srv.await.unwrap(), b"hello");
     kclient.shutdown().await;
     cclient.shutdown().await;
-    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_dir_all(&sockdir);
     println!("LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS");
 }
