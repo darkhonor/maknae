@@ -1,0 +1,22 @@
+# Terraform working directory and provider plugins (large, machine-local).
+.terraform/
+.terraform.tfstate.lock.info
+
+# State — never commit; this module targets the operator's live Vault.
+*.tfstate
+*.tfstate.*
+
+# Variable files may carry deployment_id / secrets — keep them out of the repo.
+*.tfvars
+*.tfvars.json
+
+# Crash logs and CLI-generated override files.
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# The provider lock file (.terraform.lock.hcl) is intentionally NOT ignored —
+# it pins hashicorp/vault to the validated version and MUST be committed.
