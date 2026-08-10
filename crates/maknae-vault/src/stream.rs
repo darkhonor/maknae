@@ -92,6 +92,9 @@ pub struct PlaneListener {
     acceptor: TlsAcceptor,
     expect: Plane,
     deployment_id: String,
+    /// Detaches this listener's cert sink from the client on drop (frees the client to bind
+    /// a replacement listener). Field order places it last so it drops after the others.
+    _sink_guard: crate::client::CertSinkGuard,
 }
 
 impl PlaneListener {
@@ -111,13 +114,15 @@ impl PlaneListener {
         // Attach LAST — after every other fallible step has succeeded — so a failed
         // config/bind never replaces (orphans) an existing listener's sink (codex r4).
         // attach registers the slot AND seeds it from the current identity atomically under
-        // the identity lock (fail-closed against a racing renewal-expiry — codex r1).
-        client.attach_cert_sink(resolver.slot())?;
+        // the identity lock (fail-closed against a racing renewal-expiry — codex r1); the
+        // returned guard detaches the sink when this listener drops (codex r6).
+        let sink_guard = client.attach_cert_sink(resolver.slot())?;
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(cfg),
             expect: client.plane().peer(),
             deployment_id: client.deployment_id().to_string(),
+            _sink_guard: sink_guard,
         })
     }
 

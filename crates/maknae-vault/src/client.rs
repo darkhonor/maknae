@@ -42,6 +42,30 @@ impl PlaneIdentity {
     }
 }
 
+/// Detaches a listener's cert sink from its `PlaneClient` when the listener is dropped, so
+/// the client can back a replacement listener afterward. Held by `PlaneListener`.
+pub(crate) struct CertSinkGuard {
+    cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
+    slot: Arc<ArcSwapOption<CertifiedKey>>,
+}
+
+impl Drop for CertSinkGuard {
+    fn drop(&mut self) {
+        let mut guard = self.cert_sink.write().expect("cert_sink lock poisoned");
+        // Only detach if the registered slot is still OURS (defensive; a second active bind
+        // is rejected, so it always is). Clear the slot (stop serving) then deregister so a
+        // fresh bind can succeed.
+        if guard
+            .as_ref()
+            .map(|s| Arc::ptr_eq(s, &self.slot))
+            .unwrap_or(false)
+        {
+            self.slot.store(None);
+            *guard = None;
+        }
+    }
+}
+
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     plane: Plane,
@@ -168,13 +192,15 @@ impl PlaneClient {
     pub(crate) fn attach_cert_sink(
         &self,
         slot: Arc<ArcSwapOption<CertifiedKey>>,
-    ) -> Result<(), VaultError> {
+    ) -> Result<CertSinkGuard, VaultError> {
         let id_guard = self.identity.read().expect("identity lock poisoned");
         let mut sink_guard = self.cert_sink.write().expect("cert_sink lock poisoned");
-        // ONE client backs at most ONE listener. Reject a second active bind rather than
-        // silently orphaning the first listener's sink — an orphaned sink would keep serving
-        // a stale cert that mint/expiry/shutdown no longer update (codex r5). Held across the
-        // is_some check + set so two concurrent binds can't both win.
+        // ONE client backs at most ONE ACTIVE listener. Reject a second concurrent bind
+        // rather than orphaning the first listener's sink — an orphan would keep serving a
+        // stale cert that mint/expiry/shutdown no longer update (codex r5). The returned
+        // CertSinkGuard deregisters this slot when the listener drops, so a *replacement*
+        // listener can bind afterward (codex r6). Held across the is_some check + set so two
+        // concurrent binds can't both win.
         if sink_guard.is_some() {
             return Err(VaultError::SocketBind(
                 "this PlaneClient already backs a listener (one client backs one listener)".into(),
@@ -186,8 +212,11 @@ impl PlaneClient {
             let ck = crate::tls::certified_key_from_identity(id)?;
             slot.store(Some(ck));
         }
-        *sink_guard = Some(slot);
-        Ok(())
+        *sink_guard = Some(Arc::clone(&slot));
+        Ok(CertSinkGuard {
+            cert_sink: Arc::clone(&self.cert_sink),
+            slot,
+        })
     }
 
     /// The live mint: authenticate → CSR → `pki/sign` → hold memory-only. Stores a
