@@ -20,6 +20,7 @@ mod plane;
 mod plane_verify;
 mod resolver;
 mod socket;
+mod stream;
 mod tls;
 mod verify;
 
@@ -32,6 +33,7 @@ pub use error::VaultError;
 pub use fips_glue::assert_fips_provider;
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use stream::{AuthenticatedStream, PlaneConnector, PlaneListener};
 pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]
