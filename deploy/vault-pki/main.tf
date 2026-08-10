@@ -129,3 +129,35 @@ resource "vault_policy" "maknae_cli" {
     path "auth/token/lookup-self" { capabilities = ["read"] }
   EOT
 }
+
+# ---- AppRole auth (dedicated mount; NOT the shared default 'approle') -----------
+resource "vault_auth_backend" "approle" {
+  type = "approle"
+  path = var.approle_path
+}
+
+# Single-use SecretID -> one renewable token per login. The plane background-renews
+# in token_ttl increments up to token_max_ttl, then fails closed and re-authenticates
+# with a fresh SecretID. token_no_default_policy drops `default`; the per-plane policy
+# above re-grants renew-self/lookup-self so renewal still works.
+resource "vault_approle_auth_backend_role" "maknaed" {
+  backend                 = vault_auth_backend.approle.path
+  role_name               = "maknaed"
+  token_policies          = [vault_policy.maknae_kernel.name] # reference, not raw string
+  secret_id_ttl           = var.secret_id_ttl
+  secret_id_num_uses      = 1
+  token_ttl               = var.token_ttl
+  token_max_ttl           = var.token_max_ttl
+  token_no_default_policy = true
+}
+
+resource "vault_approle_auth_backend_role" "maknae" {
+  backend                 = vault_auth_backend.approle.path
+  role_name               = "maknae"
+  token_policies          = [vault_policy.maknae_cli.name]
+  secret_id_ttl           = var.secret_id_ttl
+  secret_id_num_uses      = 1
+  token_ttl               = var.token_ttl
+  token_max_ttl           = var.token_max_ttl
+  token_no_default_policy = true
+}
