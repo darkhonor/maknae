@@ -102,3 +102,30 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
   ttl     = var.leaf_ttl_seconds
   max_ttl = var.leaf_ttl_seconds
 }
+
+# ---- Per-plane policies — signing-scoped isolation ------------------------------
+# Paths INTERPOLATE from the mount resource (heredoc supports ${..}); a hardcoded
+# literal would silently 403 an overridden-mount deployment.
+# renew-self / lookup-self are re-granted explicitly because token_no_default_policy
+# (AppRoles below) drops Vault's built-in `default` policy — its sole grantor.
+resource "vault_policy" "maknae_kernel" {
+  name   = "maknae-kernel"
+  policy = <<-EOT
+    path "${vault_mount.maknae_int.path}/sign/maknae-kernel"  { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/revoke"              { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
+    path "auth/token/renew-self"  { capabilities = ["update"] }
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+  EOT
+}
+
+resource "vault_policy" "maknae_cli" {
+  name   = "maknae-cli"
+  policy = <<-EOT
+    path "${vault_mount.maknae_int.path}/sign/maknae-cli"     { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/revoke"              { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
+    path "auth/token/renew-self"  { capabilities = ["update"] }
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+  EOT
+}
