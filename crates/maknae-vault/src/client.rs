@@ -189,23 +189,25 @@ impl PlaneClient {
     }
 
     /// Spawn the background token-renewal loop on a SHARED handle (not `&mut self`, so
-    /// serving and renewal proceed concurrently). The returned handle resolves to the
-    /// fail-closed reason (`RenewalExpired`) when the token can no longer be renewed
-    /// (token_max_ttl reached / revoked) — the caller must then re-authenticate.
+    /// serving and renewal proceed concurrently). **MUST be called after a successful
+    /// `mint()`** — there is no token to renew before minting. If called before (lease
+    /// still 0), the task fails closed immediately (`RenewalExpired`) rather than
+    /// guessing an interval. The handle resolves to `RenewalExpired` when the token can
+    /// no longer be renewed (token_max_ttl reached / revoked) — re-authenticate then.
     pub fn spawn_renewal(&self) -> tokio::task::JoinHandle<VaultError> {
         let client = Arc::clone(&self.client);
         let lease_secs = Arc::clone(&self.lease_secs);
         tokio::spawn(async move {
             loop {
-                // Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the
-                // lease so a short (sub-60s) TTL renews before it expires. Only the
-                // not-yet-minted case (lease == 0) waits a fixed 60s and re-checks.
+                // Fail closed if spawned before mint() — no token to renew, and we must
+                // never guess an interval that could outlast a short lease.
                 let lease = lease_secs.load(Ordering::Relaxed);
-                let wait = if lease == 0 {
-                    60
-                } else {
-                    (lease * 2 / 3).max(1)
-                };
+                if lease == 0 {
+                    return VaultError::RenewalExpired;
+                }
+                // Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the
+                // lease so even a sub-60s TTL renews before it expires.
+                let wait = (lease * 2 / 3).max(1);
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                 let c = client.lock().await;
                 // Update the lease from THIS renewal's response — near token_max_ttl Vault
