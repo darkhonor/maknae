@@ -98,6 +98,10 @@ impl PlaneListener {
     /// Bind a group-gated listener presenting this client's live leaf, requiring the peer
     /// to prove `plane == this.plane().peer()`.
     ///
+    /// **One client backs one listener.** A `PlaneClient` may back at most one active
+    /// `PlaneListener`; a second `bind` on the same client returns `VaultError::SocketBind`
+    /// (mint/expiry/shutdown drive a single resolver slot).
+    ///
     /// **Must be called from within a Tokio runtime** (it binds a `UnixListener`, which
     /// registers with the reactor and panics otherwise).
     pub fn bind(path: &Path, client: &PlaneClient, ca: &CaBundle) -> Result<Self, VaultError> {
