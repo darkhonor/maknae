@@ -168,11 +168,17 @@ fn verb_action(verb: &Verb) -> &'static str {
 ///    because the mTLS cert half already verified, so `cert_verified` is `true`; the
 ///    group half is the caller-supplied `in_group`. On `Deny` → emit an AU-3
 ///    `connection`/`deny` record and close WITHOUT reading a verb.
-/// 2. Read one frame within `read_timeout_ms`; a timeout / truncation / decode failure
+/// 2. On `Permit`, emit the `connection`/permit admission record (seq 1) and GATE on
+///    it (codex round-8 P1, same `may_respond` gate as step 4): a failed admission
+///    append closes the connection WITHOUT reading the request or serving — a session
+///    whose admission cannot be durably recorded must never be served, even if the
+///    later request-record append would have succeeded.
+/// 3. Read one frame within `read_timeout_ms`; a timeout / truncation / decode failure
 ///    emits a `deny` record and closes (no response).
-/// 3. Audit-then-respond (ADR-0019): emit the `request` record FIRST; only if that
-///    append succeeded (`may_respond(true)`) is the response released. An audit-append
-///    failure withholds the response (fail-closed).
+/// 4. Audit-then-respond (ADR-0019): emit the `request` record; only if that append
+///    ALSO succeeded (`may_respond(true)`) is the response released. Both the
+///    admission record (step 2) and the request record (step 4) must be durably
+///    appended before any response frame is written.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle<S, E>(
     mut stream: S,
@@ -193,8 +199,10 @@ pub async fn handle<S, E>(
 
     // 1. Connection admission (cert half already verified by the transport). ADR-0019's
     //    scheme audits admission at seq 1 for BOTH outcomes: a deny closes here; a permit
-    //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, so the
-    //    request record follows at seq 2 and a successful session's trail is complete.
+    //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, and
+    //    (codex round-8 P1) GATES on it — the request record follows at seq 2 only once
+    //    the admission record is durably written, so a served session's trail is always
+    //    complete.
     match authorize_connection(true, in_group) {
         ConnDecision::Deny { reason } => {
             let rec = make_record(
@@ -225,11 +233,11 @@ pub async fn handle<S, E>(
             return;
         }
         ConnDecision::Permit => {
-            // Admission record at seq 1 (ADR-0019). Best-effort: a failed append is logged
-            // loudly but does NOT release anything — the RESPONSE gate stays on the request
-            // record below ("audit-then-respond for the request itself"). So a session whose
-            // admission could not be durably recorded still cannot be *served* unless its
-            // request record also persists.
+            // Admission record at seq 1 (ADR-0019). HARD GATE (codex round-8 P1): unlike
+            // the deny paths (nothing to serve there), a permit connection WILL serve a
+            // response — so the admission append must succeed before the request is even
+            // read, exactly like the request-record gate below. A failed admission append
+            // must not be papered over by a later-successful request append.
             let rec = make_record(
                 "connection",
                 &host,
@@ -246,10 +254,15 @@ pub async fn handle<S, E>(
                 "authorized",
                 &au3_1,
             );
-            if let Err(e) = emit.emit(&rec).await {
-                eprintln!(
-                    "maknaed: AUDIT WRITE FAILED on connection-permit admission for peer_uid={peer_uid} peer_uri={peer_uri} — trail incomplete; response still gated on the request record: {e}"
-                );
+            let admission_result = emit.emit(&rec).await;
+            if !may_respond(admission_result.is_ok()) {
+                if let Err(e) = admission_result {
+                    eprintln!(
+                        "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri} session_id={session_id} — closing without serving: {e}"
+                    );
+                }
+                let _ = stream.shutdown().await;
+                return;
             }
         }
     }
