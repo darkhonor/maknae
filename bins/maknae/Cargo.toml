@@ -16,6 +16,10 @@ path = "src/main.rs"
 [dependencies]
 maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-config = { path = "../../crates/maknae-config" }
-maknae-mcp = { path = "../../crates/maknae-mcp" }
 maknae-vault = { path = "../../crates/maknae-vault" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
+# STRICTLY non-privileged (task-8 brief): the ONLY deps allowed here are
+# maknae-proto, maknae-vault, maknae-config, clap, tokio — no maknae-mcp either
+# (Task 9's isolation gate enforces this set).
