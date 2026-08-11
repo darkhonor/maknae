@@ -49,6 +49,11 @@ pub enum VaultError {
     InsecureSocketDir { path: PathBuf, detail: String },
     /// Binding/listening on the UDS failed (incl. a live socket already present).
     SocketBind(String),
+    /// Setting the bound UDS's group ownership failed (codex round-7 P1) — the 0660
+    /// group-gate is meaningless if the socket ends up group-owned by whatever the
+    /// daemon process's PRIMARY group happens to be rather than the resolved `maknae`
+    /// group, so this fails the bind closed rather than serving un-group-owned.
+    SocketGroupOwn(String),
     /// Peer-credential capture failed — a local connection whose kernel creds cannot be
     /// read cannot be policed by the daemon, so it is refused (fail closed).
     PeerCred(String),
@@ -98,6 +103,7 @@ impl std::fmt::Display for VaultError {
                 write!(f, "refusing UDS dir {}: {detail}", path.display())
             }
             VaultError::SocketBind(msg) => write!(f, "UDS bind failed: {msg}"),
+            VaultError::SocketGroupOwn(msg) => write!(f, "UDS group-chown failed: {msg}"),
             VaultError::PeerCred(msg) => write!(f, "peer-credential capture failed: {msg}"),
             VaultError::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
@@ -124,6 +130,7 @@ mod tests {
                 detail: "mode 0777".into(),
             },
             VaultError::SocketBind("addr in use".into()),
+            VaultError::SocketGroupOwn("chown group 1000: EPERM".into()),
             VaultError::PeerCred("getsockopt failed".into()),
             VaultError::Handshake("bad cert".into()),
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),

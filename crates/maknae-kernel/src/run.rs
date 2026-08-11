@@ -51,7 +51,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{authorize_connection, ConnDecision};
-use crate::groupres::uid_in_maknae_group;
+use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{build_whoami, dispatch_verb, may_respond, Dispatch, ServeOutcome};
 
 // ---------------------------------------------------------------------------
@@ -759,8 +759,17 @@ async fn serve_after_mint(
     audit_cfg: &maknae_config::AuditConfig,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
 ) -> Result<ServeOutcome, String> {
-    let listener =
-        PlaneListener::bind(&transport.socket_path, client, ca).map_err(|e| e.to_string())?;
+    // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
+    // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
+    // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
+    // wrong group and block authorized `maknae`-group peers at the socket layer, before
+    // mTLS/`uid_in_maknae_group` ever runs. This `?` propagates through the SAME post-mint
+    // failure path as a bind error (see this fn's doc comment): the caller's unconditional
+    // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
+    let gid =
+        maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
+    let listener = PlaneListener::bind(&transport.socket_path, client, ca, Some(gid))
+        .map_err(|e| e.to_string())?;
     let session_ids = Arc::new(SessionIds::new());
     let wctx = WhereCtx {
         host: hostname(),

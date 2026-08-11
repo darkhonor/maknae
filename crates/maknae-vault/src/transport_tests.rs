@@ -311,7 +311,7 @@ mod accept_reject {
 
         let dir = tmp_sock_dir("wrong-plane");
         let sock = dir.join("s.sock");
-        let listener = crate::socket::bind_listener(&sock).expect("bind real UDS");
+        let listener = crate::socket::bind_listener(&sock, None).expect("bind real UDS");
         let acceptor = tokio_rustls::TlsAcceptor::from(server_cfg);
 
         let srv = tokio::spawn(async move {

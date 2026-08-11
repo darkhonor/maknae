@@ -30,7 +30,7 @@ async fn plane_to_plane_roundtrip() {
     .unwrap();
     kclient.mint().await.expect("kernel mint");
     let kca = maknae_vault::load_ca_pin(std::path::Path::new(&kdir)).unwrap();
-    let listener = maknae_vault::PlaneListener::bind(&sock, &kclient, &kca).unwrap();
+    let listener = maknae_vault::PlaneListener::bind(&sock, &kclient, &kca, None).unwrap();
 
     let cclient = maknae_vault::PlaneClient::from_config_dir(
         std::path::Path::new(&cdir),
