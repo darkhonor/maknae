@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, SessionIds};
-use maknae_kernel::{Conn, PlaneAccept, WhereCtx};
-use maknae_vault::{AcceptRejection, PeerCreds, RejectReason};
+use maknae_kernel::{Conn, PlaneAccept, ServeOutcome, WhereCtx};
+use maknae_vault::{AcceptRejection, PeerCreds, RejectReason, VaultError};
 use tokio::io::DuplexStream;
 use tokio::time::Instant;
 
@@ -160,6 +160,13 @@ fn cfg_with(max_connections: u32, read_timeout_ms: u64) -> maknae_config::Transp
     c
 }
 
+/// A credential-supervisor handle that never resolves — used by every test in this
+/// suite that exercises OTHER accept-loop behavior, so the new supervisor-exit `select!`
+/// branch (codex round-5 P1) never fires and cannot interfere.
+fn pending_supervisor() -> tokio::task::JoinHandle<VaultError> {
+    tokio::spawn(std::future::pending())
+}
+
 /// An OK connection whose peer end we DROP (so the served handle sees EOF and closes).
 fn ok_conn(uri: &str, uid: u32) -> Scripted {
     let (client, server) = tokio::io::duplex(1024);
@@ -180,8 +187,16 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
 
     let emit_for_loop = emit.clone();
     let loop_task = tokio::spawn(async move {
-        maknae_kernel::accept_loop(acceptor, emit_for_loop, session_ids, cfg, wctx(), shutdown)
-            .await;
+        maknae_kernel::accept_loop(
+            acceptor,
+            emit_for_loop,
+            session_ids,
+            cfg,
+            wctx(),
+            shutdown,
+            pending_supervisor(),
+        )
+        .await;
     });
 
     // Give the loop time to consume the whole script (and spawn/settle its handlers).
@@ -313,6 +328,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
             cfg,
             wctx(),
             std::future::pending::<()>(),
+            pending_supervisor(),
         )
         .await;
     });
@@ -402,6 +418,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             cfg,
             wctx(),
             std::future::pending::<()>(),
+            pending_supervisor(),
         )
         .await;
     });
@@ -425,4 +442,90 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
 
     loop_task.abort();
     let _ = emit.records(); // touch the sink so the type is exercised
+}
+
+/// P1 (codex round-5): when the credential supervisor's `JoinHandle` resolves (token
+/// renewal / leaf rotation exhausted its retry window, or the task panicked/was
+/// cancelled), the accept loop must STOP — not keep running as a zombie against a
+/// listener whose cert slot the supervisor already cleared. No connection is queued
+/// (the fake acceptor's `accept_raw` would otherwise block forever), so the ONLY way
+/// this test can complete is via the new supervisor `select!` branch — proving it is
+/// actually wired in, carries the real exit reason, and the loop does not continue
+/// past it (nothing is ever served).
+#[tokio::test]
+async fn supervisor_exit_stops_the_loop_and_reports_failure() {
+    let emit = RecEmit::new();
+    let acceptor = FakeAccept::new(vec![]);
+    let session_ids = Arc::new(SessionIds::with_nonce(1));
+    let cfg = cfg_with(64, 150);
+    // A supervisor future that resolves immediately with the SAME error the real
+    // credential supervisor surfaces on retry-window exhaustion (ADR-0018).
+    let supervisor = tokio::spawn(async { VaultError::RenewalExpired });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        maknae_kernel::accept_loop(
+            acceptor,
+            emit.clone(),
+            session_ids,
+            cfg,
+            wctx(),
+            std::future::pending::<()>(), // shutdown never fires in this test
+            supervisor,
+        ),
+    )
+    .await
+    .expect("accept_loop must return once the supervisor exits, not hang forever");
+
+    match outcome {
+        ServeOutcome::SupervisorExited(e) => {
+            assert!(
+                matches!(e, VaultError::RenewalExpired),
+                "must carry the supervisor's ACTUAL exit reason, got {e:?}"
+            );
+        }
+        other => panic!("expected ServeOutcome::SupervisorExited, got {other:?}"),
+    }
+    assert!(
+        emit.records().is_empty(),
+        "no connection should ever have been processed — the accept loop must not \
+         continue past the supervisor exit"
+    );
+}
+
+/// Companion to the supervisor-exit test: the OTHER legitimate way the loop stops
+/// (SIGTERM/SIGINT, modeled here by firing the shutdown future) must yield the
+/// opposite, distinct outcome — `GracefulShutdown` — so `run_inner`'s `ExitCode`
+/// mapping (`handler::serve_outcome_to_exit_code`) can tell a clean stop from a
+/// credential-supervisor failure.
+#[tokio::test]
+async fn shutdown_signal_yields_graceful_outcome() {
+    let emit = RecEmit::new();
+    let acceptor = FakeAccept::new(vec![]);
+    let session_ids = Arc::new(SessionIds::with_nonce(1));
+    let cfg = cfg_with(64, 150);
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
+        let _ = rx.await;
+    };
+
+    let loop_task = tokio::spawn(maknae_kernel::accept_loop(
+        acceptor,
+        emit.clone(),
+        session_ids,
+        cfg,
+        wctx(),
+        shutdown,
+        pending_supervisor(),
+    ));
+    tx.send(()).expect("shutdown receiver must still be alive");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)
+        .await
+        .expect("accept_loop must return promptly once shutdown fires")
+        .expect("accept_loop task must not panic");
+
+    assert!(
+        matches!(outcome, ServeOutcome::GracefulShutdown),
+        "expected ServeOutcome::GracefulShutdown, got {outcome:?}"
+    );
 }

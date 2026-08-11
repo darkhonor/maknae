@@ -17,6 +17,16 @@
 //!   it is testable without a live Vault-backed `PlaneListener`.
 //! - [`run`] is the process entrypoint: FIPS install/assert → boot → sink → plane
 //!   client → mint → supervisor → bind → accept loop → graceful shutdown.
+//!
+//! The accept loop also `select!`s on the credential supervisor's `JoinHandle`
+//! (codex round-5 P1, ADR-0018): when token renewal or leaf rotation exhausts its
+//! retry window, the supervisor clears the listener's cert slot + identity and its
+//! handle resolves. Left unobserved, the accept loop would keep running as a zombie —
+//! every new TLS handshake fails (no cert to present) and nothing re-mints. Observing
+//! it stops the loop and threads a [`crate::handler::ServeOutcome::SupervisorExited`]
+//! out to [`run`], which maps it to `ExitCode::FAILURE` so process supervision
+//! restarts the daemon and re-mints on the next boot — NOT an in-place
+//! re-authentication.
 
 use std::future::Future;
 use std::path::Path;
@@ -42,7 +52,7 @@ use tokio::task::JoinSet;
 
 use crate::authz::{authorize_connection, ConnDecision};
 use crate::groupres::uid_in_maknae_group;
-use crate::handler::{build_whoami, dispatch_verb, may_respond, Dispatch};
+use crate::handler::{build_whoami, dispatch_verb, may_respond, Dispatch, ServeOutcome};
 
 // ---------------------------------------------------------------------------
 // Audit-record construction (AU-3, ADR-0019). These stamp the run-loop's own
@@ -451,10 +461,34 @@ impl PlaneAccept for PlaneListener {
     }
 }
 
+/// Turn the credential supervisor's joined outcome into the `VaultError` that caused
+/// it to stop — the direct error the supervisor's own future resolved to (e.g.
+/// `RenewalExpired`), or, if the task panicked or was cancelled instead of returning
+/// normally, a synthesized reason carrying the `JoinError`'s detail. Either way the
+/// caller always has a concrete `VaultError` to log and build
+/// [`ServeOutcome::SupervisorExited`] from — the accept loop never has to special-case
+/// "the handle didn't even resolve to an error value."
+fn supervisor_exit_reason(
+    joined: Result<maknae_vault::VaultError, tokio::task::JoinError>,
+) -> maknae_vault::VaultError {
+    match joined {
+        Ok(e) => e,
+        Err(join_err) => maknae_vault::VaultError::Renew(format!(
+            "credential supervisor task did not complete cleanly: {join_err}"
+        )),
+    }
+}
+
 /// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with a
 /// `cfg.max_connections` semaphore; audits-and-continues on a surfaced cert-half
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
-/// capacity. Returns when `shutdown` resolves, after draining in-flight handlers.
+/// capacity. Also `select!`s on `supervisor` (codex round-5 P1): the credential
+/// supervisor's handle resolving means it gave up (retry window exhausted) and cleared
+/// the listener's cert slot + identity, so continuing to accept would only serve
+/// handshakes that can never succeed. Returns the [`ServeOutcome`] that ended the loop
+/// — `GracefulShutdown` when `shutdown` resolved first, `SupervisorExited` when the
+/// supervisor resolved first — AFTER EITHER WAY draining in-flight handlers (this is
+/// itself the graceful-shutdown drain; the caller does not additionally distinguish).
 pub async fn accept_loop<A, E>(
     acceptor: A,
     emit: Arc<E>,
@@ -462,7 +496,9 @@ pub async fn accept_loop<A, E>(
     cfg: TransportConfig,
     wctx: WhereCtx,
     shutdown: impl Future<Output = ()> + Send,
-) where
+    supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+) -> ServeOutcome
+where
     A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
 {
@@ -495,15 +531,28 @@ pub async fn accept_loop<A, E>(
     let mut atcap_audit_dropped: u64 = 0;
 
     tokio::pin!(shutdown);
+    tokio::pin!(supervisor);
 
-    loop {
+    let outcome = loop {
         tokio::select! {
             biased;
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => break ServeOutcome::GracefulShutdown,
+            // The credential supervisor gave up (or panicked/was cancelled): it already
+            // cleared the listener's cert slot + identity, so every handshake from here
+            // on would fail anyway. Stop accepting and surface WHY so the caller can log
+            // + exit non-zero (process supervision restarts + re-mints, ADR-0018) instead
+            // of running on as a zombie that fast-closes every new connection.
+            joined = &mut supervisor => {
+                let reason = supervisor_exit_reason(joined);
+                eprintln!(
+                    "maknaed: credential supervisor exited ({reason}); shutting down so process supervision can restart and re-mint"
+                );
+                break ServeOutcome::SupervisorExited(reason);
+            }
             // Prompt raw accept ONLY: no TLS handshake happens on the loop's thread, so a
             // peer that stalls its handshake can never serialize acceptance (anti-DoS).
-            outcome = acceptor.accept_raw() => {
-                match outcome {
+            accepted = acceptor.accept_raw() => {
+                match accepted {
                     // A raw-accept syscall error (no peer, or peer-cred capture failed): log
                     // and continue. NEVER `?` — a transient accept error must not kill the
                     // daemon. This is the ONLY thing the loop handles inline.
@@ -591,9 +640,12 @@ pub async fn accept_loop<A, E>(
         }
         // Reap finished handlers so the set does not grow unbounded over the daemon's life.
         while handlers.try_join_next().is_some() {}
-    }
+    };
 
-    // Graceful shutdown: stop accepting (done — we broke the loop), drain in-flight.
+    // Stopped accepting (done — we broke the loop, either way). Drain in-flight
+    // handlers: this IS the graceful-shutdown drain regardless of which outcome ended
+    // the loop, so a supervisor exit still lets already-admitted requests finish rather
+    // than dropping them mid-flight.
     while handlers.join_next().await.is_some() {}
 
     // Drain the bounded at-capacity audit offload (P2): drop the sender so the drain
@@ -606,6 +658,8 @@ pub async fn accept_loop<A, E>(
             "maknaed: at-capacity audit offload dropped {atcap_audit_dropped} record(s) over the daemon's life (audit queue saturation)"
         );
     }
+
+    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +680,11 @@ pub fn run(config_dir: &Path) -> ExitCode {
     };
     runtime.block_on(async move {
         match run_inner(config_dir).await {
-            Ok(()) => ExitCode::SUCCESS,
+            // The T1 `ServeOutcome` → `ExitCode` mapping (codex round-5 P1) decides:
+            // `GracefulShutdown` → SUCCESS, `SupervisorExited` → FAILURE (so process
+            // supervision restarts the daemon and re-mints; the diagnostic was already
+            // logged by the accept loop when the supervisor's handle resolved).
+            Ok(outcome) => crate::handler::serve_outcome_to_exit_code(&outcome),
             Err(e) => {
                 eprintln!("maknaed: refusing to start: {e}");
                 ExitCode::FAILURE
@@ -635,7 +693,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
     })
 }
 
-async fn run_inner(config_dir: &Path) -> Result<(), String> {
+async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, String> {
     // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
@@ -666,14 +724,19 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-    let _supervisor = client.spawn_supervisor();
+    // Retained (not `let _`, codex round-5 P1): the serve loop selects on this handle
+    // alongside the accept path and shutdown, so a supervisor exit (renewal/rotation
+    // retry window exhausted → `RenewalExpired`, or a panic/cancellation) stops the
+    // daemon instead of leaving the accept loop running as a zombie against a listener
+    // whose cert slot the supervisor already cleared.
+    let supervisor = client.spawn_supervisor();
 
     // Once `mint()` succeeds the privileged kernel-plane Vault token is LIVE until
     // lease expiry — so EVERY post-mint startup step (bind, and anything before the
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
-    let outcome = serve_after_mint(&client, &ca, &sink, transport, &audit_cfg).await;
+    let outcome = serve_after_mint(&client, &ca, &sink, transport, &audit_cfg, supervisor).await;
 
     // Retire the plane credential (revoke token, clear leaf) on the way out — on the
     // graceful-shutdown path AND on any post-mint startup failure (e.g. bind).
@@ -682,17 +745,20 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
 }
 
 /// The post-mint startup + serve: bind the group-gated plane listener, then run the
-/// accept loop until shutdown. Split out so [`run_inner`] can revoke the minted Vault
-/// token on EVERY return path (a bind/startup failure here, or a graceful shutdown)
-/// before propagating — a `?` return from this function still runs the caller's
-/// unconditional `client.shutdown().await`.
+/// accept loop until shutdown OR the credential supervisor exits. Split out so
+/// [`run_inner`] can revoke the minted Vault token on EVERY return path (a
+/// bind/startup failure here, a graceful shutdown, or a supervisor exit) before
+/// propagating — a `?` return from this function still runs the caller's
+/// unconditional `client.shutdown().await`. Returns the [`ServeOutcome`] the accept
+/// loop stopped on so [`run`] can map it to the process `ExitCode`.
 async fn serve_after_mint(
     client: &maknae_vault::PlaneClient,
     ca: &maknae_vault::CaBundle,
     sink: &Arc<maknae_audit_append::AuditSink>,
     transport: maknae_config::TransportConfig,
     audit_cfg: &maknae_config::AuditConfig,
-) -> Result<(), String> {
+    supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+) -> Result<ServeOutcome, String> {
     let listener =
         PlaneListener::bind(&transport.socket_path, client, ca).map_err(|e| e.to_string())?;
     let session_ids = Arc::new(SessionIds::new());
@@ -701,16 +767,17 @@ async fn serve_after_mint(
         socket: transport.socket_path.display().to_string(),
         au3_1: audit_cfg.au3_1.clone(),
     };
-    accept_loop(
+    let outcome = accept_loop(
         listener,
         Arc::clone(sink),
         session_ids,
         transport,
         wctx,
         shutdown_signal(),
+        supervisor,
     )
     .await;
-    Ok(())
+    Ok(outcome)
 }
 
 /// Resolve on the first SIGTERM/SIGINT (graceful-shutdown trigger, spec §6).
