@@ -48,6 +48,10 @@ pub enum ConfigError {
     /// The `transport` section is present but a field is malformed or out of
     /// its fail-closed range (Stage-3a task-2).
     InvalidTransport(String),
+    /// The `audit` section is present but is not a map (e.g. a bare scalar or
+    /// sequence) — a malformed section must not silently bind all production
+    /// defaults (Stage-3a codex round-6 P2).
+    InvalidAudit(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -115,6 +119,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
             }
+            ConfigError::InvalidAudit(reason) => {
+                write!(f, "invalid audit config: {reason}")
+            }
         }
     }
 }
@@ -168,6 +175,17 @@ mod tests {
         let s = format!("{e}");
         assert!(
             s.contains("transport") && s.contains("max_connections"),
+            "Display was: {s}"
+        );
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn display_covers_invalid_audit() {
+        let e = ConfigError::InvalidAudit("audit section must be a map".into());
+        let s = format!("{e}");
+        assert!(
+            s.contains("audit") && s.contains("must be a map"),
             "Display was: {s}"
         );
         let _: &dyn std::error::Error = &e;

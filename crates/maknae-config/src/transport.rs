@@ -149,6 +149,15 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
         None => return Ok(TransportConfig::default()),
         Some(section) => section,
     };
+    // A present-but-non-map section (e.g. `transport: disabled`) must NOT silently
+    // fall through to all-defaults: `get()` returns `None` for every field against a
+    // non-`Map` value, which would otherwise bind the production default socket/limits
+    // to a malformed section (codex round-6 P2). Fail closed instead.
+    if !matches!(section, Value::Map(_)) {
+        return Err(ConfigError::InvalidTransport(
+            "transport section must be a map".into(),
+        ));
+    }
 
     let socket_path = match get(section, "socket_path") {
         None => PathBuf::from(DEFAULT_SOCKET_PATH),
@@ -353,6 +362,24 @@ mod tests {
     #[test]
     fn rejects_wrong_type_socket_path() {
         let v = crate::Value::Map(vec![("socket_path".into(), crate::Value::Int(1))]);
+        assert!(matches!(
+            transport_from_section(Some(&v)),
+            Err(ConfigError::InvalidTransport(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_map_scalar_section() {
+        let v = crate::Value::Str("disabled".into());
+        assert!(matches!(
+            transport_from_section(Some(&v)),
+            Err(ConfigError::InvalidTransport(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_map_seq_section() {
+        let v = crate::Value::Seq(vec![crate::Value::Str("a".into())]);
         assert!(matches!(
             transport_from_section(Some(&v)),
             Err(ConfigError::InvalidTransport(_))

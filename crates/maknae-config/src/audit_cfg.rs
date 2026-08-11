@@ -57,9 +57,12 @@ fn to_json(v: &Value) -> serde_json::Value {
 
 /// Read the `audit` section (ADR-0019, spec/task-brief §Interfaces). `None`
 /// (section absent) → `jsonl_path = runtime_dir/audit.jsonl`, `siem = None`,
-/// `au3_1 = {}`. A present field of the wrong shape is treated as absent
-/// (lenient — `audit` carries no numeric ranges to fail closed on; the only
-/// fail-closed surface in this section, `au3_1`'s JSON shape, always succeeds
+/// `au3_1 = {}`. A present-but-non-map section (e.g. `audit: disabled`) is
+/// rejected (`ConfigError::InvalidAudit`) rather than silently falling
+/// through to all defaults (codex round-6 P2 — mirrors `transport`'s guard).
+/// Within a present MAP section, a per-field wrong shape is still treated as
+/// absent (lenient — `audit` carries no numeric ranges to fail closed on, and
+/// the only other fail-closed surface, `au3_1`'s JSON shape, always succeeds
 /// because every `Value` variant has a `serde_json::Value` equivalent).
 pub fn audit_from_section(
     v: Option<&Value>,
@@ -76,6 +79,11 @@ pub fn audit_from_section(
         }
         Some(section) => section,
     };
+    if !matches!(section, Value::Map(_)) {
+        return Err(ConfigError::InvalidAudit(
+            "audit section must be a map".into(),
+        ));
+    }
 
     let jsonl_path = get(section, "jsonl_path")
         .and_then(as_str)
@@ -116,6 +124,24 @@ mod tests {
         assert_eq!(c.jsonl_path, PathBuf::from("/var/lib/maknae/audit.jsonl"));
         assert_eq!(c.siem, None);
         assert_eq!(c.au3_1, serde_json::json!({}));
+    }
+
+    #[test]
+    fn rejects_non_map_scalar_section() {
+        let v = Value::Str("disabled".into());
+        assert!(matches!(
+            audit_from_section(Some(&v), &rt()),
+            Err(ConfigError::InvalidAudit(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_map_seq_section() {
+        let v = Value::Seq(vec![Value::Str("a".into())]);
+        assert!(matches!(
+            audit_from_section(Some(&v), &rt()),
+            Err(ConfigError::InvalidAudit(_))
+        ));
     }
 
     #[test]
