@@ -64,12 +64,21 @@ enum FakeRaw {
 
 struct FakeAccept {
     queue: Mutex<VecDeque<Scripted>>,
+    /// Count of scripted items actually consumed by `accept_raw` — a clone of this Arc is
+    /// taken BEFORE the acceptor is moved into `accept_loop`, so a test can observe how
+    /// far the loop has progressed (P2: proving the loop keeps accepting even while the
+    /// at-capacity audit sink is slow).
+    popped: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl FakeAccept {
     fn new(items: Vec<Scripted>) -> Self {
         FakeAccept {
             queue: Mutex::new(items.into_iter().collect()),
+            popped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+    fn pop_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.popped)
     }
 }
 impl PlaneAccept for FakeAccept {
@@ -81,6 +90,10 @@ impl PlaneAccept for FakeAccept {
     // before the only await, so the future stays `Send` (satisfying the trait bound).
     async fn accept_raw(&self) -> Result<(FakeRaw, PeerCreds), std::io::Error> {
         let item = self.queue.lock().unwrap().pop_front();
+        if item.is_some() {
+            self.popped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         match item {
             Some(Scripted::Ok(stream, uri, uid)) => {
                 Ok((FakeRaw::Conn(stream, uri, uid), creds(uid)))
@@ -320,4 +333,96 @@ async fn stalled_handshake_does_not_block_next_connection() {
 
     // A is still stalled (30s) — abort rather than gracefully drain.
     loop_task.abort();
+}
+
+/// A sink whose every `emit` blocks for `delay` before recording — models slow/blocked
+/// audit storage. Used to prove the at-capacity audit offload (P2) never serializes the
+/// accept loop.
+struct SlowEmit {
+    delay: Duration,
+    recs: Mutex<Vec<AuditRecord>>,
+}
+impl SlowEmit {
+    fn new(delay: Duration) -> Arc<Self> {
+        Arc::new(SlowEmit {
+            delay,
+            recs: Mutex::new(Vec::new()),
+        })
+    }
+    fn records(&self) -> Vec<AuditRecord> {
+        self.recs.lock().unwrap().clone()
+    }
+}
+impl AuditEmit for SlowEmit {
+    fn emit(&self, rec: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
+        let delay = self.delay;
+        let rec = rec.clone();
+        // The returned future borrows `&self` (RPITIT) but takes the lock ONLY
+        // synchronously, AFTER the await — never held across the await point.
+        async move {
+            tokio::time::sleep(delay).await;
+            self.recs.lock().unwrap().push(rec);
+            Ok(())
+        }
+    }
+}
+
+/// P2 (DoS): an at-capacity denial must NOT block the accept loop on audit I/O. With the
+/// only permit held by a long-lived first connection, every later connection is an
+/// at-capacity denial whose audit is handed to the BOUNDED BACKGROUND drain. Even though
+/// the audit sink is slow (250ms/record), the accept loop must consume the WHOLE script
+/// promptly (dropping each raw socket immediately) instead of serializing on the append.
+#[tokio::test]
+async fn at_capacity_audit_does_not_block_accept_loop() {
+    // Hold the single permit with a first connection (read_timeout long so it lingers),
+    // then a burst of at-capacity connections whose audit goes to the slow background sink.
+    let (_c1, server1) = tokio::io::duplex(1024); // keep peer end open so handler holds the permit
+    let mut script = vec![Scripted::Ok(
+        server1,
+        "maknae://d/plane/cli".to_string(),
+        9000,
+    )];
+    for i in 0..8 {
+        script.push(ok_conn("maknae://d/plane/cli", 9001 + i));
+    }
+    let n_items = script.len();
+
+    let emit = SlowEmit::new(Duration::from_millis(250));
+    let acceptor = FakeAccept::new(script);
+    let popped = acceptor.pop_counter();
+    let session_ids = Arc::new(SessionIds::with_nonce(1));
+    let cfg = cfg_with(1, 2000); // capacity 1; first handler holds it for 2s
+
+    let emit_for_loop = emit.clone();
+    let loop_task = tokio::spawn(async move {
+        maknae_kernel::accept_loop(
+            acceptor,
+            emit_for_loop,
+            session_ids,
+            cfg,
+            wctx(),
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+
+    // The loop must consume the ENTIRE script quickly — well before even ONE slow (250ms)
+    // at-capacity audit could complete if it were awaited inline. If the loop serialized
+    // on audit I/O, consuming 8 at-capacity denials would take ~2s; here it is ~instant.
+    let deadline = Instant::now() + Duration::from_millis(150);
+    loop {
+        if popped.load(std::sync::atomic::Ordering::Relaxed) == n_items {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "accept loop did not consume the script promptly ({} of {n_items}) — it appears \
+             serialized on the slow at-capacity audit (DoS regression)",
+            popped.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    loop_task.abort();
+    let _ = emit.records(); // touch the sink so the type is exercised
 }
