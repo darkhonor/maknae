@@ -45,6 +45,9 @@ pub enum ConfigError {
     DuplicateSpec { section: String },
     /// The `core.handling` classification ceiling is present but invalid (spec ②c §4).
     InvalidCeiling { reason: String },
+    /// The `transport` section is present but a field is malformed or out of
+    /// its fail-closed range (Stage-3a task-2).
+    InvalidTransport(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -109,6 +112,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidCeiling { reason } => {
                 write!(f, "invalid core classification ceiling: {reason}")
             }
+            ConfigError::InvalidTransport(reason) => {
+                write!(f, "invalid transport config: {reason}")
+            }
         }
     }
 }
@@ -149,6 +155,19 @@ mod tests {
         let s = format!("{e}");
         assert!(
             s.contains("ceiling") && s.contains("SEKRET"),
+            "Display was: {s}"
+        );
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn display_covers_invalid_transport() {
+        let e = ConfigError::InvalidTransport(
+            "transport.max_connections: 0 out of range 1..=4096".into(),
+        );
+        let s = format!("{e}");
+        assert!(
+            s.contains("transport") && s.contains("max_connections"),
             "Display was: {s}"
         );
         let _: &dyn std::error::Error = &e;
