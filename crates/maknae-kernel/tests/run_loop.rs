@@ -42,6 +42,45 @@ impl AuditEmit for RecEmit {
     }
 }
 
+/// Like `RecEmit`, but fails ONLY the first `emit()` call and succeeds on every call
+/// after — so a test can pin exactly WHICH append failed (admission vs. request) by
+/// controlling how many prior successful calls preceded it. Used to prove the
+/// admission-record append (codex round-8 P1) gates the response on its own, not just
+/// on a later request-record failure.
+struct FailFirstEmit {
+    recs: Mutex<Vec<AuditRecord>>,
+    calls: Mutex<u32>,
+}
+
+impl FailFirstEmit {
+    fn new() -> Arc<Self> {
+        Arc::new(FailFirstEmit {
+            recs: Mutex::new(Vec::new()),
+            calls: Mutex::new(0),
+        })
+    }
+    fn records(&self) -> Vec<AuditRecord> {
+        self.recs.lock().unwrap().clone()
+    }
+}
+
+impl AuditEmit for FailFirstEmit {
+    fn emit(&self, rec: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
+        self.recs.lock().unwrap().push(rec.clone()); // record synchronously
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let is_first_call = *calls == 1;
+        drop(calls);
+        async move {
+            if is_first_call {
+                Err(AuditError::WritePrimary("forced (first call only)".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 fn default_cfg() -> maknae_config::TransportConfig {
     maknae_config::transport_from_section(None).unwrap()
 }
@@ -78,10 +117,13 @@ async fn audit_failure_withholds_response() {
     )
     .await;
 
-    // The request WAS recorded (the record is what the failing append refused to persist)...
+    // The admission record WAS offered (the record is what the failing append refused
+    // to persist) — codex round-8 P1: with EVERY append failing, the admission gate
+    // (seq 1) now trips first, before the request is even read, so no `request` record
+    // is ever offered in this scenario.
     assert!(
-        emit.records().iter().any(|r| r.event == "request"),
-        "the request should have been offered to the audit sink"
+        emit.records().iter().any(|r| r.event == "connection"),
+        "the admission record should have been offered to the audit sink"
     );
     // ...but NO response frame may be released once that append failed.
     let r = tokio::time::timeout(
@@ -92,6 +134,57 @@ async fn audit_failure_withholds_response() {
     assert!(
         r.is_err() || r.unwrap().is_err(),
         "response MUST be withheld when audit append fails"
+    );
+}
+
+#[tokio::test]
+async fn admission_audit_failure_withholds_response_without_reading_request() {
+    // codex round-8 P1: the permit-admission record (seq 1) must gate the response
+    // exactly like the request record (seq 2) does. Only the FIRST append (the
+    // admission record) fails here; a later request-record append would have
+    // succeeded — proving the gate trips on the admission append itself, not merely
+    // as a side effect of the request append also failing.
+    let (mut c, s) = tokio::io::duplex(4096);
+    let emit = FailFirstEmit::new();
+    write_ping(&mut c).await;
+
+    maknae_kernel::handle(
+        s,
+        "maknae://d/plane/cli".to_string(),
+        501,
+        true, // in_group -> Permit
+        emit.clone(),
+        99,
+        default_cfg(),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let recs = emit.records();
+    // Exactly one record: the admission append failed, so `handle` closed BEFORE ever
+    // reading the request frame — no `request` record exists at all.
+    assert_eq!(
+        recs.len(),
+        1,
+        "handle must close immediately after the failed admission append, before reading \
+         the request; got records: {recs:?}"
+    );
+    assert_eq!(recs[0].event, "connection");
+    assert_eq!(recs[0].outcome.result, "permit");
+    assert!(
+        !recs.iter().any(|r| r.event == "request"),
+        "the request must never be read once the admission append failed"
+    );
+
+    // No response frame.
+    let r = tokio::time::timeout(
+        Duration::from_millis(200),
+        maknae_proto::read_frame(&mut c, 65536),
+    )
+    .await;
+    assert!(
+        r.is_err() || r.unwrap().is_err(),
+        "response MUST be withheld when the admission audit append fails"
     );
 }
 
