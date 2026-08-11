@@ -33,20 +33,26 @@ variable "leaf_ttl_seconds" {
 
 variable "token_ttl" {
   type        = number
-  description = "AppRole token TTL (background-renewal increment), in seconds. Default 20m."
+  description = "Token TTL for the SHORT-LIVED CLI token (the `maknae` role): the CLI token lives at most this long and dies with the invocation (no background renewal). The `maknaed` daemon token is periodic (var.token_period) and does not use this. Default 20m."
   default     = 1200
 }
 
 variable "token_max_ttl" {
   type        = number
-  description = "AppRole token max TTL (fail-closed re-auth boundary; the binding operational cadence, deliberately tighter than the 72h leaf), in seconds. Default 24h."
+  description = "Token max TTL for the SHORT-LIVED CLI token (the `maknae` role), in seconds. The `maknaed` daemon uses a periodic token (var.token_period) with NO max-TTL ceiling instead (ADR-0018). Default 24h."
+  default     = 86400
+}
+
+variable "token_period" {
+  type        = number
+  description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Only the daemon role is periodic; the CLI token stays short-lived. Seconds. Default 24h."
   default     = 86400
 }
 
 variable "secret_id_ttl" {
   type        = number
-  description = "AppRole SecretID TTL, in seconds. Default 10m."
-  default     = 600
+  description = "AppRole SecretID TTL, in seconds. 0 = non-expiring (STANDING SecretID). Both roles use a standing SecretID per ADR-0018: the daemon bootstrap is `_maknae`-owned and HRoT-sealed at rest via `maknae enroll`; the CLI SecretID is operator-owned. A standing SecretID needs BOTH ttl=0 and secret_id_num_uses=0. Default 0."
+  default     = 0
 }
 
 variable "root_mount_path" {
