@@ -150,12 +150,12 @@ async fn round_trip(
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     let ok = match response.result {
-        RespResult::Ok(Payload::Pong) => {
-            println!("pong");
-            true
-        }
-        RespResult::Ok(Payload::Whoami(w)) => {
-            println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
+        RespResult::Ok(payload) => {
+            // The daemon returned SOME successful payload — but it must be the payload
+            // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
+            // a protocol violation, not a result to print; propagate Err so `execute`
+            // revokes the token and the CLI exits non-zero.
+            print_payload_for_verb(verb, payload)?;
             true
         }
         RespResult::Err(e) => {
@@ -164,6 +164,26 @@ async fn round_trip(
         }
     };
     Ok(ok)
+}
+
+/// Print the successful `payload` IFF its variant matches the requested `verb`
+/// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
+/// answered a different question than we asked — a protocol error: return `Err`
+/// (the caller already revokes the token on every error path and exits non-zero).
+fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
+    match (verb, payload) {
+        (Verb::Ping, Payload::Pong) => {
+            println!("pong");
+            Ok(())
+        }
+        (Verb::Whoami, Payload::Whoami(w)) => {
+            println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
+            Ok(())
+        }
+        (v, p) => Err(format!(
+            "protocol error: daemon returned a {p:?} payload for a {v:?} request"
+        )),
+    }
 }
 
 /// The `maknae` entrypoint: parse args, run the round trip, map the outcome to
@@ -242,6 +262,37 @@ mod tests {
             maknae_proto::Verb::from(Verb::Whoami),
             maknae_proto::Verb::Whoami
         );
+    }
+
+    // ---- verb/payload matching (P2) -------------------------------------------
+
+    #[test]
+    fn ping_accepts_pong_payload() {
+        assert!(print_payload_for_verb(Verb::Ping, Payload::Pong).is_ok());
+    }
+
+    #[test]
+    fn whoami_accepts_whoami_payload() {
+        let w = maknae_proto::WhoamiView {
+            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_uid: 1000,
+        };
+        assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
+    }
+
+    #[test]
+    fn whoami_rejects_pong_payload() {
+        // The daemon answered a `ping` question for our `whoami` — a protocol error.
+        assert!(print_payload_for_verb(Verb::Whoami, Payload::Pong).is_err());
+    }
+
+    #[test]
+    fn ping_rejects_whoami_payload() {
+        let w = maknae_proto::WhoamiView {
+            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_uid: 1000,
+        };
+        assert!(print_payload_for_verb(Verb::Ping, Payload::Whoami(w)).is_err());
     }
 
     // ---- CLI config-load coherence (P1-B) -------------------------------------

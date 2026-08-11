@@ -617,9 +617,33 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     client.mint().await.map_err(|e| e.to_string())?;
     let _supervisor = client.spawn_supervisor();
 
-    // Bind the group-gated plane listener and serve.
+    // Once `mint()` succeeds the privileged kernel-plane Vault token is LIVE until
+    // lease expiry — so EVERY post-mint startup step (bind, and anything before the
+    // serve loop) must revoke it on failure, or the token leaks. Capture the whole
+    // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
+    // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
+    let outcome = serve_after_mint(&client, &ca, &sink, transport, &audit_cfg).await;
+
+    // Retire the plane credential (revoke token, clear leaf) on the way out — on the
+    // graceful-shutdown path AND on any post-mint startup failure (e.g. bind).
+    client.shutdown().await;
+    outcome
+}
+
+/// The post-mint startup + serve: bind the group-gated plane listener, then run the
+/// accept loop until shutdown. Split out so [`run_inner`] can revoke the minted Vault
+/// token on EVERY return path (a bind/startup failure here, or a graceful shutdown)
+/// before propagating — a `?` return from this function still runs the caller's
+/// unconditional `client.shutdown().await`.
+async fn serve_after_mint(
+    client: &maknae_vault::PlaneClient,
+    ca: &maknae_vault::CaBundle,
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    transport: maknae_config::TransportConfig,
+    audit_cfg: &maknae_config::AuditConfig,
+) -> Result<(), String> {
     let listener =
-        PlaneListener::bind(&transport.socket_path, &client, &ca).map_err(|e| e.to_string())?;
+        PlaneListener::bind(&transport.socket_path, client, ca).map_err(|e| e.to_string())?;
     let session_ids = Arc::new(SessionIds::new());
     let wctx = WhereCtx {
         host: hostname(),
@@ -628,16 +652,13 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     };
     accept_loop(
         listener,
-        Arc::clone(&sink),
+        Arc::clone(sink),
         session_ids,
         transport,
         wctx,
         shutdown_signal(),
     )
     .await;
-
-    // Retire the plane credential (revoke token, clear leaf) on the way out.
-    client.shutdown().await;
     Ok(())
 }
 
