@@ -41,6 +41,10 @@ pub enum VaultError {
     Sign(String),
     /// The renewable token hit `token_max_ttl` — the caller must re-authenticate.
     RenewalExpired,
+    /// A single background `renew_self` attempt failed (transient or terminal — the
+    /// credential supervisor's `retry_action` decides which; this variant only
+    /// carries the underlying detail for logging).
+    Renew(String),
     /// The UDS parent directory has unsafe ownership/permissions — refused before bind.
     InsecureSocketDir { path: PathBuf, detail: String },
     /// Binding/listening on the UDS failed (incl. a live socket already present).
@@ -89,6 +93,7 @@ impl std::fmt::Display for VaultError {
                 f,
                 "token reached max_ttl — re-authentication with a fresh SecretID required"
             ),
+            VaultError::Renew(msg) => write!(f, "renew_self failed: {msg}"),
             VaultError::InsecureSocketDir { path, detail } => {
                 write!(f, "refusing UDS dir {}: {detail}", path.display())
             }
