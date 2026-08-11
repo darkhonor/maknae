@@ -46,6 +46,36 @@ pub fn rotate_now(leaf_age_secs: u64, leaf_ttl_secs: u64) -> bool {
     leaf_ttl_secs > 0 && leaf_age_secs.saturating_mul(3) >= leaf_ttl_secs.saturating_mul(2)
 }
 
+/// The absolute wall-clock second at which the CURRENT leaf reaches its 2/3-TTL
+/// rotation point, given `now_secs` and the leaf's age/TTL off its ACTUAL issued
+/// validity window (`SupervisorCtx::leaf_age_and_ttl_secs`).
+///
+/// The threshold age is EXACTLY `rotate_now`'s boundary — the smallest age with
+/// `age*3 >= ttl*2`, i.e. `ceil(2*ttl/3)` — so waking at this deadline and calling
+/// `rotate_now` there agree (no off-by-one that would wake a second too early/late).
+/// A `leaf_ttl_secs == 0` (no leaf minted yet, or an unknown window) yields
+/// `u64::MAX` — "no leaf deadline", so only the token deadline governs the wake.
+pub fn leaf_rotate_deadline(now_secs: u64, leaf_age_secs: u64, leaf_ttl_secs: u64) -> u64 {
+    if leaf_ttl_secs == 0 {
+        return u64::MAX;
+    }
+    // Smallest age satisfying rotate_now (age*3 >= ttl*2): ceil(ttl*2 / 3).
+    let rotate_age = leaf_ttl_secs.saturating_mul(2).div_ceil(3);
+    let secs_until = rotate_age.saturating_sub(leaf_age_secs);
+    now_secs.saturating_add(secs_until)
+}
+
+/// The next wake instant (absolute wall-clock seconds): the EARLIER of the
+/// token-renewal deadline and the leaf-rotation deadline, but never in the past
+/// (clamped to `now_secs`, so the caller's `sleep(wake - now)` is non-negative and a
+/// deadline already reached wakes immediately to act). Extracted as a pure decision so
+/// the "sleep until the earlier of two deadlines" choice — the P1-C fix that stops a
+/// leaf shorter than ⅓ of the token period from expiring unchecked — is exhaustively
+/// boundary-tested independently of the T3 driver that consults it.
+pub fn next_wake(now_secs: u64, token_deadline_secs: u64, leaf_deadline_secs: u64) -> u64 {
+    token_deadline_secs.min(leaf_deadline_secs).max(now_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +200,81 @@ mod tests {
     #[test]
     fn rotate_now_true_well_past_ttl() {
         assert!(rotate_now(1_000_000, 259200));
+    }
+
+    // ---- next_wake: the earlier of two deadlines, clamped to now (P1-C) ---------
+
+    #[test]
+    fn next_wake_token_sooner() {
+        // token_deadline (100) < leaf_deadline (500) → wake at the token deadline.
+        assert_eq!(next_wake(50, 100, 500), 100);
+    }
+
+    #[test]
+    fn next_wake_leaf_sooner() {
+        // leaf_deadline (120) < token_deadline (900) → wake at the leaf deadline.
+        // This is the P1-C case: a short leaf under a long token period must wake
+        // the loop BEFORE the token's ⅔ point so the leaf rotates before it expires.
+        assert_eq!(next_wake(50, 900, 120), 120);
+    }
+
+    #[test]
+    fn next_wake_equal_deadlines() {
+        // Equal deadlines → that instant (min of equals; neither branch is favored).
+        assert_eq!(next_wake(50, 300, 300), 300);
+    }
+
+    #[test]
+    fn next_wake_clamps_a_past_deadline_to_now() {
+        // The earlier deadline already elapsed (80 < now=100) → clamp to now so the
+        // caller sleeps 0 and acts immediately, never computes a past (underflowing)
+        // sleep. The OTHER deadline is still future.
+        assert_eq!(next_wake(100, 80, 400), 100);
+    }
+
+    #[test]
+    fn next_wake_both_past_clamps_to_now() {
+        // Both deadlines behind now → wake now (act on whatever is due; forward
+        // progress comes from acting, which advances the deadlines).
+        assert_eq!(next_wake(100, 10, 20), 100);
+    }
+
+    #[test]
+    fn next_wake_leaf_none_uses_token() {
+        // leaf_deadline == u64::MAX ("no leaf") → the token deadline always wins.
+        assert_eq!(next_wake(50, 300, u64::MAX), 300);
+    }
+
+    // ---- leaf_rotate_deadline: exact boundary, agrees with rotate_now -----------
+
+    #[test]
+    fn leaf_deadline_matches_rotate_now_boundary() {
+        // ttl=300 → rotate_age = ceil(600/3) = 200 (rotate_now(200,300) is true).
+        // At age 150 the deadline is now + (200-150) = now+50.
+        assert_eq!(leaf_rotate_deadline(1_000, 150, 300), 1_050);
+        // At exactly the rotate age, the deadline is now (secs_until == 0).
+        assert_eq!(leaf_rotate_deadline(1_000, 200, 300), 1_000);
+    }
+
+    #[test]
+    fn leaf_deadline_ceils_not_floors() {
+        // ttl=97 → ttl*2 = 194; ceil(194/3) = 65 (a FLOOR would give 64 and wake a
+        // second early, disagreeing with rotate_now(65,97)==true / rotate_now(64,97)==false).
+        assert_eq!(leaf_rotate_deadline(0, 0, 97), 65);
+        assert!(rotate_now(65, 97));
+        assert!(!rotate_now(64, 97));
+    }
+
+    #[test]
+    fn leaf_deadline_past_the_threshold_is_now() {
+        // Age already beyond the 2/3 point → secs_until saturates to 0 → deadline == now.
+        assert_eq!(leaf_rotate_deadline(500, 1_000_000, 300), 500);
+    }
+
+    #[test]
+    fn leaf_deadline_zero_ttl_is_never() {
+        // No leaf minted yet (ttl == 0) → u64::MAX so only the token deadline governs.
+        assert_eq!(leaf_rotate_deadline(1_000, 0, 0), u64::MAX);
+        assert_eq!(leaf_rotate_deadline(1_000, 5, 0), u64::MAX);
     }
 }

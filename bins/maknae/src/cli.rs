@@ -10,7 +10,7 @@ use maknae_proto::{
     decode_response, encode_request, Payload, Request, RespResult, PROTOCOL_VERSION,
 };
 use maknae_proto::{read_frame, write_frame};
-use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector};
+use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector, VAULT_SECTION};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -27,6 +27,24 @@ pub fn resolve_config_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".maknae")
+}
+
+/// The section registry the CLI loads its config under: `vault` (required — the CLI
+/// mints a plane leaf) + `transport` (optional — the daemon's socket path / frame cap;
+/// absent → documented defaults). `core` is auto-registered. Loading ONCE with this
+/// combined set is what lets a realistic `vault`+`transport` config load without each
+/// section's own loader rejecting the other as `UnknownSection` (the P1-B fix).
+fn cli_config_specs() -> [SectionSpec; 2] {
+    [
+        SectionSpec {
+            name: VAULT_SECTION.to_string(),
+            required: true,
+        },
+        SectionSpec {
+            name: TRANSPORT_SECTION.to_string(),
+            required: false,
+        },
+    ]
 }
 
 /// `maknae` — read-only verbs over the mTLS plane.
@@ -65,18 +83,17 @@ impl From<Verb> for maknae_proto::Verb {
 async fn execute(verb: Verb) -> Result<bool, String> {
     let dir = resolve_config_dir();
 
-    // The CLI reads only the `transport` section (the daemon's socket path +
-    // frame cap) from its own config dir — schema-agnostic, mirrors
-    // maknae-kernel's boot.rs.
-    let specs = [SectionSpec {
-        name: TRANSPORT_SECTION.to_string(),
-        required: false,
-    }];
-    let document = load_config(&dir, &specs).map_err(|e| e.to_string())?;
+    // Load the CLI's config ONCE, registering EVERY section it uses (vault + transport)
+    // so a realistic combined config is accepted; a genuinely-unknown section still
+    // fails closed with UnknownSection. The single document is then parsed by-section —
+    // transport here, vault inside `PlaneClient::from_document` — never re-loaded under a
+    // registry that would reject the other section (the P1-B fix).
+    let document = load_config(&dir, &cli_config_specs()).map_err(|e| e.to_string())?;
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
 
-    let client = PlaneClient::from_config_dir(&dir, Plane::Cli).map_err(|e| e.to_string())?;
+    let client =
+        PlaneClient::from_document(&document, &dir, Plane::Cli).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
 
@@ -225,5 +242,72 @@ mod tests {
             maknae_proto::Verb::from(Verb::Whoami),
             maknae_proto::Verb::Whoami
         );
+    }
+
+    // ---- CLI config-load coherence (P1-B) -------------------------------------
+
+    #[cfg(unix)]
+    struct CfgDir(std::path::PathBuf);
+    #[cfg(unix)]
+    impl Drop for CfgDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[cfg(unix)]
+    fn cfg_dir(tag: &str, body: &str) -> CfgDir {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("maknae-cli-cfg-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let f = p.join("maknae.yaml");
+        std::fs::write(&f, body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        CfgDir(p)
+    }
+
+    // A realistic combined vault + transport CLI config loads under the ONE registry
+    // and both sections parse — the P1-B gap: the old CLI loaded `transport`-only, then
+    // re-loaded `vault`-only inside `from_config_dir`, so each rejected the other's
+    // section with UnknownSection.
+    #[cfg(unix)]
+    #[test]
+    fn combined_vault_transport_cli_config_loads() {
+        let d = cfg_dir(
+            "combined",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: /run/maknae/maknaed.sock\n",
+        );
+        let doc = load_config(&d.0, &cli_config_specs()).expect("combined CLI config loads");
+        assert!(doc.section("vault").is_some());
+        let transport = transport_from_section(doc.section(TRANSPORT_SECTION))
+            .expect("transport parses from the shared document");
+        assert_eq!(
+            transport.socket_path,
+            std::path::PathBuf::from("/run/maknae/maknaed.sock")
+        );
+        let vc = maknae_vault::vault_config_from_document(&doc)
+            .expect("vault parses from the shared document");
+        assert_eq!(vc.addr, "https://v.example:8200");
+    }
+
+    // A genuinely-unknown section is still rejected under the CLI registry — fail-closed
+    // on unknown preserved.
+    #[cfg(unix)]
+    #[test]
+    fn bogus_section_still_rejected_by_cli_registry() {
+        let d = cfg_dir(
+            "bogus",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: /run/maknae/maknaed.sock\n\
+             mystery:\n  a: 1\n",
+        );
+        assert!(matches!(
+            load_config(&d.0, &cli_config_specs()),
+            Err(maknae_config::ConfigError::UnknownSection { .. })
+        ));
     }
 }

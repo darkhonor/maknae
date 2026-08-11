@@ -36,7 +36,10 @@ mod transport_tests;
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity};
-pub use config::{load_vault_config, validate_deployment_id, VaultConfig};
+pub use config::{
+    load_vault_config, validate_deployment_id, vault_config_from_document, VaultConfig,
+    VAULT_SECTION,
+};
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};

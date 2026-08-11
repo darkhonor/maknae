@@ -591,7 +591,9 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     maknae_vault::install_default_crypto_provider();
     maknae_vault::assert_fips_provider().map_err(|e| e.to_string())?;
 
-    // Boot Maknae's own config (registers transport/audit as optional — see boot.rs).
+    // Boot Maknae's own config ONCE, registering every section the daemon uses (core +
+    // lake + vault + transport + audit — see boot.rs). The booted document backs the
+    // plane client below, so no incompatible per-call reload rejects a combined config.
     let boot = crate::boot(config_dir).map_err(|e| e.to_string())?;
     let transport = maknae_config::transport_from_section(boot.section("transport"))
         .map_err(|e| e.to_string())?;
@@ -605,9 +607,12 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     // Plane credential: authenticate → mint a memory-only leaf, then run the credential
     // supervisor concurrently (renewal + leaf rotation; rotation cadence is checked once
     // per renewal cycle — Task-6 review note).
-    let client =
-        maknae_vault::PlaneClient::from_config_dir(config_dir, maknae_vault::Plane::Kernel)
-            .map_err(|e| e.to_string())?;
+    let client = maknae_vault::PlaneClient::from_document(
+        boot.document(),
+        config_dir,
+        maknae_vault::Plane::Kernel,
+    )
+    .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
     let _supervisor = client.spawn_supervisor();
