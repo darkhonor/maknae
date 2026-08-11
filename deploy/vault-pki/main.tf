@@ -169,12 +169,15 @@ resource "vault_auth_backend" "approle" {
 #    invocation without re-seeding.
 # token_no_default_policy drops `default`; the per-plane policy above re-grants
 # renew-self/lookup-self/revoke-self so renewal + zero-trust shutdown-revoke still work.
+# secret_id_ttl and secret_id_num_uses are HARD-CODED to 0 (not variables): a standing
+# SecretID is an ADR-0018 invariant, and an advisory default would let a stale override
+# silently reintroduce a time-expiring SecretID (fail closed, not advisory) — see variables.tf.
 resource "vault_approle_auth_backend_role" "maknaed" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknaed"
   token_policies          = [vault_policy.maknae_kernel.name] # reference, not raw string
-  secret_id_ttl           = var.secret_id_ttl                 # 0 = standing (non-expiring) bootstrap SecretID
-  secret_id_num_uses      = 0                                 # standing: unlimited logins (hands-free reboots)
+  secret_id_ttl           = 0                                 # ADR-0018 invariant: standing (non-expiring) bootstrap SecretID
+  secret_id_num_uses      = 0                                 # ADR-0018 invariant: unlimited logins (hands-free reboots)
   token_period            = var.token_period                  # PERIODIC token — renews indefinitely
   token_max_ttl           = 0                                 # no ceiling; only Vault failure/revoke fails closed
   token_no_default_policy = true
@@ -184,9 +187,9 @@ resource "vault_approle_auth_backend_role" "maknae" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknae"
   token_policies          = [vault_policy.maknae_cli.name]
-  secret_id_ttl           = var.secret_id_ttl # 0 = standing (non-expiring), operator-owned
-  secret_id_num_uses      = 0                 # standing: CLI mints per invocation w/o re-seed
-  token_ttl               = var.token_ttl     # short-lived token, dies fast per invocation
+  secret_id_ttl           = 0             # ADR-0018 invariant: standing (non-expiring), operator-owned
+  secret_id_num_uses      = 0             # ADR-0018 invariant: CLI mints per invocation w/o re-seed
+  token_ttl               = var.token_ttl # short-lived token, dies fast per invocation
   token_max_ttl           = var.token_max_ttl
   token_no_default_policy = true
 }
