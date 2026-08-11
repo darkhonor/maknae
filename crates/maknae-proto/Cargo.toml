@@ -10,3 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+ciborium = "0.2"
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }

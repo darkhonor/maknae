@@ -3,8 +3,15 @@
 //! charset-guarded to match the PKI role's own guard (a glob/slash would corrupt
 //! the plane URI-SAN or be rejected by Vault). All pure/fixture-testable (T1).
 use crate::VaultError;
-use maknae_config::{load_config, SectionSpec, Value};
+use maknae_config::{load_config, Document, SectionSpec, Value};
 use std::path::Path;
+
+/// The config section this client reads (the Terraform `vault` block: addr + mounts).
+/// Exposed so each process registers it in the SAME `load_config` call as every OTHER
+/// section it uses — the daemon (`core`+`lake`+`vault`+`transport`+`audit`) and the CLI
+/// (`core`+`vault`+`transport`) — instead of re-loading under a per-call registry that
+/// would reject the other sections with `UnknownSection` (the P1-A/P1-B fix).
+pub const VAULT_SECTION: &str = "vault";
 
 /// Default Vault mount paths — MUST match the deploy module's `approle_path` /
 /// `int_mount_path` variable defaults (deploy/vault-pki/variables.tf). Overridable via
@@ -73,17 +80,31 @@ pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
 }
 
 /// Load `vault.addr` + `deployment_id` (from `core` first, else `vault`) from the
-/// config dir; validate both. Fail-closed on any absent/invalid field.
+/// config dir; validate both. Fail-closed on any absent/invalid field. Kept for
+/// back-compat (the live-smoke tests + `PlaneClient::from_config_dir`); processes that
+/// also read other sections load the config ONCE and call
+/// [`vault_config_from_document`] on the shared document instead.
 pub fn load_vault_config(dir: &Path) -> Result<VaultConfig, VaultError> {
     let doc = load_config(
         dir,
         &[SectionSpec {
-            name: "vault".to_string(),
+            name: VAULT_SECTION.to_string(),
             required: true,
         }],
     )?;
+    vault_config_from_document(&doc)
+}
+
+/// Parse + validate the Vault settings out of an ALREADY-LOADED [`Document`]. This is
+/// the coherent-config seam (P1-A/P1-B): the daemon and CLI load their config once with
+/// EVERY section they use registered, then hand the parsed document here — so a
+/// realistic combined config (`core`+`vault`+`transport`+`audit`) is never re-loaded
+/// under a `vault`-only registry that would reject `transport`/`audit` as
+/// `UnknownSection`. A `vault` section absent from the document is `MissingKey("vault")`
+/// (fail-closed) — the registry's required/optional flag is the caller's concern.
+pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultError> {
     let vault = doc
-        .section("vault")
+        .section(VAULT_SECTION)
         .ok_or(VaultError::MissingKey("vault"))?;
     let addr = get_str(vault, "addr")
         .ok_or(VaultError::MissingKey("vault.addr"))?
@@ -260,6 +281,67 @@ mod tests {
         assert!(matches!(
             load_vault_config(&d.0),
             Err(VaultError::InvalidDeploymentId(_))
+        ));
+    }
+
+    // ---- shared-document coherence (P1-A/P1-B) ------------------------------
+
+    #[test]
+    fn vault_parses_from_a_combined_document() {
+        // The gap the old tests missed: a REALISTIC combined config (core + vault +
+        // transport + audit) loaded ONCE with every section registered, then parsed
+        // by-section. Under the old per-call `vault`-only registry this document could
+        // not exist (transport/audit would be UnknownSection); the shared-document seam
+        // is exactly what lets the daemon/CLI accept it.
+        let d = TempDir::new("combined");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: /run/maknae/maknaed.sock\n\
+             audit:\n  path: /var/log/maknae/audit.jsonl\n",
+        );
+        let doc = load_config(
+            &d.0,
+            &[
+                SectionSpec {
+                    name: VAULT_SECTION.to_string(),
+                    required: true,
+                },
+                SectionSpec {
+                    name: "transport".to_string(),
+                    required: false,
+                },
+                SectionSpec {
+                    name: "audit".to_string(),
+                    required: false,
+                },
+            ],
+        )
+        .expect("combined config loads with all sections registered");
+        let c = vault_config_from_document(&doc).expect("vault parses from the shared document");
+        assert_eq!(c.addr, "https://v.example:8200");
+        assert_eq!(c.deployment_id, "dev-01");
+    }
+
+    #[test]
+    fn absent_vault_section_in_document_is_missing_key() {
+        // An OPTIONAL vault registration with no vault block present (the daemon's boot
+        // registry marks vault optional): the document loads, but parsing fails closed
+        // with MissingKey("vault") rather than silently proceeding without Vault.
+        let d = TempDir::new("novault");
+        d.write("maknae.yaml", "core:\n  deployment_id: dev-01\n");
+        let doc = load_config(
+            &d.0,
+            &[SectionSpec {
+                name: VAULT_SECTION.to_string(),
+                required: false,
+            }],
+        )
+        .expect("loads without the optional vault section");
+        assert!(matches!(
+            vault_config_from_document(&doc),
+            Err(VaultError::MissingKey("vault"))
         ));
     }
 }

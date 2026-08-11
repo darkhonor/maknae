@@ -11,6 +11,17 @@
 //! excluded (`mutants.toml`). The pure `fips::fips_result` carries the T1 logic.
 use crate::{fips::fips_result, VaultError};
 
+/// Install the aws-lc-rs FIPS provider as the process-default `CryptoProvider`, once.
+/// Idempotent: a pre-existing default (or a second call) is a no-op. The daemon `main`
+/// (via `maknae_kernel::run`) MUST call this before [`assert_fips_provider`] and before
+/// constructing any Vault client, so `vaultrs`'s reqwest + rustls read the FIPS default
+/// rather than falling back to `ring` (spec §6.1). The subsequent `assert_fips_provider`
+/// remains the authoritative gate: this installer only makes a FIPS build's default
+/// available; it never masks a non-FIPS build (whose `.fips()` is false → refuse).
+pub fn install_default_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 /// Assert the process is running the aws-lc-rs FIPS provider. Fail-closed:
 /// no installed default (the binary `main` forgot to install one) → refuse.
 pub fn assert_fips_provider() -> Result<(), VaultError> {
