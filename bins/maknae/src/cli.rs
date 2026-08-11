@@ -80,7 +80,27 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
 
-    let mut stream = PlaneConnector::connect(&transport.socket_path, &client, &ca)
+    // Once `mint()` succeeds the Vault token is LIVE until lease expiry — so EVERY
+    // post-mint path (success, a daemon ProtoError, OR any transport/codec/timeout error)
+    // must revoke it, or the token leaks. Capture the whole round-trip outcome, revoke the
+    // token UNCONDITIONALLY, THEN propagate. (A pre-mint failure above skips revoke — there
+    // is nothing minted to revoke.)
+    let outcome = round_trip(verb, &transport, &client, &ca).await;
+    client.shutdown().await;
+    outcome
+}
+
+/// The post-mint round trip: connect → request → (bounded) response → print. Split out so
+/// [`execute`] can revoke the minted token on EVERY return path (success or error) before
+/// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
+/// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
+async fn round_trip(
+    verb: Verb,
+    transport: &maknae_config::TransportConfig,
+    client: &PlaneClient,
+    ca: &maknae_vault::CaBundle,
+) -> Result<bool, String> {
+    let mut stream = PlaneConnector::connect(&transport.socket_path, client, ca)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -92,9 +112,24 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     write_frame(&mut stream, &body)
         .await
         .map_err(|e| e.to_string())?;
-    let resp_body = read_frame(&mut stream, transport.frame_max_bytes)
-        .await
-        .map_err(|e| e.to_string())?;
+
+    // Bound the response wait by the configured `read_timeout_ms`: a daemon that accepts
+    // the connection but never answers must not hang the CLI forever (it still fails
+    // non-zero, and `execute` still revokes the token).
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(transport.read_timeout_ms),
+        read_frame(&mut stream, transport.frame_max_bytes),
+    )
+    .await;
+    let resp_body = match read {
+        Err(_elapsed) => {
+            return Err(format!(
+                "no response from daemon within {}ms (stalled?)",
+                transport.read_timeout_ms
+            ))
+        }
+        Ok(r) => r.map_err(|e| e.to_string())?,
+    };
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     let ok = match response.result {
@@ -111,11 +146,6 @@ async fn execute(verb: Verb) -> Result<bool, String> {
             false
         }
     };
-
-    // Best-effort revoke on the way out, whether the verb itself succeeded or
-    // the daemon returned a ProtoError — only an earlier connection-level
-    // failure (above) skips this (the process is exiting anyway).
-    client.shutdown().await;
     Ok(ok)
 }
 

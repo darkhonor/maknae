@@ -41,10 +41,13 @@ async fn plane_to_plane_roundtrip() {
     let cca = maknae_vault::load_ca_pin(std::path::Path::new(&cdir)).unwrap();
 
     let srv = tokio::spawn(async move {
+        // Prompt raw accept, then the bounded handshake — the same anti-DoS split the daemon
+        // run-loop drives (accept_raw on the loop, finish_handshake under the semaphore).
+        let (raw, creds) = listener.accept_raw().await.expect("accept_raw");
         let mut s = listener
-            .accept(std::time::Duration::from_secs(10))
+            .finish_handshake(raw, creds, std::time::Duration::from_secs(10))
             .await
-            .expect("accept");
+            .expect("finish_handshake");
         // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
         let san = s.peer_uri_san();
         assert!(

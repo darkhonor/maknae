@@ -19,6 +19,7 @@ use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, SessionIds};
 use maknae_kernel::{Conn, PlaneAccept, WhereCtx};
 use maknae_vault::{AcceptRejection, PeerCreds, RejectReason};
 use tokio::io::DuplexStream;
+use tokio::time::Instant;
 
 /// Recording sink (never fails) shared with the accept loop.
 struct RecEmit {
@@ -41,11 +42,24 @@ impl AuditEmit for RecEmit {
     }
 }
 
-/// A scripted accept source. Each `accept()` pops the next outcome; when the script is
-/// exhausted it parks forever (so the loop blocks in `accept` until shutdown fires).
+/// A scripted accept source. Each `accept_raw()` pops the next outcome; when the script is
+/// exhausted it parks forever (so the loop blocks in `accept_raw` until shutdown fires).
+/// A `Reject`/`Stall` is realised in `finish_handshake` (the bounded half the run-loop now
+/// runs UNDER its semaphore) — proving the loop's new prompt-accept / deferred-handshake
+/// split behaves: rejections still audit, and a stalled handshake does not block the loop.
 enum Scripted {
     Ok(DuplexStream, String, u32),
     Reject(AcceptRejection),
+    /// `accept_raw` succeeds, but `finish_handshake` sleeps this long before yielding an OK
+    /// connection — simulating a peer that stalls the TLS handshake.
+    Stall(Duration, DuplexStream, String, u32),
+}
+
+/// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
+enum FakeRaw {
+    Conn(DuplexStream, String, u32),
+    Reject(AcceptRejection),
+    Stall(Duration, DuplexStream, String, u32),
 }
 
 struct FakeAccept {
@@ -59,25 +73,52 @@ impl FakeAccept {
     }
 }
 impl PlaneAccept for FakeAccept {
+    type Raw = FakeRaw;
     type Stream = DuplexStream;
+
     // Pop INSIDE the future so a `select!` that loses to shutdown (dropping this future
     // unpolled) does not silently consume a scripted item. The std MutexGuard is released
     // before the only await, so the future stays `Send` (satisfying the trait bound).
-    async fn accept(
-        &self,
-        _handshake_timeout: Duration,
-    ) -> Result<Conn<DuplexStream>, AcceptRejection> {
+    async fn accept_raw(&self) -> Result<(FakeRaw, PeerCreds), std::io::Error> {
         let item = self.queue.lock().unwrap().pop_front();
         match item {
-            Some(Scripted::Ok(stream, uri, uid)) => Ok(Conn {
+            Some(Scripted::Ok(stream, uri, uid)) => {
+                Ok((FakeRaw::Conn(stream, uri, uid), creds(uid)))
+            }
+            Some(Scripted::Reject(rej)) => {
+                let c = rej.peer_creds.unwrap_or_else(|| creds(0));
+                Ok((FakeRaw::Reject(rej), c))
+            }
+            Some(Scripted::Stall(d, stream, uri, uid)) => {
+                Ok((FakeRaw::Stall(d, stream, uri, uid), creds(uid)))
+            }
+            None => {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+    }
+
+    async fn finish_handshake(
+        &self,
+        raw: FakeRaw,
+        _peer_creds: PeerCreds,
+        _handshake_timeout: Duration,
+    ) -> Result<Conn<DuplexStream>, AcceptRejection> {
+        match raw {
+            FakeRaw::Conn(stream, uri, uid) => Ok(Conn {
                 stream,
                 peer_uri: uri,
                 peer_uid: uid,
             }),
-            Some(Scripted::Reject(rej)) => Err(rej),
-            None => {
-                std::future::pending::<()>().await;
-                unreachable!()
+            FakeRaw::Reject(rej) => Err(rej),
+            FakeRaw::Stall(d, stream, uri, uid) => {
+                tokio::time::sleep(d).await;
+                Ok(Conn {
+                    stream,
+                    peer_uri: uri,
+                    peer_uid: uid,
+                })
             }
         }
     }
@@ -222,4 +263,61 @@ async fn handshake_timeout_audits() {
         recs.iter().any(|r| r.source.uid == 3002),
         "the connection accepted after the handshake timeout must have been processed"
     );
+}
+
+#[tokio::test]
+async fn stalled_handshake_does_not_block_next_connection() {
+    // The anti-DoS property (P1-A): connection A stalls its TLS handshake for a long time;
+    // connection B handshakes instantly. Because the handshake now runs per-connection UNDER
+    // the semaphore (NOT inline on the accept loop), B is accepted and SERVED while A is
+    // still stalled — the loop is never serialized on A's handshake. We observe B's records
+    // WITHOUT waiting for A (a graceful drain would block on A's 30s stall), then abort.
+    // Keep A's peer end open (bound, not dropped) so, even if A ever finished, it would just
+    // block in read — the point is only that B is served first.
+    let (_a_client, a_server) = tokio::io::duplex(1024);
+    let script = vec![
+        Scripted::Stall(
+            Duration::from_secs(30),
+            a_server,
+            "maknae://d/plane/cli".to_string(),
+            7001,
+        ),
+        ok_conn("maknae://d/plane/cli", 7002),
+    ];
+
+    let emit = RecEmit::new();
+    let acceptor = FakeAccept::new(script);
+    let session_ids = Arc::new(SessionIds::with_nonce(1));
+    // Capacity for BOTH so A's stall does not starve B on the semaphore (this test isolates
+    // loop-serialization, not the capacity cap — that is `at_capacity_fast_closes`).
+    let cfg = cfg_with(64, 150);
+    let emit_for_loop = emit.clone();
+    let loop_task = tokio::spawn(async move {
+        maknae_kernel::accept_loop(
+            acceptor,
+            emit_for_loop,
+            session_ids,
+            cfg,
+            wctx(),
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+
+    // Poll until B (uid 7002) is served, WITHOUT draining A.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if emit.records().iter().any(|r| r.source.uid == 7002) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "connection B was NOT served while A stalled its handshake — the accept loop \
+             appears serialized on the handshake (DoS regression)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // A is still stalled (30s) — abort rather than gracefully drain.
+    loop_task.abort();
 }
