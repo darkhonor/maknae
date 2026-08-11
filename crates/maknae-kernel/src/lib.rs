@@ -10,7 +10,9 @@ mod run;
 pub use authz::*;
 pub use boot::{boot, BootConfig};
 pub use groupres::*;
-pub use handler::{build_whoami, dispatch_verb, may_respond, Dispatch};
+pub use handler::{
+    build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
+};
 pub use run::{accept_loop, handle, run, Conn, PlaneAccept, WhereCtx};
 
 #[used]
