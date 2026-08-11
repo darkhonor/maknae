@@ -24,4 +24,4 @@ arc-swap = "1"                                                  # hot-path Resol
 nix = { version = "0.31", default-features = false, features = ["socket", "user"] }  # socket=peer-creds; user=geteuid (dir-owner check)
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }

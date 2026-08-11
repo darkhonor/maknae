@@ -18,6 +18,8 @@ mod fips_glue;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod supervisor;
+mod supervisor_run;
 mod tls;
 mod verify;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
