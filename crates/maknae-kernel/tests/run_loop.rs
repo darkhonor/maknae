@@ -29,10 +29,7 @@ impl RecEmit {
 }
 
 impl AuditEmit for RecEmit {
-    fn emit(
-        &self,
-        rec: &AuditRecord,
-    ) -> impl Future<Output = Result<(), AuditError>> + Send {
+    fn emit(&self, rec: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
         self.recs.lock().unwrap().push(rec.clone()); // record synchronously
         let fail = self.fail;
         async move {
@@ -58,7 +55,9 @@ fn ping_frame_bytes() -> Vec<u8> {
 }
 
 async fn write_ping(c: &mut tokio::io::DuplexStream) {
-    maknae_proto::write_frame(c, &ping_frame_bytes()).await.unwrap();
+    maknae_proto::write_frame(c, &ping_frame_bytes())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -133,7 +132,10 @@ async fn deny_audits_then_closes() {
         maknae_proto::read_frame(&mut c, 65536),
     )
     .await;
-    assert!(r.is_err() || r.unwrap().is_err(), "deny must write no response");
+    assert!(
+        r.is_err() || r.unwrap().is_err(),
+        "deny must write no response"
+    );
 }
 
 #[tokio::test]
@@ -244,5 +246,8 @@ async fn read_timeout_closes() {
         maknae_proto::read_frame(&mut c, 65536),
     )
     .await;
-    assert!(r.is_err() || r.unwrap().is_err(), "timeout must write no response");
+    assert!(
+        r.is_err() || r.unwrap().is_err(),
+        "timeout must write no response"
+    );
 }

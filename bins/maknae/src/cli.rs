@@ -6,7 +6,9 @@
 
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
-use maknae_proto::{decode_response, encode_request, Payload, RespResult, Request, PROTOCOL_VERSION};
+use maknae_proto::{
+    decode_response, encode_request, Payload, Request, RespResult, PROTOCOL_VERSION,
+};
 use maknae_proto::{read_frame, write_frame};
 use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector};
 use std::path::PathBuf;
@@ -71,8 +73,8 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         required: false,
     }];
     let document = load_config(&dir, &specs).map_err(|e| e.to_string())?;
-    let transport = transport_from_section(document.section(TRANSPORT_SECTION))
-        .map_err(|e| e.to_string())?;
+    let transport =
+        transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
 
     let client = PlaneClient::from_config_dir(&dir, Plane::Cli).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;

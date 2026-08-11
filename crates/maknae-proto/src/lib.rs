@@ -1,7 +1,7 @@
 //! maknae-proto — kernel decision request/response, THE versioned contract.
 mod error;
-mod wire;
 mod frame;
+mod wire;
 pub use error::*;
-pub use wire::*;
 pub use frame::*;
+pub use wire::*;

@@ -70,7 +70,9 @@ impl AuditSink {
         let primary = Arc::clone(&self.primary);
         let result = tokio::task::spawn_blocking(move || write_line(&primary, &line))
             .await
-            .map_err(|e| AuditError::WritePrimary(format!("blocking write task panicked/was cancelled: {e}")))?;
+            .map_err(|e| {
+                AuditError::WritePrimary(format!("blocking write task panicked/was cancelled: {e}"))
+            })?;
         self.mirror_journald(rec);
         result
     }
@@ -102,11 +104,17 @@ fn write_line(file: &Mutex<File>, line: &str) -> Result<(), AuditError> {
 /// desugared future is not `Send` — which would make `tokio::spawn(async
 /// move { sink.emit(&rec).await })` in the run-loop fail to compile.
 pub trait AuditEmit {
-    fn emit(&self, rec: &AuditRecord) -> impl std::future::Future<Output = Result<(), AuditError>> + Send;
+    fn emit(
+        &self,
+        rec: &AuditRecord,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send;
 }
 
 impl AuditEmit for AuditSink {
-    fn emit(&self, rec: &AuditRecord) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+    fn emit(
+        &self,
+        rec: &AuditRecord,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
         self.append(rec)
     }
 }

@@ -121,7 +121,9 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(k).expect("string serialization is infallible"));
+                out.push_str(
+                    &serde_json::to_string(k).expect("string serialization is infallible"),
+                );
                 out.push(':');
                 write_canonical(&map[k.as_str()], out);
             }
@@ -172,7 +174,10 @@ mod tests {
     #[test]
     fn where_serializes_as_keyword_key() {
         let s = canonical_json(&sample()).unwrap();
-        assert!(s.contains("\"where\":"), "AU-3c key must be `where`, not `where_`");
+        assert!(
+            s.contains("\"where\":"),
+            "AU-3c key must be `where`, not `where_`"
+        );
         assert!(!s.contains("where_"));
     }
 
@@ -225,7 +230,10 @@ mod tests {
         ];
         let positions: Vec<usize> = expected_order
             .iter()
-            .map(|k| s.find(k).unwrap_or_else(|| panic!("missing key {k} in {s}")))
+            .map(|k| {
+                s.find(k)
+                    .unwrap_or_else(|| panic!("missing key {k} in {s}"))
+            })
             .collect();
         let mut sorted_positions = positions.clone();
         sorted_positions.sort();
@@ -240,7 +248,10 @@ mod tests {
         let alpha = s.find("\"alpha\"").unwrap();
         let mid = s.find("\"mid\"").unwrap();
         let zeta = s.find("\"zeta\"").unwrap();
-        assert!(alpha < mid && mid < zeta, "nested object keys not sorted: {s}");
+        assert!(
+            alpha < mid && mid < zeta,
+            "nested object keys not sorted: {s}"
+        );
     }
 
     #[test]

@@ -1,9 +1,10 @@
 # cargo-mutants config (read even under `cargo mutants --package`, from the workspace
 # root where the CI gate invokes it). The exclude_globs are path-scoped to maknae-vault,
-# so they do NOT affect the other mutated crates (config/security/kernel mutate their own
-# files). Scope maknae-vault mutation to the pure T1 decision logic — the excluded files
-# are network/keygen/provider I/O that cannot be unit-killed without a live Vault and are
-# T3-tiered + exercised by the gated live-smoke.
+# maknae-proto, maknae-audit-append, and maknae-kernel respectively, so they do NOT
+# affect the other mutated crates (config/security mutate their own files). Scope each
+# mutated crate to its pure T1 decision logic — the excluded files are I/O (network/
+# keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
+# T3-tiered.
 exclude_globs = [
   "crates/maknae-vault/src/auth.rs",       # AppRole login + sys/wrapping/unwrap — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
@@ -20,4 +21,13 @@ exclude_globs = [
   "crates/maknae-vault/src/peercred.rs",      # nix getsockopt peer-creds — syscall I/O (T3)
   "crates/maknae-vault/src/stream.rs",        # PlaneListener/Connector/AuthenticatedStream — I/O (T3)
   "crates/maknae-vault/src/transport_tests.rs", # #[cfg(test)] loopback suite — test-only, uniform T3 story
+  # Stage-3a "it responds" cohort (Task 9): T3 I/O files of the newly-mutated
+  # crates (maknae-proto, maknae-audit-append) + the kernel's I/O-only files —
+  # only the T1 decision logic (wire/frame/transport/audit_cfg/record/session/
+  # authz/handler/supervisor) is mutated.
+  "crates/maknae-proto/src/error.rs",       # Display/Error declarations only
+  "crates/maknae-audit-append/src/sink.rs", # file-open + blocking-write I/O
+  "crates/maknae-audit-append/src/error.rs", # Display/Error declarations only
+  "crates/maknae-kernel/src/groupres.rs",   # nix Group/User/getgrouplist — syscall I/O
+  "crates/maknae-kernel/src/run.rs",        # run-loop orchestration + process entrypoint — I/O/control-flow driver
 ]

@@ -483,7 +483,8 @@ impl SupervisorCtx {
         let auth = vaultrs::token::renew_self(&*c, None)
             .await
             .map_err(|e| VaultError::Renew(e.to_string()))?;
-        self.lease_secs.store(auth.lease_duration, Ordering::Relaxed);
+        self.lease_secs
+            .store(auth.lease_duration, Ordering::Relaxed);
         Ok(auth.lease_duration)
     }
 
@@ -495,7 +496,12 @@ impl SupervisorCtx {
     /// leaf-rotation fails sustainedly.
     pub(crate) fn expire_now(&self) -> VaultError {
         let mut guard = self.identity.write().expect("identity lock poisoned");
-        if let Some(slot) = self.cert_sink.read().expect("cert_sink lock poisoned").as_ref() {
+        if let Some(slot) = self
+            .cert_sink
+            .read()
+            .expect("cert_sink lock poisoned")
+            .as_ref()
+        {
             slot.store(None);
         }
         *guard = None;
@@ -528,8 +534,13 @@ impl SupervisorCtx {
     /// as token renewal and falls back to `expire_now()` only on SUSTAINED failure.
     pub(crate) async fn rotate_leaf(&self) -> Result<(), VaultError> {
         let client = self.client.lock().await;
-        let (key_der, leaf_pem, chain_pem) =
-            sign_leaf_for(self.plane, &self.deployment_id, &self.pki_int_mount, &client).await?;
+        let (key_der, leaf_pem, chain_pem) = sign_leaf_for(
+            self.plane,
+            &self.deployment_id,
+            &self.pki_int_mount,
+            &client,
+        )
+        .await?;
         let (issued_at, ttl_secs) = leaf_validity_unix(&leaf_pem)?;
 
         let id = PlaneIdentity(Arc::new(IdentityInner {

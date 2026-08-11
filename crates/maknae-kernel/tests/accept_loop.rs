@@ -35,10 +35,7 @@ impl RecEmit {
     }
 }
 impl AuditEmit for RecEmit {
-    fn emit(
-        &self,
-        rec: &AuditRecord,
-    ) -> impl Future<Output = Result<(), AuditError>> + Send {
+    fn emit(&self, rec: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
         self.recs.lock().unwrap().push(rec.clone());
         async move { Ok(()) }
     }
@@ -157,7 +154,10 @@ async fn cert_half_rejection_audits() {
         .find(|r| r.event == "connection" && r.outcome.reason.contains("wrong plane"))
         .expect("the wrong-plane rejection must be audited");
     assert_eq!(reject.outcome.result, "deny");
-    assert_eq!(reject.source.uid, 1001, "the rejected peer's uid must be recorded");
+    assert_eq!(
+        reject.source.uid, 1001,
+        "the rejected peer's uid must be recorded"
+    );
 
     // The loop CONTINUED: the good connection was processed and produced its own record.
     assert!(
@@ -211,7 +211,10 @@ async fn handshake_timeout_audits() {
         .find(|r| r.event == "connection" && r.outcome.reason.contains("handshake timeout"))
         .expect("the handshake-timeout rejection must be audited");
     assert_eq!(timeout.outcome.result, "deny");
-    assert_eq!(timeout.source.uid, 3001, "peer-creds must be present on a timeout deny");
+    assert_eq!(
+        timeout.source.uid, 3001,
+        "peer-creds must be present on a timeout deny"
+    );
 
     // Loop continued past the timeout.
     assert!(

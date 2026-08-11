@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use maknae_audit_append::{
-    AuditEmit, AuditRecord, Integrity, Outcome, SessionIds, Seq, Source, Subject, Where,
+    AuditEmit, AuditRecord, Integrity, Outcome, Seq, SessionIds, Source, Subject, Where,
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
@@ -190,8 +190,15 @@ pub async fn handle<S, E>(
     let body = match read {
         Err(_elapsed) => {
             emit_request_deny(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                "read", "read timeout",
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                "read",
+                "read timeout",
             )
             .await;
             let _ = stream.shutdown().await;
@@ -199,8 +206,15 @@ pub async fn handle<S, E>(
         }
         Ok(Err(e)) => {
             emit_request_deny(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                "read", &format!("frame read failed: {e}"),
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                "read",
+                &format!("frame read failed: {e}"),
             )
             .await;
             let _ = stream.shutdown().await;
@@ -213,8 +227,15 @@ pub async fn handle<S, E>(
         Ok(r) => r,
         Err(e) => {
             emit_request_deny(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                "decode", &format!("malformed request: {e}"),
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                "decode",
+                &format!("malformed request: {e}"),
             )
             .await;
             let _ = stream.shutdown().await;
@@ -450,7 +471,8 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // Fail-closed audit sink: no durable audit path → do not start (AU-5).
-    let sink = Arc::new(maknae_audit_append::AuditSink::open(&audit_cfg).map_err(|e| e.to_string())?);
+    let sink =
+        Arc::new(maknae_audit_append::AuditSink::open(&audit_cfg).map_err(|e| e.to_string())?);
 
     // Plane credential: authenticate → mint a memory-only leaf, then run the credential
     // supervisor concurrently (renewal + leaf rotation; rotation cadence is checked once
@@ -463,8 +485,8 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     let _supervisor = client.spawn_supervisor();
 
     // Bind the group-gated plane listener and serve.
-    let listener = PlaneListener::bind(&transport.socket_path, &client, &ca)
-        .map_err(|e| e.to_string())?;
+    let listener =
+        PlaneListener::bind(&transport.socket_path, &client, &ca).map_err(|e| e.to_string())?;
     let session_ids = Arc::new(SessionIds::new());
     let wctx = WhereCtx {
         host: hostname(),
