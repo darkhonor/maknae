@@ -201,6 +201,13 @@ async fn supervisor_loop<D: SupervisorDriver>(ctx: D) -> VaultError {
         // self-inflicted-outage this fix removes).
         if now() >= token_deadline {
             match ctx.renew_token_once().await {
+                // A "successful" renewal with a ZERO lease means Vault has nothing left
+                // to give (token at max_ttl / no remaining lease) — treat it exactly
+                // like the fail-closed cases below, NOT like a real renewal: retaining
+                // the identity and scheduling a retry would keep the daemon serving on
+                // an effectively-expired token (mirrors the initial-zero-lease check at
+                // the top of this function).
+                Ok(0) => return ctx.expire_now(),
                 Ok(new_lease) => {
                     lease = new_lease;
                     token_attempt = 0;
@@ -235,6 +242,9 @@ mod tests {
     ///
     /// - `renew_ok_budget`: `renew_token_once` returns `Ok(lease)` for the first N calls,
     ///   then `Err` forever (drives the token toward its own FailClosed).
+    /// - `renew_zero_lease`: when `true`, a within-budget `renew_token_once` success
+    ///   returns `Ok(0)` instead of `Ok(current lease)` — simulates Vault answering
+    ///   `renew-self` successfully but with `lease_duration == 0` (codex round-6 P1).
     /// - `rotate_fail_first`: `rotate_leaf` fails for the first N calls, then succeeds; a
     ///   successful rotation resets `leaf_age` to 0 (a FRESH leaf, so the natural rotation
     ///   deadline moves far out — matching a real re-mint and avoiding a busy-loop).
@@ -248,6 +258,7 @@ mod tests {
         renew_calls: Arc<AtomicU32>,
         rotate_calls: Arc<AtomicU32>,
         renew_ok_budget: Arc<AtomicU32>,
+        renew_zero_lease: Arc<AtomicBool>,
         rotate_fail_first: Arc<AtomicU32>,
         expired: Arc<AtomicBool>,
     }
@@ -261,6 +272,7 @@ mod tests {
                 renew_calls: Arc::new(AtomicU32::new(0)),
                 rotate_calls: Arc::new(AtomicU32::new(0)),
                 renew_ok_budget: Arc::new(AtomicU32::new(u32::MAX)),
+                renew_zero_lease: Arc::new(AtomicBool::new(false)),
                 rotate_fail_first: Arc::new(AtomicU32::new(0)),
                 expired: Arc::new(AtomicBool::new(false)),
             }
@@ -282,7 +294,11 @@ mod tests {
         async fn renew_token_once(&self) -> Result<u64, VaultError> {
             let n = self.0.renew_calls.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= self.0.renew_ok_budget.load(Ordering::Relaxed) {
-                Ok(self.0.lease.load(Ordering::Relaxed))
+                if self.0.renew_zero_lease.load(Ordering::Relaxed) {
+                    Ok(0)
+                } else {
+                    Ok(self.0.lease.load(Ordering::Relaxed))
+                }
             } else {
                 Err(VaultError::Renew("fake renew failure".into()))
             }
@@ -393,5 +409,36 @@ mod tests {
             "a successful rotation must not be retried or busy-looped"
         );
         assert!(probe.renew_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    /// Codex round-6 P1: a `renew_self` that "succeeds" but reports
+    /// `lease_duration == 0` (token at max_ttl / no remaining lease) must fail closed
+    /// exactly like the initial-zero-lease case at loop start — NOT be treated as a
+    /// real renewal that leaves the identity installed and schedules a retry ~1s
+    /// later. Rotation is given an effectively-infinite TTL so it never fires,
+    /// isolating the renewal path.
+    #[tokio::test(start_paused = true)]
+    async fn zero_lease_renewal_fails_closed() {
+        let shared = Shared::new(6, 0, u64::MAX);
+        shared.renew_zero_lease.store(true, Ordering::Relaxed);
+        let probe = shared.clone();
+
+        let err = supervisor_loop(FakeDriver(shared)).await;
+        assert!(matches!(err, VaultError::RenewalExpired));
+        assert!(
+            probe.expired.load(Ordering::Relaxed),
+            "a zero-lease renewal must clear the identity (fail closed)"
+        );
+        assert_eq!(
+            probe.renew_calls.load(Ordering::Relaxed),
+            1,
+            "the loop must expire on the FIRST zero-lease renewal, not retain the \
+             identity and schedule another attempt"
+        );
+        assert_eq!(
+            probe.rotate_calls.load(Ordering::Relaxed),
+            0,
+            "rotation must never have been due in this scenario"
+        );
     }
 }
