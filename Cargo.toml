@@ -30,3 +30,8 @@ rust-version = "1.94.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1" }
+ciborium = "0.2"
