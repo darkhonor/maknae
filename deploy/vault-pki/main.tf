@@ -127,7 +127,7 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
 # its sole grantor. revoke-self lets the maknae-vault plane client revoke its token on
 # shutdown per ADR-0005 (zero-trust: don't leave a usable token to live out its TTL).
 # Without it the client's best-effort shutdown revoke 403s and the token lingers until
-# token_ttl expires.
+# its lease lapses (worse for the daemon's periodic token, which otherwise renews indefinitely).
 resource "vault_policy" "maknae_kernel" {
   name   = "maknae-kernel"
   policy = <<-EOT
@@ -158,18 +158,28 @@ resource "vault_auth_backend" "approle" {
   path = var.approle_path
 }
 
-# Single-use SecretID -> one renewable token per login. The plane background-renews
-# in token_ttl increments up to token_max_ttl, then fails closed and re-authenticates
-# with a fresh SecretID. token_no_default_policy drops `default`; the per-plane policy
-# above re-grants renew-self/lookup-self so renewal still works.
+# Token & SecretID model per ADR-0018 (supersedes ADR-0005's single-use / max-ttl clauses):
+#  - maknaed (daemon): a PERIODIC token (token_period, no max-ttl ceiling) the plane renews
+#    indefinitely; fail-closed only on genuine Vault failure or revocation, never on a
+#    scheduled self-outage. Its SecretID is STANDING (num_uses=0, ttl=0) so reboots re-login
+#    hands-free; the bootstrap secret is _maknae-owned and HRoT-sealed at rest by
+#    `maknae enroll` (the daemon holds no SecretID-minting capability).
+#  - maknae (CLI): a SHORT-LIVED token (token_ttl/token_max_ttl, dies fast per invocation)
+#    plus a STANDING, operator-owned SecretID (num_uses=0, ttl=0) so the CLI mints per
+#    invocation without re-seeding.
+# token_no_default_policy drops `default`; the per-plane policy above re-grants
+# renew-self/lookup-self/revoke-self so renewal + zero-trust shutdown-revoke still work.
+# secret_id_ttl and secret_id_num_uses are HARD-CODED to 0 (not variables): a standing
+# SecretID is an ADR-0018 invariant, and an advisory default would let a stale override
+# silently reintroduce a time-expiring SecretID (fail closed, not advisory) — see variables.tf.
 resource "vault_approle_auth_backend_role" "maknaed" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknaed"
   token_policies          = [vault_policy.maknae_kernel.name] # reference, not raw string
-  secret_id_ttl           = var.secret_id_ttl
-  secret_id_num_uses      = 1
-  token_ttl               = var.token_ttl
-  token_max_ttl           = var.token_max_ttl
+  secret_id_ttl           = 0                                 # ADR-0018 invariant: standing (non-expiring) bootstrap SecretID
+  secret_id_num_uses      = 0                                 # ADR-0018 invariant: unlimited logins (hands-free reboots)
+  token_period            = var.token_period                  # PERIODIC token — renews indefinitely
+  token_max_ttl           = 0                                 # no ceiling; only Vault failure/revoke fails closed
   token_no_default_policy = true
 }
 
@@ -177,9 +187,9 @@ resource "vault_approle_auth_backend_role" "maknae" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknae"
   token_policies          = [vault_policy.maknae_cli.name]
-  secret_id_ttl           = var.secret_id_ttl
-  secret_id_num_uses      = 1
-  token_ttl               = var.token_ttl
+  secret_id_ttl           = 0             # ADR-0018 invariant: standing (non-expiring), operator-owned
+  secret_id_num_uses      = 0             # ADR-0018 invariant: CLI mints per invocation w/o re-seed
+  token_ttl               = var.token_ttl # short-lived token, dies fast per invocation
   token_max_ttl           = var.token_max_ttl
   token_no_default_policy = true
 }

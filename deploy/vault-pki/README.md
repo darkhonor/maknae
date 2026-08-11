@@ -21,8 +21,9 @@ separate, following cycles.
   off; presence of the correct plane-SAN is enforced downstream by the peer verifier.
 - **Policies** — each plane can sign **only its own role** (signing-scoped isolation)
   and manage its own token. (`revoke` is mount-wide — a Vault limitation, see below.)
-- **AppRoles** — single-use SecretID → one renewable token per login, background-renewed
-  up to 24h, then fail-closed re-auth with a fresh SecretID.
+- **AppRoles** (ADR-0018) — `maknaed` gets a **periodic token** (renews indefinitely; fails
+  closed only on genuine Vault failure/revocation) + a **standing SecretID** (hands-free
+  reboots). `maknae` (CLI) keeps a **short-lived token** + a standing, operator-owned SecretID.
 
 ## Requirements
 
@@ -87,8 +88,8 @@ are present (a permissive role is still schema-valid) — that is a review conce
 ## Operational follow-up: SecretID delivery (not Terraform)
 
 AppRole login needs **two** things: the **RoleID** (non-secret, stable) and a
-**SecretID** (secret, single-use). Terraform provisions both roles and outputs the
-RoleIDs; it does not generate or deliver SecretIDs.
+**SecretID** (secret; **standing** under ADR-0018 — `num_uses=0`, `ttl=0`). Terraform
+provisions both roles and outputs the RoleIDs; it does not generate or deliver SecretIDs.
 
 Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config):
 
@@ -97,13 +98,23 @@ terraform output -raw maknaed_role_id   # trust plane
 terraform output -raw maknae_role_id    # CLI plane
 ```
 
-Then issue a response-wrapped single-use SecretID per plane and deliver it to that
-plane's `0o400` file (note the `auth/` mount prefix):
+Then issue a standing SecretID per plane (note the `auth/` mount prefix):
 
 ```bash
-vault write -wrap-ttl=90s -f auth/<approle-path>/role/maknaed/secret-id
-vault write -wrap-ttl=90s -f auth/<approle-path>/role/maknae/secret-id
+vault write -f auth/<approle-path>/role/maknaed/secret-id   # daemon bootstrap
+vault write -f auth/<approle-path>/role/maknae/secret-id    # operator CLI
 ```
 
-Each plane logs in with `role_id` + the unwrapped `secret_id`, then background-renews
-until `token_max_ttl`, then fails closed and awaits a fresh SecretID.
+Provisioning and at-rest protection of these SecretIDs is the job of **`maknae enroll`**
+(ADR-0018): the daemon's bootstrap SecretID is `_maknae`-owned and **HRoT-sealed at rest**
+(TPM 2.0 / Secure Enclave), decrypted only into memory at startup; the CLI SecretID is
+operator-owned. **Response-wrapping** (`-wrap-ttl`) is retained only where a SecretID
+crosses an **untrusted delivery channel** (e.g. remote AppRole provisioning to another
+host), not for the local `_maknae`- or operator-owned bootstrap files. (The Kubernetes path
+uses Vault's k8s auth method with **no AppRole SecretID at rest at all** (see ADR-0018), so
+it is not a wrapped-SecretID channel.)
+
+Each plane logs in with `role_id` + `secret_id`. The **daemon** then renews its **periodic
+token indefinitely** (fail-closed only on genuine Vault failure/revocation); the **CLI**
+token is short-lived and dies with the invocation. Because the SecretID is standing,
+reboots and per-invocation CLI runs need no re-seed.
