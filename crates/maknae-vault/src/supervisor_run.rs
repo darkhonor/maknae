@@ -261,7 +261,21 @@ mod tests {
         renew_zero_lease: Arc<AtomicBool>,
         rotate_fail_first: Arc<AtomicU32>,
         expired: Arc<AtomicBool>,
+        /// Loop-iteration probe counter (see `leaf_age_and_ttl_secs`) — the
+        /// busy-spin circuit breaker for mutation testing.
+        probes: Arc<AtomicU32>,
     }
+
+    /// Any loop that probes the driver this many times is stuck: legitimate runs in
+    /// these tests complete within a few dozen iterations. A supervisor.rs mutant can
+    /// turn the loop into a `sleep(0)` busy-spin that never advances VIRTUAL time
+    /// (e.g. `leaf_rotate_deadline -> 0` with rotation never due), which neither a
+    /// virtual-time `timeout` nor `start_paused` auto-advance can interrupt — but the
+    /// loop still probes the driver every iteration, so this breaker panics the test
+    /// in wall-clock milliseconds: the mutant is CAUGHT (test failure) instead of
+    /// wedging the whole test binary into a 20s cargo-mutants TIMEOUT that masks the
+    /// kill (the CI failure mode this exists to prevent).
+    const STUCK_LOOP_PROBE_LIMIT: u32 = 100_000;
 
     impl Shared {
         fn new(lease: u64, leaf_age: u64, leaf_ttl: u64) -> Self {
@@ -275,6 +289,7 @@ mod tests {
                 renew_zero_lease: Arc::new(AtomicBool::new(false)),
                 rotate_fail_first: Arc::new(AtomicU32::new(0)),
                 expired: Arc::new(AtomicBool::new(false)),
+                probes: Arc::new(AtomicU32::new(0)),
             }
         }
     }
@@ -286,6 +301,13 @@ mod tests {
             self.0.lease.load(Ordering::Relaxed)
         }
         fn leaf_age_and_ttl_secs(&self) -> (u64, u64) {
+            // Called at least once per loop iteration — the busy-spin circuit breaker.
+            let probes = self.0.probes.fetch_add(1, Ordering::Relaxed) + 1;
+            assert!(
+                probes <= STUCK_LOOP_PROBE_LIMIT,
+                "supervisor_loop appears stuck (>{STUCK_LOOP_PROBE_LIMIT} driver probes) — \
+                 a non-terminating mutant?"
+            );
             (
                 self.0.leaf_age.load(Ordering::Relaxed),
                 self.0.leaf_ttl.load(Ordering::Relaxed),
@@ -320,12 +342,27 @@ mod tests {
         }
     }
 
+    /// Drive `supervisor_loop` to completion under paused time, bounded by a VIRTUAL
+    /// deadline far above any legitimate schedule in these tests (all complete within
+    /// a few hundred virtual seconds; the largest deadline any test arms is ~666k).
+    /// A mutant that turns the loop into an endless SLEEPER hits this bound in
+    /// wall-clock milliseconds (paused time auto-advances through sleeps) and fails
+    /// the test — a CAUGHT mutant, not a 20s cargo-mutants TIMEOUT that masks the
+    /// kill. Endless busy-spins (which never advance virtual time) are caught by
+    /// `STUCK_LOOP_PROBE_LIMIT` instead; together the two breakers make every
+    /// non-terminating supervisor.rs mutant fail fast.
+    async fn run_loop_bounded(driver: FakeDriver) -> VaultError {
+        tokio::time::timeout(Duration::from_secs(10_000_000), supervisor_loop(driver))
+            .await
+            .expect("supervisor_loop must terminate (endless-sleep mutant?)")
+    }
+
     #[tokio::test(start_paused = true)]
     async fn spawn_before_mint_fails_closed() {
         // Lease 0 (spawned before mint()) → expire immediately, no renew/rotate attempts.
         let shared = Shared::new(0, 48 * 3600, 72 * 3600);
         let probe = shared.clone();
-        let err = supervisor_loop(FakeDriver(shared)).await;
+        let err = run_loop_bounded(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
         assert!(probe.expired.load(Ordering::Relaxed));
         assert_eq!(probe.renew_calls.load(Ordering::Relaxed), 0);
@@ -348,7 +385,7 @@ mod tests {
         shared.renew_ok_budget.store(1, Ordering::Relaxed); // 1 renew Ok, then fail → token FailClosed
         let probe = shared.clone();
 
-        let err = supervisor_loop(FakeDriver(shared)).await;
+        let err = run_loop_bounded(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
         // The loop ended via the TOKEN's fail-closed (its budget), not the leaf's.
         assert!(probe.expired.load(Ordering::Relaxed));
@@ -377,7 +414,7 @@ mod tests {
         shared.rotate_fail_first.store(u32::MAX, Ordering::Relaxed);
         let probe = shared.clone();
 
-        let err = supervisor_loop(FakeDriver(shared)).await;
+        let err = run_loop_bounded(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
         assert!(probe.expired.load(Ordering::Relaxed));
         assert!(probe.rotate_calls.load(Ordering::Relaxed) >= 1);
@@ -400,7 +437,7 @@ mod tests {
         shared.renew_ok_budget.store(0, Ordering::Relaxed); // renewal always fails → token FailClosed
         let probe = shared.clone();
 
-        let err = supervisor_loop(FakeDriver(shared)).await;
+        let err = run_loop_bounded(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
         assert!(probe.expired.load(Ordering::Relaxed));
         assert_eq!(
@@ -423,7 +460,7 @@ mod tests {
         shared.renew_zero_lease.store(true, Ordering::Relaxed);
         let probe = shared.clone();
 
-        let err = supervisor_loop(FakeDriver(shared)).await;
+        let err = run_loop_bounded(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
         assert!(
             probe.expired.load(Ordering::Relaxed),
