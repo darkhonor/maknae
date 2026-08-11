@@ -93,6 +93,40 @@ const ATCAP_AUDIT_QUEUE_DEPTH: usize = 256;
 /// aborted so shutdown can proceed; the normal (fast) case still drains fully.
 const AUDIT_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bound on draining IN-FLIGHT connection handlers at the end of the accept loop.
+/// Same class as `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`: each handler performs audit appends
+/// (`spawn_blocking` write+fsync under the hood), so a wedged audit filesystem can
+/// block a handler indefinitely — an unbounded `join_next()` drain would then hang
+/// shutdown BEFORE the at-capacity drain bound is even reached. Sized above the
+/// per-connection work bounds (handshake_timeout + read_timeout + response write
+/// bound, each ≤ 60s only in pathological configs; defaults total ≤ ~15s).
+const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on the final TLS close (`AsyncWriteExt::shutdown` → close_notify write) of a
+/// connection stream. A peer that stops reading can otherwise block the close on a
+/// full socket buffer forever, holding the handler (and its semaphore permit) — the
+/// same slow-drip permit exhaustion the response-write bound closes. Closing is
+/// best-effort (the socket is dropped either way); 1s is generous for ~30 bytes.
+const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Bound on the Tokio runtime's own teardown in [`run`] (the LAST line of defense for
+/// codex round-11 P1). Aborting an async task can NEVER cancel a `spawn_blocking`
+/// operation already running (blocking threads are not abortable), and a dropped
+/// `Runtime` waits for them INDEFINITELY by default — so a wedged audit `write_all`/
+/// `sync_data` would hang process exit even after every bounded drain above gave up.
+/// `Runtime::shutdown_timeout` caps that wait; on elapse the process exits anyway and
+/// the OS reclaims the stuck thread. This backstop is what makes every shutdown bound
+/// above *terminal* rather than advisory.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Close `stream` (TLS close_notify + FIN) within [`STREAM_CLOSE_TIMEOUT`], abandoning
+/// the close on elapse (the stream is dropped regardless, which closes the fd). Every
+/// exit path of [`handle`] funnels through this so no path can hang on a peer that
+/// stopped reading.
+async fn close_bounded<S: AsyncWrite + Unpin>(stream: &mut S) {
+    let _ = tokio::time::timeout(STREAM_CLOSE_TIMEOUT, stream.shutdown()).await;
+}
+
 /// How [`await_drain_with_timeout`] resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DrainOutcome {
@@ -117,6 +151,32 @@ async fn await_drain_with_timeout(
         Ok(_joined) => DrainOutcome::Completed,
         Err(_elapsed) => {
             handle.abort();
+            DrainOutcome::Aborted
+        }
+    }
+}
+
+/// Drain the in-flight handler `JoinSet` within `timeout`; on elapse, `abort_all` and
+/// reap the (now-cancelling) tasks so shutdown can proceed. A handler stuck in a wedged
+/// audit append cannot be truly cancelled mid-`spawn_blocking` — the abort stops the
+/// async wrapper, and [`RUNTIME_SHUTDOWN_TIMEOUT`] in [`run`] caps the runtime's final
+/// wait on the blocking thread itself.
+async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -> DrainOutcome {
+    let all_joined = tokio::time::timeout(timeout, async {
+        while handlers.join_next().await.is_some() {}
+    })
+    .await;
+    match all_joined {
+        Ok(()) => DrainOutcome::Completed,
+        Err(_elapsed) => {
+            handlers.abort_all();
+            // Reap the aborted tasks; each resolves promptly with a cancellation
+            // JoinError unless it is pinned inside non-abortable blocking I/O — which
+            // the runtime-level shutdown bound then caps.
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                while handlers.join_next().await.is_some() {}
+            })
+            .await;
             DrainOutcome::Aborted
         }
     }
@@ -268,7 +328,7 @@ pub async fn handle<S, E>(
                     "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
                 );
             }
-            let _ = stream.shutdown().await;
+            close_bounded(&mut stream).await;
             return;
         }
         ConnDecision::Permit => {
@@ -300,7 +360,7 @@ pub async fn handle<S, E>(
                         "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri} session_id={session_id} — closing without serving: {e}"
                     );
                 }
-                let _ = stream.shutdown().await;
+                close_bounded(&mut stream).await;
                 return;
             }
         }
@@ -327,7 +387,7 @@ pub async fn handle<S, E>(
                 &au3_1,
             )
             .await;
-            let _ = stream.shutdown().await;
+            close_bounded(&mut stream).await;
             return;
         }
         Ok(Err(e)) => {
@@ -344,7 +404,7 @@ pub async fn handle<S, E>(
                 &au3_1,
             )
             .await;
-            let _ = stream.shutdown().await;
+            close_bounded(&mut stream).await;
             return;
         }
         Ok(Ok(b)) => b,
@@ -366,7 +426,7 @@ pub async fn handle<S, E>(
                 &au3_1,
             )
             .await;
-            let _ = stream.shutdown().await;
+            close_bounded(&mut stream).await;
             return;
         }
     };
@@ -384,14 +444,19 @@ pub async fn handle<S, E>(
         seq.next(),
         verb_action(&request.verb),
         "permit",
-        "served",
+        // "authorized", NOT "served": this record is appended BEFORE the response write
+        // (audit-then-respond), so it must claim only the authorization + audit-gate
+        // facts that are true at append time — a later response-write failure (peer
+        // vanished mid-reply) must not leave a durable record over-claiming delivery
+        // (codex round-11 P2). Delivery success is observable to the CLIENT, not the trail.
+        "authorized",
         "authorized",
         &au3_1,
     );
     let audit_ok = emit.emit(&rec).await.is_ok();
     if !may_respond(audit_ok) {
         // The audit trail does not durably contain this request — withhold the response.
-        let _ = stream.shutdown().await;
+        close_bounded(&mut stream).await;
         return;
     }
 
@@ -403,10 +468,20 @@ pub async fn handle<S, E>(
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(payload),
     };
+    // Bound the response write by read_timeout_ms (it doubles as the write bound —
+    // both cap "how long one peer may hold this connection's permit"): a peer that
+    // sends a request and then never reads would otherwise block this write on a full
+    // socket buffer forever — a slow-drip permit exhaustion (same DoS class as the
+    // inline-handshake and inline-fsync findings). On elapse the connection is simply
+    // closed; the request record above already (accurately) says "authorized".
     if let Ok(bytes) = encode_response(&response) {
-        let _ = write_frame(&mut stream, &bytes).await;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(cfg.read_timeout_ms),
+            write_frame(&mut stream, &bytes),
+        )
+        .await;
     }
-    let _ = stream.shutdown().await;
+    close_bounded(&mut stream).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -654,10 +729,23 @@ where
                                         .await
                                     {
                                         Ok(conn) => {
-                                            // Group half resolved here; fail-closed to false on
-                                            // any resolution error (handle then Denies + audits).
+                                            // Group half resolved here — on the BLOCKING pool, not
+                                            // this async worker: `uid_in_maknae_group` makes
+                                            // synchronous NSS calls (getgrnam/getpwuid), and a
+                                            // stalled directory backend (SSS/LDAP) would otherwise
+                                            // pin worker threads until a handful of stuck lookups
+                                            // starve the whole runtime — accept loop included
+                                            // (same inline-blocking DoS class as the handshake and
+                                            // fsync findings). Fail-closed to false on any
+                                            // resolution OR join error (handle then Denies+audits).
+                                            let uid = conn.peer_uid;
                                             let in_group =
-                                                uid_in_maknae_group(conn.peer_uid).unwrap_or(false);
+                                                tokio::task::spawn_blocking(move || {
+                                                    uid_in_maknae_group(uid)
+                                                })
+                                                .await
+                                                .map(|r| r.unwrap_or(false))
+                                                .unwrap_or(false);
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
@@ -697,8 +785,17 @@ where
     // Stopped accepting (done — we broke the loop, either way). Drain in-flight
     // handlers: this IS the graceful-shutdown drain regardless of which outcome ended
     // the loop, so a supervisor exit still lets already-admitted requests finish rather
-    // than dropping them mid-flight.
-    while handlers.join_next().await.is_some() {}
+    // than dropping them mid-flight. BOUNDED (same class as the audit drain below): a
+    // handler stuck in a wedged audit append would otherwise hang shutdown here before
+    // the at-capacity drain bound is even reached.
+    if drain_handlers_bounded(&mut handlers, HANDLER_DRAIN_SHUTDOWN_TIMEOUT).await
+        == DrainOutcome::Aborted
+    {
+        eprintln!(
+            "maknaed: in-flight handler drain did not complete within {}s during shutdown; aborting remaining handlers to allow exit",
+            HANDLER_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
+        );
+    }
 
     // Drain the bounded at-capacity audit offload (P2): drop the sender so the drain
     // task's `recv()` returns `None` once the queue empties, then await it. The queue
@@ -744,7 +841,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(async move {
+    let code = runtime.block_on(async move {
         match run_inner(config_dir).await {
             // The T1 `ServeOutcome` → `ExitCode` mapping (codex round-5 P1) decides:
             // `GracefulShutdown` → SUCCESS, `SupervisorExited` → FAILURE (so process
@@ -756,7 +853,15 @@ pub fn run(config_dir: &Path) -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-    })
+    });
+    // TERMINAL shutdown bound (codex round-11 P1). Dropping the runtime would wait
+    // INDEFINITELY for outstanding `spawn_blocking` work — and a wedged audit
+    // filesystem can pin a blocking thread in `write_all`/`sync_data` forever (task
+    // aborts never cancel blocking threads). Cap the wait so SIGTERM handling and the
+    // supervisor-failure restart path always reach process exit; on elapse the stuck
+    // thread is abandoned to the OS (the fd is closed at process exit anyway).
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    code
 }
 
 async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, String> {
@@ -842,34 +947,44 @@ async fn serve_after_mint(
         socket: transport.socket_path.display().to_string(),
         au3_1: audit_cfg.au3_1.clone(),
     };
+    // Install the shutdown-signal handlers EAGERLY, before serving: a failure here is a
+    // post-mint startup failure like a bind error (the caller revokes the token and
+    // exits non-zero) — never a silently-resolving future that would masquerade as an
+    // instant graceful shutdown.
+    let shutdown = install_shutdown_signal()?;
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
         session_ids,
         transport,
         wctx,
-        shutdown_signal(),
+        shutdown,
         supervisor,
     )
     .await;
     Ok(outcome)
 }
 
-/// Resolve on the first SIGTERM/SIGINT (graceful-shutdown trigger, spec §6).
-async fn shutdown_signal() {
+/// Install the SIGTERM/SIGINT handlers EAGERLY and return the future that resolves on
+/// the first signal (graceful-shutdown trigger, spec §6). Installation failure is a
+/// hard `Err` for the caller to fail closed on: the previous shape installed lazily
+/// inside the future and, on failure, RESOLVED it immediately — making the daemon boot
+/// and then instantly "gracefully" exit with SUCCESS, which process supervision
+/// (Restart=on-failure) would not restart. A daemon that cannot arrange orderly
+/// shutdown must refuse to start (revoking its token via the post-mint failure path),
+/// not silently morph the failure into a clean exit.
+fn install_shutdown_signal() -> Result<impl Future<Output = ()> + Send, String> {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(_) => return, // cannot install → treat as immediate shutdown request
-    };
-    let mut intr = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = intr.recv() => {}
-    }
+    let mut term = signal(SignalKind::terminate())
+        .map_err(|e| format!("cannot install SIGTERM handler: {e}"))?;
+    let mut intr = signal(SignalKind::interrupt())
+        .map_err(|e| format!("cannot install SIGINT handler: {e}"))?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = intr.recv() => {}
+        }
+    })
 }
 
 /// Best-effort host label for AU-3c. Not security-load-bearing (the security-relevant
@@ -985,5 +1100,31 @@ mod tests {
         let mut handle = tokio::spawn(async {});
         let outcome = await_drain_with_timeout(&mut handle, Duration::from_secs(5)).await;
         assert_eq!(outcome, DrainOutcome::Completed);
+    }
+
+    // The in-flight HANDLER drain must be bounded for the same reason as the audit
+    // drain: a handler wedged in blocking audit I/O would otherwise hang shutdown
+    // before any later bound is reached.
+    #[tokio::test]
+    async fn handler_drain_aborts_handlers_that_never_complete() {
+        let mut handlers: JoinSet<()> = JoinSet::new();
+        handlers.spawn(std::future::pending::<()>());
+        handlers.spawn(async {}); // one completes promptly; one never does
+        let outcome = drain_handlers_bounded(&mut handlers, Duration::from_millis(50)).await;
+        assert_eq!(outcome, DrainOutcome::Aborted);
+        assert!(
+            handlers.is_empty(),
+            "aborted handlers must be reaped so shutdown proceeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_drain_completes_when_all_handlers_finish() {
+        let mut handlers: JoinSet<()> = JoinSet::new();
+        handlers.spawn(async {});
+        handlers.spawn(async {});
+        let outcome = drain_handlers_bounded(&mut handlers, Duration::from_secs(5)).await;
+        assert_eq!(outcome, DrainOutcome::Completed);
+        assert!(handlers.is_empty());
     }
 }

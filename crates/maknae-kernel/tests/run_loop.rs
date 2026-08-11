@@ -458,3 +458,54 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         deny.au3_1
     );
 }
+
+// A peer that sends a valid request and then NEVER reads the response must not hold
+// the handler (and, in production, its semaphore permit) forever: the response write
+// is bounded by `read_timeout_ms` and the close by the stream-close bound, so `handle`
+// returns on its own. duplex(1) forces byte-at-a-time transfer: the request drains
+// through the 1-byte pipe as `handle` reads it, then the response write fills the pipe
+// and blocks — with no reader ever draining it — until the write bound fires.
+#[tokio::test]
+async fn unread_response_does_not_hang_the_handler() {
+    let (mut client, server) = tokio::io::duplex(1);
+    let emit = RecEmit::new(false);
+    let mut cfg = default_cfg();
+    cfg.read_timeout_ms = 300; // also the response-write bound
+    let req = ping_frame_bytes();
+
+    // Feed the request byte-by-byte from a side task (the 1-byte pipe can't hold it
+    // all), then keep `client` alive WITHOUT ever reading the response.
+    let writer = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut framed = (u32::try_from(req.len()).unwrap().to_be_bytes()).to_vec();
+        framed.extend_from_slice(&req);
+        let _ = client.write_all(&framed).await;
+        // Hold the pipe open (no read, no drop) long past the write bound.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        drop(client);
+    });
+
+    let done = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        maknae_kernel::handle(
+            server,
+            "maknae://d/plane/cli".to_string(),
+            501,
+            true,
+            emit.clone(),
+            7,
+            cfg,
+            serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert!(
+        done.is_ok(),
+        "handle must return within the write bound even though the peer never reads"
+    );
+    // Both records (admission + request) were still durably offered before the write.
+    let recs = emit.records();
+    assert_eq!(recs.len(), 2, "admission + request records expected");
+    assert_eq!(recs[1].outcome.reason, "authorized");
+    writer.abort();
+}
