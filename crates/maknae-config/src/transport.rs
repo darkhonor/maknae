@@ -284,10 +284,7 @@ mod tests {
     #[test]
     fn accepts_frame_max_bytes_floor() {
         let v = crate::Value::Map(vec![("frame_max_bytes".into(), crate::Value::Int(1))]);
-        assert_eq!(
-            transport_from_section(Some(&v)).unwrap().frame_max_bytes,
-            1
-        );
+        assert_eq!(transport_from_section(Some(&v)).unwrap().frame_max_bytes, 1);
     }
 
     #[test]

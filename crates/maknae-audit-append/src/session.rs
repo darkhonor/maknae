@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Process-wide session-id allocator. `session_id = (boot_nonce << 32) |
+/// Process-wide session-id allocator. `session_id = (boot_nonce << 32) +
 /// per-connection counter`: the high 32 bits are a per-boot nonce (real-clock
 /// UNIX-epoch seconds, truncated to `u32`) that distinguishes daemon
 /// restarts; the low 32 bits are a monotonic per-connection counter unique
@@ -41,9 +41,15 @@ impl SessionIds {
     }
 
     /// Allocate the next session id for a newly-accepted connection.
+    ///
+    /// Combines the two halves with `+`, not `|`: the halves never overlap
+    /// (nonce occupies bits 32..=63, `ctr` bits 0..=31), so the two operators
+    /// are behaviorally identical here — but `+` (unlike `|`) has no
+    /// same-result alternate mutation, so a swapped operator is caught by
+    /// mutation testing rather than being a silently-equivalent mutant.
     pub fn next_session(&self) -> u64 {
         let ctr = self.conn_ctr.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-        ((self.boot_nonce as u64) << 32) | (ctr as u64)
+        ((self.boot_nonce as u64) << 32) + (ctr as u64)
     }
 }
 
@@ -114,7 +120,11 @@ mod tests {
         let a = SessionIds::with_nonce(1).next_session();
         let b = SessionIds::with_nonce(2).next_session();
         assert_ne!(a, b);
-        assert_eq!(a & 0xFFFF_FFFF, b & 0xFFFF_FFFF, "both start their counter at 1");
+        assert_eq!(
+            a & 0xFFFF_FFFF,
+            b & 0xFFFF_FFFF,
+            "both start their counter at 1"
+        );
     }
 
     #[test]
@@ -125,7 +135,10 @@ mod tests {
         let s = SessionIds::new();
         let id = s.next_session();
         let nonce = (id >> 32) as u32;
-        assert!(nonce > 1_700_000_000, "nonce {nonce} does not look like a real epoch-seconds value");
+        assert!(
+            nonce > 1_700_000_000,
+            "nonce {nonce} does not look like a real epoch-seconds value"
+        );
     }
 
     #[test]
@@ -144,5 +157,25 @@ mod tests {
         assert_eq!(a.next(), 2);
         // b is a distinct connection's counter — unaffected by a's advances.
         assert_eq!(b.next(), 1);
+    }
+
+    #[test]
+    fn session_ids_default_uses_real_clock_nonce() {
+        // Default must delegate to new() (real-clock nonce), not some other
+        // construction path — same "now-ish" sanity bound as new_uses_a_plausible_real_clock_nonce.
+        let s = SessionIds::default();
+        let id = s.next_session();
+        let nonce = (id >> 32) as u32;
+        assert!(
+            nonce > 1_700_000_000,
+            "nonce {nonce} does not look like a real epoch-seconds value"
+        );
+    }
+
+    #[test]
+    fn seq_default_starts_at_one() {
+        let seq = Seq::default();
+        assert_eq!(seq.next(), 1);
+        assert_eq!(seq.next(), 2);
     }
 }

@@ -200,7 +200,11 @@ mod tests {
         // the decision loop must call rotate_leaf, not skip it.
         let fake = FakeRotator::new(48 * 3600, 72 * 3600, 0);
         assert!(maybe_rotate_leaf(&fake).await.is_ok());
-        assert_eq!(fake.calls.load(Ordering::Relaxed), 1, "rotate_leaf called once");
+        assert_eq!(
+            fake.calls.load(Ordering::Relaxed),
+            1,
+            "rotate_leaf called once"
+        );
         assert!(!fake.expired.load(Ordering::Relaxed));
     }
 
