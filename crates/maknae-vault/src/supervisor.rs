@@ -76,6 +76,24 @@ pub fn next_wake(now_secs: u64, token_deadline_secs: u64, leaf_deadline_secs: u6
     token_deadline_secs.min(leaf_deadline_secs).max(now_secs)
 }
 
+/// Translate a `retry_action` outcome into the next absolute wake deadline (wall-clock
+/// seconds) for the operation that just failed a SINGLE attempt.
+///
+/// `None` means the retry budget is exhausted — the caller must fail closed (expire).
+/// `Some(secs)` schedules the operation's next single attempt: `Wait(d)` backs off to
+/// `now + d`; `RetryNow` re-arms at `now` (immediate). Extracted as a pure decision so
+/// the supervisor driver (T3) can independently reschedule token renewal and leaf
+/// rotation as single-attempt-per-wake — one failing operation's backoff deadline is
+/// just another deadline `next_wake` mins over, so a persistently-failing rotation can
+/// never starve a due token renewal (ADR-0018 self-inflicted-outage avoidance).
+pub fn retry_deadline(now_secs: u64, action: &RetryAction) -> Option<u64> {
+    match action {
+        RetryAction::Wait(d) => Some(now_secs.saturating_add(d.as_secs())),
+        RetryAction::RetryNow => Some(now_secs),
+        RetryAction::FailClosed => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +261,40 @@ mod tests {
     fn next_wake_leaf_none_uses_token() {
         // leaf_deadline == u64::MAX ("no leaf") → the token deadline always wins.
         assert_eq!(next_wake(50, 300, u64::MAX), 300);
+    }
+
+    // ---- retry_deadline: RetryAction → next single-attempt deadline -------------
+
+    #[test]
+    fn retry_deadline_wait_adds_backoff_to_now() {
+        assert_eq!(
+            retry_deadline(1_000, &RetryAction::Wait(Duration::from_secs(30))),
+            Some(1_030)
+        );
+        // A zero-backoff Wait re-arms at exactly now (no negative/underflow).
+        assert_eq!(
+            retry_deadline(1_000, &RetryAction::Wait(Duration::from_secs(0))),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn retry_deadline_retry_now_is_now() {
+        assert_eq!(retry_deadline(1_000, &RetryAction::RetryNow), Some(1_000));
+    }
+
+    #[test]
+    fn retry_deadline_fail_closed_is_none() {
+        // None is the fail-closed signal — the driver expires rather than reschedules.
+        assert_eq!(retry_deadline(1_000, &RetryAction::FailClosed), None);
+    }
+
+    #[test]
+    fn retry_deadline_wait_saturates_at_u64_max() {
+        assert_eq!(
+            retry_deadline(u64::MAX, &RetryAction::Wait(Duration::from_secs(5))),
+            Some(u64::MAX)
+        );
     }
 
     // ---- leaf_rotate_deadline: exact boundary, agrees with rotate_now -----------

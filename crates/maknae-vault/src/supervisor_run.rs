@@ -1,24 +1,29 @@
-//! Credential supervisor driver (T3, ADR-0018 Decision 3). The two decisions —
-//! `retry_action` (renewal-retry-within-window) and `rotate_now` (leaf rotation) —
-//! live in `supervisor.rs` (T1, pure, mutation-tested to 0-missed); this module is
-//! the I/O loop that consults them and calls back into `PlaneClient`/`SupervisorCtx`
-//! for the actual Vault work. Excluded from mutation testing (`.cargo/mutants.toml`)
-//! — it is a driver, not a decision; the decisions it drives ARE mutation-tested.
+//! Credential supervisor driver (T3, ADR-0018 Decision 3). The scheduling decisions —
+//! `retry_action` (renewal-retry-within-window), `rotate_now`/`leaf_rotate_deadline`
+//! (leaf rotation), `next_wake` (earliest-deadline sleep) and `retry_deadline`
+//! (RetryAction → next single-attempt deadline) — live in `supervisor.rs` (T1, pure,
+//! mutation-tested to 0-missed); this module is the I/O loop that consults them and
+//! calls back into `PlaneClient`/`SupervisorCtx` for the actual Vault work. Excluded
+//! from mutation testing (`.cargo/mutants.toml`) — it is a driver, not a decision; the
+//! decisions it drives ARE mutation-tested.
+//!
+//! **Token renewal and leaf rotation are INDEPENDENTLY scheduled, single-attempt-per-
+//! wake, on one shared loop (codex round-4 P1).** On each wake the loop attempts at
+//! most ONE `rotate_leaf` (if its deadline is due) and at most ONE `renew_token_once`
+//! (if ITS deadline is due). Neither operation retries inline; a failure just re-arms
+//! that operation's own deadline (via `retry_deadline`) to a sooner wake, and
+//! `next_wake` mins over both. So a persistently-failing rotation can NEVER block a due
+//! token renewal from being attempted — the self-inflicted outage ADR-0018's periodic-
+//! token design exists to avoid. Fail-closed (`expire_now`) still fires when a deadline
+//! genuinely cannot be met (token unrenewable before expiry, or leaf un-rotatable
+//! before expiry).
 use crate::client::{PlaneClient, SupervisorCtx};
 use crate::error::VaultError;
-use crate::supervisor::{leaf_rotate_deadline, next_wake, retry_action, rotate_now, RetryAction};
-use std::time::{Duration, Instant};
-
-/// Current wall-clock time as unix seconds — the common base for the token-renewal
-/// and leaf-rotation deadlines (`leaf_age_and_ttl_secs` already reads `SystemTime`).
-/// A clock read failure (pre-epoch) saturates to 0, which only ever makes a deadline
-/// look sooner → wake earlier → act, never later (fail-safe).
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+use crate::supervisor::{
+    leaf_rotate_deadline, next_wake, retry_action, retry_deadline, rotate_now,
+};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the lease so even
 /// a sub-60s TTL renews before it expires (`.max(1)` guarantees forward progress on a
@@ -35,22 +40,24 @@ impl PlaneClient {
     /// before minting; a zero lease fails closed immediately rather than guessing an
     /// interval (mirrors the removed `spawn_renewal`, which this replaces).
     ///
-    /// Two independent responsibilities, both driven by the T1 pure decisions in
-    /// `supervisor.rs` (ADR-0018 Decision 3):
+    /// Two INDEPENDENTLY-scheduled responsibilities, both driven by the T1 pure
+    /// decisions in `supervisor.rs` (ADR-0018 Decision 3), each attempted at most ONCE
+    /// per wake so neither can starve the other:
     ///
-    /// - **Renewal-retry-within-window.** A failed `renew_self` no longer clears the
-    ///   identity on the FIRST error. It consults
-    ///   `retry_action(remaining, elapsed, attempt)`: `Wait(d)` backs off and retries
-    ///   — the identity is left alone, so a transient Vault blip is absorbed;
-    ///   `FailClosed` fires only once the token's actual remaining validity (tracked
-    ///   as a real deadline, not a static estimate — backoff sleeps correctly shrink
-    ///   the budget) is exhausted.
+    /// - **Token renewal.** When its own deadline (~2/3 of the current lease) is due,
+    ///   attempt `renew_self` ONCE. On success the lease + next deadline recompute from
+    ///   the fresh lease; on a transient failure `retry_action` → `retry_deadline`
+    ///   re-arms the renewal deadline to a sooner wake (identity left intact — a Vault
+    ///   blip is absorbed); `FailClosed` (the token's remaining validity is exhausted)
+    ///   expires. Renewal is attempted WHENEVER its deadline is due, regardless of
+    ///   rotation state.
     /// - **Leaf rotation.** Independently tracks leaf age off the ACTUAL issued
-    ///   validity window (`SupervisorCtx::leaf_age_and_ttl_secs`); once `rotate_now`
-    ///   fires, `rotate_leaf()` re-signs on the still-valid token. A rotation failure
-    ///   retries within the SAME retry-window discipline as token renewal (budgeted
-    ///   against the leaf's own remaining validity); sustained failure also fails
-    ///   closed.
+    ///   validity window (`SupervisorCtx::leaf_age_and_ttl_secs`); once
+    ///   `leaf_rotate_deadline` is due, attempt `rotate_leaf()` ONCE on the still-valid
+    ///   token. A rotation failure does NOT loop inline: `retry_action` →
+    ///   `retry_deadline` re-arms the rotation deadline to a sooner wake and control
+    ///   returns to the loop (so a due renewal is still attempted); sustained failure
+    ///   past the leaf's own remaining validity fails closed.
     ///
     /// The handle resolves to `RenewalExpired` when either loop gives up; at that
     /// point the shared identity is CLEARED (`SupervisorCtx::expire_now`) so
@@ -62,101 +69,34 @@ impl PlaneClient {
     }
 }
 
-/// The loop body, split out from `spawn_supervisor` so it's a plain `async fn` (no
-/// `tokio::spawn` boilerplate) — easier to reason about and, if ever needed, to test
-/// directly against a fake `SupervisorCtx` seam.
-async fn supervisor_loop(ctx: SupervisorCtx) -> VaultError {
-    // Fail closed if spawned before mint() — no token to renew, and we must never
-    // guess an interval that could outlast a short lease.
-    let mut lease = ctx.current_lease_secs();
-    if lease == 0 {
-        return ctx.expire_now();
-    }
-    // The token-renewal deadline as an ABSOLUTE wall-clock second (~2/3 of the current
-    // lease from now). Recomputed after every successful renewal from that renewal's
-    // fresh lease (Vault may shorten it near token_max_ttl).
-    let mut token_deadline = now_secs().saturating_add(token_renew_after(lease));
-
-    loop {
-        // Wake at the EARLIER of the token-renewal deadline and the leaf-rotation
-        // deadline (P1-C): a leaf shorter than ~1/3 of the token period would otherwise
-        // expire during a single 2/3-of-token sleep, silently breaking TLS handshakes.
-        // Both deadlines share the wall-clock base `leaf_age_and_ttl_secs` already uses.
-        let now = now_secs();
-        let (leaf_age, leaf_ttl) = ctx.leaf_age_and_ttl_secs();
-        let leaf_deadline = leaf_rotate_deadline(now, leaf_age, leaf_ttl);
-        let wake = next_wake(now, token_deadline, leaf_deadline);
-        tokio::time::sleep(Duration::from_secs(wake.saturating_sub(now))).await;
-
-        // On wake, perform whichever action(s) are now due. Leaf rotation first
-        // (maybe_rotate_leaf is a no-op when rotate_now is false, i.e. we woke for the
-        // token); its own retry-within-window discipline is unchanged.
-        if let Err(e) = maybe_rotate_leaf(&ctx).await {
-            return e;
-        }
-
-        // Token renewal ONLY once its own deadline has arrived — waking early for the
-        // leaf must not burn a renewal cycle. When due, renew within the token's
-        // remaining validity window, then recompute the next deadline from the fresh
-        // lease. Sustained renewal failure fails closed.
-        if now_secs() >= token_deadline {
-            match renew_token_with_retry(&ctx, lease).await {
-                Ok(new_lease) => {
-                    lease = new_lease;
-                    token_deadline = now_secs().saturating_add(token_renew_after(lease));
-                }
-                Err(e) => return e,
-            }
-        }
-    }
-}
-
-/// Renew the token, retrying transient failures within the token's remaining validity
-/// window (~1/3 of the lease at the ⅔ renewal point) — a blip is absorbed rather than
-/// clearing the identity on the first error; sustained failure fails closed. Returns
-/// the fresh lease so the caller recomputes the next renewal deadline from it.
-///
-/// The retry budget is a real monotonic `Instant` deadline (not a static estimate) so
-/// backoff sleeps correctly shrink the budget `retry_action` reasons about.
-async fn renew_token_with_retry(ctx: &SupervisorCtx, lease: u64) -> Result<u64, VaultError> {
-    let remaining = lease.saturating_sub(token_renew_after(lease));
-    let deadline = Instant::now() + Duration::from_secs(remaining);
-    let retry_started = Instant::now();
-    let mut attempt: u32 = 0;
-    loop {
-        match ctx.renew_token_once().await {
-            Ok(new_lease) => return Ok(new_lease),
-            Err(_) => {
-                attempt += 1;
-                let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
-                let elapsed = retry_started.elapsed().as_secs();
-                match retry_action(remaining, elapsed, attempt) {
-                    RetryAction::Wait(d) => tokio::time::sleep(d).await,
-                    RetryAction::RetryNow => {}
-                    RetryAction::FailClosed => return Err(ctx.expire_now()),
-                }
-            }
-        }
-    }
-}
-
-/// Seam so "the decision loop calls `rotate_leaf` when `rotate_now` fires" is
+/// Seam so the FULL supervisor loop (both token renewal AND leaf rotation) is
 /// unit-testable without a live Vault. `SupervisorCtx` (Vault-backed) is the real
-/// implementation used by `spawn_supervisor`; tests substitute a fake that tracks
-/// call counts instead of talking to Vault.
-trait LeafRotator {
+/// implementation used by `spawn_supervisor`; tests substitute a fake that tracks call
+/// counts instead of talking to Vault — letting a test drive a persistently-failing
+/// rotation and assert a due token renewal is STILL attempted on its own deadline.
+trait SupervisorDriver {
+    /// The last-known token lease (seconds); 0 before the first mint.
+    fn current_lease_secs(&self) -> u64;
     /// `(leaf_age_secs, leaf_ttl_secs)` off the current leaf's ACTUAL issued
-    /// validity window — `rotate_now`'s two inputs.
+    /// validity window — `rotate_now`/`leaf_rotate_deadline`'s inputs.
     fn leaf_age_and_ttl_secs(&self) -> (u64, u64);
+    /// One token-renewal attempt on the current token; returns the fresh lease.
+    async fn renew_token_once(&self) -> Result<u64, VaultError>;
     /// Re-mint the leaf on the current token.
     async fn rotate_leaf(&self) -> Result<(), VaultError>;
     /// Fail-closed retirement (clears the shared identity).
     fn expire_now(&self) -> VaultError;
 }
 
-impl LeafRotator for SupervisorCtx {
+impl SupervisorDriver for SupervisorCtx {
+    fn current_lease_secs(&self) -> u64 {
+        SupervisorCtx::current_lease_secs(self)
+    }
     fn leaf_age_and_ttl_secs(&self) -> (u64, u64) {
         SupervisorCtx::leaf_age_and_ttl_secs(self)
+    }
+    async fn renew_token_once(&self) -> Result<u64, VaultError> {
+        SupervisorCtx::renew_token_once(self).await
     }
     async fn rotate_leaf(&self) -> Result<(), VaultError> {
         SupervisorCtx::rotate_leaf(self).await
@@ -166,31 +106,117 @@ impl LeafRotator for SupervisorCtx {
     }
 }
 
-/// Rotate the leaf if `rotate_now` fires, retrying rotation failures within the SAME
-/// retry-window discipline as token renewal (budgeted against the leaf's own
-/// remaining validity, recomputed each attempt); sustained failure fails closed.
-async fn maybe_rotate_leaf<R: LeafRotator>(ctx: &R) -> Result<(), VaultError> {
-    let (age, ttl) = ctx.leaf_age_and_ttl_secs();
-    if !rotate_now(age, ttl) {
-        return Ok(());
+/// The loop body, split out from `spawn_supervisor` so it's a plain `async fn` (no
+/// `tokio::spawn` boilerplate) and GENERIC over the [`SupervisorDriver`] seam, so tests
+/// drive the whole loop against a fake (no live Vault).
+///
+/// Token renewal and leaf rotation are INDEPENDENTLY scheduled, single-attempt-per-wake
+/// (codex round-4 P1). Each holds its own absolute wall-clock deadline; a failed single
+/// attempt re-arms only THAT operation's deadline (via `retry_deadline`) to a sooner
+/// wake — it never loops inline, so the other operation's due attempt is never blocked.
+/// `next_wake` sleeps until the earliest of the two deadlines (each already folding in
+/// any pending retry-backoff deadline).
+async fn supervisor_loop<D: SupervisorDriver>(ctx: D) -> VaultError {
+    // Fail closed if spawned before mint() — no token to renew, and we must never
+    // guess an interval that could outlast a short lease.
+    let mut lease = ctx.current_lease_secs();
+    if lease == 0 {
+        return ctx.expire_now();
     }
-    let retry_started = Instant::now();
-    let mut attempt: u32 = 0;
+    // The scheduling clock is a MONOTONIC `tokio::time::Instant` (not wall-clock): it
+    // advances at the same rate as `tokio::time::sleep` — the two agree in production
+    // AND under `#[tokio::test(start_paused)]` (where sleeps auto-advance virtual time)
+    // — and it is immune to wall-clock steps (NTP/leap-second) that could otherwise jump
+    // a deadline. `now()` is whole seconds since loop start; every deadline below is in
+    // that same "seconds since start" base. The leaf's age/ttl are RELATIVE durations
+    // (`leaf_age_and_ttl_secs`), so mixing them with this relative clock is sound.
+    let clock = Instant::now();
+    let now = || clock.elapsed().as_secs();
+
+    // Token-renewal schedule, in seconds-since-start:
+    // - `token_deadline`  : when to attempt the next renewal (~2/3 of the lease; on a
+    //   transient failure re-armed sooner by `retry_deadline`).
+    // - `token_expires_at`: the token's hard expiry — the retry budget `retry_action`
+    //   reasons about (recomputed from each successful renewal's fresh lease, which
+    //   Vault may shorten near token_max_ttl).
+    let mut token_deadline = now().saturating_add(token_renew_after(lease));
+    let mut token_expires_at = now().saturating_add(lease);
+    let mut token_attempt: u32 = 0;
+    // Leaf-rotation schedule: `leaf_backoff_until` is `Some` only while backing off a
+    // failed rotation (so the loop waits the backoff instead of busy-retrying an
+    // already-past natural rotation deadline); otherwise the natural
+    // `leaf_rotate_deadline` (constant until a rotation issues a fresh leaf) governs.
+    let mut leaf_backoff_until: Option<u64> = None;
+    let mut leaf_attempt: u32 = 0;
+
     loop {
-        match ctx.rotate_leaf().await {
-            Ok(()) => return Ok(()),
-            Err(_) => {
-                attempt += 1;
-                // Recompute from the live clock each attempt — the leaf's remaining
-                // validity (ttl - age) is the retry budget, shrinking as real time
-                // (including backoff sleeps) passes.
-                let (age_now, ttl_now) = ctx.leaf_age_and_ttl_secs();
-                let remaining = ttl_now.saturating_sub(age_now);
-                let elapsed = retry_started.elapsed().as_secs();
-                match retry_action(remaining, elapsed, attempt) {
-                    RetryAction::Wait(d) => tokio::time::sleep(d).await,
-                    RetryAction::RetryNow => {}
-                    RetryAction::FailClosed => return Err(ctx.expire_now()),
+        // Wake at the EARLIER of the token-renewal deadline and the leaf-rotation
+        // deadline (each already folding in any pending retry-backoff). A leaf shorter
+        // than ~1/3 of the token period would otherwise expire during a single 2/3-of-
+        // token sleep (P1-C); an independent retry-backoff deadline likewise pulls the
+        // wake sooner without blocking the other operation (P1 round-4).
+        let t = now();
+        let (leaf_age, leaf_ttl) = ctx.leaf_age_and_ttl_secs();
+        // The leaf's effective wake deadline: while backing off a failed rotation, that
+        // backoff deadline; otherwise the natural 2/3-TTL rotation point.
+        let leaf_deadline =
+            leaf_backoff_until.unwrap_or_else(|| leaf_rotate_deadline(t, leaf_age, leaf_ttl));
+        let wake = next_wake(t, token_deadline, leaf_deadline);
+        tokio::time::sleep(Duration::from_secs(wake.saturating_sub(t))).await;
+
+        // --- Leaf rotation: at most ONE attempt when it is due. --------------------
+        // Due = rotation is warranted (`rotate_now`, the mutation-tested T1 decision)
+        // AND we are past any retry-backoff. Gating on both means waking early for the
+        // TOKEN (while a rotation backoff is still pending) does NOT trigger a premature
+        // rotation. A failure re-arms `leaf_backoff_until` and returns to the loop — it
+        // does NOT retry inline, so a due token renewal below is still attempted.
+        let (leaf_age, leaf_ttl) = ctx.leaf_age_and_ttl_secs();
+        let backoff_elapsed = leaf_backoff_until.is_none_or(|d| now() >= d);
+        if backoff_elapsed && rotate_now(leaf_age, leaf_ttl) {
+            match ctx.rotate_leaf().await {
+                Ok(()) => {
+                    // Fresh leaf: clear any backoff and let the natural deadline (far in
+                    // the future now) govern again.
+                    leaf_backoff_until = None;
+                    leaf_attempt = 0;
+                }
+                Err(_) => {
+                    leaf_attempt += 1;
+                    // Budget = the leaf's own remaining validity (ttl - age), recomputed
+                    // from the live clock so it shrinks as real time passes.
+                    let (age_now, ttl_now) = ctx.leaf_age_and_ttl_secs();
+                    let remaining = ttl_now.saturating_sub(age_now);
+                    match retry_deadline(now(), &retry_action(remaining, 0, leaf_attempt)) {
+                        Some(d) => leaf_backoff_until = Some(d),
+                        // Leaf genuinely un-rotatable before it expires → fail closed.
+                        None => return ctx.expire_now(),
+                    }
+                }
+            }
+        }
+
+        // --- Token renewal: at most ONE attempt when ITS deadline is due. ----------
+        // Attempted whenever `token_deadline` is due, INDEPENDENT of the rotation
+        // outcome above — a failing rotation can never starve renewal (the ADR-0018
+        // self-inflicted-outage this fix removes).
+        if now() >= token_deadline {
+            match ctx.renew_token_once().await {
+                Ok(new_lease) => {
+                    lease = new_lease;
+                    token_attempt = 0;
+                    let n = now();
+                    token_deadline = n.saturating_add(token_renew_after(lease));
+                    token_expires_at = n.saturating_add(lease);
+                }
+                Err(_) => {
+                    token_attempt += 1;
+                    // Budget = the token's remaining validity before its hard expiry.
+                    let remaining = token_expires_at.saturating_sub(now());
+                    match retry_deadline(now(), &retry_action(remaining, 0, token_attempt)) {
+                        Some(d) => token_deadline = d,
+                        // Token unrenewable before expiry → fail closed.
+                        None => return ctx.expire_now(),
+                    }
                 }
             }
         }
@@ -200,102 +226,172 @@ async fn maybe_rotate_leaf<R: LeafRotator>(ctx: &R) -> Result<(), VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::Arc;
 
-    /// A `LeafRotator` fake — no Vault, no locks. `age`/`ttl` are fixed (the tests
-    /// pick values whose `retry_action` outcome doesn't depend on wall-clock elapsed
-    /// time); `fail_first_n` controls how many `rotate_leaf` calls fail before one
-    /// succeeds (a large value never succeeds, exercising sustained failure).
-    struct FakeRotator {
-        age: u64,
-        ttl: u64,
-        fail_first_n: u32,
-        calls: AtomicU32,
-        expired: AtomicBool,
+    /// Shared, `Arc`-backed observable state for [`FakeDriver`] — cloned out before the
+    /// driver is moved into `supervisor_loop`, so a test can inspect call counts and the
+    /// `expired` flag after the loop returns. No Vault, no locks.
+    ///
+    /// - `renew_ok_budget`: `renew_token_once` returns `Ok(lease)` for the first N calls,
+    ///   then `Err` forever (drives the token toward its own FailClosed).
+    /// - `rotate_fail_first`: `rotate_leaf` fails for the first N calls, then succeeds; a
+    ///   successful rotation resets `leaf_age` to 0 (a FRESH leaf, so the natural rotation
+    ///   deadline moves far out — matching a real re-mint and avoiding a busy-loop).
+    /// - `leaf_age`/`leaf_ttl`: fixed inputs whose `rotate_now`/`retry_action` outcome does
+    ///   not depend on wall-clock elapsed time.
+    #[derive(Clone)]
+    struct Shared {
+        lease: Arc<AtomicU64>,
+        leaf_age: Arc<AtomicU64>,
+        leaf_ttl: Arc<AtomicU64>,
+        renew_calls: Arc<AtomicU32>,
+        rotate_calls: Arc<AtomicU32>,
+        renew_ok_budget: Arc<AtomicU32>,
+        rotate_fail_first: Arc<AtomicU32>,
+        expired: Arc<AtomicBool>,
     }
 
-    impl FakeRotator {
-        fn new(age: u64, ttl: u64, fail_first_n: u32) -> Self {
+    impl Shared {
+        fn new(lease: u64, leaf_age: u64, leaf_ttl: u64) -> Self {
             Self {
-                age,
-                ttl,
-                fail_first_n,
-                calls: AtomicU32::new(0),
-                expired: AtomicBool::new(false),
+                lease: Arc::new(AtomicU64::new(lease)),
+                leaf_age: Arc::new(AtomicU64::new(leaf_age)),
+                leaf_ttl: Arc::new(AtomicU64::new(leaf_ttl)),
+                renew_calls: Arc::new(AtomicU32::new(0)),
+                rotate_calls: Arc::new(AtomicU32::new(0)),
+                renew_ok_budget: Arc::new(AtomicU32::new(u32::MAX)),
+                rotate_fail_first: Arc::new(AtomicU32::new(0)),
+                expired: Arc::new(AtomicBool::new(false)),
             }
         }
     }
 
-    impl LeafRotator for FakeRotator {
+    struct FakeDriver(Shared);
+
+    impl SupervisorDriver for FakeDriver {
+        fn current_lease_secs(&self) -> u64 {
+            self.0.lease.load(Ordering::Relaxed)
+        }
         fn leaf_age_and_ttl_secs(&self) -> (u64, u64) {
-            (self.age, self.ttl)
+            (
+                self.0.leaf_age.load(Ordering::Relaxed),
+                self.0.leaf_ttl.load(Ordering::Relaxed),
+            )
+        }
+        async fn renew_token_once(&self) -> Result<u64, VaultError> {
+            let n = self.0.renew_calls.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= self.0.renew_ok_budget.load(Ordering::Relaxed) {
+                Ok(self.0.lease.load(Ordering::Relaxed))
+            } else {
+                Err(VaultError::Renew("fake renew failure".into()))
+            }
         }
         async fn rotate_leaf(&self) -> Result<(), VaultError> {
-            let n = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-            if n <= self.fail_first_n {
+            let n = self.0.rotate_calls.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= self.0.rotate_fail_first.load(Ordering::Relaxed) {
                 Err(VaultError::Sign("fake rotate_leaf failure".into()))
             } else {
+                // A fresh leaf: age resets, so the natural rotation deadline moves far
+                // out (no busy-loop of instantly-due rotations).
+                self.0.leaf_age.store(0, Ordering::Relaxed);
                 Ok(())
             }
         }
         fn expire_now(&self) -> VaultError {
-            self.expired.store(true, Ordering::Relaxed);
+            self.0.expired.store(true, Ordering::Relaxed);
             VaultError::RenewalExpired
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn rotates_when_rotate_now_fires() {
-        // age/ttl at exactly the 2/3 boundary (rotate_now's own boundary test) —
-        // the decision loop must call rotate_leaf, not skip it.
-        let fake = FakeRotator::new(48 * 3600, 72 * 3600, 0);
-        assert!(maybe_rotate_leaf(&fake).await.is_ok());
-        assert_eq!(
-            fake.calls.load(Ordering::Relaxed),
-            1,
-            "rotate_leaf called once"
-        );
-        assert!(!fake.expired.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn does_not_rotate_before_the_threshold() {
-        let fake = FakeRotator::new(1_000, 259_200, 0); // ~0.4% of 72h
-        assert!(maybe_rotate_leaf(&fake).await.is_ok());
-        assert_eq!(
-            fake.calls.load(Ordering::Relaxed),
-            0,
-            "rotate_leaf NOT called below the 2/3 threshold"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retries_a_transient_rotation_failure_then_succeeds() {
-        // Ample remaining validity (72h leaf at 2/3 age still has 24h left) — two
-        // transient failures must retry, not fail closed, and the identity must
-        // stay intact (expire_now NOT called).
-        let fake = FakeRotator::new(48 * 3600, 72 * 3600, 2);
-        assert!(maybe_rotate_leaf(&fake).await.is_ok());
-        assert_eq!(
-            fake.calls.load(Ordering::Relaxed),
-            3,
-            "2 failures + 1 success"
-        );
-        assert!(!fake.expired.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn sustained_rotation_failure_fails_closed() {
-        // A small fixed remaining-validity budget (5s) — retry_action's threshold
-        // (backoff+2) grows past it as `attempt` increases even though `remaining`
-        // itself never shrinks in this fake, so this always converges to
-        // FailClosed without needing to simulate elapsed wall-clock time.
-        let fake = FakeRotator::new(95, 100, u32::MAX);
-        let err = maybe_rotate_leaf(&fake).await.unwrap_err();
+    async fn spawn_before_mint_fails_closed() {
+        // Lease 0 (spawned before mint()) → expire immediately, no renew/rotate attempts.
+        let shared = Shared::new(0, 48 * 3600, 72 * 3600);
+        let probe = shared.clone();
+        let err = supervisor_loop(FakeDriver(shared)).await;
         assert!(matches!(err, VaultError::RenewalExpired));
+        assert!(probe.expired.load(Ordering::Relaxed));
+        assert_eq!(probe.renew_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(probe.rotate_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// THE codex round-4 P1 property: a persistently-failing leaf rotation must NOT
+    /// starve a due token renewal. The rotator fails EVERY call; renewal succeeds once
+    /// then fails (so the loop still terminates via the token's own FailClosed). We
+    /// assert renewal was attempted MULTIPLE times on its own deadline while rotation
+    /// kept failing — proving the two schedules are independent (no self-inflicted
+    /// outage). `start_paused` auto-advances virtual time so this runs instantly.
+    #[tokio::test(start_paused = true)]
+    async fn failing_rotation_does_not_starve_token_renewal() {
+        // lease 100 → renew at ~66s, hard expiry ~100s. Leaf at 2/3 of a 72h TTL: ample
+        // remaining validity, so rotation NEVER self-FailCloses — it just keeps failing
+        // and backing off, which must not block the token's renewal deadline.
+        let shared = Shared::new(100, 48 * 3600, 72 * 3600);
+        shared.rotate_fail_first.store(u32::MAX, Ordering::Relaxed); // rotation always fails
+        shared.renew_ok_budget.store(1, Ordering::Relaxed); // 1 renew Ok, then fail → token FailClosed
+        let probe = shared.clone();
+
+        let err = supervisor_loop(FakeDriver(shared)).await;
+        assert!(matches!(err, VaultError::RenewalExpired));
+        // The loop ended via the TOKEN's fail-closed (its budget), not the leaf's.
+        assert!(probe.expired.load(Ordering::Relaxed));
+        // Renewal was attempted on its own deadline (>= 2: the first Ok + at least one
+        // retry) DESPITE rotation failing every single wake — the anti-starvation proof.
         assert!(
-            fake.expired.load(Ordering::Relaxed),
-            "expire_now called on sustained failure"
+            probe.renew_calls.load(Ordering::Relaxed) >= 2,
+            "token renewal must be attempted on its own deadline even while rotation fails (got {})",
+            probe.renew_calls.load(Ordering::Relaxed)
         );
+        // And rotation really was failing repeatedly in the same window.
+        assert!(
+            probe.rotate_calls.load(Ordering::Relaxed) >= 2,
+            "the rotation was expected to fail repeatedly (got {})",
+            probe.rotate_calls.load(Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sustained_rotation_failure_fails_closed_independently() {
+        // Leaf with only 5s remaining validity (age 95 / ttl 100) → rotate_now fires and
+        // the retry budget is exhausted within a couple of attempts → leaf fail-closed,
+        // WITHOUT the token ever coming due (huge lease). Proves leaf rotation fails
+        // closed on its own schedule.
+        let shared = Shared::new(1_000_000, 95, 100);
+        shared.rotate_fail_first.store(u32::MAX, Ordering::Relaxed);
+        let probe = shared.clone();
+
+        let err = supervisor_loop(FakeDriver(shared)).await;
+        assert!(matches!(err, VaultError::RenewalExpired));
+        assert!(probe.expired.load(Ordering::Relaxed));
+        assert!(probe.rotate_calls.load(Ordering::Relaxed) >= 1);
+        assert_eq!(
+            probe.renew_calls.load(Ordering::Relaxed),
+            0,
+            "the token was never due — its renewal must not have been attempted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_rotation_succeeds_then_token_governs() {
+        // Rotation succeeds on the FIRST attempt (fresh leaf → far-future rotation
+        // deadline); the loop then terminates via the token's own fail-closed (renewal
+        // fails on the first attempt, short lease). Exercises the rotate_leaf Ok path and
+        // proves a successful rotation clears its schedule (rotate_leaf called exactly
+        // once, not busy-looped).
+        let shared = Shared::new(6, 48 * 3600, 72 * 3600);
+        shared.rotate_fail_first.store(0, Ordering::Relaxed); // succeeds immediately
+        shared.renew_ok_budget.store(0, Ordering::Relaxed); // renewal always fails → token FailClosed
+        let probe = shared.clone();
+
+        let err = supervisor_loop(FakeDriver(shared)).await;
+        assert!(matches!(err, VaultError::RenewalExpired));
+        assert!(probe.expired.load(Ordering::Relaxed));
+        assert_eq!(
+            probe.rotate_calls.load(Ordering::Relaxed),
+            1,
+            "a successful rotation must not be retried or busy-looped"
+        );
+        assert!(probe.renew_calls.load(Ordering::Relaxed) >= 1);
     }
 }

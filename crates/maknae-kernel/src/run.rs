@@ -36,6 +36,7 @@ use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -63,6 +64,14 @@ pub struct WhereCtx {
 }
 
 const COMPONENT: &str = "kernel";
+
+/// Bounded depth of the at-capacity audit offload channel (codex round-4 P2). The
+/// accept loop hands each capacity-denial audit record to a background drain task via a
+/// channel of this depth instead of awaiting the append+fsync inline — so slow/blocked
+/// audit storage can never serialize the accept / fast-close path (a held-permit DoS).
+/// Small and bounded: if it fills, the loop drops the record (the connection is STILL
+/// refused — the raw socket is already closed) rather than block, and counts the drop.
+const ATCAP_AUDIT_QUEUE_DEPTH: usize = 256;
 
 #[allow(clippy::too_many_arguments)]
 fn make_record(
@@ -462,6 +471,29 @@ pub async fn accept_loop<A, E>(
     // Shared so each spawned task can drive the bounded handshake off the accept path.
     let acceptor = Arc::new(acceptor);
     let mut handlers: JoinSet<()> = JoinSet::new();
+
+    // At-capacity audit offload (codex round-4 P2). A capacity denial has NO permit to
+    // spawn a per-connection task under, so the pre-fix code appended+fsync'd the audit
+    // record INLINE on the accept loop — slow audit storage would then serialize the
+    // fast-close path (a few held permits + repeated connections = DoS). Instead: a
+    // bounded channel drained by ONE background task does the append off the loop. The
+    // accept branch only `try_send`s (never awaits I/O); a full queue drops the record
+    // (the connection is already refused) and is counted.
+    let (atcap_audit_tx, mut atcap_audit_rx) =
+        mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
+    let atcap_audit_emit = Arc::clone(&emit);
+    let atcap_audit_task = tokio::spawn(async move {
+        while let Some(rec) = atcap_audit_rx.recv().await {
+            if let Err(e) = atcap_audit_emit.emit(&rec).await {
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on at-capacity denial (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                    rec.source.uid
+                );
+            }
+        }
+    });
+    let mut atcap_audit_dropped: u64 = 0;
+
     tokio::pin!(shutdown);
 
     loop {
@@ -483,20 +515,28 @@ pub async fn accept_loop<A, E>(
                         match Arc::clone(&sem).try_acquire_owned() {
                             // At capacity: fast-close + audit from the captured peer-creds
                             // (no handshake ran, so there is no verified URI-SAN yet). Do NOT
-                            // serve (anti-DoS); dropping `raw` closes the socket.
+                            // serve (anti-DoS). Drop `raw` IMMEDIATELY to close the socket, then
+                            // hand the audit record to the BOUNDED background drain (P2): the
+                            // accept loop must NEVER await the append+fsync here — with no permit
+                            // to spawn under, an inline await would let slow audit storage
+                            // serialize the fast-close path (held-permit DoS). `try_send` is
+                            // non-blocking; a full queue drops the record (connection already
+                            // refused) rather than block, and is counted/logged.
                             Err(_) => {
+                                drop(raw);
                                 let rec = make_record(
                                     "connection", &wctx.host, &wctx.socket, peer_creds.uid,
                                     peer_creds.gid, peer_creds.pid, None, session_id, 1,
                                     "connect", "deny", "at capacity", "unauthorized", &wctx.au3_1,
                                 );
-                                if let Err(e) = emit.emit(&rec).await {
+                                if let Err(err) = atcap_audit_tx.try_send(rec) {
+                                    atcap_audit_dropped = atcap_audit_dropped.saturating_add(1);
                                     eprintln!(
-                                        "maknaed: AUDIT WRITE FAILED on accept-reject (at capacity) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                                        "maknaed: at-capacity audit offload {} for peer_uid={} — connection still refused, record dropped (total dropped: {atcap_audit_dropped}): {err}",
+                                        match err { mpsc::error::TrySendError::Full(_) => "queue full", mpsc::error::TrySendError::Closed(_) => "channel closed" },
                                         peer_creds.uid
                                     );
                                 }
-                                drop(raw);
                             }
                             Ok(permit) => {
                                 let acceptor = Arc::clone(&acceptor);
@@ -555,6 +595,17 @@ pub async fn accept_loop<A, E>(
 
     // Graceful shutdown: stop accepting (done — we broke the loop), drain in-flight.
     while handlers.join_next().await.is_some() {}
+
+    // Drain the bounded at-capacity audit offload (P2): drop the sender so the drain
+    // task's `recv()` returns `None` once the queue empties, then await it. The wait is
+    // BOUNDED — at most `ATCAP_AUDIT_QUEUE_DEPTH` records remain to append.
+    drop(atcap_audit_tx);
+    let _ = atcap_audit_task.await;
+    if atcap_audit_dropped > 0 {
+        eprintln!(
+            "maknaed: at-capacity audit offload dropped {atcap_audit_dropped} record(s) over the daemon's life (audit queue saturation)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
