@@ -117,9 +117,24 @@ async fn round_trip(
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
 ) -> Result<bool, String> {
-    let mut stream = PlaneConnector::connect(&transport.socket_path, client, ca)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
+    // process that accepts the Unix socket but never completes TLS must not hang the CLI
+    // forever (it still fails non-zero, and `execute` still revokes the token on this
+    // post-mint path — a handshake timeout is a post-mint failure like any other).
+    let connect = tokio::time::timeout(
+        std::time::Duration::from_millis(transport.handshake_timeout_ms),
+        PlaneConnector::connect(&transport.socket_path, client, ca),
+    )
+    .await;
+    let mut stream = match connect {
+        Err(_elapsed) => {
+            return Err(format!(
+                "TLS handshake to the daemon timed out after {}ms",
+                transport.handshake_timeout_ms
+            ))
+        }
+        Ok(r) => r.map_err(|e| e.to_string())?,
+    };
 
     let request = Request {
         protocol_version: PROTOCOL_VERSION,
