@@ -1,19 +1,23 @@
 //! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (response-wrapped
 //! SecretID) → P-384 CSR → `pki/sign` → memory-only leaf. The identity is Arc-backed
-//! (cheap snapshot; key wiped on drop). Renewal runs on a shared handle so serving and
-//! renewal can proceed concurrently.
+//! (cheap snapshot; key wiped on drop). The credential supervisor (`spawn_supervisor`,
+//! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
+//! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::auth::AppRoleAuth;
 use crate::{
-    assert_fips_provider, generate_plane_csr, load_ca_pin, load_vault_config,
-    verify::verify_plane_uri_san, Plane, VaultError,
+    assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
+    verify::verify_plane_uri_san, Plane, VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
+use maknae_config::{load_config, Document, SectionSpec};
 use rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
+use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 use zeroize::Zeroizing;
 
 struct IdentityInner {
@@ -82,6 +86,13 @@ pub struct PlaneClient {
     /// the CLI). Stored/cleared IN THE SAME critical section as the identity write so the
     /// resolver never lags the identity.
     cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
+    /// The current leaf's `NotBefore`, unix seconds (0 until first mint) — feeds the
+    /// leaf-rotation loop's `leaf_age_secs` off the ACTUAL issued validity window
+    /// (mirrors `lease_secs` for the token; avoids drifting from a hardcoded TTL
+    /// constant if the Vault role's `leaf_ttl_seconds` changes).
+    leaf_issued_at: Arc<AtomicU64>,
+    /// The current leaf's TTL in seconds (`NotAfter - NotBefore`), 0 until first mint.
+    leaf_ttl_secs: Arc<AtomicU64>,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -146,13 +157,85 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>, VaultError> {
     Ok(parsed.contents)
 }
 
+/// Parse the leaf's actual issued validity window (unix seconds) — `(NotBefore,
+/// NotAfter - NotBefore)`. Drives the rotation loop's `leaf_age_secs`/`leaf_ttl_secs`
+/// off what Vault ACTUALLY issued rather than a hardcoded assumption (the Terraform
+/// `leaf_ttl_seconds` var could change without a client rebuild).
+fn leaf_validity_unix(pem: &str) -> Result<(u64, u64), VaultError> {
+    let der = pem_to_der(pem)?;
+    let (_, cert) = X509Certificate::from_der(&der)
+        .map_err(|_| VaultError::Pem("signed leaf: malformed certificate (validity)"))?;
+    let validity = cert.validity();
+    let not_before = validity.not_before.timestamp();
+    let not_after = validity.not_after.timestamp();
+    if not_before < 0 || not_after <= not_before {
+        return Err(VaultError::Pem("signed leaf: invalid validity window"));
+    }
+    Ok((not_before as u64, (not_after - not_before) as u64))
+}
+
+/// CSR → `pki/sign` → returned-leaf SAN self-check. A free fn (not `&self`) so it has
+/// exactly ONE implementation shared by `PlaneClient::sign_leaf` (used by `mint`) and
+/// `SupervisorCtx::rotate_leaf` (the leaf-rotation loop's mutator) — both need
+/// identical CSR/sign/verify logic, just against a different already-authenticated
+/// `VaultClient` handle.
+async fn sign_leaf_for(
+    plane: Plane,
+    deployment_id: &str,
+    pki_int_mount: &str,
+    client: &VaultClient,
+) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
+    let (key_der, csr_pem) = generate_plane_csr(plane, deployment_id)?;
+    let resp = vaultrs::pki::cert::ca::sign(
+        client,
+        pki_int_mount,
+        plane.pki_sign_role(),
+        &csr_pem,
+        "", // empty CN — the role sets require_cn=false / use_csr_common_name=false
+        None,
+    )
+    .await
+    .map_err(|e| VaultError::Sign(e.to_string()))?;
+    // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
+    let leaf_der = pem_to_der(&resp.certificate)?;
+    verify_plane_uri_san(&leaf_der, plane, deployment_id)
+        .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
+    Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
+}
+
 impl PlaneClient {
-    /// Build from a config dir. **LOAD-BEARING ordering:** `assert_fips_provider()`
-    /// runs first — before the Vault client is built — so reqwest reads the FIPS
-    /// default (§6.1), never falling back to ring. Fail-closed throughout.
+    /// Build from a config dir, loading the config under a `vault`-only registry.
+    /// Retained for back-compat (the gated live-smoke tests). A process that ALSO reads
+    /// other sections (the daemon: `core`+`lake`+`vault`+`transport`+`audit`; the CLI:
+    /// `core`+`vault`+`transport`) must instead load the config ONCE with every section
+    /// registered and call [`PlaneClient::from_document`] on that shared document — a
+    /// per-call `vault`-only reload here would reject those sections as `UnknownSection`
+    /// (the P1-A/P1-B fix). File I/O only; the FIPS assertion is in `from_document`.
     pub fn from_config_dir(dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+        let doc = load_config(
+            dir,
+            &[SectionSpec {
+                name: VAULT_SECTION.to_string(),
+                required: true,
+            }],
+        )?;
+        Self::from_document(&doc, dir, plane)
+    }
+
+    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir. The
+    /// coherent-config entrypoint (P1-A/P1-B): the daemon/CLI load their config once
+    /// with the full set of sections each uses and pass the parsed document here, so a
+    /// realistic combined config is accepted while a genuinely-unknown section is still
+    /// rejected at the single load (fail-closed on unknown preserved). `dir` still
+    /// supplies the non-section credential files (AppRole id / wrapped SecretID / CA
+    /// pins / Vault CA), which are read from disk, not the document.
+    ///
+    /// **LOAD-BEARING ordering:** `assert_fips_provider()` runs first — before the Vault
+    /// client is built — so reqwest reads the FIPS default (§6.1), never falling back to
+    /// ring. Fail-closed throughout.
+    pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
         assert_fips_provider()?;
-        let cfg = load_vault_config(dir)?;
+        let cfg = vault_config_from_document(doc)?;
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
         let prefix = plane.config_prefix();
@@ -161,9 +244,21 @@ impl PlaneClient {
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
         let wrapped_secret_id = read_secret_credential(&dir.join(format!("{prefix}-secret-id")))?;
         let vault_ca = dir.join("tls").join("vault-ca.crt");
+        // A HARD per-request HTTP timeout on every Vault operation this client ever
+        // makes (login/unwrap/mint/sign, renew_self, revoke_self). vaultrs defaults
+        // `timeout` to None — an UNBOUNDED reqwest client — so a hung Vault connection
+        // (network drop with no RST, a stalled LB) would otherwise wedge whatever
+        // awaits it: the credential supervisor's renew/rotate (silently zombifying the
+        // daemon — the supervisor never returns, so the run-loop's supervisor-exit
+        // select never fires and the leaf just expires), boot-time `mint()`, and the
+        // best-effort `revoke_self` on the shutdown path. 30s is far above any healthy
+        // Vault round-trip and far below every credential validity window; a timeout
+        // surfaces as an ordinary retryable error to the supervisor's
+        // retry-within-window logic (ADR-0018).
         let settings = VaultClientSettingsBuilder::default()
             .address(cfg.addr)
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
+            .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
         let client = VaultClient::new(settings)
@@ -181,6 +276,8 @@ impl PlaneClient {
             identity: Arc::new(RwLock::new(None)),
             lease_secs: Arc::new(AtomicU64::new(0)),
             cert_sink: Arc::new(RwLock::new(None)),
+            leaf_issued_at: Arc::new(AtomicU64::new(0)),
+            leaf_ttl_secs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -225,8 +322,9 @@ impl PlaneClient {
         let mut client = self.client.lock().await;
         let token = self.auth.authenticate(&client).await?;
         client.set_token(&token.client_token);
-        // Record the actual lease so spawn_renewal renews on the real TTL; surface a
-        // non-renewable token (a role misconfig) rather than silently failing later.
+        // Record the actual lease so the supervisor loop (spawn_supervisor) renews on
+        // the real TTL; surface a non-renewable token (a role misconfig) rather than
+        // silently failing later.
         self.lease_secs
             .store(token.lease_duration, Ordering::Relaxed);
         if !token.renewable {
@@ -246,6 +344,17 @@ impl PlaneClient {
                 return Err(e);
             }
         };
+        // Record the ACTUAL issued validity window so the leaf-rotation loop tracks
+        // it rather than a hardcoded assumption (mirrors lease_secs.store above).
+        let (leaf_issued_at, leaf_ttl_secs) = match leaf_validity_unix(&leaf_pem) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+                return Err(e);
+            }
+        };
+        self.leaf_issued_at.store(leaf_issued_at, Ordering::Relaxed);
+        self.leaf_ttl_secs.store(leaf_ttl_secs, Ordering::Relaxed);
 
         let id = PlaneIdentity(Arc::new(IdentityInner {
             leaf_pem,
@@ -289,27 +398,13 @@ impl PlaneClient {
     }
 
     /// CSR → `pki/sign` → returned-leaf SAN self-check. Split out so `mint` has a single
-    /// post-auth cleanup point (revoke-on-failure).
+    /// post-auth cleanup point (revoke-on-failure). Delegates to the free `sign_leaf_for`
+    /// (shared with `SupervisorCtx::rotate_leaf`).
     async fn sign_leaf(
         &self,
         client: &VaultClient,
     ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
-        let (key_der, csr_pem) = generate_plane_csr(self.plane, &self.deployment_id)?;
-        let resp = vaultrs::pki::cert::ca::sign(
-            client,
-            &self.pki_int_mount,
-            self.plane.pki_sign_role(),
-            &csr_pem,
-            "", // empty CN — the role sets require_cn=false / use_csr_common_name=false
-            None,
-        )
-        .await
-        .map_err(|e| VaultError::Sign(e.to_string()))?;
-        // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
-        let leaf_der = pem_to_der(&resp.certificate)?;
-        verify_plane_uri_san(&leaf_der, self.plane, &self.deployment_id)
-            .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
-        Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
+        sign_leaf_for(self.plane, &self.deployment_id, &self.pki_int_mount, client).await
     }
 
     /// The deployment id (crate-internal — the verifier needs it to compute the expected
@@ -330,57 +425,32 @@ impl PlaneClient {
             .clone()
     }
 
-    /// Spawn the background token-renewal loop on a SHARED handle (not `&mut self`, so
-    /// serving and renewal proceed concurrently). **MUST be called after a successful
-    /// `mint()`** — there is no token to renew before minting. If called before (lease
-    /// still 0), the task fails closed immediately (`RenewalExpired`) rather than
-    /// guessing an interval. The handle resolves to `RenewalExpired` when the token can
-    /// no longer be renewed (token_max_ttl reached / revoked); at that point the shared
-    /// identity is CLEARED so `current_identity()` returns `None` (fail closed) whether or
-    /// not the caller observes the handle — re-authenticate to mint a fresh leaf.
-    pub fn spawn_renewal(&self) -> tokio::task::JoinHandle<VaultError> {
-        let client = Arc::clone(&self.client);
-        let lease_secs = Arc::clone(&self.lease_secs);
-        let identity = Arc::clone(&self.identity);
-        let cert_sink = Arc::clone(&self.cert_sink);
-        // Once renewal can no longer continue, the leaf's usefulness is bounded by the
-        // token's remaining TTL — so INVALIDATE the identity here rather than trusting the
-        // caller to observe the join handle. current_identity() then returns None (fail
-        // closed) even if nobody is watching the handle. The resolver's cert slot is
-        // cleared in lock-step so a bound listener also stops presenting a leaf.
-        let expire = move || {
-            // Hold the identity write guard across BOTH mutations so a racing mint (which
-            // also takes identity.write()) cannot interleave into a torn state, and clear
-            // the resolver slot FIRST so a bound listener stops presenting a leaf at or
-            // before the identity clears (maximal fail-closed retirement).
-            let mut guard = identity.write().expect("identity lock poisoned");
-            if let Some(slot) = cert_sink.read().expect("cert_sink lock poisoned").as_ref() {
-                slot.store(None);
-            }
-            *guard = None;
-            VaultError::RenewalExpired
-        };
-        tokio::spawn(async move {
-            loop {
-                // Fail closed if spawned before mint() — no token to renew, and we must
-                // never guess an interval that could outlast a short lease.
-                let lease = lease_secs.load(Ordering::Relaxed);
-                if lease == 0 {
-                    return expire();
-                }
-                // Renew at ~2/3 of the token's ACTUAL lease — always STRICTLY below the
-                // lease so even a sub-60s TTL renews before it expires.
-                let wait = (lease * 2 / 3).max(1);
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                let c = client.lock().await;
-                // Update the lease from THIS renewal's response — near token_max_ttl Vault
-                // shortens the lease, so the next delay must track the current one.
-                match vaultrs::token::renew_self(&*c, None).await {
-                    Ok(auth) => lease_secs.store(auth.lease_duration, Ordering::Relaxed),
-                    Err(_) => return expire(),
-                }
-            }
-        })
+    /// Build a cheap, `'static`-safe handle to this client's shareable pieces — used
+    /// by `spawn_supervisor`'s background task, which must outlive the `&self` borrow
+    /// it's called with (mirrors the old `spawn_renewal`'s per-field `Arc::clone`
+    /// pattern, generalized so `rotate_leaf`'s lock-discipline-critical code has
+    /// exactly ONE implementation, shared by `PlaneClient::rotate_leaf` and the
+    /// supervisor loop in `supervisor_run.rs`).
+    pub(crate) fn supervisor_ctx(&self) -> SupervisorCtx {
+        SupervisorCtx {
+            client: Arc::clone(&self.client),
+            identity: Arc::clone(&self.identity),
+            cert_sink: Arc::clone(&self.cert_sink),
+            lease_secs: Arc::clone(&self.lease_secs),
+            leaf_issued_at: Arc::clone(&self.leaf_issued_at),
+            leaf_ttl_secs: Arc::clone(&self.leaf_ttl_secs),
+            plane: self.plane,
+            deployment_id: self.deployment_id.clone(),
+            pki_int_mount: self.pki_int_mount.clone(),
+        }
+    }
+
+    /// Re-mint the plane leaf on the CURRENT valid token (ADR-0018 Decision 3's
+    /// rotation mutator) — thin delegating wrapper. See `SupervisorCtx::rotate_leaf`
+    /// for the lock-discipline contract (shared with the supervisor loop so there is
+    /// exactly one implementation of this security-critical path).
+    pub async fn rotate_leaf(&self) -> Result<(), VaultError> {
+        self.supervisor_ctx().rotate_leaf().await
     }
 
     /// Best-effort revoke on shutdown; failure is logged, never blocks exit.
@@ -405,6 +475,145 @@ impl PlaneClient {
         if let Err(e) = vaultrs::token::revoke_self(&*client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
         }
+    }
+}
+
+/// A cheap, `'static`-safe handle to a `PlaneClient`'s shareable pieces (built by
+/// `PlaneClient::supervisor_ctx`) — the credential supervisor's I/O surface
+/// (`supervisor_run.rs`, T3). All fields are `Arc`-backed except two small owned
+/// `String`s (cloned once at construction); every method here mirrors the lock
+/// discipline reviewed in `PlaneClient::mint`/`expire`/`shutdown`.
+pub(crate) struct SupervisorCtx {
+    client: Arc<Mutex<VaultClient>>,
+    identity: Arc<RwLock<Option<PlaneIdentity>>>,
+    cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
+    lease_secs: Arc<AtomicU64>,
+    leaf_issued_at: Arc<AtomicU64>,
+    leaf_ttl_secs: Arc<AtomicU64>,
+    plane: Plane,
+    deployment_id: String,
+    pki_int_mount: String,
+}
+
+impl SupervisorCtx {
+    /// The last-known token lease (seconds); 0 before the first mint.
+    pub(crate) fn current_lease_secs(&self) -> u64 {
+        self.lease_secs.load(Ordering::Relaxed)
+    }
+
+    /// `(leaf_age_secs, leaf_ttl_secs)` off the ACTUAL issued validity window —
+    /// `rotate_now`'s two inputs.
+    pub(crate) fn leaf_age_and_ttl_secs(&self) -> (u64, u64) {
+        let issued = self.leaf_issued_at.load(Ordering::Relaxed);
+        let ttl = self.leaf_ttl_secs.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        (now.saturating_sub(issued), ttl)
+    }
+
+    /// One token-renewal attempt against the CURRENT token (no re-auth — `mint()`
+    /// must have run first). Updates `lease_secs` from THIS renewal's response on
+    /// success (Vault may shorten the lease near `token_max_ttl`) and returns the
+    /// fresh lease so the caller can compute the next cadence / retry budget.
+    pub(crate) async fn renew_token_once(&self) -> Result<u64, VaultError> {
+        let c = self.client.lock().await;
+        let auth = vaultrs::token::renew_self(&*c, None)
+            .await
+            .map_err(|e| VaultError::Renew(e.to_string()))?;
+        self.lease_secs
+            .store(auth.lease_duration, Ordering::Relaxed);
+        Ok(auth.lease_duration)
+    }
+
+    /// Fail-closed retirement: clear the resolver slot (if bound) THEN the identity,
+    /// under a single identity WRITE lock so a racing mint (which also takes
+    /// `identity.write()`) cannot interleave into a torn state. Mirrors
+    /// `PlaneClient::shutdown` / the old `spawn_renewal`'s `expire` closure. Used when
+    /// the renewal retry budget is exhausted (`RetryAction::FailClosed`) and when
+    /// leaf-rotation fails sustainedly.
+    pub(crate) fn expire_now(&self) -> VaultError {
+        let mut guard = self.identity.write().expect("identity lock poisoned");
+        if let Some(slot) = self
+            .cert_sink
+            .read()
+            .expect("cert_sink lock poisoned")
+            .as_ref()
+        {
+            slot.store(None);
+        }
+        *guard = None;
+        VaultError::RenewalExpired
+    }
+
+    /// Re-mint the plane leaf on the CURRENT valid token — the leaf-rotation loop's
+    /// mutator (ADR-0018 Decision 3).
+    ///
+    /// **Lock discipline mirrors `PlaneClient::mint` exactly (client.rs `mint`,
+    /// commit block at :272-273 in the original layout):** the async `pki/sign` call
+    /// (`sign_leaf_for`) runs to completion with NO identity lock held. THEN a
+    /// synchronous block takes `identity.write()` and installs the new leaf —
+    /// `*guard = Some(new_identity); slot.store(Some(new_ck));`, identity-then-slot,
+    /// mint's own order — with **NOTHING awaited inside that block**. Holding the std
+    /// `RwLock` write guard across the sign `.await` is forbidden here: it would let
+    /// one in-flight rotation block every OTHER thread that needs the identity lock
+    /// (including the TLS resolver's hot-path reads and a concurrent `mint`/`expire`)
+    /// for the full round-trip to Vault, and — because this is `#![forbid(unsafe_code)]`
+    /// with no `unsafe` escape hatch and no compiler lint that catches "sync guard
+    /// held across an await point" — the only enforcement is this comment plus code
+    /// review; the structure below (sign happens entirely BEFORE the `.write()` call
+    /// is even taken) makes the mistake syntactically impossible to reintroduce by
+    /// accident, since the guard variable doesn't exist yet during the `.await`.
+    ///
+    /// On failure the CURRENT identity/token are left untouched (fail-safe, not
+    /// fail-closed): the token here is REUSED, not newly issued like `mint()`'s, so
+    /// unlike `mint()` there is nothing to revoke. The supervisor loop
+    /// (`supervisor_run.rs`) retries rotation within the same retry-window discipline
+    /// as token renewal and falls back to `expire_now()` only on SUSTAINED failure.
+    pub(crate) async fn rotate_leaf(&self) -> Result<(), VaultError> {
+        let client = self.client.lock().await;
+        let (key_der, leaf_pem, chain_pem) = sign_leaf_for(
+            self.plane,
+            &self.deployment_id,
+            &self.pki_int_mount,
+            &client,
+        )
+        .await?;
+        let (issued_at, ttl_secs) = leaf_validity_unix(&leaf_pem)?;
+
+        let id = PlaneIdentity(Arc::new(IdentityInner {
+            leaf_pem,
+            key_der,
+            chain_pem,
+        }));
+        // Commit under the identity WRITE lock — synchronous only, NO `.await`
+        // inside. identity-then-slot order (mint's own order).
+        {
+            let mut guard = self.identity.write().expect("identity lock poisoned");
+            let sink = self
+                .cert_sink
+                .read()
+                .expect("cert_sink lock poisoned")
+                .clone();
+            match sink {
+                Some(slot) => match crate::tls::certified_key_from_identity(&id) {
+                    Ok(ck) => {
+                        *guard = Some(id);
+                        slot.store(Some(ck));
+                    }
+                    // Do NOT commit identity on a build failure — the OLD leaf stays
+                    // live; nothing to revoke (the token is reused, not newly issued).
+                    Err(e) => return Err(e),
+                },
+                None => {
+                    *guard = Some(id);
+                }
+            }
+        }
+        self.leaf_issued_at.store(issued_at, Ordering::Relaxed);
+        self.leaf_ttl_secs.store(ttl_secs, Ordering::Relaxed);
+        Ok(())
     }
 }
 

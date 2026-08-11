@@ -61,6 +61,23 @@ files = [
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
   "crates/maknae-vault/src/fips.rs",
+  # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
+  # + config-range + audit-canonicalization + connection/verb decision seams.
+  # Each holds fail-closed decision logic per the T1 line-drawing rule (a
+  # missed decode-version check, an out-of-range config field silently
+  # accepted, a mis-sorted audit record, or a swapped authz/dispatch arm all
+  # weaken the enforced posture). Each in [t1].files ONLY (own 95% floor; NOT
+  # ratchet_cohort — the ratchet is the security-seam + config-loading-core
+  # cohort, ADR-0016 §4).
+  "crates/maknae-proto/src/wire.rs",
+  "crates/maknae-proto/src/frame.rs",
+  "crates/maknae-config/src/transport.rs",
+  "crates/maknae-config/src/audit_cfg.rs",
+  "crates/maknae-audit-append/src/record.rs",
+  "crates/maknae-audit-append/src/session.rs",
+  "crates/maknae-kernel/src/authz.rs",
+  "crates/maknae-kernel/src/handler.rs",
+  "crates/maknae-vault/src/supervisor.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -68,7 +85,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append"]
 
 [t2]
 floor_production_region = 90
@@ -234,10 +251,45 @@ why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
 path = "crates/maknae-vault/src/transport_tests.rs"
 why = "in-process mTLS negative suite (Stage 2, Task 10); #[cfg(test)] unit module, report-only test code"
 
-# [[exception]] — documented-not-tested (none at adoption). Removes every code
-# region whose line_start falls within [anchor, end_anchor] from numerator AND
-# denominator. Fail-closed: zero/multi-match anchors, zero-region spans,
-# all-covered (stale) spans, blank why. Never a dodge for testable logic.
+# Stage-3a "it responds" cohort (Task 9), T3 half: I/O-bound or Display/Error-
+# only files paired with the T1 decision logic above.
+[[t3]]
+path = "crates/maknae-proto/src/error.rs"
+why = "Display/Error declarations only (ProtoCodecError/ProtoFrameError); no decision logic — the decode/frame decisions live in wire.rs/frame.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-audit-append/src/sink.rs"
+why = "AuditSink open/append — file-open + blocking-write I/O; the record shape/canonicalization it appends is record.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-audit-append/src/error.rs"
+why = "AuditError enum + Display/Error declarations only; no decision logic"
+
+[[t3]]
+path = "crates/maknae-kernel/src/groupres.rs"
+why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; the pure admission decision it feeds is authz.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-kernel/src/run.rs"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-vault/src/supervisor_run.rs"
+why = "credential-supervisor I/O driver; the decisions it drives (retry_action/rotate_now) stay in supervisor.rs (T1), NOT excluded. Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "bins/maknae/src/cli.rs"
+why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
+
+# [[exception]] — documented-not-tested. Removes every code region whose
+# line_start falls within [anchor, end_anchor] from numerator AND denominator.
+# Fail-closed: zero/multi-match anchors, zero-region spans, all-covered
+# (stale) spans, blank why. Never a dodge for testable logic.
+[[exception]]
+path = "crates/maknae-proto/src/frame.rs"
+anchor = "map_err(|_| ProtoFrameError::Oversize {"
+end_anchor = "max: u32::MAX as usize,"
+why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds body by transport.frame_max_bytes (<=1 MiB, config.rs range-enforced), never by this defensive cap. The Io error paths on the same function (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
 
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.

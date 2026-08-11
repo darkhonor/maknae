@@ -1,6 +1,12 @@
-//! maknaed boot exit-code contract: a good config → exit 0; a bad/absent config → exit 1.
+//! maknaed startup exit-code contract. A bad/absent config → exit 1 (fail-closed at the
+//! config gate). A GOOD config now advances the full run-loop startup (FIPS install +
+//! assert → boot → audit sink → plane-credential mint), so in CI — where there is no live
+//! Vault — it also fails closed (exit 1), but PAST the FIPS + config gates: the daemon no
+//! longer exits 0 on boot because a successful start begins serving forever. The
+//! `good_config_passes_gates_then_fails_without_vault` test pins that distinction on stderr.
+//!
 //! Unix-only: the boot path enforces Unix permissions (non-Unix → PermissionsUnsupported),
-//! so these exit-0 assertions are meaningful only on Unix. On non-Unix this file is empty.
+//! so these assertions are meaningful only on Unix. On non-Unix this file is empty.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -31,7 +37,7 @@ fn put(dir: &Path, name: &str, body: &str, mode: u32) {
 }
 
 #[test]
-fn good_config_exits_zero() {
+fn good_config_passes_gates_then_fails_without_vault() {
     let d = new_dir("good");
     put(
         &d.0,
@@ -39,8 +45,25 @@ fn good_config_exits_zero() {
         "core:\n  identity:\n    name: t\n",
         0o640,
     );
-    let status = Command::new(bin()).arg(&d.0).status().unwrap();
-    assert_eq!(status.code(), Some(0), "good config should boot (exit 0)");
+    let out = Command::new(bin()).arg(&d.0).output().unwrap();
+    // No live Vault in CI → fail closed (the daemon refuses to serve without a plane cert).
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "good config must fail closed without a live Vault (exit 1)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Proof the good config advanced PAST the FIPS gate (provider installed + FIPS) and PAST
+    // config validation — i.e. it failed at the credential/serving phase, not at a gate.
+    assert!(
+        !stderr.contains("FIPS provider not active"),
+        "the FIPS provider must install and pass on this build; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.to_lowercase().contains("unknown section")
+            && !stderr.to_lowercase().contains("ceiling"),
+        "a good config must clear config validation; stderr: {stderr}"
+    );
 }
 
 #[test]

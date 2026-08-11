@@ -18,6 +18,8 @@ mod fips_glue;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod supervisor;
+mod supervisor_run;
 mod tls;
 mod verify;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
@@ -34,15 +36,20 @@ mod transport_tests;
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity};
-pub use config::{load_vault_config, validate_deployment_id, VaultConfig};
+pub use config::{
+    load_vault_config, validate_deployment_id, vault_config_from_document, VaultConfig,
+    VAULT_SECTION,
+};
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
-pub use fips_glue::assert_fips_provider;
+pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(unix)]
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 #[cfg(unix)]
-pub use stream::{AuthenticatedStream, PlaneConnector, PlaneListener};
+pub use stream::{
+    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
+};
 pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]
