@@ -5,10 +5,11 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::auth::AppRoleAuth;
 use crate::{
-    assert_fips_provider, generate_plane_csr, load_ca_pin, load_vault_config,
-    verify::verify_plane_uri_san, Plane, VaultError,
+    assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
+    verify::verify_plane_uri_san, Plane, VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
+use maknae_config::{load_config, Document, SectionSpec};
 use rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -203,12 +204,38 @@ async fn sign_leaf_for(
 }
 
 impl PlaneClient {
-    /// Build from a config dir. **LOAD-BEARING ordering:** `assert_fips_provider()`
-    /// runs first — before the Vault client is built — so reqwest reads the FIPS
-    /// default (§6.1), never falling back to ring. Fail-closed throughout.
+    /// Build from a config dir, loading the config under a `vault`-only registry.
+    /// Retained for back-compat (the gated live-smoke tests). A process that ALSO reads
+    /// other sections (the daemon: `core`+`lake`+`vault`+`transport`+`audit`; the CLI:
+    /// `core`+`vault`+`transport`) must instead load the config ONCE with every section
+    /// registered and call [`PlaneClient::from_document`] on that shared document — a
+    /// per-call `vault`-only reload here would reject those sections as `UnknownSection`
+    /// (the P1-A/P1-B fix). File I/O only; the FIPS assertion is in `from_document`.
     pub fn from_config_dir(dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+        let doc = load_config(
+            dir,
+            &[SectionSpec {
+                name: VAULT_SECTION.to_string(),
+                required: true,
+            }],
+        )?;
+        Self::from_document(&doc, dir, plane)
+    }
+
+    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir. The
+    /// coherent-config entrypoint (P1-A/P1-B): the daemon/CLI load their config once
+    /// with the full set of sections each uses and pass the parsed document here, so a
+    /// realistic combined config is accepted while a genuinely-unknown section is still
+    /// rejected at the single load (fail-closed on unknown preserved). `dir` still
+    /// supplies the non-section credential files (AppRole id / wrapped SecretID / CA
+    /// pins / Vault CA), which are read from disk, not the document.
+    ///
+    /// **LOAD-BEARING ordering:** `assert_fips_provider()` runs first — before the Vault
+    /// client is built — so reqwest reads the FIPS default (§6.1), never falling back to
+    /// ring. Fail-closed throughout.
+    pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
         assert_fips_provider()?;
-        let cfg = load_vault_config(dir)?;
+        let cfg = vault_config_from_document(doc)?;
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
         let prefix = plane.config_prefix();

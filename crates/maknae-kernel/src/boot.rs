@@ -7,6 +7,7 @@ use maknae_config::{
     ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec,
     Value, AUDIT_SECTION, TRANSPORT_SECTION,
 };
+use maknae_vault::VAULT_SECTION;
 use std::path::Path;
 
 /// The reserved, inert extension section for Maknae's own long-term-memory
@@ -32,21 +33,39 @@ impl BootConfig {
         &self.ceiling
     }
 
+    /// The full loaded document — handed to `PlaneClient::from_document` so the daemon
+    /// loads its config ONCE (this boot, registering every section it uses) instead of
+    /// the plane client re-loading under a `vault`-only registry that would reject
+    /// boot's `lake`/`transport`/`audit` sections as `UnknownSection` (P1-A).
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
     /// The coarse ingest posture derived from the ceiling.
     pub fn ingest_posture(&self) -> IngestPosture {
         self.ceiling.ingest_posture()
     }
 }
 
-/// Boot the kernel over Maknae's config directory: load the config (registering the
-/// reserved `lake` section; `core` is auto-registered), read the `core` ceiling, and
-/// return the assembled `BootConfig`. Fail-closed: any `ConfigError` short-circuits.
+/// Boot the kernel over Maknae's config directory: load the config ONCE with every
+/// section the daemon uses registered (`core` is auto-registered; `lake`+`vault`+
+/// `transport`+`audit` as optional extensions), read the `core` ceiling, and return the
+/// assembled `BootConfig`. The `vault` block is registered here — rather than re-loaded
+/// later under a `vault`-only registry — so the SAME document boots the kernel AND backs
+/// `PlaneClient::from_document`; a realistic combined config loads coherently while a
+/// genuinely-unknown section still fails closed with `UnknownSection` (P1-A).
+/// Fail-closed: any `ConfigError` short-circuits.
 pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
-    // The run-loop (Task 7) parses `transport`/`audit`; register them as optional so a
-    // config declaring either loads instead of hard-failing with `UnknownSection`.
+    // `vault` is registered optional (not required) so the existing minimal-config boot
+    // tests — and any core-only deployment — still load; the daemon's actual dependence
+    // on a vault block fails closed later at `from_document`/`mint` (MissingKey).
     let specs = [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: VAULT_SECTION.to_string(),
             required: false,
         },
         SectionSpec {
@@ -163,6 +182,57 @@ mod tests {
     fn unknown_section_refused() {
         let d = new_dir("unknown");
         put(&d.0, "maknae.yaml", "mystery:\n  a: 1\n", 0o640);
+        assert!(matches!(
+            boot(&d.0),
+            Err(maknae_config::ConfigError::UnknownSection { .. })
+        ));
+    }
+
+    // A realistic combined config (core + vault + transport + audit) must boot AND
+    // carry every section — the P1-A gap: the old boot registry omitted `vault`, so a
+    // real /etc/maknae config was rejected with UnknownSection before the daemon could
+    // start. The vault block must parse out of the SAME booted document that
+    // `PlaneClient::from_document` consumes.
+    #[cfg(unix)]
+    #[test]
+    fn combined_core_vault_transport_audit_boots() {
+        let d = new_dir("combined");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\n  identity:\n    name: t\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: /run/maknae/maknaed.sock\n\
+             audit:\n  path: /var/log/maknae/audit.jsonl\n",
+            0o640,
+        );
+        let cfg = boot(&d.0).expect("combined config boots");
+        assert!(cfg.section("vault").is_some());
+        assert!(cfg.section("transport").is_some());
+        assert!(cfg.section("audit").is_some());
+        // The booted document backs the plane client: prove the vault section parses
+        // out of it (the coherence the daemon relies on to reach mint()).
+        let vc = maknae_vault::vault_config_from_document(cfg.document())
+            .expect("vault parses from the booted document");
+        assert_eq!(vc.addr, "https://v.example:8200");
+        assert_eq!(vc.deployment_id, "dev-01");
+    }
+
+    // A genuinely-unknown section still fails closed EVEN alongside the now-accepted
+    // combined sections — the fail-closed-on-unknown security property is preserved.
+    #[cfg(unix)]
+    #[test]
+    fn combined_config_with_a_bogus_section_still_refused() {
+        let d = new_dir("combined_bogus");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: /run/maknae/maknaed.sock\n\
+             mystery:\n  a: 1\n",
+            0o640,
+        );
         assert!(matches!(
             boot(&d.0),
             Err(maknae_config::ConfigError::UnknownSection { .. })
