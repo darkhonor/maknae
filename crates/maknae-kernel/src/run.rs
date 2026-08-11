@@ -50,6 +50,12 @@ use crate::handler::{build_whoami, dispatch_verb, may_respond, Dispatch};
 pub struct WhereCtx {
     pub host: String,
     pub socket: String,
+    /// The deployer's AU-3(1) extension object (ADR-0019, `AuditConfig.au3_1`).
+    /// Carried here — the accept loop's only handle on the boot-time `AuditConfig` —
+    /// so it can be stamped onto every record `accept_loop` builds directly, and
+    /// cloned into each spawned [`handle`] call, instead of `make_record` hardcoding
+    /// it to an empty object.
+    pub au3_1: serde_json::Value,
 }
 
 const COMPONENT: &str = "kernel";
@@ -69,6 +75,7 @@ fn make_record(
     result: &str,
     reason: &str,
     posture: &str,
+    au3_1: &serde_json::Value,
 ) -> AuditRecord {
     AuditRecord {
         ts: rfc3339_now(),
@@ -96,7 +103,7 @@ fn make_record(
         },
         session_id,
         seq,
-        au3_1: serde_json::Value::Object(serde_json::Map::new()),
+        au3_1: au3_1.clone(),
         integrity: Integrity {
             prev_hash: None,
             sig: None,
@@ -143,6 +150,7 @@ fn verb_action(verb: &Verb) -> &'static str {
 /// 3. Audit-then-respond (ADR-0019): emit the `request` record FIRST; only if that
 ///    append succeeded (`may_respond(true)`) is the response released. An audit-append
 ///    failure withholds the response (fail-closed).
+#[allow(clippy::too_many_arguments)]
 pub async fn handle<S, E>(
     mut stream: S,
     peer_uri: String,
@@ -151,6 +159,7 @@ pub async fn handle<S, E>(
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
+    au3_1: serde_json::Value,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -175,8 +184,16 @@ pub async fn handle<S, E>(
             "deny",
             &reason,
             "unauthorized",
+            &au3_1,
         );
-        let _ = emit.emit(&rec).await;
+        if let Err(e) = emit.emit(&rec).await {
+            // Mid-life audit-write failure on a deny path is logged but does not change
+            // the already-fail-closed outcome (the connection is refused); the permit
+            // path gates on audit success, deny paths already deny.
+            eprintln!(
+                "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+            );
+        }
         let _ = stream.shutdown().await;
         return;
     }
@@ -199,6 +216,7 @@ pub async fn handle<S, E>(
                 seq.next(),
                 "read",
                 "read timeout",
+                &au3_1,
             )
             .await;
             let _ = stream.shutdown().await;
@@ -215,6 +233,7 @@ pub async fn handle<S, E>(
                 seq.next(),
                 "read",
                 &format!("frame read failed: {e}"),
+                &au3_1,
             )
             .await;
             let _ = stream.shutdown().await;
@@ -236,6 +255,7 @@ pub async fn handle<S, E>(
                 seq.next(),
                 "decode",
                 &format!("malformed request: {e}"),
+                &au3_1,
             )
             .await;
             let _ = stream.shutdown().await;
@@ -258,6 +278,7 @@ pub async fn handle<S, E>(
         "permit",
         "served",
         "authorized",
+        &au3_1,
     );
     let audit_ok = emit.emit(&rec).await.is_ok();
     if !may_respond(audit_ok) {
@@ -291,6 +312,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     seq: u64,
     action: &str,
     reason: &str,
+    au3_1: &serde_json::Value,
 ) {
     let rec = make_record(
         "request",
@@ -306,8 +328,15 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
         "deny",
         reason,
         "unauthorized",
+        au3_1,
     );
-    let _ = emit.emit(&rec).await;
+    if let Err(e) = emit.emit(&rec).await {
+        // See the group-check deny above: logged, not control-flow-changing — the
+        // caller already closes the connection regardless.
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on request-deny ({action}) for peer_uid={uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,9 +413,13 @@ pub async fn accept_loop<A, E>(
                         let rec = make_record(
                             "connection", &wctx.host, &wctx.socket, uid, gid, pid, None,
                             session_ids.next_session(), 1, "connect", "deny",
-                            reject_reason_str(&rej.reason), "unauthorized",
+                            reject_reason_str(&rej.reason), "unauthorized", &wctx.au3_1,
                         );
-                        let _ = emit.emit(&rec).await;
+                        if let Err(e) = emit.emit(&rec).await {
+                            eprintln!(
+                                "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
+                            );
+                        }
                     }
                     Ok(conn) => {
                         let session_id = session_ids.next_session();
@@ -396,9 +429,14 @@ pub async fn accept_loop<A, E>(
                                 let rec = make_record(
                                     "connection", &wctx.host, &wctx.socket, conn.peer_uid, None,
                                     None, Some(&conn.peer_uri), session_id, 1, "connect", "deny",
-                                    "at capacity", "unauthorized",
+                                    "at capacity", "unauthorized", &wctx.au3_1,
                                 );
-                                let _ = emit.emit(&rec).await;
+                                if let Err(e) = emit.emit(&rec).await {
+                                    eprintln!(
+                                        "maknaed: AUDIT WRITE FAILED on accept-reject (at capacity) for peer_uid={} peer_uri={} — rejection proceeded without a durable record: {e}",
+                                        conn.peer_uid, conn.peer_uri
+                                    );
+                                }
                                 let mut stream = conn.stream;
                                 let _ = stream.shutdown().await;
                             }
@@ -409,11 +447,12 @@ pub async fn accept_loop<A, E>(
                                     uid_in_maknae_group(conn.peer_uid).unwrap_or(false);
                                 let emit = Arc::clone(&emit);
                                 let cfg = cfg.clone();
+                                let au3_1 = wctx.au3_1.clone();
                                 let Conn { stream, peer_uri, peer_uid } = conn;
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     handle(stream, peer_uri, peer_uid, in_group, emit,
-                                           session_id, cfg).await;
+                                           session_id, cfg, au3_1).await;
                                 });
                             }
                         }
@@ -491,6 +530,7 @@ async fn run_inner(config_dir: &Path) -> Result<(), String> {
     let wctx = WhereCtx {
         host: hostname(),
         socket: transport.socket_path.display().to_string(),
+        au3_1: audit_cfg.au3_1.clone(),
     };
     accept_loop(
         listener,

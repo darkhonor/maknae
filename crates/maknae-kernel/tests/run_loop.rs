@@ -74,6 +74,7 @@ async fn audit_failure_withholds_response() {
         emit.clone(),
         1,
         default_cfg(),
+        serde_json::json!({}),
     )
     .await;
 
@@ -109,6 +110,7 @@ async fn deny_audits_then_closes() {
         emit.clone(),
         7,
         default_cfg(),
+        serde_json::json!({}),
     )
     .await;
 
@@ -152,6 +154,7 @@ async fn happy_ping_responds() {
         emit.clone(),
         1,
         default_cfg(),
+        serde_json::json!({}),
     )
     .await;
 
@@ -194,6 +197,7 @@ async fn happy_whoami_carries_peer_facts() {
         emit.clone(),
         1,
         default_cfg(),
+        serde_json::json!({}),
     )
     .await;
 
@@ -224,6 +228,7 @@ async fn read_timeout_closes() {
         emit.clone(),
         1,
         cfg,
+        serde_json::json!({}),
     )
     .await;
     let elapsed = start.elapsed();
@@ -249,5 +254,66 @@ async fn read_timeout_closes() {
     assert!(
         r.is_err() || r.unwrap().is_err(),
         "timeout must write no response"
+    );
+}
+
+#[tokio::test]
+async fn configured_au3_1_is_stamped_onto_every_record() {
+    // I-1 (Stage-3a final review): `audit.au3_1` (ADR-0019, AuditConfig) must be
+    // threaded onto EVERY emitted `AuditRecord.au3_1` — not hardcoded to an empty
+    // object. Exercise both a permit record (happy ping) and a deny record (group
+    // check) with a non-empty, distinguishable `au3_1` value.
+    let au3_1 = serde_json::json!({"deployer": "x"});
+
+    // Permit path.
+    let (mut c, s) = tokio::io::duplex(4096);
+    let emit = RecEmit::new(false);
+    write_ping(&mut c).await;
+    maknae_kernel::handle(
+        s,
+        "maknae://d/plane/cli".to_string(),
+        501,
+        true,
+        emit.clone(),
+        1,
+        default_cfg(),
+        au3_1.clone(),
+    )
+    .await;
+    let recs = emit.records();
+    assert!(!recs.is_empty(), "at least one record must be emitted");
+    for r in &recs {
+        assert_eq!(
+            r.au3_1, au3_1,
+            "every permit-path record's au3_1 must carry the configured value, got {:?}",
+            r.au3_1
+        );
+    }
+
+    // Deny path (group check fails, no verb even read).
+    let (mut c2, s2) = tokio::io::duplex(4096);
+    let emit2 = RecEmit::new(false);
+    write_ping(&mut c2).await;
+    maknae_kernel::handle(
+        s2,
+        "maknae://d/plane/cli".to_string(),
+        501,
+        false, // in_group = false -> Deny
+        emit2.clone(),
+        1,
+        default_cfg(),
+        au3_1.clone(),
+    )
+    .await;
+    let recs2 = emit2.records();
+    let deny = recs2
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection/deny record must be emitted");
+    assert_eq!(
+        deny.au3_1, au3_1,
+        "the deny-path record's au3_1 must carry the configured value, not the hardcoded \
+         empty map, got {:?}",
+        deny.au3_1
     );
 }
