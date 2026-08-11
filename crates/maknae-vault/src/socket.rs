@@ -94,14 +94,25 @@ pub(crate) fn bind_listener(
     // bound `UnixListener`'s fd is a socket, not a regular-file fd, and `fchown` on it
     // returns `EINVAL` on at least macOS/BSD — `chown` on the pathname is the portable
     // way to set ownership on a UDS's filesystem entry.
+    // On any post-bind setup failure below, unlink the pathname we just created before
+    // erroring: dropping a `UnixListener` does NOT unlink its filesystem entry, and a
+    // failed startup must not leave a stale socket behind (the next bind's liveness
+    // probe would reclaim it, but tooling/clients in between would see a dead socket).
+    let cleanup = |e: VaultError| {
+        let _ = std::fs::remove_file(path);
+        e
+    };
     if let Some(gid) = group {
-        nix::unistd::chown(path, None, Some(gid))
-            .map_err(|e| VaultError::SocketGroupOwn(format!("chown group {gid}: {e}")))?;
+        nix::unistd::chown(path, None, Some(gid)).map_err(|e| {
+            cleanup(VaultError::SocketGroupOwn(format!(
+                "chown group {gid}: {e}"
+            )))
+        })?;
     }
     // Atomic-enough: set 0660 immediately after bind (the parent dir is already owner-only,
     // so there is no window a non-group process could connect through).
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-        .map_err(|e| VaultError::SocketBind(format!("chmod 0660: {e}")))?;
+        .map_err(|e| cleanup(VaultError::SocketBind(format!("chmod 0660: {e}"))))?;
     Ok(listener)
 }
 
