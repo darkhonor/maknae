@@ -9,10 +9,12 @@
 //! - [`handle`] serves ONE authenticated connection (authorize → read → audit →
 //!   respond, or fail-closed close). Generic over the stream + audit sink so the
 //!   run-loop integration tests drive it over a `duplex`.
-//! - [`accept_loop`] is the anti-DoS accept loop: bound concurrency with a semaphore,
-//!   audit-and-continue on a surfaced cert-half rejection (NEVER `?` — a bad handshake
-//!   must not kill the daemon), fast-close at capacity. Generic over a [`PlaneAccept`]
-//!   source so it is testable without a live Vault-backed `PlaneListener`.
+//! - [`accept_loop`] is the anti-DoS accept loop: accept the raw socket PROMPTLY, then run
+//!   the bounded TLS handshake per-connection UNDER the concurrency semaphore (so a stalled
+//!   handshake occupies one permit for at most `handshake_timeout`, never the loop itself);
+//!   audit-and-continue on a surfaced cert-half rejection (NEVER `?` — a bad handshake must
+//!   not kill the daemon), fast-close at capacity. Generic over a [`PlaneAccept`] source so
+//!   it is testable without a live Vault-backed `PlaneListener`.
 //! - [`run`] is the process entrypoint: FIPS install/assert → boot → sink → plane
 //!   client → mint → supervisor → bind → accept loop → graceful shutdown.
 
@@ -30,7 +32,9 @@ use maknae_proto::{
     decode_request, encode_response, read_frame, write_frame, Payload, RespResult, Response, Verb,
     PROTOCOL_VERSION,
 };
-use maknae_vault::{AcceptRejection, AuthenticatedStream, PlaneListener, RejectReason};
+use maknae_vault::{
+    AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
+};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -168,34 +172,67 @@ pub async fn handle<S, E>(
     let host = hostname();
     let socket = cfg.socket_path.display().to_string();
 
-    // 1. Connection admission (cert half already verified by the transport).
-    if let ConnDecision::Deny { reason } = authorize_connection(true, in_group) {
-        let rec = make_record(
-            "connection",
-            &host,
-            &socket,
-            peer_uid,
-            None,
-            None,
-            Some(&peer_uri),
-            session_id,
-            seq.next(),
-            "connect",
-            "deny",
-            &reason,
-            "unauthorized",
-            &au3_1,
-        );
-        if let Err(e) = emit.emit(&rec).await {
-            // Mid-life audit-write failure on a deny path is logged but does not change
-            // the already-fail-closed outcome (the connection is refused); the permit
-            // path gates on audit success, deny paths already deny.
-            eprintln!(
-                "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+    // 1. Connection admission (cert half already verified by the transport). ADR-0019's
+    //    scheme audits admission at seq 1 for BOTH outcomes: a deny closes here; a permit
+    //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, so the
+    //    request record follows at seq 2 and a successful session's trail is complete.
+    match authorize_connection(true, in_group) {
+        ConnDecision::Deny { reason } => {
+            let rec = make_record(
+                "connection",
+                &host,
+                &socket,
+                peer_uid,
+                None,
+                None,
+                Some(&peer_uri),
+                session_id,
+                seq.next(),
+                "connect",
+                "deny",
+                &reason,
+                "unauthorized",
+                &au3_1,
             );
+            if let Err(e) = emit.emit(&rec).await {
+                // Mid-life audit-write failure on a deny path is logged but does not change
+                // the already-fail-closed outcome (the connection is refused); the permit
+                // path gates on audit success, deny paths already deny.
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+                );
+            }
+            let _ = stream.shutdown().await;
+            return;
         }
-        let _ = stream.shutdown().await;
-        return;
+        ConnDecision::Permit => {
+            // Admission record at seq 1 (ADR-0019). Best-effort: a failed append is logged
+            // loudly but does NOT release anything — the RESPONSE gate stays on the request
+            // record below ("audit-then-respond for the request itself"). So a session whose
+            // admission could not be durably recorded still cannot be *served* unless its
+            // request record also persists.
+            let rec = make_record(
+                "connection",
+                &host,
+                &socket,
+                peer_uid,
+                None,
+                None,
+                Some(&peer_uri),
+                session_id,
+                seq.next(),
+                "connect",
+                "permit",
+                "admitted",
+                "authorized",
+                &au3_1,
+            );
+            if let Err(e) = emit.emit(&rec).await {
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on connection-permit admission for peer_uid={peer_uid} peer_uri={peer_uri} — trail incomplete; response still gated on the request record: {e}"
+                );
+            }
+        }
     }
 
     // 2. Read exactly one request frame, bounded by read_timeout + the frame cap.
@@ -350,25 +387,51 @@ pub struct Conn<S> {
     pub peer_uid: u32,
 }
 
-/// The accept surface the run-loop consumes. `PlaneListener` is the production impl;
-/// the accept-loop integration tests supply a scripted fake (no live Vault needed).
+/// The accept surface the run-loop consumes, split into a prompt raw-accept and a bounded
+/// handshake so a stalled TLS handshake cannot serialize acceptance (anti-DoS, spec §6a).
+/// `PlaneListener` is the production impl; the accept-loop integration tests supply a
+/// scripted fake (no live Vault needed).
 pub trait PlaneAccept {
+    /// The raw, pre-handshake connection handle (opaque; carried from `accept_raw` into
+    /// `finish_handshake`).
+    type Raw: Send + 'static;
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
-    fn accept(
+
+    /// Prompt half: take the next raw socket + its peer-creds. Only a raw-accept syscall
+    /// error surfaces (`io::Error`); the loop logs-and-continues on it (never `?`).
+    fn accept_raw(
         &self,
+    ) -> impl Future<Output = Result<(Self::Raw, PeerCreds), std::io::Error>> + Send;
+
+    /// Bounded half: run the mTLS handshake within `handshake_timeout` and report the
+    /// authenticated peer, or an `AcceptRejection` carrying the passed-through creds. Run
+    /// per-connection UNDER the accept loop's semaphore.
+    fn finish_handshake(
+        &self,
+        raw: Self::Raw,
+        peer_creds: PeerCreds,
         handshake_timeout: Duration,
     ) -> impl Future<Output = Result<Conn<Self::Stream>, AcceptRejection>> + Send;
 }
 
 impl PlaneAccept for PlaneListener {
+    type Raw = RawPlaneConn;
     type Stream = AuthenticatedStream;
-    // `async fn` (not a manual `-> impl Future`): its anonymous future satisfies the
-    // trait's `+ Send` bound because the only await (`PlaneListener::accept`) is `Send`.
-    async fn accept(
+
+    // `async fn` (not a manual `-> impl Future`): its anonymous future satisfies the trait's
+    // `+ Send` bound because the only awaits are `Send`.
+    async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
+        PlaneListener::accept_raw(self).await
+    }
+
+    async fn finish_handshake(
         &self,
+        raw: RawPlaneConn,
+        peer_creds: PeerCreds,
         handshake_timeout: Duration,
     ) -> Result<Conn<AuthenticatedStream>, AcceptRejection> {
-        let stream = PlaneListener::accept(self, handshake_timeout).await?;
+        let stream =
+            PlaneListener::finish_handshake(self, raw, peer_creds, handshake_timeout).await?;
         let peer_uri = stream.peer_uri_san().to_string();
         let peer_uid = stream.peer_creds().uid;
         Ok(Conn {
@@ -391,11 +454,13 @@ pub async fn accept_loop<A, E>(
     wctx: WhereCtx,
     shutdown: impl Future<Output = ()> + Send,
 ) where
-    A: PlaneAccept + Send + Sync,
+    A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
 {
     let sem = Arc::new(Semaphore::new(cfg.max_connections as usize));
     let handshake_timeout = Duration::from_millis(cfg.handshake_timeout_ms);
+    // Shared so each spawned task can drive the bounded handshake off the accept path.
+    let acceptor = Arc::new(acceptor);
     let mut handlers: JoinSet<()> = JoinSet::new();
     tokio::pin!(shutdown);
 
@@ -403,56 +468,80 @@ pub async fn accept_loop<A, E>(
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
-            outcome = acceptor.accept(handshake_timeout) => {
+            // Prompt raw accept ONLY: no TLS handshake happens on the loop's thread, so a
+            // peer that stalls its handshake can never serialize acceptance (anti-DoS).
+            outcome = acceptor.accept_raw() => {
                 match outcome {
-                    // A surfaced cert-half rejection: audit WHO/WHY and continue (Boundary A).
-                    Err(rej) => {
-                        let uid = rej.peer_creds.map(|c| c.uid).unwrap_or(0);
-                        let gid = rej.peer_creds.and_then(|c| c.gid);
-                        let pid = rej.peer_creds.and_then(|c| c.pid);
-                        let rec = make_record(
-                            "connection", &wctx.host, &wctx.socket, uid, gid, pid, None,
-                            session_ids.next_session(), 1, "connect", "deny",
-                            reject_reason_str(&rej.reason), "unauthorized", &wctx.au3_1,
-                        );
-                        if let Err(e) = emit.emit(&rec).await {
-                            eprintln!(
-                                "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
-                            );
-                        }
+                    // A raw-accept syscall error (no peer, or peer-cred capture failed): log
+                    // and continue. NEVER `?` — a transient accept error must not kill the
+                    // daemon. This is the ONLY thing the loop handles inline.
+                    Err(e) => {
+                        eprintln!("maknaed: raw accept failed (continuing): {e}");
                     }
-                    Ok(conn) => {
+                    Ok((raw, peer_creds)) => {
                         let session_id = session_ids.next_session();
                         match Arc::clone(&sem).try_acquire_owned() {
-                            // At capacity: fast-close + audit, do NOT serve (anti-DoS).
+                            // At capacity: fast-close + audit from the captured peer-creds
+                            // (no handshake ran, so there is no verified URI-SAN yet). Do NOT
+                            // serve (anti-DoS); dropping `raw` closes the socket.
                             Err(_) => {
                                 let rec = make_record(
-                                    "connection", &wctx.host, &wctx.socket, conn.peer_uid, None,
-                                    None, Some(&conn.peer_uri), session_id, 1, "connect", "deny",
-                                    "at capacity", "unauthorized", &wctx.au3_1,
+                                    "connection", &wctx.host, &wctx.socket, peer_creds.uid,
+                                    peer_creds.gid, peer_creds.pid, None, session_id, 1,
+                                    "connect", "deny", "at capacity", "unauthorized", &wctx.au3_1,
                                 );
                                 if let Err(e) = emit.emit(&rec).await {
                                     eprintln!(
-                                        "maknaed: AUDIT WRITE FAILED on accept-reject (at capacity) for peer_uid={} peer_uri={} — rejection proceeded without a durable record: {e}",
-                                        conn.peer_uid, conn.peer_uri
+                                        "maknaed: AUDIT WRITE FAILED on accept-reject (at capacity) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                                        peer_creds.uid
                                     );
                                 }
-                                let mut stream = conn.stream;
-                                let _ = stream.shutdown().await;
+                                drop(raw);
                             }
                             Ok(permit) => {
-                                // Group half resolved here; fail-closed to false on any
-                                // resolution error (handle then Denies + audits).
-                                let in_group =
-                                    uid_in_maknae_group(conn.peer_uid).unwrap_or(false);
+                                let acceptor = Arc::clone(&acceptor);
                                 let emit = Arc::clone(&emit);
                                 let cfg = cfg.clone();
-                                let au3_1 = wctx.au3_1.clone();
-                                let Conn { stream, peer_uri, peer_uid } = conn;
+                                let wctx = wctx.clone();
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
-                                    handle(stream, peer_uri, peer_uid, in_group, emit,
-                                           session_id, cfg, au3_1).await;
+                                    // The bounded TLS handshake runs HERE, under the permit —
+                                    // a stalled handshake occupies ONE slot for at most
+                                    // handshake_timeout, never the accept loop.
+                                    match acceptor
+                                        .finish_handshake(raw, peer_creds, handshake_timeout)
+                                        .await
+                                    {
+                                        Ok(conn) => {
+                                            // Group half resolved here; fail-closed to false on
+                                            // any resolution error (handle then Denies + audits).
+                                            let in_group =
+                                                uid_in_maknae_group(conn.peer_uid).unwrap_or(false);
+                                            handle(
+                                                conn.stream, conn.peer_uri, conn.peer_uid, in_group,
+                                                emit, session_id, cfg, wctx.au3_1,
+                                            )
+                                            .await;
+                                        }
+                                        // A surfaced cert-half rejection: audit WHO/WHY and drop
+                                        // (Boundary A — the transport reports, the daemon audits).
+                                        Err(rej) => {
+                                            let uid = rej.peer_creds.map(|c| c.uid).unwrap_or(0);
+                                            let gid = rej.peer_creds.and_then(|c| c.gid);
+                                            let pid = rej.peer_creds.and_then(|c| c.pid);
+                                            let rec = make_record(
+                                                "connection", &wctx.host, &wctx.socket, uid, gid,
+                                                pid, None, session_id, 1, "connect", "deny",
+                                                reject_reason_str(&rej.reason), "unauthorized",
+                                                &wctx.au3_1,
+                                            );
+                                            if let Err(e) = emit.emit(&rec).await {
+                                                eprintln!(
+                                                    "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
                                 });
                             }
                         }

@@ -179,6 +179,54 @@ async fn happy_ping_responds() {
 }
 
 #[tokio::test]
+async fn permit_admission_precedes_request_record() {
+    // P2-A (ADR-0019 audit completeness): a SUCCESSFUL admission must emit a `connection`/
+    // permit record at seq 1 BEFORE the request is read, with the `request` record following
+    // at seq 2 — so a served session's trail is admission-then-request, not request-only.
+    let (mut c, s) = tokio::io::duplex(4096);
+    let emit = RecEmit::new(false);
+    write_ping(&mut c).await;
+
+    maknae_kernel::handle(
+        s,
+        "maknae://d/plane/cli".to_string(),
+        501,
+        true, // in_group -> Permit
+        emit.clone(),
+        42,
+        default_cfg(),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let recs = emit.records();
+    // Exactly two records, in order: connection/permit (seq 1), then request/permit (seq 2).
+    let conn = recs
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection/permit admission record must be emitted");
+    let req = recs
+        .iter()
+        .find(|r| r.event == "request")
+        .expect("a request record must follow admission");
+    assert_eq!(conn.outcome.result, "permit");
+    assert_eq!(conn.outcome.posture, "authorized");
+    assert_eq!(conn.action, "connect");
+    assert_eq!(conn.session_id, 42);
+    assert_eq!(conn.seq, 1, "admission must be seq 1");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.action, "ping");
+    assert_eq!(req.seq, 2, "the request record must follow at seq 2");
+    // Ordering in the emitted stream: admission strictly before the request.
+    let conn_idx = recs.iter().position(|r| r.event == "connection").unwrap();
+    let req_idx = recs.iter().position(|r| r.event == "request").unwrap();
+    assert!(
+        conn_idx < req_idx,
+        "the connection/permit record must be emitted BEFORE the request record"
+    );
+}
+
+#[tokio::test]
 async fn happy_whoami_carries_peer_facts() {
     let (mut c, s) = tokio::io::duplex(4096);
     let emit = RecEmit::new(false);

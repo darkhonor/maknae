@@ -89,6 +89,16 @@ enum TlsStream {
     Client(tokio_rustls::client::TlsStream<tokio::net::UnixStream>),
 }
 
+/// A raw-accepted plane connection: the bare UDS stream plus the `PeerCreds` captured
+/// (fast syscalls) BEFORE any TLS handshake. Produced by [`PlaneListener::accept_raw`],
+/// consumed by [`PlaneListener::finish_handshake`]. This split lets the daemon's accept
+/// loop take the socket promptly and run the bounded TLS handshake per-connection under
+/// its concurrency semaphore — so a client that stalls the handshake cannot serialize
+/// acceptance and starve the loop (anti-DoS, spec §6a/§10). Opaque on purpose: the raw
+/// `tokio::net::UnixStream` never crosses into the kernel crate (which does not link
+/// tokio's `net` feature); the kernel only names this wrapper.
+pub struct RawPlaneConn(tokio::net::UnixStream);
+
 /// A connected, mutually-authenticated plane channel.
 pub struct AuthenticatedStream {
     inner: TlsStream,
@@ -219,48 +229,70 @@ impl PlaneListener {
         })
     }
 
-    /// Accept one connection: capture peer-creds, complete the mTLS server handshake
-    /// (bounded by `handshake_timeout`), and report the verified peer identity. Fail-closed
-    /// on any error — but on a handshake/SAN rejection, the `AcceptRejection` carries
-    /// whatever `PeerCreds` were captured (before the handshake started) so the daemon can
-    /// audit WHO was rejected. The transport only REPORTS this; it never audits (Boundary A).
-    pub async fn accept(
+    /// Prompt half of accept (anti-DoS): do ONLY the `UnixListener::accept()` +
+    /// `SO_PEERCRED`/`LOCAL_PEERCRED` capture — both fast syscalls — and return the raw
+    /// stream with its peer-creds. NO TLS handshake happens here, so this cannot be stalled
+    /// by a slow peer: the daemon's accept loop stays free to accept the next connection
+    /// while the (bounded) handshake runs elsewhere, under the concurrency semaphore. Only a
+    /// raw-accept syscall error (or a peer-cred capture failure) surfaces here, as an
+    /// `io::Error` the loop logs-and-continues (never `?`).
+    pub async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
+        accept_raw_on(&self.listener).await
+    }
+
+    /// Bounded half of accept (anti-DoS): complete the mTLS server handshake within
+    /// `handshake_timeout`, verify the plane URI-SAN, and report the authenticated peer.
+    /// Fail-closed on any error — but the returned `AcceptRejection` carries the `PeerCreds`
+    /// captured by `accept_raw` (before the handshake started) so the daemon can audit WHO
+    /// was rejected and WHY; a timeout is `HandshakeTimeout`. The transport only REPORTS
+    /// this; it never audits (Boundary A). Run this per-connection under the accept loop's
+    /// semaphore: a stalled handshake then occupies ONE permit for at most
+    /// `handshake_timeout`, never the accept loop itself.
+    pub async fn finish_handshake(
         &self,
+        raw: RawPlaneConn,
+        peer_creds: PeerCreds,
         handshake_timeout: Duration,
     ) -> Result<AuthenticatedStream, AcceptRejection> {
-        accept_on(
-            &self.listener,
+        finish_handshake_on(
             &self.acceptor,
             self.expect,
             &self.deployment_id,
+            raw,
+            peer_creds,
             handshake_timeout,
         )
         .await
     }
 }
 
-/// The actual accept implementation, factored out of the `PlaneListener` method so tests can
-/// drive it against a bare `TlsAcceptor` bound to a real `UnixListener` (peer-creds need a
-/// real socket; `PlaneListener` itself additionally requires a live `PlaneClient` cert-sink
-/// attachment that isn't needed to exercise this logic).
-pub(crate) async fn accept_on(
+/// The prompt raw-accept, factored out of the `PlaneListener` method so tests can drive it
+/// against a bare `UnixListener` (peer-creds need a real socket; `PlaneListener` itself
+/// additionally requires a live `PlaneClient` cert-sink attachment not needed here). A
+/// peer-cred capture failure fails closed to an `io::Error` — a peer we cannot identify
+/// cannot be policed, and the caller drops the socket.
+pub(crate) async fn accept_raw_on(
     listener: &tokio::net::UnixListener,
+) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
+    let (raw, _addr) = listener.accept().await?;
+    // Capture peer-creds BEFORE the handshake — so they're available to report even on a
+    // handshake/SAN failure (the whole point of `AcceptRejection`).
+    let peer_creds = peercred::capture(&raw).map_err(std::io::Error::other)?;
+    Ok((RawPlaneConn(raw), peer_creds))
+}
+
+/// The bounded handshake half, factored out for the same testability reason as
+/// `accept_raw_on`. Consumes the raw stream + its captured creds and produces the
+/// authenticated stream (or an `AcceptRejection` carrying those creds).
+pub(crate) async fn finish_handshake_on(
     acceptor: &TlsAcceptor,
     expect: Plane,
     deployment_id: &str,
+    raw: RawPlaneConn,
+    peer_creds: PeerCreds,
     handshake_timeout: Duration,
 ) -> Result<AuthenticatedStream, AcceptRejection> {
-    let (raw, _addr) = listener.accept().await.map_err(|_| AcceptRejection {
-        peer_creds: None,
-        reason: RejectReason::Io,
-    })?;
-    // Capture peer-creds BEFORE the handshake — so they're available to report even on a
-    // handshake/SAN failure (the whole point of this type).
-    let peer_creds = peercred::capture(&raw).map_err(|_| AcceptRejection {
-        peer_creds: None,
-        reason: RejectReason::PeerCredCapture,
-    })?;
-    let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(raw)).await {
+    let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(raw.0)).await {
         Err(_elapsed) => {
             return Err(AcceptRejection {
                 peer_creds: Some(peer_creds),
@@ -294,6 +326,32 @@ pub(crate) async fn accept_on(
             reason: RejectReason::Handshake,
         }),
     }
+}
+
+/// Compose the two halves into a single accept — used by the in-crate transport test (and
+/// any caller that does not need the anti-DoS split). A raw-accept / peer-cred failure maps
+/// to `RejectReason::Io` (no creds captured yet).
+#[cfg(test)]
+pub(crate) async fn accept_on(
+    listener: &tokio::net::UnixListener,
+    acceptor: &TlsAcceptor,
+    expect: Plane,
+    deployment_id: &str,
+    handshake_timeout: Duration,
+) -> Result<AuthenticatedStream, AcceptRejection> {
+    let (raw, peer_creds) = accept_raw_on(listener).await.map_err(|_| AcceptRejection {
+        peer_creds: None,
+        reason: RejectReason::Io,
+    })?;
+    finish_handshake_on(
+        acceptor,
+        expect,
+        deployment_id,
+        raw,
+        peer_creds,
+        handshake_timeout,
+    )
+    .await
 }
 
 /// CLI (client) side.

@@ -45,7 +45,7 @@ pub use peercred::PeerCreds;
 pub use plane::Plane;
 #[cfg(unix)]
 pub use stream::{
-    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RejectReason,
+    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
 };
 pub use verify::{verify_plane_uri_san, VerifyError};
 
