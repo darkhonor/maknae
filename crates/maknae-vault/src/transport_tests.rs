@@ -271,3 +271,85 @@ async fn rejects_extra_san_client() {
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
 }
+
+// ---- accept() rejection surfacing (Task 5): needs a REAL UnixStream socketpair, since the
+// in-process `tokio::io::duplex` used above cannot carry `SO_PEERCRED` — peer-creds are the
+// whole point of `AcceptRejection`. Unix-only, like `socket.rs`/`peercred.rs`/`stream.rs`.
+#[cfg(unix)]
+mod accept_reject {
+    use super::*;
+    use crate::stream::accept_on;
+    use crate::{AcceptRejection, RejectReason};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    /// A private (0700) temp dir — `socket::bind_listener` refuses a group/other-writable
+    /// parent (see `socket.rs`).
+    fn tmp_sock_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("mv-accept-reject-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        p
+    }
+
+    /// Drive `accept_on` (the real socket-backed accept path `PlaneListener::accept`
+    /// delegates to) against a client that presents a wrong-plane leaf. Expect a rejection
+    /// that carries the captured `PeerCreds` (available since creds are captured BEFORE the
+    /// handshake) tagged `WrongPlane` (our own SAN check) — `Handshake` is the documented
+    /// fallback if the rustls error can't be classified more precisely.
+    #[tokio::test]
+    async fn accept_reject_wrong_plane_carries_peer_creds() {
+        provider();
+        let ca = mk_ca();
+        let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+        // Server (daemon) presents kernel, expects the peer to prove plane == cli.
+        let server_cfg = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+        // Client presents a KERNEL leaf instead of the expected CLI leaf — wrong plane.
+        let (wrong_chain, wrong_key) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+        let client_cfg = client_cfg(wrong_chain, wrong_key, &cab(&ca), Plane::Kernel, true);
+
+        let dir = tmp_sock_dir("wrong-plane");
+        let sock = dir.join("s.sock");
+        let listener = crate::socket::bind_listener(&sock).expect("bind real UDS");
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_cfg);
+
+        let srv = tokio::spawn(async move {
+            accept_on(
+                &listener,
+                &acceptor,
+                Plane::Cli,
+                "d",
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        let raw = crate::socket::connect(&sock).await.expect("client connect");
+        let connector = tokio_rustls::TlsConnector::from(client_cfg);
+        let name = rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+        // The client's own connect() is expected to fail too (server sends a rejection
+        // alert) — the assertion of record is on the SERVER's AcceptRejection below.
+        let _ = connector.connect(name, raw).await;
+
+        let result = srv.await.expect("server task did not panic");
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Err(AcceptRejection {
+                peer_creds: Some(_),
+                reason,
+            }) => {
+                assert!(
+                    matches!(reason, RejectReason::WrongPlane | RejectReason::Handshake),
+                    "expected WrongPlane (or Handshake fallback), got {reason:?}"
+                );
+            }
+            Err(other) => panic!(
+                "expected Err(AcceptRejection {{ peer_creds: Some(_), reason: WrongPlane | Handshake }}), got {other:?}"
+            ),
+            Ok(_) => panic!(
+                "expected accept_on to REJECT a wrong-plane leaf, but it succeeded"
+            ),
+        }
+    }
+}

@@ -41,7 +41,10 @@ async fn plane_to_plane_roundtrip() {
     let cca = maknae_vault::load_ca_pin(std::path::Path::new(&cdir)).unwrap();
 
     let srv = tokio::spawn(async move {
-        let mut s = listener.accept().await.expect("accept");
+        let mut s = listener
+            .accept(std::time::Duration::from_secs(10))
+            .await
+            .expect("accept");
         // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
         let san = s.peer_uri_san();
         assert!(
