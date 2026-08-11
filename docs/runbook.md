@@ -63,12 +63,16 @@ export VAULT_ADDR="https://vault.private.darkhonor.net:8200"   # your CLI is alr
 export MAKNAE_CONFIG_DIR="$HOME/.maknae"
 ```
 
-### 3. Seed "secret 0" — a RESPONSE-WRAPPED, single-use SecretID (just-in-time)
+### 3. Seed "secret 0" — a RESPONSE-WRAPPED SecretID (interception-detecting delivery)
 
-The SecretID is single-use with a ~10-minute TTL, so create it immediately before minting:
+Under ADR-0018 the SecretID itself is **standing** (non-expiring, unlimited uses); the
+**response-wrap** is what's single-use (~90s). Wrapping this *local* daemon file is a
+transitional **Stage-1 client constraint** (the current client only accepts a wrapping
+token), **not** the ADR-0018 steady state — where a local `_maknae`/operator-owned bootstrap
+file needs no wrap (see `deploy/vault-pki/README.md`). Create it just before minting:
 
 ```bash
-# Response-wrap a fresh single-use SecretID (note the auth/ mount prefix):
+# Response-wrap the standing SecretID for interception-detecting delivery (auth/ mount prefix):
 vault write -wrap-ttl=90s -f auth/maknae-approle/role/maknaed/secret-id
 
 # Deliver the returned WRAPPING TOKEN (wrapping_info.token) to the 0o400 file:
@@ -94,7 +98,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
 - FIPS: the process runs the aws-lc-rs FIPS provider (`.fips()==true`, asserted
   fail-closed before the Vault client is built — so vaultrs's reqwest rides the FIPS
   provider, not its ring fallback).
-- The AppRole login used a response-wrapped, single-use SecretID (unwrapped once).
+- The AppRole login used a response-wrapped **standing** SecretID (the wrap is single-use —
+  unwrapped once — for interception detection; the SecretID itself does not expire).
 - The CSR is empty-subject, URI-SAN-only, EC P-384; the leaf's only SAN is
   `maknae://<deployment_id>/plane/kernel` (self-checked in `mint()`).
 - The leaf + key are held **memory-only** and the token is revoked on shutdown.
@@ -102,7 +107,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
 ### Teardown
 
 Nothing to clean — the leaf and key are memory-only and gone when the process exits; the
-token is revoked on `shutdown`. The single-use SecretID is consumed by the login.
+token is revoked on `shutdown`. The SecretID is **standing** (not consumed by the login); the
+response-wrap it rode in on is single-use and already spent.
 
 ---
 

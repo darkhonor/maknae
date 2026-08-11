@@ -33,21 +33,36 @@ variable "leaf_ttl_seconds" {
 
 variable "token_ttl" {
   type        = number
-  description = "AppRole token TTL (background-renewal increment), in seconds. Default 20m."
+  description = "Token TTL for the SHORT-LIVED CLI token (the `maknae` role): the CLI token lives at most this long and dies with the invocation (no background renewal). The `maknaed` daemon token is periodic (var.token_period) and does not use this. Default 20m."
   default     = 1200
 }
 
 variable "token_max_ttl" {
   type        = number
-  description = "AppRole token max TTL (fail-closed re-auth boundary; the binding operational cadence, deliberately tighter than the 72h leaf), in seconds. Default 24h."
+  description = "Token max TTL for the SHORT-LIVED CLI token (the `maknae` role), in seconds. The `maknaed` daemon uses a periodic token (var.token_period) with NO max-TTL ceiling instead (ADR-0018). Default 24h."
   default     = 86400
 }
 
-variable "secret_id_ttl" {
+variable "token_period" {
   type        = number
-  description = "AppRole SecretID TTL, in seconds. Default 10m."
-  default     = 600
+  description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Only the daemon role is periodic; the CLI token stays short-lived. Seconds. Default 24h."
+  default     = 86400
+
+  # Fail closed on the one invariant-breaking value: token_period = 0 makes the daemon
+  # token NON-periodic, silently reinstating the token_max_ttl self-expiry that ADR-0018
+  # removes (a scheduled daemon self-outage — the exact Availability vector ADR-0018 rejects).
+  # The period is tunable across any positive duration; it may never be disabled.
+  validation {
+    condition     = var.token_period > 0
+    error_message = "token_period must be > 0: a period of 0 disables the daemon's periodic token and reintroduces the ADR-0018-removed scheduled self-outage. Tune the duration, never zero it."
+  }
 }
+
+# NOTE: there is deliberately NO `secret_id_ttl` variable. A standing SecretID (ttl=0) is an
+# ADR-0018 invariant for BOTH roles, so it is HARD-CODED to 0 in main.tf rather than exposed
+# as a variable — an advisory default would let a stale `terraform.tfvars` / `TF_VAR_secret_id_ttl`
+# override silently reintroduce a time-expiring SecretID and break hands-free reboot / standing
+# CLI login. secret_id_num_uses=0 is likewise hard-coded. (Fail closed, not advisory.)
 
 variable "root_mount_path" {
   type        = string
