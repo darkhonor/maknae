@@ -39,7 +39,7 @@ pub use client::{PlaneClient, PlaneIdentity};
 pub use config::{load_vault_config, validate_deployment_id, VaultConfig};
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
-pub use fips_glue::assert_fips_provider;
+pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(unix)]
 pub use peercred::PeerCreds;
 pub use plane::Plane;

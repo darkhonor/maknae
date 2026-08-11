@@ -5,9 +5,13 @@
 mod authz;
 mod boot;
 mod groupres;
+mod handler;
+mod run;
 pub use authz::*;
 pub use boot::{boot, BootConfig};
 pub use groupres::*;
+pub use handler::{build_whoami, dispatch_verb, may_respond, Dispatch};
+pub use run::{accept_loop, handle, run, Conn, PlaneAccept, WhereCtx};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

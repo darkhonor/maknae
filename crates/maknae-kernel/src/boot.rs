@@ -5,7 +5,7 @@
 
 use maknae_config::{
     ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec,
-    Value,
+    Value, AUDIT_SECTION, TRANSPORT_SECTION,
 };
 use std::path::Path;
 
@@ -42,10 +42,22 @@ impl BootConfig {
 /// reserved `lake` section; `core` is auto-registered), read the `core` ceiling, and
 /// return the assembled `BootConfig`. Fail-closed: any `ConfigError` short-circuits.
 pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
-    let specs = [SectionSpec {
-        name: LAKE_SECTION.to_string(),
-        required: false,
-    }];
+    // The run-loop (Task 7) parses `transport`/`audit`; register them as optional so a
+    // config declaring either loads instead of hard-failing with `UnknownSection`.
+    let specs = [
+        SectionSpec {
+            name: LAKE_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: TRANSPORT_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: AUDIT_SECTION.to_string(),
+            required: false,
+        },
+    ];
     let document = load_config(config_dir, &specs)?;
     let ceiling = ceiling_from_core(document.section("core"))?;
     Ok(BootConfig { document, ceiling })
