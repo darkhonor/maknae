@@ -83,6 +83,45 @@ const COMPONENT: &str = "kernel";
 /// refused — the raw socket is already closed) rather than block, and counts the drop.
 const ATCAP_AUDIT_QUEUE_DEPTH: usize = 256;
 
+/// Bound on awaiting the at-capacity audit drain task during shutdown (codex round-10
+/// P1). `ATCAP_AUDIT_QUEUE_DEPTH` bounds how many records can be QUEUED, but not how
+/// long each append can TAKE: a stalled audit filesystem (unresponsive network/FUSE
+/// mount) can block `emit`/`sync_data` inside the drain task indefinitely, so an
+/// unbounded `.await` on it would hang shutdown forever — preventing graceful
+/// termination and blocking the supervisor-failure restart path from ever reaching
+/// `client.shutdown()` (token revoke) and process exit. On elapse the drain task is
+/// aborted so shutdown can proceed; the normal (fast) case still drains fully.
+const AUDIT_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How [`await_drain_with_timeout`] resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOutcome {
+    /// The drain task finished within the bound (successfully or with an
+    /// already-logged internal error) — every queued record was handled.
+    Completed,
+    /// The drain task did not finish within the bound; it was aborted so the caller
+    /// can proceed with shutdown. Some queued audit records may be lost.
+    Aborted,
+}
+
+/// Await `handle` for at most `timeout`; on elapse, abort it and report so a stalled
+/// drain task (e.g. blocked on a wedged audit filesystem) can never hang the caller's
+/// shutdown indefinitely. Takes `&mut` (not by value) so a timeout leaves the handle
+/// intact to abort — `tokio::time::timeout` only drops its future on elapse, which
+/// would merely detach an owned `JoinHandle` and leave the task running unobserved.
+async fn await_drain_with_timeout(
+    handle: &mut tokio::task::JoinHandle<()>,
+    timeout: Duration,
+) -> DrainOutcome {
+    match tokio::time::timeout(timeout, &mut *handle).await {
+        Ok(_joined) => DrainOutcome::Completed,
+        Err(_elapsed) => {
+            handle.abort();
+            DrainOutcome::Aborted
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_record(
     event: &str,
@@ -531,7 +570,7 @@ where
     let (atcap_audit_tx, mut atcap_audit_rx) =
         mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
     let atcap_audit_emit = Arc::clone(&emit);
-    let atcap_audit_task = tokio::spawn(async move {
+    let mut atcap_audit_task = tokio::spawn(async move {
         while let Some(rec) = atcap_audit_rx.recv().await {
             if let Err(e) = atcap_audit_emit.emit(&rec).await {
                 eprintln!(
@@ -662,10 +701,24 @@ where
     while handlers.join_next().await.is_some() {}
 
     // Drain the bounded at-capacity audit offload (P2): drop the sender so the drain
-    // task's `recv()` returns `None` once the queue empties, then await it. The wait is
-    // BOUNDED — at most `ATCAP_AUDIT_QUEUE_DEPTH` records remain to append.
+    // task's `recv()` returns `None` once the queue empties, then await it. The queue
+    // depth bounds how many records remain, but NOT how long each append can take
+    // (codex round-10 P1) — a stalled audit filesystem can block the drain task
+    // indefinitely, so the await itself is bounded by `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`
+    // and the task aborted on elapse. This single drain point is reached by BOTH
+    // outcomes that can end the loop above (`GracefulShutdown` and
+    // `SupervisorExited` share it), so bounding it here bounds both shutdown paths:
+    // neither can hang here, and both still reach the caller's `client.shutdown()`
+    // (token revoke) and process exit.
     drop(atcap_audit_tx);
-    let _ = atcap_audit_task.await;
+    if await_drain_with_timeout(&mut atcap_audit_task, AUDIT_DRAIN_SHUTDOWN_TIMEOUT).await
+        == DrainOutcome::Aborted
+    {
+        eprintln!(
+            "maknaed: audit drain did not complete within {}s during shutdown; aborting drain to allow exit — some queued audit records may be lost",
+            AUDIT_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
+        );
+    }
     if atcap_audit_dropped > 0 {
         eprintln!(
             "maknaed: at-capacity audit offload dropped {atcap_audit_dropped} record(s) over the daemon's life (audit queue saturation)"
@@ -900,5 +953,37 @@ mod tests {
     fn verb_action_labels() {
         assert_eq!(verb_action(&Verb::Ping), "ping");
         assert_eq!(verb_action(&Verb::Whoami), "whoami");
+    }
+
+    // codex round-10 P1: `await_drain_with_timeout` must bound the wait on a stalled
+    // drain task (abort + report) while still fully draining the normal, fast case.
+    // A short real timeout (no `tokio::time::pause`/test-util needed) keeps this
+    // deterministic: the never-completing task cannot finish before the bound no
+    // matter how slow the test runner is, and the ready task finishes essentially
+    // instantly, well inside it.
+    #[tokio::test]
+    async fn drain_with_timeout_aborts_a_task_that_never_completes() {
+        let mut handle = tokio::spawn(std::future::pending::<()>());
+        let outcome = await_drain_with_timeout(&mut handle, Duration::from_millis(20)).await;
+        assert_eq!(outcome, DrainOutcome::Aborted);
+        // The abort() request lands asynchronously; give the runtime a moment to
+        // observe it so the assertion isn't racing task teardown.
+        for _ in 0..50 {
+            if handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            handle.is_finished(),
+            "aborted task should be finished shortly after Aborted is reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_with_timeout_completes_when_task_finishes_promptly() {
+        let mut handle = tokio::spawn(async {});
+        let outcome = await_drain_with_timeout(&mut handle, Duration::from_secs(5)).await;
+        assert_eq!(outcome, DrainOutcome::Completed);
     }
 }
