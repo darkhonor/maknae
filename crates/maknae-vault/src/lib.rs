@@ -42,7 +42,9 @@ pub use fips_glue::assert_fips_provider;
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 #[cfg(unix)]
-pub use stream::{AuthenticatedStream, PlaneConnector, PlaneListener};
+pub use stream::{
+    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RejectReason,
+};
 pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]

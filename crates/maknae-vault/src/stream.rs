@@ -8,8 +8,81 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+/// Why `PlaneListener::accept()` refused a connection — carries the SAME captured
+/// `PeerCreds` the transport would have attached on success, so the (non-privileged)
+/// transport can REPORT a rejection with identity attached without itself auditing it
+/// (Boundary A — the Stage-3 daemon decides what to do with this).
+#[derive(Debug, PartialEq, Eq)]
+pub enum RejectReason {
+    /// The TLS handshake failed for a reason not further distinguished below.
+    Handshake,
+    /// The handshake did not complete within the configured bound.
+    HandshakeTimeout,
+    /// The peer's leaf carried a plane URI-SAN other than the one expected (the T1
+    /// `verify_plane_uri_san` check — this crate's own decision, not rustls').
+    WrongPlane,
+    /// The peer's leaf was expired / not yet valid.
+    ExpiredOrInvalidCert,
+    /// The peer's chain did not validate against the pinned root (unknown issuer, bad
+    /// signature, revoked).
+    ChainOrCa,
+    /// Kernel peer-credential capture failed — the connection is refused before any
+    /// identity is known (fail-closed; mirrors `VaultError::PeerCred`).
+    PeerCredCapture,
+    /// The raw accept on the listening socket itself failed (no peer connected yet, so no
+    /// creds exist to capture).
+    Io,
+}
+
+/// A refused `accept()` — carries whatever `PeerCreds` were captured before the failure
+/// (`Some` in the common case: creds are captured before the TLS handshake even starts) so
+/// the daemon can audit WHO was rejected and WHY. The transport reports; it never audits.
+#[derive(Debug)]
+pub struct AcceptRejection {
+    pub peer_creds: Option<PeerCreds>,
+    pub reason: RejectReason,
+}
+
+/// Classify a failed `TlsAcceptor::accept()` outcome. tokio-rustls wraps the underlying
+/// `rustls::Error` as the io::Error's source (`io::Error::new(InvalidData, rustls_err)`), so
+/// downcast to it when present. `rustls::Error` and `CertificateError` are `#[non_exhaustive]`
+/// — an unmatched variant falls back to `Handshake` per the brief (WrongPlane is preserved
+/// exactly because that's OUR OWN `plane_verify` rejection, tagged by its message prefix).
+fn classify_handshake_error(e: &std::io::Error) -> RejectReason {
+    let Some(rustls_err) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    else {
+        return RejectReason::Handshake;
+    };
+    match rustls_err {
+        // plane_verify.rs wraps a WrongSan/NoUriSan/ExtraSans/ParseError rejection as
+        // `rustls::Error::General("plane URI-SAN: {e:?}")` — see PlaneClientCertVerifier.
+        rustls::Error::General(msg) if msg.starts_with("plane URI-SAN") => RejectReason::WrongPlane,
+        rustls::Error::InvalidCertificate(cert_err) => match cert_err {
+            rustls::CertificateError::Expired
+            | rustls::CertificateError::ExpiredContext { .. }
+            | rustls::CertificateError::NotValidYet
+            | rustls::CertificateError::NotValidYetContext { .. } => {
+                RejectReason::ExpiredOrInvalidCert
+            }
+            rustls::CertificateError::UnknownIssuer
+            | rustls::CertificateError::BadSignature
+            | rustls::CertificateError::Revoked
+            | rustls::CertificateError::UnknownRevocationStatus
+            | rustls::CertificateError::ExpiredRevocationList
+            | rustls::CertificateError::ExpiredRevocationListContext { .. } => {
+                RejectReason::ChainOrCa
+            }
+            _ => RejectReason::Handshake,
+        },
+        _ => RejectReason::Handshake,
+    }
+}
 
 enum TlsStream {
     Server(tokio_rustls::server::TlsStream<tokio::net::UnixStream>),
@@ -146,27 +219,80 @@ impl PlaneListener {
         })
     }
 
-    /// Accept one connection: capture peer-creds, complete the mTLS server handshake, and
-    /// report the verified peer identity. Fail-closed on any error.
-    pub async fn accept(&self) -> Result<AuthenticatedStream, VaultError> {
-        let (raw, _addr) = self
-            .listener
-            .accept()
-            .await
-            .map_err(|e| VaultError::SocketBind(e.to_string()))?;
-        let peer_creds = peercred::capture(&raw)?;
-        let tls = self
-            .acceptor
-            .accept(raw)
-            .await
-            .map_err(|e| VaultError::Handshake(e.to_string()))?;
-        let peer_certs = tls.get_ref().1.peer_certificates().map(|c| c.to_vec());
-        let peer_uri = peer_uri_san(peer_certs.as_deref(), self.expect, &self.deployment_id)?;
-        Ok(AuthenticatedStream {
+    /// Accept one connection: capture peer-creds, complete the mTLS server handshake
+    /// (bounded by `handshake_timeout`), and report the verified peer identity. Fail-closed
+    /// on any error — but on a handshake/SAN rejection, the `AcceptRejection` carries
+    /// whatever `PeerCreds` were captured (before the handshake started) so the daemon can
+    /// audit WHO was rejected. The transport only REPORTS this; it never audits (Boundary A).
+    pub async fn accept(
+        &self,
+        handshake_timeout: Duration,
+    ) -> Result<AuthenticatedStream, AcceptRejection> {
+        accept_on(
+            &self.listener,
+            &self.acceptor,
+            self.expect,
+            &self.deployment_id,
+            handshake_timeout,
+        )
+        .await
+    }
+}
+
+/// The actual accept implementation, factored out of the `PlaneListener` method so tests can
+/// drive it against a bare `TlsAcceptor` bound to a real `UnixListener` (peer-creds need a
+/// real socket; `PlaneListener` itself additionally requires a live `PlaneClient` cert-sink
+/// attachment that isn't needed to exercise this logic).
+pub(crate) async fn accept_on(
+    listener: &tokio::net::UnixListener,
+    acceptor: &TlsAcceptor,
+    expect: Plane,
+    deployment_id: &str,
+    handshake_timeout: Duration,
+) -> Result<AuthenticatedStream, AcceptRejection> {
+    let (raw, _addr) = listener.accept().await.map_err(|_| AcceptRejection {
+        peer_creds: None,
+        reason: RejectReason::Io,
+    })?;
+    // Capture peer-creds BEFORE the handshake — so they're available to report even on a
+    // handshake/SAN failure (the whole point of this type).
+    let peer_creds = peercred::capture(&raw).map_err(|_| AcceptRejection {
+        peer_creds: None,
+        reason: RejectReason::PeerCredCapture,
+    })?;
+    let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(raw)).await {
+        Err(_elapsed) => {
+            return Err(AcceptRejection {
+                peer_creds: Some(peer_creds),
+                reason: RejectReason::HandshakeTimeout,
+            })
+        }
+        Ok(Err(e)) => {
+            return Err(AcceptRejection {
+                peer_creds: Some(peer_creds),
+                reason: classify_handshake_error(&e),
+            })
+        }
+        Ok(Ok(tls)) => tls,
+    };
+    let peer_certs = tls.get_ref().1.peer_certificates().map(|c| c.to_vec());
+    match peer_uri_san(peer_certs.as_deref(), expect, deployment_id) {
+        Ok(peer_uri) => Ok(AuthenticatedStream {
             inner: TlsStream::Server(tls),
             peer_uri_san: peer_uri,
             peer_creds,
-        })
+        }),
+        // Recomputing the SAN post-handshake failed — the client-cert verifier already
+        // accepted this leaf, so in practice this path is defense-in-depth, not a live
+        // negative case; classify by the same rule as the live handshake-time check.
+        Err(VaultError::PeerIdentity(_)) => Err(AcceptRejection {
+            peer_creds: Some(peer_creds),
+            reason: RejectReason::WrongPlane,
+        }),
+        Err(_) => Err(AcceptRejection {
+            peer_creds: Some(peer_creds),
+            reason: RejectReason::Handshake,
+        }),
     }
 }
 
