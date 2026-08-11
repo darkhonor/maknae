@@ -18,3 +18,4 @@ maknae-vault = { path = "../maknae-vault" }
 maknae-config = { path = "../maknae-config" }
 maknae-subject-ctx-mint = { path = "../maknae-subject-ctx-mint" }
 maknae-audit-append = { path = "../maknae-audit-append" }
+nix = { version = "0.31", default-features = false, features = ["user"] }
