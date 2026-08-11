@@ -81,6 +81,15 @@ impl From<Verb> for maknae_proto::Verb {
 /// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
 /// earlier (config/mint/connect/frame) failure.
 async fn execute(verb: Verb) -> Result<bool, String> {
+    // Install the aws-lc-rs FIPS provider as the process default BEFORE any operation
+    // that asserts FIPS (`PlaneClient::from_document` → `mint()` assert `.fips()`). The
+    // daemon does the identical install-then-assert in `run_inner`; the CLI is a separate
+    // process with its own empty default provider, so it must install too — without this,
+    // `mint()` fails closed with "FIPS provider not active" and the CLI never connects.
+    // (Live-smoke-caught: the CLI tests only cover arg-parsing/config-discovery, never the
+    // live mint path, so no unit test exercised this.)
+    maknae_vault::install_default_crypto_provider();
+
     let dir = resolve_config_dir();
 
     // Load the CLI's config ONCE, registering EVERY section it uses (vault + transport)
