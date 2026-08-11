@@ -12,4 +12,11 @@ exclude_globs = [
   "crates/maknae-vault/src/fips_glue.rs",  # process-global provider fetch (T3)
   "crates/maknae-vault/src/error.rs",      # Display/From declarations
   "crates/maknae-vault/src/lib.rs",        # re-exports
+  "crates/maknae-vault/src/tls.rs",           # rustls config builders — provider/handshake I/O (T3)
+  "crates/maknae-vault/src/plane_verify.rs",  # rustls verifier adapter — delegates to WebPki + T1 verify (T3)
+  "crates/maknae-vault/src/resolver.rs",      # ArcSwapOption cert resolver — TLS hot path (T3)
+  "crates/maknae-vault/src/socket.rs",        # UDS bind/accept/connect + fs hardening — I/O (T3)
+  "crates/maknae-vault/src/peercred.rs",      # nix getsockopt peer-creds — syscall I/O (T3)
+  "crates/maknae-vault/src/stream.rs",        # PlaneListener/Connector/AuthenticatedStream — I/O (T3)
+  "crates/maknae-vault/src/transport_tests.rs", # #[cfg(test)] loopback suite — test-only, uniform T3 story
 ]
