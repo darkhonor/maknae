@@ -95,6 +95,7 @@ fn wctx() -> WhereCtx {
     WhereCtx {
         host: "test-host".to_string(),
         socket: "/run/maknae/test.sock".to_string(),
+        au3_1: serde_json::json!({}),
     }
 }
 
