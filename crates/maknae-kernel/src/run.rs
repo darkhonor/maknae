@@ -109,6 +109,17 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// best-effort (the socket is dropped either way); 1s is generous for ~30 bytes.
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Bound on the `maknae`-group membership lookup (NSS: getgrnam/getpwuid, possibly
+/// backed by SSSD/LDAP). `spawn_blocking` keeps a stalled lookup off the async workers
+/// (so the accept loop stays live), but the handler still awaits the join while holding
+/// its connection permit — unbounded, `max_connections` stalled lookups would pin every
+/// permit and the daemon would fast-close all further connections until NSS recovered.
+/// On elapse the handler FAILS CLOSED (not-a-member → deny + audit) and returns,
+/// releasing the permit; the blocking thread finishes in the background (capped at
+/// process exit by [`RUNTIME_SHUTDOWN_TIMEOUT`]). 5s is far above any healthy NSS
+/// round-trip and below the per-connection read/handshake bounds' order.
+const GROUP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Bound on the Tokio runtime's own teardown in [`run`] (the LAST line of defense for
 /// codex round-11 P1). Aborting an async task can NEVER cancel a `spawn_blocking`
 /// operation already running (blocking threads are not abortable), and a dropped
@@ -739,13 +750,31 @@ where
                                             // fsync findings). Fail-closed to false on any
                                             // resolution OR join error (handle then Denies+audits).
                                             let uid = conn.peer_uid;
-                                            let in_group =
+                                            // Bounded join: a stalled NSS backend must not
+                                            // pin this permit indefinitely — on elapse,
+                                            // fail closed (deny + audit) and release the
+                                            // permit; the orphaned blocking lookup finishes
+                                            // in the background.
+                                            let in_group = match tokio::time::timeout(
+                                                GROUP_LOOKUP_TIMEOUT,
                                                 tokio::task::spawn_blocking(move || {
                                                     uid_in_maknae_group(uid)
-                                                })
-                                                .await
-                                                .map(|r| r.unwrap_or(false))
-                                                .unwrap_or(false);
+                                                }),
+                                            )
+                                            .await
+                                            {
+                                                Ok(join) => {
+                                                    join.map(|r| r.unwrap_or(false))
+                                                        .unwrap_or(false)
+                                                }
+                                                Err(_elapsed) => {
+                                                    eprintln!(
+                                                        "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
+                                                        GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                    );
+                                                    false
+                                                }
+                                            };
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
