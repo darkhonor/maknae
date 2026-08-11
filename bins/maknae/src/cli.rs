@@ -141,9 +141,23 @@ async fn round_trip(
         verb: verb.into(),
     };
     let body = encode_request(&request).map_err(|e| e.to_string())?;
-    write_frame(&mut stream, &body)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Bound the request write like the handshake and read: a daemon that accepted but
+    // stopped consuming must not hang the CLI on a full socket buffer (the frame can
+    // exceed the UDS buffer). `read_timeout_ms` doubles as the write bound.
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(transport.read_timeout_ms),
+        write_frame(&mut stream, &body),
+    )
+    .await
+    {
+        Err(_elapsed) => {
+            return Err(format!(
+                "request write to the daemon stalled for {}ms (daemon not reading?)",
+                transport.read_timeout_ms
+            ))
+        }
+        Ok(r) => r.map_err(|e| e.to_string())?,
+    }
 
     // Bound the response wait by the configured `read_timeout_ms`: a daemon that accepts
     // the connection but never answers must not hang the CLI forever (it still fails

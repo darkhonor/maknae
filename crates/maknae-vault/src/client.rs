@@ -244,9 +244,21 @@ impl PlaneClient {
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
         let wrapped_secret_id = read_secret_credential(&dir.join(format!("{prefix}-secret-id")))?;
         let vault_ca = dir.join("tls").join("vault-ca.crt");
+        // A HARD per-request HTTP timeout on every Vault operation this client ever
+        // makes (login/unwrap/mint/sign, renew_self, revoke_self). vaultrs defaults
+        // `timeout` to None — an UNBOUNDED reqwest client — so a hung Vault connection
+        // (network drop with no RST, a stalled LB) would otherwise wedge whatever
+        // awaits it: the credential supervisor's renew/rotate (silently zombifying the
+        // daemon — the supervisor never returns, so the run-loop's supervisor-exit
+        // select never fires and the leaf just expires), boot-time `mint()`, and the
+        // best-effort `revoke_self` on the shutdown path. 30s is far above any healthy
+        // Vault round-trip and far below every credential validity window; a timeout
+        // surfaces as an ordinary retryable error to the supervisor's
+        // retry-within-window logic (ADR-0018).
         let settings = VaultClientSettingsBuilder::default()
             .address(cfg.addr)
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
+            .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
         let client = VaultClient::new(settings)
