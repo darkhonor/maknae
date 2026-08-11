@@ -205,6 +205,35 @@ why = "AppRole login + sys/wrapping/unwrap — live-Vault I/O; exercised by the 
 path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
 
+# maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
+[[t3]]
+path = "crates/maknae-vault/src/tls.rs"
+why = "rustls FIPS config builders (Stage 2); provider/handshake I/O, no live-unit decision logic"
+
+[[t3]]
+path = "crates/maknae-vault/src/plane_verify.rs"
+why = "asymmetric rustls verifier adapter (Stage 2); delegates chain/PoP to WebPki + T1 verify_plane_uri_san"
+
+[[t3]]
+path = "crates/maknae-vault/src/resolver.rs"
+why = "ArcSwapOption<CertifiedKey> ResolvesServerCert (Stage 2); TLS handshake hot path"
+
+[[t3]]
+path = "crates/maknae-vault/src/socket.rs"
+why = "pathname-UDS bind/accept/connect + fs hardening (Stage 2); I/O"
+
+[[t3]]
+path = "crates/maknae-vault/src/peercred.rs"
+why = "nix getsockopt peer-creds (Stage 2); syscall I/O, cross-platform"
+
+[[t3]]
+path = "crates/maknae-vault/src/stream.rs"
+why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
+
+[[t3]]
+path = "crates/maknae-vault/src/transport_tests.rs"
+why = "in-process mTLS negative suite (Stage 2, Task 10); #[cfg(test)] unit module, report-only test code"
+
 # [[exception]] — documented-not-tested (none at adoption). Removes every code
 # region whose line_start falls within [anchor, end_anchor] from numerator AND
 # denominator. Fail-closed: zero/multi-match anchors, zero-region spans,

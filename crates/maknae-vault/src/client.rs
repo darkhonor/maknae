@@ -7,6 +7,8 @@ use crate::{
     assert_fips_provider, generate_plane_csr, load_ca_pin, load_vault_config,
     verify::verify_plane_uri_san, Plane, VaultError,
 };
+use arc_swap::ArcSwapOption;
+use rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -16,7 +18,6 @@ use zeroize::Zeroizing;
 
 struct IdentityInner {
     leaf_pem: String,
-    #[allow(dead_code)] // consumed by the Stage-2 rustls config builder
     key_der: Zeroizing<Vec<u8>>,
     chain_pem: Vec<String>,
 }
@@ -34,6 +35,35 @@ impl PlaneIdentity {
     pub fn chain_pem(&self) -> &[String] {
         &self.0.chain_pem
     }
+    /// The private key in DER (crate-internal only — used to build the rustls
+    /// `CertifiedKey` in `tls.rs`; never handed to a caller).
+    pub(crate) fn key_der(&self) -> &[u8] {
+        &self.0.key_der
+    }
+}
+
+/// Detaches a listener's cert sink from its `PlaneClient` when the listener is dropped, so
+/// the client can back a replacement listener afterward. Held by `PlaneListener`.
+pub(crate) struct CertSinkGuard {
+    cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
+    slot: Arc<ArcSwapOption<CertifiedKey>>,
+}
+
+impl Drop for CertSinkGuard {
+    fn drop(&mut self) {
+        let mut guard = self.cert_sink.write().expect("cert_sink lock poisoned");
+        // Only detach if the registered slot is still OURS (defensive; a second active bind
+        // is rejected, so it always is). Clear the slot (stop serving) then deregister so a
+        // fresh bind can succeed.
+        if guard
+            .as_ref()
+            .map(|s| Arc::ptr_eq(s, &self.slot))
+            .unwrap_or(false)
+        {
+            self.slot.store(None);
+            *guard = None;
+        }
+    }
 }
 
 /// The Stage-1 plane-cert client.
@@ -48,6 +78,10 @@ pub struct PlaneClient {
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
     /// the actual token TTL rather than a hardcoded assumption. 0 until first mint.
     lease_secs: Arc<AtomicU64>,
+    /// The server resolver's cert slot (set only when a PlaneListener is bound; None for
+    /// the CLI). Stored/cleared IN THE SAME critical section as the identity write so the
+    /// resolver never lags the identity.
+    cert_sink: Arc<RwLock<Option<Arc<ArcSwapOption<CertifiedKey>>>>>,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -146,6 +180,42 @@ impl PlaneClient {
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
             lease_secs: Arc::new(AtomicU64::new(0)),
+            cert_sink: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Attach the server resolver's cert slot AND seed it from the current identity, both
+    /// under the identity READ lock. Renewal-expiry takes the identity WRITE lock, so
+    /// holding the read lock here excludes it: the seed cannot race an expiry that would
+    /// otherwise clear the slot and leave this call restoring a retired cert. After this,
+    /// `mint()`/expiry keep the slot in lock-step with the identity.
+    pub(crate) fn attach_cert_sink(
+        &self,
+        slot: Arc<ArcSwapOption<CertifiedKey>>,
+    ) -> Result<CertSinkGuard, VaultError> {
+        let id_guard = self.identity.read().expect("identity lock poisoned");
+        let mut sink_guard = self.cert_sink.write().expect("cert_sink lock poisoned");
+        // ONE client backs at most ONE ACTIVE listener. Reject a second concurrent bind
+        // rather than orphaning the first listener's sink — an orphan would keep serving a
+        // stale cert that mint/expiry/shutdown no longer update (codex r5). The returned
+        // CertSinkGuard deregisters this slot when the listener drops, so a *replacement*
+        // listener can bind afterward (codex r6). Held across the is_some check + set so two
+        // concurrent binds can't both win.
+        if sink_guard.is_some() {
+            return Err(VaultError::SocketBind(
+                "this PlaneClient already backs a listener (one client backs one listener)".into(),
+            ));
+        }
+        // Build + seed the new slot BEFORE registering it, so a build failure returns Err
+        // without ever registering a half-initialized sink.
+        if let Some(id) = id_guard.as_ref() {
+            let ck = crate::tls::certified_key_from_identity(id)?;
+            slot.store(Some(ck));
+        }
+        *sink_guard = Some(Arc::clone(&slot));
+        Ok(CertSinkGuard {
+            cert_sink: Arc::clone(&self.cert_sink),
+            slot,
         })
     }
 
@@ -182,7 +252,39 @@ impl PlaneClient {
             key_der,
             chain_pem,
         }));
-        *self.identity.write().expect("identity lock poisoned") = Some(id.clone());
+        // Commit under the identity WRITE lock, reading the sink + building the CertifiedKey
+        // INSIDE it, so a racing attach_cert_sink (which registers/seeds under the identity
+        // lock) is fully serialized — no window where mint installs a new identity while the
+        // resolver keeps the old cert, and no window where attach seeds a retired cert. The
+        // build is synchronous, so nothing is awaited while the std lock is held; the only
+        // await (token revoke on build failure) happens AFTER the guard is dropped, and the
+        // identity is NOT committed on that failure path (fail closed).
+        let build_result: Result<(), VaultError> = {
+            let mut guard = self.identity.write().expect("identity lock poisoned");
+            let sink = self
+                .cert_sink
+                .read()
+                .expect("cert_sink lock poisoned")
+                .clone();
+            match sink {
+                Some(slot) => match crate::tls::certified_key_from_identity(&id) {
+                    Ok(ck) => {
+                        *guard = Some(id.clone());
+                        slot.store(Some(ck));
+                        Ok(())
+                    }
+                    Err(e) => Err(e), // do NOT commit identity; revoke below (outside the lock)
+                },
+                None => {
+                    *guard = Some(id.clone());
+                    Ok(())
+                }
+            }
+        };
+        if let Err(e) = build_result {
+            let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -210,6 +312,16 @@ impl PlaneClient {
         Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
     }
 
+    /// The deployment id (crate-internal — the verifier needs it to compute the expected
+    /// peer URI-SAN).
+    pub(crate) fn deployment_id(&self) -> &str {
+        &self.deployment_id
+    }
+    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
+    pub(crate) fn plane(&self) -> Plane {
+        self.plane
+    }
+
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
     pub fn current_identity(&self) -> Option<PlaneIdentity> {
         self.identity
@@ -230,12 +342,22 @@ impl PlaneClient {
         let client = Arc::clone(&self.client);
         let lease_secs = Arc::clone(&self.lease_secs);
         let identity = Arc::clone(&self.identity);
+        let cert_sink = Arc::clone(&self.cert_sink);
         // Once renewal can no longer continue, the leaf's usefulness is bounded by the
         // token's remaining TTL — so INVALIDATE the identity here rather than trusting the
         // caller to observe the join handle. current_identity() then returns None (fail
-        // closed) even if nobody is watching the handle.
+        // closed) even if nobody is watching the handle. The resolver's cert slot is
+        // cleared in lock-step so a bound listener also stops presenting a leaf.
         let expire = move || {
-            *identity.write().expect("identity lock poisoned") = None;
+            // Hold the identity write guard across BOTH mutations so a racing mint (which
+            // also takes identity.write()) cannot interleave into a torn state, and clear
+            // the resolver slot FIRST so a bound listener stops presenting a leaf at or
+            // before the identity clears (maximal fail-closed retirement).
+            let mut guard = identity.write().expect("identity lock poisoned");
+            if let Some(slot) = cert_sink.read().expect("cert_sink lock poisoned").as_ref() {
+                slot.store(None);
+            }
+            *guard = None;
             VaultError::RenewalExpired
         };
         tokio::spawn(async move {
@@ -263,6 +385,22 @@ impl PlaneClient {
 
     /// Best-effort revoke on shutdown; failure is logged, never blocks exit.
     pub async fn shutdown(self) {
+        // Retire the transport credential FIRST — clear the resolver slot (a live listener
+        // stops presenting a leaf) and the identity — so shutdown actually retires the cert
+        // regardless of whether the token revoke below succeeds. Same lock-step order as
+        // `expire` (slot before identity, under the identity write guard).
+        {
+            let mut guard = self.identity.write().expect("identity lock poisoned");
+            if let Some(slot) = self
+                .cert_sink
+                .read()
+                .expect("cert_sink lock poisoned")
+                .as_ref()
+            {
+                slot.store(None);
+            }
+            *guard = None;
+        }
         let client = self.client.lock().await;
         if let Err(e) = vaultrs::token::revoke_self(&*client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
