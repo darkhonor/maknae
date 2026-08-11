@@ -198,12 +198,22 @@ impl PlaneListener {
     /// `PlaneListener`; a second `bind` on the same client returns `VaultError::SocketBind`
     /// (mint/expiry/shutdown drive a single resolver slot).
     ///
+    /// `group`, when `Some`, group-owns the bound socket's pathname (codex round-7 P1) so
+    /// the 0660 mode actually gates on that group rather than the daemon process's PRIMARY
+    /// group — see `socket::bind_listener`. The caller is expected to resolve the `maknae`
+    /// gid and fail closed if it can't; `None` skips group-owning (tests / non-daemon binds).
+    ///
     /// **Must be called from within a Tokio runtime** (it binds a `UnixListener`, which
     /// registers with the reactor and panics otherwise).
-    pub fn bind(path: &Path, client: &PlaneClient, ca: &CaBundle) -> Result<Self, VaultError> {
+    pub fn bind(
+        path: &Path,
+        client: &PlaneClient,
+        ca: &CaBundle,
+        group: Option<nix::unistd::Gid>,
+    ) -> Result<Self, VaultError> {
         let resolver = Arc::new(PlaneCertResolver::new_empty());
         let cfg = tls::server_config(client, ca, Arc::clone(&resolver))?;
-        let listener = socket::bind_listener(path)?;
+        let listener = socket::bind_listener(path, group)?;
         // Attach LAST — after every other fallible step has succeeded — so a failed
         // config/bind never replaces (orphans) an existing listener's sink (codex r4).
         // attach registers the slot AND seeds it from the current identity atomically under

@@ -37,9 +37,21 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 /// socket is removed ONLY if it is actually a socket AND the dir was verified owner-only
 /// above (so an attacker cannot have planted it); otherwise bind surfaces the error.
 ///
+/// `group`, when `Some`, group-owns the freshly bound socket's pathname entry (codex
+/// round-7 P1): under a service account whose PRIMARY group isn't `maknae` (the
+/// normal production setup — `maknae` is a supplementary group), a bare bind leaves the
+/// 0660 socket group-owned by the wrong group, so authorized `maknae`-group peers get
+/// permission-denied at the socket layer before mTLS/`uid_in_maknae_group` ever runs. The
+/// caller resolves the gid and fails closed if it can't (see
+/// `maknae-kernel::groupres::maknae_gid`); `None` is for callers that don't need the
+/// group-gate to actually gate (tests, the CLI-side connector never binds).
+///
 /// **Must be called from within a Tokio runtime** — `tokio::net::UnixListener::bind`
 /// registers with the reactor and panics ("there is no reactor running") otherwise.
-pub(crate) fn bind_listener(path: &Path) -> Result<tokio::net::UnixListener, VaultError> {
+pub(crate) fn bind_listener(
+    path: &Path,
+    group: Option<nix::unistd::Gid>,
+) -> Result<tokio::net::UnixListener, VaultError> {
     verify_parent_dir(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
@@ -76,6 +88,16 @@ pub(crate) fn bind_listener(path: &Path) -> Result<tokio::net::UnixListener, Vau
     }
     let listener =
         tokio::net::UnixListener::bind(path).map_err(|e| VaultError::SocketBind(e.to_string()))?;
+    // Group-own immediately after bind, before the chmod below — minimizes the insecure
+    // window (the parent dir is already owner-only, so nothing outside us can race the
+    // path in between regardless). Path-based `chown`, not `fchown` on the bound fd: a
+    // bound `UnixListener`'s fd is a socket, not a regular-file fd, and `fchown` on it
+    // returns `EINVAL` on at least macOS/BSD — `chown` on the pathname is the portable
+    // way to set ownership on a UDS's filesystem entry.
+    if let Some(gid) = group {
+        nix::unistd::chown(path, None, Some(gid))
+            .map_err(|e| VaultError::SocketGroupOwn(format!("chown group {gid}: {e}")))?;
+    }
     // Atomic-enough: set 0660 immediately after bind (the parent dir is already owner-only,
     // so there is no window a non-group process could connect through).
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
@@ -108,7 +130,7 @@ mod tests {
         let dir = tmpdir("open", 0o777); // group/other-writable → unsafe
         let sock = dir.join("s.sock");
         assert!(matches!(
-            bind_listener(&sock),
+            bind_listener(&sock, None),
             Err(VaultError::InsecureSocketDir { .. })
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -118,9 +140,31 @@ mod tests {
     async fn binds_and_sets_0660_in_safe_dir() {
         let dir = tmpdir("safe", 0o700);
         let sock = dir.join("s.sock");
-        let _l = bind_listener(&sock).expect("bind in a 0700 dir");
+        let _l = bind_listener(&sock, None).expect("bind in a 0700 dir");
         let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o660, "socket must be group-gated 0660");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The codex round-7 P1 fix: `Some(gid)` group-owns the bound socket, so the 0660 mode
+    /// actually gates on the resolved group — not whatever the daemon process's primary
+    /// group happens to be. No `maknae` group exists on this dev host, so this exercises
+    /// the underlying mechanism against the current process's own gid (always resolvable,
+    /// no fixture/root dependency).
+    #[tokio::test]
+    async fn binds_and_group_owns_when_group_is_given() {
+        let dir = tmpdir("group-own", 0o700);
+        let sock = dir.join("s.sock");
+        let gid = nix::unistd::getgid();
+        let _l = bind_listener(&sock, Some(gid)).expect("bind + group-own in a 0700 dir");
+        let meta = std::fs::metadata(&sock).unwrap();
+        assert_eq!(
+            meta.gid(),
+            gid.as_raw(),
+            "socket must be group-owned by the resolved gid"
+        );
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o660, "socket must still be group-gated 0660");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -130,7 +174,7 @@ mod tests {
         let sock = dir.join("s.sock");
         let _live = std::os::unix::net::UnixListener::bind(&sock).unwrap(); // live listener
         assert!(matches!(
-            bind_listener(&sock),
+            bind_listener(&sock, None),
             Err(VaultError::SocketBind(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -145,7 +189,8 @@ mod tests {
             let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         }
         assert!(sock.exists(), "stale socket file remains after drop");
-        let _l = bind_listener(&sock).expect("stale socket detected + removed, bind succeeds");
+        let _l =
+            bind_listener(&sock, None).expect("stale socket detected + removed, bind succeeds");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
