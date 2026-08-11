@@ -12,15 +12,63 @@ use crate::error::AuditError;
 use crate::record::{canonical_json, AuditRecord};
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 fn open_options() -> std::fs::OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
     let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true).mode(0o640);
+    // `O_NOFOLLOW`: if the final path component is a symlink, `open()` fails with
+    // ELOOP rather than following it — a symlink at the audit path must never
+    // redirect privileged appends elsewhere. `custom_flags` is safe (no `unsafe`).
+    opts.append(true)
+        .create(true)
+        .mode(0o640)
+        .custom_flags(nix::libc::O_NOFOLLOW);
     opts
+}
+
+/// Fail-closed integrity check on the OPENED audit file descriptor. `fstat`s the
+/// FILE HANDLE (`File::metadata`, never the path) so there is no TOCTOU window
+/// between the check and subsequent appends: a pre-seeded audit file that is not a
+/// regular file, is group/world-writable, or is not owned by our euid is refused so
+/// another user cannot tamper with the durable audit trail (AU-9 / AU-5). A symlink
+/// at the path is already refused upstream by `O_NOFOLLOW`.
+///
+/// A freshly-created file (the normal first-boot case) is a regular file, owned by
+/// the daemon's euid, at mode `0o640 & ~umask` — which passes every check below.
+#[cfg(unix)]
+fn validate_secure_audit_file(file: &File, path: &Path) -> Result<(), AuditError> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().map_err(|e| AuditError::OpenPrimary {
+        path: path.to_path_buf(),
+        detail: format!("cannot fstat opened audit file: {e}"),
+    })?;
+    let reject = |why: String| AuditError::OpenPrimary {
+        path: path.to_path_buf(),
+        detail: format!("insecure pre-existing audit file: {why}"),
+    };
+    if !meta.file_type().is_file() {
+        return Err(reject("not a regular file".to_string()));
+    }
+    // Intended perms are 0o640 (owner rw, group r, other none). Reject any group
+    // write/execute bit and ANY other-class bit (mask 0o037): another user must not
+    // be able to write the trail. A freshly-created 0o640 file (group r only) passes.
+    if meta.mode() & 0o037 != 0 {
+        return Err(reject(format!(
+            "group/world-accessible mode {:o} (require owner-only writable, e.g. 0o640)",
+            meta.mode() & 0o7777
+        )));
+    }
+    let euid = nix::unistd::geteuid().as_raw();
+    if meta.uid() != euid {
+        return Err(reject(format!(
+            "owned by uid {} not our euid {euid}",
+            meta.uid()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -48,6 +96,11 @@ impl AuditSink {
                 path: cfg.jsonl_path.clone(),
                 detail: e.to_string(),
             })?;
+        // Validate the OPENED fd (not the path) — fail closed on an insecure or
+        // symlinked pre-existing audit file (AU-9). A symlink already failed the
+        // open above via O_NOFOLLOW; this catches perms / ownership / non-regular.
+        #[cfg(unix)]
+        validate_secure_audit_file(&file, &cfg.jsonl_path)?;
         Ok(AuditSink {
             primary: Arc::new(Mutex::new(file)),
             path: cfg.jsonl_path.clone(),
@@ -199,6 +252,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
             jsonl_path: dir.path().to_path_buf(), // a directory, not a file
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        assert!(AuditSink::open(&cfg).is_err());
+    }
+
+    // ---- fail-closed audit-file integrity (O_NOFOLLOW + fstat) --------------
+
+    // (a) A fresh path opens, and the created file is a regular file, owned by us,
+    // and NOT group/world-writable (mode 0o640 & ~umask — the security mask the
+    // validator enforces). The umask may tighten below 0o640; it never loosens it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_succeeds_on_fresh_path_regular_owned_not_group_world_writable() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        assert!(AuditSink::open(&cfg).is_ok());
+        let meta = std::fs::metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "created audit file is regular");
+        assert_eq!(meta.uid(), nix::unistd::geteuid().as_raw(), "owned by us");
+        assert_eq!(meta.mode() & 0o037, 0, "not group/world-writable");
+        assert_eq!(meta.mode() & 0o600, 0o600, "owner can read+write");
+    }
+
+    // (b) A pre-existing world-writable file is refused — another user must not be
+    // able to tamper with the durable audit trail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_fails_on_preexisting_world_writable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path,
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        assert!(AuditSink::open(&cfg).is_err());
+    }
+
+    // (c) A symlink at the audit path is refused (O_NOFOLLOW → ELOOP on open), so a
+    // symlink cannot redirect privileged appends to another file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_fails_when_path_is_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-target");
+        std::fs::write(&target, b"").unwrap();
+        let link = dir.path().join("audit.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: link,
             siem: None,
             au3_1: serde_json::json!({}),
         };
