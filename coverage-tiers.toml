@@ -61,6 +61,13 @@ files = [
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
   "crates/maknae-vault/src/fips.rs",
+  # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
+  # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
+  # default here is exactly the T1 line-drawing rule (silently prefers a weaker
+  # credential source, or the daemon and CLI resolvers get conflated). In
+  # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
+  # (secret_io.rs) is T3 below.
+  "crates/maknae-vault/src/secret_source.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a
@@ -230,6 +237,10 @@ why = "AppRole login (standing SecretID) — live-Vault I/O; exercised by the ga
 [[t3]]
 path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
+
+[[t3]]
+path = "crates/maknae-vault/src/secret_io.rs"
+why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
 
 [[t3]]
 path = "crates/maknae-vault/src/operator.rs"

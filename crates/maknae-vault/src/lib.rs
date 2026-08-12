@@ -19,6 +19,8 @@ mod operator;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod secret_io;
+mod secret_source;
 mod supervisor;
 mod supervisor_run;
 mod tls;
@@ -48,6 +50,10 @@ pub use operator::OperatorClient;
 #[cfg(unix)]
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use secret_source::{
+    resolve_cli_secret_source, resolve_daemon_secret_source, CliSecretSource, CredentialSourceKind,
+    DaemonSecretSource,
+};
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
