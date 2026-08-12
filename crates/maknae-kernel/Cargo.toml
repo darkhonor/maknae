@@ -18,6 +18,7 @@ maknae-vault = { path = "../maknae-vault" }
 maknae-config = { path = "../maknae-config" }
 maknae-subject-ctx-mint = { path = "../maknae-subject-ctx-mint" }
 maknae-audit-append = { path = "../maknae-audit-append" }
+maknae-msgs = { path = "../maknae-msgs" }
 nix = { version = "0.31", default-features = false, features = ["user"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util"] }
 serde_json = "1"

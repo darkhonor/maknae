@@ -40,6 +40,15 @@ impl SessionIds {
         }
     }
 
+    /// The per-boot nonce ALONE — the high 32 bits of every `session_id` this
+    /// instance allocates, with no connection counter mixed in (Task 7: boot-level
+    /// AU-3 records, which precede any connection, use `boot_nonce() << 32`
+    /// directly — ctr floor 0 — while real connections start at ctr 1 via
+    /// [`Self::next_session`]).
+    pub fn boot_nonce(&self) -> u32 {
+        self.boot_nonce
+    }
+
     /// Allocate the next session id for a newly-accepted connection.
     ///
     /// Combines the two halves with `+`, not `|`: the halves never overlap
@@ -177,5 +186,12 @@ mod tests {
         let seq = Seq::default();
         assert_eq!(seq.next(), 1);
         assert_eq!(seq.next(), 2);
+    }
+
+    #[test]
+    fn boot_nonce_matches_layout() {
+        let ids = SessionIds::with_nonce(0xABCD);
+        assert_eq!(ids.boot_nonce(), 0xABCD);
+        assert_eq!(ids.next_session() >> 32, 0xABCD);
     }
 }

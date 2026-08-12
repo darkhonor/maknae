@@ -14,5 +14,11 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::AuthzUnknownSubject => "Unknown subject",
         MsgId::DaemonNotRunning => "maknae daemon is not running",
         MsgId::DaemonStartFailed => "Failed to start maknae daemon",
+        MsgId::AuthzConfigRefused => {
+            "maknae daemon refused to start: the authorization policy could not be loaded"
+        }
+        MsgId::PostureDegraded => {
+            "warning: this boot's credential posture is not hardware-root-of-trust sealed"
+        }
     }
 }

@@ -996,6 +996,7 @@ dependencies = [
  "maknae-audit",
  "maknae-audit-append",
  "maknae-config",
+ "maknae-msgs",
  "maknae-proto",
  "maknae-spif",
  "maknae-subject-ctx",
