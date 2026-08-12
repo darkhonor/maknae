@@ -29,7 +29,7 @@
 //! re-authentication.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -858,10 +858,40 @@ where
 // Layer 3: the process entrypoint.
 // ---------------------------------------------------------------------------
 
+/// Boot-time failures [`run_inner`] can return (spec §5.4). Two arms, not one,
+/// so [`run`] can map the fail-closed **authz-config boot gate** to its OWN
+/// distinct non-zero `ExitCode` — separable at the process level from every
+/// other startup failure (FIPS/config/vault/audit-sink/bind/...), which all
+/// remain generically `Other`.
+#[derive(Debug)]
+enum RunError {
+    /// The boot-time DAC authz-config gate (spec §5.4) refused to start: the
+    /// `principal` section could not be resolved, or `authz.yaml` was
+    /// missing/malformed/insecure. An AU-3 refusal record has already been
+    /// emitted (peer-less mapping, spec §5.3) before this is constructed.
+    Authz(String),
+    /// Any other startup failure.
+    Other(String),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::Authz(m) | RunError::Other(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+/// The distinct process exit code for [`RunError::Authz`] (spec §5.4: "distinct
+/// non-zero exit"). Deliberately not [`ExitCode::FAILURE`] (1) — an operator or
+/// process-supervision script can tell "refused: unauthorized/unresolvable DAC
+/// policy" apart from every other startup failure without parsing stderr.
+const AUTHZ_REFUSAL_EXIT_CODE: u8 = 3;
+
 /// The `maknaed` entrypoint. Builds a Tokio runtime and drives the async orchestration;
-/// any boot/config/credential failure fails closed to [`ExitCode::FAILURE`] (the daemon
-/// refuses to start rather than serve without audit or a plane credential). `bins/maknaed`
-/// stays a plain `fn main` that returns this `ExitCode`.
+/// any boot/config/credential failure fails closed to a non-zero `ExitCode` (the daemon
+/// refuses to start rather than serve without audit, an authorized DAC policy, or a
+/// plane credential). `bins/maknaed` stays a plain `fn main` that returns this `ExitCode`.
 pub fn run(config_dir: &Path) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -877,7 +907,11 @@ pub fn run(config_dir: &Path) -> ExitCode {
             // supervision restarts the daemon and re-mints; the diagnostic was already
             // logged by the accept loop when the supervisor's handle resolved).
             Ok(outcome) => crate::handler::serve_outcome_to_exit_code(&outcome),
-            Err(e) => {
+            Err(RunError::Authz(e)) => {
+                eprintln!("maknaed: refusing to start: {e}");
+                ExitCode::from(AUTHZ_REFUSAL_EXIT_CODE)
+            }
+            Err(RunError::Other(e)) => {
                 eprintln!("maknaed: refusing to start: {e}");
                 ExitCode::FAILURE
             }
@@ -893,37 +927,236 @@ pub fn run(config_dir: &Path) -> ExitCode {
     code
 }
 
-async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, String> {
+/// The peer-less `session_id` every boot-level AU-3 record shares (spec §5.3):
+/// the boot nonce alone, ctr floor 0 — never `session_ids.next_session()`, which
+/// would consume ctr 1 and collide with the first real connection's id.
+fn boot_session_id(session_ids: &SessionIds) -> u64 {
+    (session_ids.boot_nonce() as u64) << 32
+}
+
+/// Emit the AU-3 boot-refusal record for the authz gate (spec §5.4) — peer-less
+/// field mapping (spec §5.3) — then build the [`RunError::Authz`] `run()` maps to
+/// its own exit code. A failure to durably append the refusal record itself is
+/// logged but never additionally fatal (the boot is refused either way).
+#[allow(clippy::too_many_arguments)]
+async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
+    sink: &E,
+    host: &str,
+    socket: &str,
+    uid: u32,
+    session_id: u64,
+    seq: u64,
+    au3_1: &serde_json::Value,
+    reason: String,
+) -> RunError {
+    let rec = make_record(
+        "boot",
+        host,
+        socket,
+        uid,
+        None,
+        None,
+        None,
+        session_id,
+        seq,
+        "authz",
+        "deny",
+        &reason,
+        "unauthorized",
+        au3_1,
+    );
+    if let Err(e) = sink.emit(&rec).await {
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on boot authz refusal — refusal proceeded without a durable record: {e}"
+        );
+    }
+    let catalog = maknae_msgs::msg(
+        maknae_msgs::detect_locale(),
+        maknae_msgs::MsgId::AuthzConfigRefused,
+    );
+    RunError::Authz(format!("{catalog}: {reason}"))
+}
+
+/// Read the root-owned boot posture marker (`<config_dir>/private/posture.yaml`,
+/// spec §4.6/§5.2) — the daemon can read it but never modify it. A MISSING file
+/// (never provisioned) or a MALFORMED one (bad YAML, wrong shape, a missing
+/// field) both parse to `None`: [`crate::posture::determine`] then treats an
+/// absent attestation exactly like a contradicting one (`Unverified`) — this
+/// read is deliberately fail-SOFT (`None`, not a hard boot error) because the
+/// marker is provisioning-time EVIDENCE, not a load-bearing config section; its
+/// absence degrades the reported posture, it never blocks boot.
+fn read_posture_marker(config_dir: &Path) -> Option<crate::posture::PostureMarker> {
+    let path = config_dir.join("private").join("posture.yaml");
+    let value = maknae_config::load_file(&path).ok()?;
+    let entries = match &value {
+        maknae_config::Value::Map(entries) => entries,
+        _ => return None,
+    };
+    let get = |key: &str| -> Option<String> {
+        entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                maknae_config::Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+    };
+    Some(crate::posture::PostureMarker {
+        mechanism: get("mechanism")?,
+        target: get("target")?,
+        timestamp: get("timestamp")?,
+    })
+}
+
+async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
     maknae_vault::install_default_crypto_provider();
-    maknae_vault::assert_fips_provider().map_err(|e| e.to_string())?;
+    maknae_vault::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
 
     // Boot Maknae's own config ONCE, registering every section the daemon uses (core +
-    // lake + vault + transport + audit — see boot.rs). The booted document backs the
-    // plane client below, so no incompatible per-call reload rejects a combined config.
-    let boot = crate::boot(config_dir).map_err(|e| e.to_string())?;
+    // lake + vault + transport + audit + principal — see boot.rs). The booted document
+    // backs the plane client below, so no incompatible per-call reload rejects a
+    // combined config.
+    let boot = crate::boot(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
     let transport = maknae_config::transport_from_section(boot.section("transport"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RunError::Other(e.to_string()))?;
     let audit_cfg = maknae_config::audit_from_section(boot.section("audit"), config_dir)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RunError::Other(e.to_string()))?;
 
     // Fail-closed audit sink: no durable audit path → do not start (AU-5).
-    let sink =
-        Arc::new(maknae_audit_append::AuditSink::open(&audit_cfg).map_err(|e| e.to_string())?);
+    let sink = Arc::new(
+        maknae_audit_append::AuditSink::open(&audit_cfg)
+            .map_err(|e| RunError::Other(e.to_string()))?,
+    );
 
-    // Plane credential: authenticate → mint a memory-only leaf, then run the credential
-    // supervisor concurrently (renewal + leaf rotation; rotation cadence is checked once
-    // per renewal cycle — Task-6 review note).
+    // The boot-level session id (spec §5.3) — shared by every AU-3 record this boot
+    // emits BEFORE any connection (the authz refusal, the posture record) and by every
+    // real connection's `next_session()` afterward, so they all derive from the SAME
+    // per-boot nonce.
+    let session_ids = Arc::new(SessionIds::new());
+    let host = hostname();
+    let socket = transport.socket_path.display().to_string();
+    let euid = nix::unistd::geteuid().as_raw();
+
+    // --- AUTHZ GATE (spec §5.4): fail-closed boot gate over authz.yaml. Ordering:
+    // audit sink first (above), so the refusal below is itself auditable. ANY
+    // failure here — a malformed `principal` section (needed to resolve `~`) or a
+    // rejected/missing/insecure authz.yaml — refuses to start: emit a peer-less AU-3
+    // boot-refusal record, then return `RunError::Authz` so `run()` maps it to its
+    // own distinct non-zero exit code.
+    let principal = match maknae_config::principal_from_section(boot.section("principal")) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(refuse_authz_boot(
+                sink.as_ref(),
+                &host,
+                &socket,
+                euid,
+                boot_session_id(&session_ids),
+                Seq::new().next(),
+                &audit_cfg.au3_1,
+                e.to_string(),
+            )
+            .await);
+        }
+    };
+    if let Err(e) = maknae_config::load_authz(
+        &config_dir.join("authz.yaml"),
+        principal.as_ref().map(|p| p.home.as_path()),
+    ) {
+        return Err(refuse_authz_boot(
+            sink.as_ref(),
+            &host,
+            &socket,
+            euid,
+            boot_session_id(&session_ids),
+            Seq::new().next(),
+            &audit_cfg.au3_1,
+            e.to_string(),
+        )
+        .await);
+    }
+
+    // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
+    // authenticate, then mint a memory-only leaf below; the credential supervisor then
+    // runs concurrently (renewal + leaf rotation; rotation cadence is checked once per
+    // renewal cycle — Task-6 review note).
     let client = maknae_vault::PlaneClient::from_document(
         boot.document(),
         config_dir,
         maknae_vault::Plane::Kernel,
     )
-    .map_err(|e| e.to_string())?;
-    let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
+    .map_err(|e| RunError::Other(e.to_string()))?;
+    let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
+
+    // --- BOOT POSTURE RECORD (spec §5.2/§5.3): stated BEFORE mint, right after the
+    // plane client resolved which SecretID source it actually used. A durable-append
+    // failure here is logged but non-fatal (mirrors every other boot-record emit) —
+    // credential posture is an audit STATEMENT, not itself a gate.
+    //
+    // `expected_target` is the deterministic sealed-credential path THIS boot's
+    // config implies — `<config_dir>/private/maknaed-secret-id.{cred,sep}`, the
+    // SAME path enroll's `artifact_table` writes to (bins/maknae's
+    // `artifact_table.rs`) and the systemd unit's `LoadCredentialEncrypted=`
+    // pins (spec §9.6) — computed here from the same `config_dir` base every
+    // other boot artifact resolves against. `posture::determine` requires the
+    // marker's `target` to match this, closing the "marker's mechanism is
+    // right but its target is a stale/foreign path" gap (spec §5.2).
+    let secret_source_kind = client.secret_source();
+    let expected_target = match secret_source_kind {
+        maknae_vault::CredentialSourceKind::CredentialsDirectory => {
+            config_dir.join("private").join("maknaed-secret-id.cred")
+        }
+        maknae_vault::CredentialSourceKind::SepSealed => {
+            config_dir.join("private").join("maknaed-secret-id.sep")
+        }
+        // Unused by `determine` for the plaintext branch (it ignores both the
+        // marker and the target unconditionally) — an empty path is fine.
+        maknae_vault::CredentialSourceKind::PlaintextPath => PathBuf::new(),
+    };
+    let marker = read_posture_marker(config_dir);
+    let posture = crate::posture::determine(
+        secret_source_kind.into(),
+        marker.as_ref(),
+        &expected_target.to_string_lossy(),
+    );
+    let posture_rec = make_record(
+        "boot",
+        &host,
+        &socket,
+        euid,
+        None,
+        None,
+        None,
+        boot_session_id(&session_ids),
+        Seq::new().next(),
+        "posture",
+        "permit",
+        "boot credential posture recorded",
+        posture.as_str(),
+        &audit_cfg.au3_1,
+    );
+    if let Err(e) = sink.emit(&posture_rec).await {
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on boot posture record — boot proceeded without a durable record: {e}"
+        );
+    }
+    if posture != crate::posture::Posture::HrotSealed {
+        eprintln!(
+            "maknaed: {}",
+            maknae_msgs::msg(
+                maknae_msgs::detect_locale(),
+                maknae_msgs::MsgId::PostureDegraded
+            )
+        );
+    }
+
+    client
+        .mint()
+        .await
+        .map_err(|e| RunError::Other(e.to_string()))?;
     // Retained (not `let _`, codex round-5 P1): the serve loop selects on this handle
     // alongside the accept path and shutdown, so a supervisor exit (renewal/rotation
     // retry window exhausted → `RenewalExpired`, or a panic/cancellation) stops the
@@ -936,12 +1169,21 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, String> {
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
-    let outcome = serve_after_mint(&client, &ca, &sink, transport, &audit_cfg, supervisor).await;
+    let outcome = serve_after_mint(
+        &client,
+        &ca,
+        &sink,
+        transport,
+        &audit_cfg,
+        Arc::clone(&session_ids),
+        supervisor,
+    )
+    .await;
 
     // Retire the plane credential (revoke token, clear leaf) on the way out — on the
     // graceful-shutdown path AND on any post-mint startup failure (e.g. bind).
     client.shutdown().await;
-    outcome
+    outcome.map_err(RunError::Other)
 }
 
 /// The post-mint startup + serve: bind the group-gated plane listener, then run the
@@ -957,6 +1199,7 @@ async fn serve_after_mint(
     sink: &Arc<maknae_audit_append::AuditSink>,
     transport: maknae_config::TransportConfig,
     audit_cfg: &maknae_config::AuditConfig,
+    session_ids: Arc<SessionIds>,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
@@ -970,7 +1213,9 @@ async fn serve_after_mint(
         maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
     let listener = PlaneListener::bind(&transport.socket_path, client, ca, Some(gid))
         .map_err(|e| e.to_string())?;
-    let session_ids = Arc::new(SessionIds::new());
+    // `session_ids` is the SAME allocator `run_inner` used for this boot's AU-3
+    // boot-level records (spec §5.3): every real connection's `next_session()`
+    // therefore shares the one per-boot nonce, starting its counter at 1.
     let wctx = WhereCtx {
         host: hostname(),
         socket: transport.socket_path.display().to_string(),
@@ -1155,5 +1400,417 @@ mod tests {
         let outcome = drain_handlers_bounded(&mut handlers, Duration::from_secs(5)).await;
         assert_eq!(outcome, DrainOutcome::Completed);
         assert!(handlers.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot-gate integration tests (spec §5.4/§5.2-§5.3, Task 7). Full `run_inner`
+// over a real temp config dir (the boot.rs / maknae-vault client.rs fixture
+// pattern) — the authz gate now sits BEFORE the plane client is even
+// constructed, so cases (a)/(b) need no live Vault at all; case (c) reaches
+// past the gate into client construction + the posture record and is expected
+// to fail LATER, at `mint()` (no live Vault in a unit test), which proves it
+// got past the gate.
+#[cfg(unix)]
+#[cfg(test)]
+mod boot_gate_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    // `$CREDENTIALS_DIRECTORY` is process-wide; serialize the one test that sets it
+    // against any other test in THIS crate's test binary that might touch it.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // A real, self-signed P-384 CA certificate (generated once via `openssl req
+    // -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-384 ...`) — `load_ca_pin` and
+    // `PlaneClient::from_document` both parse-validate whatever sits at
+    // `tls/*.crt`, so a placeholder string would fail closed before ever reaching
+    // the authz gate this suite exercises.
+    const SELF_SIGNED_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIB1TCCAVqgAwIBAgIUHomPebdT3IeSlE93a8ShvhfFJmcwCgYIKoZIzj0EAwIw\n\
+IDEeMBwGA1UEAwwVbWFrbmFlLWtlcm5lbC10ZXN0LWNhMCAXDTI2MDgxMjE3NDYy\n\
+MloYDzIxMjYwNzE5MTc0NjIyWjAgMR4wHAYDVQQDDBVtYWtuYWUta2VybmVsLXRl\n\
+c3QtY2EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAASmE05K4ZU2QMMCNKPnA8UhRC4/\n\
+wR5qqSAZWTnfBTJ8J3ld5APC5p6QsORvYOt8/bQGTC5MgFZ+GmfZGubJCeExdsRB\n\
+8o7s8lbNapU4nyYsO2M0pB2wu3w+AE9RYiGIewqjUzBRMB0GA1UdDgQWBBS0R8fb\n\
+RZzvJKR13WnrvryhhbsGrTAfBgNVHSMEGDAWgBS0R8fbRZzvJKR13WnrvryhhbsG\n\
+rTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA2kAMGYCMQCAXllf9eXJGbU4\n\
+xc1T6LHIdEHkxzkIaXC/fBpSxtTrVL9JSVGMBLQgMHs6aNp8gRgCMQDU2GhtZkJI\n\
+kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
+-----END CERTIFICATE-----\n";
+
+    struct Dir(std::path::PathBuf);
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "maknae_kernel_rungate_{}_{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(p.join("tls")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o750)).unwrap();
+            Dir(p)
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn put(dir: &Path, name: &str, body: &str, mode: u32) {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Everything `run_inner` needs on disk EXCEPT `authz.yaml` (each test writes
+    /// its own, or omits it): `maknae.yaml` (core+vault+transport+audit[+principal]),
+    /// the CA trio, and the daemon's AppRole id.
+    fn write_common_fixture(d: &Dir, principal_block: &str) {
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             transport:\n  socket_path: {}\n\
+             audit:\n  jsonl_path: {}\n\
+             {}",
+            d.0.join("maknaed.sock").display(),
+            d.0.join("audit.jsonl").display(),
+            principal_block,
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+        for f in [
+            "tls/vault-ca.crt",
+            "tls/maknae-root-ca.crt",
+            "tls/maknae-int-ca.crt",
+        ] {
+            put(&d.0, f, SELF_SIGNED_PEM, 0o640);
+        }
+        put(&d.0, "maknaed-approle-id", "maknaed-role-id\n", 0o640);
+    }
+
+    /// Run `run_inner` to completion on a FRESH single-threaded runtime, entirely
+    /// synchronously from the caller's point of view — deliberately NOT
+    /// `#[tokio::test]`/`.await`: these tests hold `ENV_LOCK` (a plain
+    /// `std::sync::Mutex`) across the call to serialize `$CREDENTIALS_DIRECTORY`
+    /// mutation against any other test in this binary, and holding a
+    /// `MutexGuard` across a syntactic `.await` point trips
+    /// `clippy::await_holding_lock`. Calling `Runtime::block_on` from a plain
+    /// (non-async) test function has no such suspend point in the CALLER's own
+    /// frame, so the guard is just an ordinary stack value — matches `run()`'s
+    /// own runtime-construction pattern.
+    fn block_on_run_inner(dir: &Path) -> Result<ServeOutcome, RunError> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_inner(dir))
+    }
+
+    // (a) A missing `authz.yaml` refuses to start with the NEW distinct error
+    // variant, having written a durable AU-3 refusal record — spec §5.4.
+    #[test]
+    fn missing_authz_yaml_refuses_and_audits() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("missing_authz");
+        write_common_fixture(
+            &d,
+            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
+        );
+        // Deliberately no authz.yaml written.
+
+        match block_on_run_inner(&d.0) {
+            Err(RunError::Authz(msg)) => assert!(!msg.is_empty()),
+            other => panic!("expected Err(RunError::Authz), got {other:?}"),
+        }
+
+        let audit = std::fs::read_to_string(d.0.join("audit.jsonl")).unwrap();
+        let lines: Vec<&str> = audit.lines().collect();
+        assert_eq!(lines.len(), 1, "exactly one boot-refusal record: {audit}");
+        let rec: maknae_audit_append::AuditRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(rec.event, "boot");
+        assert_eq!(rec.action, "authz");
+        assert_eq!(rec.outcome.result, "deny");
+        assert_eq!(rec.outcome.posture, "unauthorized");
+        assert_eq!(rec.subject.user, None, "boot records are peer-less");
+        assert_eq!(rec.subject.plane_uri_san, None);
+        assert_eq!(rec.source.gid, None);
+        assert_eq!(rec.source.pid, None);
+        assert_eq!(rec.seq, 1);
+    }
+
+    // (b) A shipped `authz.yaml` using `~` with NO enrolled principal refuses —
+    // `~` cannot be resolved without `principal.home` (spec §5.5/§7).
+    #[test]
+    fn tilde_pattern_without_principal_refuses() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("tilde_no_principal");
+        write_common_fixture(&d, ""); // no `principal:` section at all
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n",
+            0o640,
+        );
+
+        match block_on_run_inner(&d.0) {
+            Err(RunError::Authz(_)) => {}
+            other => panic!("expected Err(RunError::Authz), got {other:?}"),
+        }
+    }
+
+    // (c) A valid default `authz.yaml` + an enrolled principal gets PAST the
+    // authz gate: the boot posture record is emitted (client construct + source
+    // resolve succeeded), and boot only fails later, at `mint()` (no live Vault
+    // in this unit test) — a `RunError::Other`, never `RunError::Authz`.
+    //
+    // **Root-gated (best-effort):** `maknae_config::load_authz` asserts
+    // `authz.yaml` is owned by uid 0 (spec §4.6/§7, `maknae-config/src/authz.rs`)
+    // — a control this task does not touch. A non-privileged test process can
+    // never create a root-owned fixture file (documented at
+    // `authz.rs::security_load`'s own doc comment: "the SUCCESS path is
+    // unit-testable [only] without an actual root-owned fixture file" via
+    // dependency injection, which `load_authz`'s public entrypoint does not
+    // expose). This test therefore only exercises the real success path when
+    // it happens to run AS root (`sudo cargo test -p maknae-kernel`); under an
+    // unprivileged runner (every CI lane) it degrades to proving the SAME
+    // fixture fails via the authz gate for the expected reason
+    // (`NotRootOwned`) rather than silently no-op'ing. The individual pieces
+    // the success path would exercise (`boot_session_id`, `read_posture_marker`,
+    // the `make_record("boot", ..., "posture", ...)` shape) are pinned by the
+    // focused unit tests below, independent of root.
+    #[test]
+    fn valid_authz_and_principal_reaches_posture_record() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let d = Dir::new("valid_reaches_posture");
+        write_common_fixture(
+            &d,
+            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
+        );
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n",
+            0o640,
+        );
+        let creds_dir = std::env::temp_dir().join(format!(
+            "maknae_kernel_rungate_creds_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&creds_dir);
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        std::fs::write(creds_dir.join("maknaed-secret-id"), "secret-value").unwrap();
+        std::env::set_var("CREDENTIALS_DIRECTORY", &creds_dir);
+
+        let result = block_on_run_inner(&d.0);
+
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let _ = std::fs::remove_dir_all(&creds_dir);
+
+        if nix::unistd::geteuid().as_raw() == 0 {
+            // Running as root: `authz.yaml` (written above by this same, now-root,
+            // process) is genuinely root-owned — the real success path runs.
+            match &result {
+                Err(RunError::Other(_)) => {}
+                other => panic!(
+                    "expected Err(RunError::Other) (a later, non-authz failure), got {other:?}"
+                ),
+            }
+            let audit = std::fs::read_to_string(d.0.join("audit.jsonl")).unwrap();
+            let recs: Vec<maknae_audit_append::AuditRecord> = audit
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            let posture_rec = recs
+                .iter()
+                .find(|r| r.action == "posture")
+                .unwrap_or_else(|| panic!("no posture record in: {audit}"));
+            assert_eq!(posture_rec.event, "boot");
+            assert_eq!(posture_rec.outcome.result, "permit");
+            // $CREDENTIALS_DIRECTORY resolves to CredentialsDirectory; with no
+            // posture marker file present that's Unverified (spec §5.2 closed map).
+            assert_eq!(posture_rec.outcome.posture, "unverified");
+            assert_eq!(posture_rec.subject.user, None);
+            assert_eq!(posture_rec.source.uid, nix::unistd::geteuid().as_raw());
+        } else {
+            // Unprivileged (every CI lane, this dev host): the authz gate still
+            // refuses — for `NotRootOwned` specifically (checked below via its
+            // exact Display text, `authz.rs`'s `AuthzError::NotRootOwned` arm),
+            // not a grammar/tilde problem — proving the gate is reached and
+            // enforced, not silently bypassed.
+            match &result {
+                Err(RunError::Authz(msg)) => assert!(
+                    msg.contains("not owned by root"),
+                    "expected a NotRootOwned refusal, got: {msg}"
+                ),
+                other => panic!("expected Err(RunError::Authz), got {other:?}"),
+            }
+        }
+    }
+
+    // ---- focused unit coverage for the pieces the root-gated happy path above
+    // cannot exercise without root ----
+
+    #[test]
+    fn boot_session_id_is_nonce_shifted_with_ctr_floor_zero() {
+        let ids = SessionIds::with_nonce(0x1234_5678);
+        assert_eq!(boot_session_id(&ids), 0x1234_5678_0000_0000);
+        // Distinct from the first REAL connection's session id (ctr=1), so a
+        // boot-level record and the first connection's admission record never
+        // collide on `session_id`.
+        assert_ne!(boot_session_id(&ids), ids.next_session());
+    }
+
+    #[test]
+    fn read_posture_marker_missing_file_is_none() {
+        let d = Dir::new("marker_missing");
+        assert_eq!(read_posture_marker(&d.0), None);
+    }
+
+    #[test]
+    fn read_posture_marker_unparseable_yaml_is_none() {
+        let d = Dir::new("marker_unparseable");
+        put(&d.0, "private/posture.yaml", "x: [1, 2\n", 0o640); // unclosed flow seq
+        assert_eq!(read_posture_marker(&d.0), None);
+    }
+
+    #[test]
+    fn read_posture_marker_scalar_root_is_none() {
+        let d = Dir::new("marker_scalar_root");
+        put(&d.0, "private/posture.yaml", "just a scalar\n", 0o640);
+        assert_eq!(read_posture_marker(&d.0), None);
+    }
+
+    #[test]
+    fn read_posture_marker_missing_field_is_none() {
+        let d = Dir::new("marker_missing_field");
+        // `timestamp` is absent — the whole marker must not be fabricated from a
+        // partial record.
+        put(
+            &d.0,
+            "private/posture.yaml",
+            "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\n",
+            0o640,
+        );
+        assert_eq!(read_posture_marker(&d.0), None);
+    }
+
+    #[test]
+    fn read_posture_marker_valid_parses() {
+        let d = Dir::new("marker_valid");
+        put(
+            &d.0,
+            "private/posture.yaml",
+            "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: 2026-08-12T00:00:00.000Z\n",
+            0o640,
+        );
+        let m = read_posture_marker(&d.0).expect("valid marker parses");
+        assert_eq!(m.mechanism, "tpm2");
+        assert_eq!(m.target, "/etc/maknae/private/maknaed-secret-id.cred");
+        assert_eq!(m.timestamp, "2026-08-12T00:00:00.000Z");
+    }
+
+    // ---- final-fix wave, Fix 1: posture-marker key/type contract pin -------
+    // (reader half — see `bins/maknae/src/enroll/mod.rs`'s
+    // `build_posture_yaml_emits_the_three_reader_keys_as_strings` for the
+    // writer-side half of this same cross-crate pin. `bins/maknae` cannot
+    // depend on `maknae-kernel` (bin/lib layering), so there is no single
+    // shared test crate; this fixture closes the gap by being
+    // BYTE-IDENTICAL to `build_posture_yaml`'s actual emitted output —
+    // captured by literally running that function and copying its output,
+    // not hand-typed from the format string.)
+
+    #[test]
+    fn posture_marker_matches_enroll_writer_output() {
+        // Exact byte-for-byte capture of
+        // `bins/maknae/src/enroll/mod.rs::build_posture_yaml("tpm2",
+        // "/etc/maknae/private/maknaed-secret-id.cred")`'s output (its
+        // `yaml_rust2::YamlEmitter` quotes the all-digit `timestamp` scalar
+        // to preserve its string type — confirmed by actually running the
+        // writer, not assumed). If enroll's writer format ever drifts from
+        // this, this test — not just the reader's own schema tests — must
+        // be the one that catches it.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_fixture");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0).expect("enroll's real writer output parses");
+        assert_eq!(marker.mechanism, "tpm2");
+        assert_eq!(marker.target, "/etc/maknae/private/maknaed-secret-id.cred");
+        assert_eq!(marker.timestamp, "1786563711");
+    }
+
+    #[test]
+    fn enroll_writer_fixture_determines_hrot_sealed() {
+        // The actual regression this fix closes: feed the enroll writer's
+        // real output through BOTH `read_posture_marker` AND
+        // `posture::determine` and assert a healthy sealed boot yields
+        // `HrotSealed` — not `Unverified`, which is what the pre-fix key
+        // mismatch produced on every real `maknae enroll` + boot.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_hrot_sealed");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        // The expected target matches enroll's ALWAYS-`/etc/maknae` write
+        // target (bins/maknae's `artifact_table.rs` hardcodes `/etc/maknae`,
+        // not the daemon's `config_dir` argument) — the real daemon's default
+        // `config_dir` is also `/etc/maknae` (bins/maknaed/src/main.rs), so
+        // this fixture models the default-deployment case where the two
+        // agree. A non-default `--config-dir` daemon boot is a legitimate,
+        // documented case where they would NOT agree — out of scope here.
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::CredentialsDirectory,
+            marker.as_ref(),
+            "/etc/maknae/private/maknaed-secret-id.cred",
+        );
+        assert_eq!(
+            posture,
+            crate::posture::Posture::HrotSealed,
+            "enroll's real writer output must determine HrotSealed on a \
+             healthy CredentialsDirectory boot, not Unverified"
+        );
+    }
+
+    #[test]
+    fn enroll_writer_sep_fixture_determines_hrot_sealed() {
+        // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
+        // determine HrotSealed for a SepSealed boot.
+        let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_sep_hrot_sealed");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::SepSealed,
+            marker.as_ref(),
+            "/etc/maknae/private/maknaed-secret-id.sep",
+        );
+        assert_eq!(posture, crate::posture::Posture::HrotSealed);
+    }
+
+    #[test]
+    fn enroll_writer_fixture_with_foreign_target_is_unverified() {
+        // The regression pin for the finding at the cross-crate (enroll-writer
+        // fixture) level: same mechanism (tpm2) as the healthy fixture above,
+        // but a target that does NOT match this boot's expected sealed-
+        // credential path (e.g. a marker copied from another host) — must
+        // yield Unverified, not HrotSealed.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_foreign_target");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::CredentialsDirectory,
+            marker.as_ref(),
+            "/etc/maknae/private/some-other-host-secret-id.cred",
+        );
+        assert_eq!(
+            posture,
+            crate::posture::Posture::Unverified,
+            "a marker with the right mechanism but the wrong target must not \
+             determine HrotSealed"
+        );
     }
 }

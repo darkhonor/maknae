@@ -1,8 +1,10 @@
-//! The `Authenticator` abstraction. Stage 1 impl: `AppRoleAuth` — reads the
-//! response-wrapped SecretID (a single-use wrapping token), **unwraps once** via
-//! `sys/wrapping/unwrap` (fail-closed if already-used/expired — the interception-
-//! detection control), then `auth/<mount>/login`. No plaintext SecretID touches disk.
-//! A future `KubernetesAuth` slots in behind this trait without touching the mint core.
+//! The `Authenticator` abstraction. Stage 1 impl: `AppRoleAuth` — logs in directly with
+//! a **standing raw SecretID** (ADR-0018: the RoleID + SecretID pair is a local,
+//! `_maknae`-/operator-owned bootstrap credential, not a delivery across an untrusted
+//! channel, so the old single-use response-wrapping step adds nothing here and is
+//! retired — spec §4.4). `auth/<mount>/login` is called directly against `role_id` +
+//! `secret_id`. A future `KubernetesAuth` slots in behind this trait without touching
+//! the mint core.
 use crate::VaultError;
 use vaultrs::client::VaultClient;
 use zeroize::Zeroizing;
@@ -20,18 +22,13 @@ pub struct VaultToken {
     pub lease_duration: u64,
 }
 
-/// AppRole auth over a response-wrapped SecretID.
+/// AppRole auth over a standing raw SecretID (ADR-0018).
 pub struct AppRoleAuth {
     pub role_id: String,
-    /// The on-disk artifact: a single-use *wrapping token* (NOT a plaintext SecretID).
-    pub wrapped_secret_id: String,
+    /// The on-disk artifact: a standing, plaintext SecretID (owner-only file
+    /// permissions enforced by the reader — see `client::read_secret_credential`).
+    pub secret_id: Zeroizing<String>,
     pub approle_mount: String,
-}
-
-/// Shape of the unwrapped SecretID payload.
-#[derive(serde::Deserialize)]
-struct UnwrappedSecretId {
-    secret_id: String,
 }
 
 impl AppRoleAuth {
@@ -39,18 +36,13 @@ impl AppRoleAuth {
         AuthMethod::AppRole
     }
 
-    /// Unwrap the wrapping token once (fail-closed) → SecretID, then AppRole login.
+    /// Direct AppRole login with the standing SecretID — no unwrap step.
     pub async fn authenticate(&self, client: &VaultClient) -> Result<VaultToken, VaultError> {
-        let unwrapped: UnwrappedSecretId =
-            vaultrs::sys::wrapping::unwrap(client, Some(&self.wrapped_secret_id))
-                .await
-                .map_err(|e| VaultError::WrapUnwrap(e.to_string()))?;
-        let secret_id = Zeroizing::new(unwrapped.secret_id);
         let auth = vaultrs::auth::approle::login(
             client,
             &self.approle_mount,
             &self.role_id,
-            secret_id.as_str(),
+            self.secret_id.as_str(),
         )
         .await
         .map_err(|e| VaultError::Auth(e.to_string()))?;

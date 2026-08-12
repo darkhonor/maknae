@@ -52,6 +52,13 @@ pub enum ConfigError {
     /// sequence) — a malformed section must not silently bind all production
     /// defaults (Stage-3a codex round-6 P2).
     InvalidAudit(String),
+    /// The `principal` section is present but malformed (missing `name`/`uid`/
+    /// `home`, a non-integer or negative/overflowing `uid`, an empty `home`,
+    /// or a relative `home`) — PR-J1 Task 5. A present-but-malformed section
+    /// must never collapse to "absent" (fail-closed: `~` in DAC authz policy
+    /// resolves to this operator's home, so a silently-dropped malformed
+    /// section would leave `~` unresolved rather than refused).
+    InvalidPrincipal(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -122,6 +129,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidAudit(reason) => {
                 write!(f, "invalid audit config: {reason}")
             }
+            ConfigError::InvalidPrincipal(reason) => {
+                write!(f, "invalid principal config: {reason}")
+            }
         }
     }
 }
@@ -186,6 +196,17 @@ mod tests {
         let s = format!("{e}");
         assert!(
             s.contains("audit") && s.contains("must be a map"),
+            "Display was: {s}"
+        );
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn display_covers_invalid_principal() {
+        let e = ConfigError::InvalidPrincipal("principal.uid: must be an integer".into());
+        let s = format!("{e}");
+        assert!(
+            s.contains("principal") && s.contains("uid"),
             "Display was: {s}"
         );
         let _: &dyn std::error::Error = &e;

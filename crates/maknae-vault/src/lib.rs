@@ -1,5 +1,5 @@
-//! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005).
-//! Stage 1: config -> AppRole auth (response-wrapped SecretID) -> P-384 CSR ->
+//! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005, amended
+//! by ADR-0018). Stage 1: config -> AppRole auth (standing raw SecretID) -> P-384 CSR ->
 //! pki/sign -> memory-only leaf, plus the CA-pin loader + URI-SAN verifier.
 //! FIPS: the runtime `.fips()` assertion (assert_fips_provider, in fips_glue) is
 //! authoritative; the load-bearing install-before-first-Vault-client ordering keeps
@@ -15,9 +15,12 @@ mod csr_gen;
 mod error;
 mod fips;
 mod fips_glue;
+mod operator;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod secret_io;
+mod secret_source;
 mod supervisor;
 mod supervisor_run;
 mod tls;
@@ -38,14 +41,19 @@ pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity};
 pub use config::{
     load_vault_config, validate_deployment_id, vault_config_from_document, VaultConfig,
-    VAULT_SECTION,
+    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+pub use operator::OperatorClient;
 #[cfg(unix)]
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use secret_source::{
+    resolve_cli_secret_source, resolve_daemon_secret_source, CliSecretSource, CredentialSourceKind,
+    DaemonSecretSource,
+};
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
