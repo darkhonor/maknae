@@ -59,6 +59,9 @@ pub enum VaultError {
     Handshake(String),
     /// The peer leaf's plane URI-SAN was wrong/absent/extra (wraps the T1 verifier error).
     PeerIdentity(crate::VerifyError),
+    /// An `OperatorClient` operation (client build, RoleID read, SecretID
+    /// mint/destroy, CA-chain fetch) failed against Vault.
+    Operator(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -101,6 +104,7 @@ impl std::fmt::Display for VaultError {
             VaultError::PeerCred(msg) => write!(f, "peer-credential capture failed: {msg}"),
             VaultError::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
+            VaultError::Operator(msg) => write!(f, "operator Vault operation failed: {msg}"),
         }
     }
 }
@@ -128,6 +132,7 @@ mod tests {
             VaultError::PeerCred("getsockopt failed".into()),
             VaultError::Handshake("bad cert".into()),
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
+            VaultError::Operator("issuer/default/json: connection refused".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

@@ -1062,6 +1062,8 @@ dependencies = [
  "maknae-config",
  "nix",
  "rcgen",
+ "rustify",
+ "rustify_derive",
  "rustls",
  "serde",
  "tokio",
