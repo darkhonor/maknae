@@ -56,12 +56,15 @@ fn to_json(v: &Value) -> serde_json::Value {
 }
 
 /// Read the `audit` section (ADR-0019, spec/task-brief §Interfaces, spec §11).
-/// `None` (section ABSENT) → `Err(ConfigError::MissingSection)`: an always-written
-/// section (enroll writes it explicitly, per §4.6) plus packaging make this
-/// satisfiable, so a host lacking it fails closed loudly at parse rather than
-/// landing the sink's default path inside `/etc/maknae` (unwritable by `_maknae`
-/// per §4.6 — first boot would otherwise fail closed anyway, just later and less
-/// legibly, at `AuditSink::open`). A present-but-non-map section (e.g.
+/// `None` (section ABSENT) → `Err(ConfigError::MissingSection)`: absence fails
+/// closed rather than landing the sink's default path inside `/etc/maknae`
+/// (unwritable by `_maknae` per §4.6 — first boot would otherwise fail closed
+/// anyway, just later and less legibly, at `AuditSink::open`). A daemon config
+/// MUST carry an explicit `audit:` section; `maknae enroll` (forthcoming, PR-J1
+/// Task 8) and the PR-J2 packaging default will write it so operators don't
+/// hand-author it — **until those land, a host needs a hand-authored `audit:`
+/// block**, or the daemon refuses to start (this is current-state, not yet the
+/// steady-state operator experience). A present-but-non-map section (e.g.
 /// `audit: disabled`) is rejected (`ConfigError::InvalidAudit`) rather than
 /// silently falling through to all defaults (codex round-6 P2 — mirrors
 /// `transport`'s guard). Within a present MAP section, a per-field wrong shape
