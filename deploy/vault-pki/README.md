@@ -105,6 +105,17 @@ vault write -f auth/<approle-path>/role/maknaed/secret-id   # daemon bootstrap
 vault write -f auth/<approle-path>/role/maknae/secret-id    # operator CLI
 ```
 
+`maknae enroll` runs under the **operator's own Vault token**, not either plane's
+AppRole token. This Terraform provisions a least-privilege `maknae-enroll` policy
+(read both RoleIDs, create/update both SecretIDs, destroy both SecretID accessors,
+read the intermediate issuer bundle — no `list`, per §4.5), but **provisioning the
+policy does not grant it to anyone**: before running `sudo maknae enroll`, the
+operator's Vault identity must be attached to it — e.g. via `vault token create
+-policy=maknae-enroll` for a direct token, or by adding `maknae-enroll` to whatever
+external auth-method mapping (LDAP/OIDC group, userpass policy list, etc.) governs
+that operator's login. Without this grant, `maknae enroll` 403s on every
+AppRole/PKI call it makes.
+
 Provisioning and at-rest protection of these SecretIDs is the job of **`maknae enroll`**
 (ADR-0018): the daemon's bootstrap SecretID is `_maknae`-owned and **HRoT-sealed at rest**
 (TPM 2.0 / Secure Enclave), decrypted only into memory at startup; the CLI SecretID is
