@@ -78,6 +78,15 @@ files = [
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
   "crates/maknae-vault/src/supervisor.rs",
+  # maknae-msgs: the compiled-in en_US/ko_KR message catalog (spec §4.3, PR-J1
+  # Task 1). lib.rs owns detect_locale (env-var precedence: LC_MESSAGES then
+  # LANG, ko-prefix routing) and msg() (locale -> catalog dispatch) — a
+  # mis-detected locale or swapped dispatch arm silently ships the wrong
+  # language to an operator. In [t1].files ONLY (own 95% floor; NOT
+  # ratchet_cohort — new crate, not the security-seam+config-loading-core
+  # cohort, ADR-0016 §4). The two catalog files are pure declaration-only
+  # string tables (no decision logic) -> T3 below.
+  "crates/maknae-msgs/src/lib.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -85,7 +94,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
 
 [t2]
 floor_production_region = 90
@@ -280,6 +289,17 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 [[t3]]
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
+
+# maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
+# decision logic (precedent: maknae-config value.rs). The locale-detect +
+# dispatch decision logic is lib.rs (T1).
+[[t3]]
+path = "crates/maknae-msgs/src/catalog_en_us.rs"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
+
+[[t3]]
+path = "crates/maknae-msgs/src/catalog_ko_kr.rs"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
 
 # [[exception]] — documented-not-tested. Removes every code region whose
 # line_start falls within [anchor, end_anchor] from numerator AND denominator.

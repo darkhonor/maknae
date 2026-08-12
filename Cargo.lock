@@ -1015,6 +1015,10 @@ name = "maknae-mcp"
 version = "0.0.0"
 
 [[package]]
+name = "maknae-msgs"
+version = "0.0.0"
+
+[[package]]
 name = "maknae-proto"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,206 @@
+//! maknae-msgs — compiled-in en_US/ko_KR operator-facing message catalog
+//! (spec §4.3).
+//!
+//! Zero-dependency (std-only) leaf crate. Every operator-facing string a
+//! later task needs to show a human routes through `MsgId` + `msg()` so
+//! locale selection and message content are centralized instead of scattered
+//! across ad hoc `format!()` call sites in the daemon/CLI.
+
+mod catalog_en_us;
+mod catalog_ko_kr;
+
+/// Operator-facing message identifiers. Grown per call site as later PR-J1
+/// tasks wire up their message needs — this is a starter set covering the
+/// enroll flow and daemon authz/posture refusals named in the plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MsgId {
+    EnrollStarted,
+    /// Carries a `{user}` placeholder — required (spec ambiguity resolution
+    /// §10.7) so a constant-returning mutant on the catalog match arms
+    /// cannot satisfy both the non-empty and placeholder-parity assertions.
+    EnrollGroupAdded,
+    EnrollAlreadyMember,
+    EnrollFailed,
+    AuthzDenied,
+    AuthzPostureRefused,
+    AuthzUnknownSubject,
+    DaemonNotRunning,
+    DaemonStartFailed,
+}
+
+/// Every `MsgId` variant, in declaration order. `all_slice_is_exhaustive`
+/// guards this against drifting out of sync with the enum.
+pub const ALL: &[MsgId] = &[
+    MsgId::EnrollStarted,
+    MsgId::EnrollGroupAdded,
+    MsgId::EnrollAlreadyMember,
+    MsgId::EnrollFailed,
+    MsgId::AuthzDenied,
+    MsgId::AuthzPostureRefused,
+    MsgId::AuthzUnknownSubject,
+    MsgId::DaemonNotRunning,
+    MsgId::DaemonStartFailed,
+];
+
+/// Supported locales. Unknown/unset environment locale falls back to `EnUs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locale {
+    EnUs,
+    KoKr,
+}
+
+/// Resolve the active locale from the environment: `LC_MESSAGES` first, then
+/// `LANG`. A `ko`-prefixed value (e.g. `ko_KR.UTF-8`) selects `KoKr`; any
+/// other non-empty value at whichever variable is checked first is
+/// authoritative and selects `EnUs` without falling through to the next
+/// variable. Unset/empty on both falls back to `EnUs`.
+pub fn detect_locale() -> Locale {
+    for var in ["LC_MESSAGES", "LANG"] {
+        if let Ok(val) = std::env::var(var) {
+            if val.starts_with("ko") {
+                return Locale::KoKr;
+            }
+            if !val.is_empty() {
+                return Locale::EnUs;
+            }
+        }
+    }
+    Locale::EnUs
+}
+
+/// Look up the catalog string for `id` in `locale`.
+pub fn msg(locale: Locale, id: MsgId) -> &'static str {
+    match locale {
+        Locale::EnUs => catalog_en_us::text(id),
+        Locale::KoKr => catalog_ko_kr::text(id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Extract the sorted, deduplicated set of `{token}` placeholder names in
+    // `s`. Test-only: it exists to prove parity between the en_US/ko_KR
+    // catalogs, not as a public interpolation utility (call sites substitute
+    // via `str::replace`, per spec §4.3).
+    fn placeholders(s: &str) -> Vec<&str> {
+        let mut found = Vec::new();
+        let mut rest = s;
+        while let Some(start) = rest.find('{') {
+            let after = &rest[start + 1..];
+            if let Some(end) = after.find('}') {
+                found.push(&after[..end]);
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+
+    // `LC_MESSAGES`/`LANG` are process-wide; without this lock the locale
+    // tests below can interleave across cargo's multi-threaded test runner
+    // (env-lock pattern per bins/maknae/src/cli.rs:250 ENV_LOCK).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn locale_detection_prefers_lc_messages() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LC_MESSAGES", "ko_KR.UTF-8");
+        std::env::set_var("LANG", "en_US.UTF-8");
+        assert_eq!(detect_locale(), Locale::KoKr);
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
+    }
+
+    #[test]
+    fn unknown_locale_falls_back_to_en_us() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LC_MESSAGES", "de_DE.UTF-8");
+        std::env::remove_var("LANG");
+        assert_eq!(detect_locale(), Locale::EnUs);
+        std::env::remove_var("LC_MESSAGES");
+    }
+
+    #[test]
+    fn unset_locale_falls_back_to_en_us() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
+        assert_eq!(detect_locale(), Locale::EnUs);
+    }
+
+    #[test]
+    fn empty_lc_messages_falls_through_to_lang() {
+        // A set-but-empty LC_MESSAGES is neither a ko match nor a non-empty
+        // "authoritative" value — it must fall through to LANG rather than
+        // short-circuiting to EnUs.
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LC_MESSAGES", "");
+        std::env::set_var("LANG", "ko_KR.UTF-8");
+        assert_eq!(detect_locale(), Locale::KoKr);
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
+    }
+
+    #[test]
+    fn every_msg_nonempty_and_placeholder_parity() {
+        for &id in ALL {
+            let (en, ko) = (msg(Locale::EnUs, id), msg(Locale::KoKr, id));
+            assert!(!en.is_empty() && !ko.is_empty(), "{id:?}");
+            assert_eq!(placeholders(en), placeholders(ko), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn all_slice_is_exhaustive() {
+        // A new variant added without a matching ALL entry breaks this
+        // exhaustive match (compile error) before it can silently ship
+        // without catalog coverage, and VARIANT_COUNT catches an ALL entry
+        // added/removed without a matching enum edit.
+        fn assert_covered(id: MsgId) {
+            match id {
+                MsgId::EnrollStarted
+                | MsgId::EnrollGroupAdded
+                | MsgId::EnrollAlreadyMember
+                | MsgId::EnrollFailed
+                | MsgId::AuthzDenied
+                | MsgId::AuthzPostureRefused
+                | MsgId::AuthzUnknownSubject
+                | MsgId::DaemonNotRunning
+                | MsgId::DaemonStartFailed => {}
+            }
+        }
+        const VARIANT_COUNT: usize = 9;
+        assert_eq!(ALL.len(), VARIANT_COUNT);
+        for &id in ALL {
+            assert_covered(id);
+        }
+    }
+
+    #[test]
+    fn placeholder_extraction() {
+        assert_eq!(placeholders("no tokens here"), Vec::<&str>::new());
+        assert_eq!(
+            placeholders("Added {user} to {group}"),
+            vec!["group", "user"]
+        );
+        assert_eq!(placeholders("{a}{a}"), vec!["a"]);
+        assert_eq!(placeholders("{unterminated"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn enroll_group_added_carries_user_placeholder() {
+        // Required by spec (§10.7 ambiguity resolution): at least one MsgId
+        // must carry a placeholder so a constant-returning mutant on the
+        // catalog match arms can't satisfy the parity assertion.
+        assert_eq!(
+            placeholders(msg(Locale::EnUs, MsgId::EnrollGroupAdded)),
+            vec!["user"]
+        );
+    }
+}
