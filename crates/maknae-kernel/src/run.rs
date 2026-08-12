@@ -29,7 +29,7 @@
 //! re-authentication.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1095,8 +1095,33 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // plane client resolved which SecretID source it actually used. A durable-append
     // failure here is logged but non-fatal (mirrors every other boot-record emit) —
     // credential posture is an audit STATEMENT, not itself a gate.
+    //
+    // `expected_target` is the deterministic sealed-credential path THIS boot's
+    // config implies — `<config_dir>/private/maknaed-secret-id.{cred,sep}`, the
+    // SAME path enroll's `artifact_table` writes to (bins/maknae's
+    // `artifact_table.rs`) and the systemd unit's `LoadCredentialEncrypted=`
+    // pins (spec §9.6) — computed here from the same `config_dir` base every
+    // other boot artifact resolves against. `posture::determine` requires the
+    // marker's `target` to match this, closing the "marker's mechanism is
+    // right but its target is a stale/foreign path" gap (spec §5.2).
+    let secret_source_kind = client.secret_source();
+    let expected_target = match secret_source_kind {
+        maknae_vault::CredentialSourceKind::CredentialsDirectory => {
+            config_dir.join("private").join("maknaed-secret-id.cred")
+        }
+        maknae_vault::CredentialSourceKind::SepSealed => {
+            config_dir.join("private").join("maknaed-secret-id.sep")
+        }
+        // Unused by `determine` for the plaintext branch (it ignores both the
+        // marker and the target unconditionally) — an empty path is fine.
+        maknae_vault::CredentialSourceKind::PlaintextPath => PathBuf::new(),
+    };
     let marker = read_posture_marker(config_dir);
-    let posture = crate::posture::determine(client.secret_source().into(), marker.as_ref());
+    let posture = crate::posture::determine(
+        secret_source_kind.into(),
+        marker.as_ref(),
+        &expected_target.to_string_lossy(),
+    );
     let posture_rec = make_record(
         "boot",
         &host,
@@ -1729,9 +1754,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = Dir::new("marker_enroll_writer_hrot_sealed");
         put(&d.0, "private/posture.yaml", fixture, 0o640);
         let marker = read_posture_marker(&d.0);
+        // The expected target matches enroll's ALWAYS-`/etc/maknae` write
+        // target (bins/maknae's `artifact_table.rs` hardcodes `/etc/maknae`,
+        // not the daemon's `config_dir` argument) — the real daemon's default
+        // `config_dir` is also `/etc/maknae` (bins/maknaed/src/main.rs), so
+        // this fixture models the default-deployment case where the two
+        // agree. A non-default `--config-dir` daemon boot is a legitimate,
+        // documented case where they would NOT agree — out of scope here.
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::CredentialsDirectory,
             marker.as_ref(),
+            "/etc/maknae/private/maknaed-secret-id.cred",
         );
         assert_eq!(
             posture,
@@ -1749,8 +1782,35 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = Dir::new("marker_enroll_writer_sep_hrot_sealed");
         put(&d.0, "private/posture.yaml", fixture, 0o640);
         let marker = read_posture_marker(&d.0);
-        let posture =
-            crate::posture::determine(crate::posture::CredentialSource::SepSealed, marker.as_ref());
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::SepSealed,
+            marker.as_ref(),
+            "/etc/maknae/private/maknaed-secret-id.sep",
+        );
         assert_eq!(posture, crate::posture::Posture::HrotSealed);
+    }
+
+    #[test]
+    fn enroll_writer_fixture_with_foreign_target_is_unverified() {
+        // The regression pin for the finding at the cross-crate (enroll-writer
+        // fixture) level: same mechanism (tpm2) as the healthy fixture above,
+        // but a target that does NOT match this boot's expected sealed-
+        // credential path (e.g. a marker copied from another host) — must
+        // yield Unverified, not HrotSealed.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_foreign_target");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::CredentialsDirectory,
+            marker.as_ref(),
+            "/etc/maknae/private/some-other-host-secret-id.cred",
+        );
+        assert_eq!(
+            posture,
+            crate::posture::Posture::Unverified,
+            "a marker with the right mechanism but the wrong target must not \
+             determine HrotSealed"
+        );
     }
 }

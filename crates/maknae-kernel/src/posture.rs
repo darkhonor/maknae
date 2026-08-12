@@ -78,21 +78,48 @@ impl Posture {
 ///   a sealed posture).
 /// - A sealed source ([`CredentialSource::CredentialsDirectory`] /
 ///   [`CredentialSource::SepSealed`]) with a marker whose `mechanism` matches the
-///   sealed kind → [`Posture::HrotSealed`].
-/// - A sealed source with a MISSING marker, or one whose `mechanism` does not
-///   match → [`Posture::Unverified`] (covers both a missing attestation and a
-///   contradicting one, per spec §5.2).
-pub fn determine(source: CredentialSource, marker: Option<&PostureMarker>) -> Posture {
+///   sealed kind AND whose `target` matches `expected_target` (the deterministic
+///   sealed-credential path this boot's config implies — computed by the caller,
+///   `run.rs`) → [`Posture::HrotSealed`].
+/// - A sealed source with a MISSING marker, one whose `mechanism` does not match,
+///   OR one whose `target` does not match `expected_target` →
+///   [`Posture::Unverified`] (covers a missing attestation, a contradicting
+///   mechanism, AND a stale/foreign target — e.g. a marker copied from another
+///   host or left over from a prior config, per spec §5.2).
+///
+/// **Honest limit, stated (spec §5.2):** the daemon cannot cryptographically
+/// prove at runtime that systemd's decryption was TPM-bound — the marker
+/// attests provisioning-time posture; a root-privileged actor who swaps the
+/// unit to plain `LoadCredential=` *and* forges the marker (mechanism AND
+/// target both) defeats the record (§4.6 makes the marker unmodifiable by
+/// `_maknae`, not by root). This `target` check strengthens the *accidental*
+/// / cross-host / config-drift case (a stale or copied marker whose target
+/// doesn't match this host's path) — it does not close the same-host,
+/// root-forges-both gap; a root-level adversary remains outside this
+/// control's threat model.
+pub fn determine(
+    source: CredentialSource,
+    marker: Option<&PostureMarker>,
+    expected_target: &str,
+) -> Posture {
     match source {
         CredentialSource::PlaintextPath => Posture::PlaintextDegraded,
-        CredentialSource::CredentialsDirectory => sealed_posture(marker, MECHANISM_TPM2),
-        CredentialSource::SepSealed => sealed_posture(marker, MECHANISM_SEP),
+        CredentialSource::CredentialsDirectory => {
+            sealed_posture(marker, MECHANISM_TPM2, expected_target)
+        }
+        CredentialSource::SepSealed => sealed_posture(marker, MECHANISM_SEP, expected_target),
     }
 }
 
-fn sealed_posture(marker: Option<&PostureMarker>, expected_mechanism: &str) -> Posture {
+fn sealed_posture(
+    marker: Option<&PostureMarker>,
+    expected_mechanism: &str,
+    expected_target: &str,
+) -> Posture {
     match marker {
-        Some(m) if m.mechanism == expected_mechanism => Posture::HrotSealed,
+        Some(m) if m.mechanism == expected_mechanism && m.target == expected_target => {
+            Posture::HrotSealed
+        }
         _ => Posture::Unverified,
     }
 }
@@ -101,10 +128,12 @@ fn sealed_posture(marker: Option<&PostureMarker>, expected_mechanism: &str) -> P
 mod tests {
     use super::*;
 
+    const EXPECTED_TARGET: &str = "/etc/maknae/private/maknaed-secret-id.cred";
+
     fn marker(mechanism: &str) -> PostureMarker {
         PostureMarker {
             mechanism: mechanism.to_string(),
-            target: "/etc/maknae/private/maknaed-secret-id.cred".to_string(),
+            target: EXPECTED_TARGET.to_string(),
             timestamp: "2026-08-12T00:00:00.000Z".to_string(),
         }
     }
@@ -117,7 +146,8 @@ mod tests {
         assert_eq!(
             determine(
                 CredentialSource::CredentialsDirectory,
-                Some(&marker(MECHANISM_TPM2))
+                Some(&marker(MECHANISM_TPM2)),
+                EXPECTED_TARGET
             ),
             Posture::HrotSealed
         );
@@ -126,7 +156,11 @@ mod tests {
     #[test]
     fn credentials_directory_with_missing_marker_is_unverified() {
         assert_eq!(
-            determine(CredentialSource::CredentialsDirectory, None),
+            determine(
+                CredentialSource::CredentialsDirectory,
+                None,
+                EXPECTED_TARGET
+            ),
             Posture::Unverified
         );
     }
@@ -136,7 +170,23 @@ mod tests {
         assert_eq!(
             determine(
                 CredentialSource::CredentialsDirectory,
-                Some(&marker(MECHANISM_SEP))
+                Some(&marker(MECHANISM_SEP)),
+                EXPECTED_TARGET
+            ),
+            Posture::Unverified
+        );
+    }
+
+    #[test]
+    fn credentials_directory_with_matching_mechanism_but_wrong_target_is_unverified() {
+        // The regression pin for the finding: a marker whose MECHANISM matches
+        // (tpm2) but whose TARGET points at a different (stale/foreign) sealed
+        // credential must NOT be laundered into HrotSealed.
+        assert_eq!(
+            determine(
+                CredentialSource::CredentialsDirectory,
+                Some(&marker(MECHANISM_TPM2)),
+                "/etc/maknae/private/some-other-secret-id.cred"
             ),
             Posture::Unverified
         );
@@ -145,7 +195,11 @@ mod tests {
     #[test]
     fn sep_sealed_with_matching_marker_is_hrot_sealed() {
         assert_eq!(
-            determine(CredentialSource::SepSealed, Some(&marker(MECHANISM_SEP))),
+            determine(
+                CredentialSource::SepSealed,
+                Some(&marker(MECHANISM_SEP)),
+                EXPECTED_TARGET
+            ),
             Posture::HrotSealed
         );
     }
@@ -153,7 +207,7 @@ mod tests {
     #[test]
     fn sep_sealed_with_missing_marker_is_unverified() {
         assert_eq!(
-            determine(CredentialSource::SepSealed, None),
+            determine(CredentialSource::SepSealed, None, EXPECTED_TARGET),
             Posture::Unverified
         );
     }
@@ -161,7 +215,24 @@ mod tests {
     #[test]
     fn sep_sealed_with_mismatched_marker_is_unverified() {
         assert_eq!(
-            determine(CredentialSource::SepSealed, Some(&marker(MECHANISM_TPM2))),
+            determine(
+                CredentialSource::SepSealed,
+                Some(&marker(MECHANISM_TPM2)),
+                EXPECTED_TARGET
+            ),
+            Posture::Unverified
+        );
+    }
+
+    #[test]
+    fn sep_sealed_with_matching_mechanism_but_wrong_target_is_unverified() {
+        // Mirrors the CredentialsDirectory regression pin above for the SEP branch.
+        assert_eq!(
+            determine(
+                CredentialSource::SepSealed,
+                Some(&marker(MECHANISM_SEP)),
+                "/etc/maknae/private/some-other-secret-id.sep"
+            ),
             Posture::Unverified
         );
     }
@@ -173,7 +244,8 @@ mod tests {
         assert_eq!(
             determine(
                 CredentialSource::PlaintextPath,
-                Some(&marker(MECHANISM_TPM2))
+                Some(&marker(MECHANISM_TPM2)),
+                EXPECTED_TARGET
             ),
             Posture::PlaintextDegraded
         );
@@ -182,7 +254,7 @@ mod tests {
     #[test]
     fn plaintext_path_with_missing_marker_is_degraded() {
         assert_eq!(
-            determine(CredentialSource::PlaintextPath, None),
+            determine(CredentialSource::PlaintextPath, None, EXPECTED_TARGET),
             Posture::PlaintextDegraded
         );
     }
@@ -190,7 +262,11 @@ mod tests {
     #[test]
     fn plaintext_path_with_mismatched_marker_is_still_degraded() {
         assert_eq!(
-            determine(CredentialSource::PlaintextPath, Some(&marker("bogus"))),
+            determine(
+                CredentialSource::PlaintextPath,
+                Some(&marker("bogus")),
+                EXPECTED_TARGET
+            ),
             Posture::PlaintextDegraded
         );
     }
