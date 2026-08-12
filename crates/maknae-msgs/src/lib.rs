@@ -65,6 +65,13 @@ pub enum MsgId {
     EnrollRotating,
     /// A failure after minting destroyed the just-minted accessors (rollback).
     EnrollRollbackDestroyed,
+    /// The post-mint rollback destroy (`destroy_and_report`) was attempted
+    /// but one or more accessors FAILED to destroy — distinct from
+    /// [`MsgId::EnrollRollbackDestroyed`] so the audit-facing line does not
+    /// misleadingly claim success when the per-failure detail underneath
+    /// says otherwise. Non-fatal (best-effort rollback stays non-fatal);
+    /// this only fixes the message's honesty.
+    EnrollRollbackDestroyPartial,
     /// The operator-context helper's self-verification (euid/egid) failed.
     HelperContextMismatch,
     /// The operator-context helper still carries root's supplementary groups —
@@ -100,6 +107,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollEnableDaemonHint,
     MsgId::EnrollRotating,
     MsgId::EnrollRollbackDestroyed,
+    MsgId::EnrollRollbackDestroyPartial,
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
 ];
@@ -265,11 +273,12 @@ mod tests {
                 | MsgId::EnrollEnableDaemonHint
                 | MsgId::EnrollRotating
                 | MsgId::EnrollRollbackDestroyed
+                | MsgId::EnrollRollbackDestroyPartial
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 27;
+        const VARIANT_COUNT: usize = 28;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

@@ -1688,4 +1688,69 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(m.target, "/etc/maknae/private/maknaed-secret-id.cred");
         assert_eq!(m.timestamp, "2026-08-12T00:00:00.000Z");
     }
+
+    // ---- final-fix wave, Fix 1: posture-marker key/type contract pin -------
+    // (reader half — see `bins/maknae/src/enroll/mod.rs`'s
+    // `build_posture_yaml_emits_the_three_reader_keys_as_strings` for the
+    // writer-side half of this same cross-crate pin. `bins/maknae` cannot
+    // depend on `maknae-kernel` (bin/lib layering), so there is no single
+    // shared test crate; this fixture closes the gap by being
+    // BYTE-IDENTICAL to `build_posture_yaml`'s actual emitted output —
+    // captured by literally running that function and copying its output,
+    // not hand-typed from the format string.)
+
+    #[test]
+    fn posture_marker_matches_enroll_writer_output() {
+        // Exact byte-for-byte capture of
+        // `bins/maknae/src/enroll/mod.rs::build_posture_yaml("tpm2",
+        // "/etc/maknae/private/maknaed-secret-id.cred")`'s output (its
+        // `yaml_rust2::YamlEmitter` quotes the all-digit `timestamp` scalar
+        // to preserve its string type — confirmed by actually running the
+        // writer, not assumed). If enroll's writer format ever drifts from
+        // this, this test — not just the reader's own schema tests — must
+        // be the one that catches it.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_fixture");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0).expect("enroll's real writer output parses");
+        assert_eq!(marker.mechanism, "tpm2");
+        assert_eq!(marker.target, "/etc/maknae/private/maknaed-secret-id.cred");
+        assert_eq!(marker.timestamp, "1786563711");
+    }
+
+    #[test]
+    fn enroll_writer_fixture_determines_hrot_sealed() {
+        // The actual regression this fix closes: feed the enroll writer's
+        // real output through BOTH `read_posture_marker` AND
+        // `posture::determine` and assert a healthy sealed boot yields
+        // `HrotSealed` — not `Unverified`, which is what the pre-fix key
+        // mismatch produced on every real `maknae enroll` + boot.
+        let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_hrot_sealed");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        let posture = crate::posture::determine(
+            crate::posture::CredentialSource::CredentialsDirectory,
+            marker.as_ref(),
+        );
+        assert_eq!(
+            posture,
+            crate::posture::Posture::HrotSealed,
+            "enroll's real writer output must determine HrotSealed on a \
+             healthy CredentialsDirectory boot, not Unverified"
+        );
+    }
+
+    #[test]
+    fn enroll_writer_sep_fixture_determines_hrot_sealed() {
+        // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
+        // determine HrotSealed for a SepSealed boot.
+        let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
+        let d = Dir::new("marker_enroll_writer_sep_hrot_sealed");
+        put(&d.0, "private/posture.yaml", fixture, 0o640);
+        let marker = read_posture_marker(&d.0);
+        let posture =
+            crate::posture::determine(crate::posture::CredentialSource::SepSealed, marker.as_ref());
+        assert_eq!(posture, crate::posture::Posture::HrotSealed);
+    }
 }

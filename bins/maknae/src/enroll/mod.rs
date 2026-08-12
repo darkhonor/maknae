@@ -517,15 +517,34 @@ fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String 
     ]))
 }
 
-fn build_posture_yaml(source: &str, mechanism: &str) -> String {
+/// Builds the root-owned boot-posture marker (`/etc/maknae/private/posture.yaml`,
+/// spec §4.6/§5.2) — the ONLY provisioning-time artifact the daemon's
+/// `read_posture_marker`/`posture::determine` (`crates/maknae-kernel/src/run.rs`,
+/// `crates/maknae-kernel/src/posture.rs`) consult to decide `HrotSealed` vs.
+/// `Unverified`. The three keys emitted here — `mechanism`, `target`,
+/// `timestamp` — are the reader's exact contract (`PostureMarker { mechanism,
+/// target, timestamp }`, each read as a YAML string via `?`); a missing OR
+/// mistyped key makes the whole marker parse to `None`, so this shape must
+/// stay byte-for-byte aligned with the reader (pinned by
+/// `posture_marker_roundtrip` below and by
+/// `crates/maknae-kernel/src/run.rs`'s `read_posture_marker_...` fixture
+/// tests).
+///
+/// `mechanism` MUST be exactly the token `posture::sealed_posture` expects
+/// for the sealed source it will be compared against
+/// (`posture::MECHANISM_TPM2` = `"tpm2"` for the Linux
+/// `CredentialsDirectory` source, `posture::MECHANISM_SEP` = `"sep"` for the
+/// macOS `SepSealed` source) — the caller passes exactly one of those two
+/// literals, matching the daemon's own constants.
+fn build_posture_yaml(mechanism: &str, target: &str) -> String {
     let sealed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     artifact_write::emit_yaml(artifact_write::yaml_map(vec![
-        ("source", Yaml::String(source.to_string())),
-        ("seal_mechanism", Yaml::String(mechanism.to_string())),
-        ("sealed_at_unix", Yaml::Integer(sealed_at as i64)),
+        ("mechanism", Yaml::String(mechanism.to_string())),
+        ("target", Yaml::String(target.to_string())),
+        ("timestamp", Yaml::String(sealed_at.to_string())),
     ]))
 }
 
@@ -981,7 +1000,13 @@ async fn destroy_and_report(
     if failures.is_empty() {
         eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
     } else {
-        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
+        // FIX 2 (final-fix wave): this branch previously printed the SAME
+        // "destroyed" success message as the branch above, then listed
+        // failures underneath — a misleading audit line claiming success
+        // right above the evidence it didn't happen. `destroy_and_report`
+        // stays non-fatal (best-effort post-mint rollback, spec §4.1); only
+        // the message's honesty changes.
+        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyPartial));
         for (role, accessor, e) in &failures {
             eprintln!("  ! failed to destroy accessor for role {role} ({accessor}): {e}");
         }
@@ -1245,13 +1270,17 @@ async fn finish_enrollment(
         operator,
     );
     let enroll_state_yaml = build_enroll_state_yaml(&args.approle_mount, minted);
+    // `target` is the sealed daemon secret's own row path — the single source
+    // of truth `artifact_table` already computes (reused again below at the
+    // actual seal step), never a second hardcoded copy of
+    // `maknaed-secret-id.cred`/`.sep` that could drift from it.
+    let sealed_row = table
+        .iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
+        .expect("artifact_table always emits exactly one SealedDaemonSecret row");
     let posture_yaml = build_posture_yaml(
-        if macos {
-            "sep_sealed"
-        } else {
-            "credentials_directory"
-        },
         if macos { "sep" } else { "tpm2" },
+        &sealed_row.path.to_string_lossy(),
     );
 
     let etc = Path::new("/etc/maknae");
@@ -1298,10 +1327,8 @@ async fn finish_enrollment(
 
     // ---- Step 5: seal the daemon credential --------------------------------
     println!("{}", msg(locale, MsgId::EnrollSealingDaemonCredential));
-    let sealed_row = table
-        .iter()
-        .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
-        .expect("artifact_table always emits exactly one SealedDaemonSecret row");
+    // `sealed_row` was already looked up above (posture-marker `target`) —
+    // reused here rather than re-derived, so both consumers share one lookup.
     if macos {
         seal_daemon_secret_macos(daemon_secret, &sealed_row.path)?;
     } else {
@@ -1687,6 +1714,62 @@ mod tests {
     #[test]
     fn parse_state_accessors_rejects_malformed_entry() {
         assert!(parse_state_accessors("accessors:\n  - role: maknaed\n").is_err());
+    }
+
+    // ---- final-fix wave, Fix 1: posture-marker key/type contract pin -------
+    // (writer half — see `crates/maknae-kernel/src/run.rs`'s
+    // `posture_marker_matches_enroll_writer_output` for the reader-side half
+    // of this same cross-crate pin, and `posture.rs`'s
+    // `enroll_writer_fixture_determines_hrot_sealed` for the full round-trip
+    // through `posture::determine`.)
+
+    #[test]
+    fn build_posture_yaml_emits_the_three_reader_keys_as_strings() {
+        // The daemon's `read_posture_marker` (`crates/maknae-kernel/src/run.rs`)
+        // requires exactly `mechanism`, `target`, `timestamp`, each read via
+        // `Value::Str(..)`. Any missing/mistyped key here makes the whole
+        // marker parse to `None` on every real boot (the bug this fix
+        // closes) — pinned by asserting all three round-trip as strings.
+        let text = build_posture_yaml("tpm2", "/etc/maknae/private/maknaed-secret-id.cred");
+        let v = maknae_config::load_str(&text).expect("valid YAML");
+        let entries = match &v {
+            maknae_config::Value::Map(entries) => entries,
+            other => panic!("expected a map document, got {other:?}"),
+        };
+        let get_str = |key: &str| -> Option<String> {
+            entries
+                .iter()
+                .find(|(k, _)| k == key)
+                .and_then(|(_, val)| match val {
+                    maknae_config::Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(get_str("mechanism").as_deref(), Some("tpm2"));
+        assert_eq!(
+            get_str("target").as_deref(),
+            Some("/etc/maknae/private/maknaed-secret-id.cred")
+        );
+        // `timestamp` is all-digits content but MUST still parse as a YAML
+        // string (not a bare int) — the reader only accepts `Value::Str`.
+        assert!(
+            get_str("timestamp").is_some(),
+            "timestamp must round-trip as a YAML string, not an integer"
+        );
+    }
+
+    #[test]
+    fn build_posture_yaml_mechanism_literal_matches_daemon_constants() {
+        // `bins/maknae` cannot depend on `maknae-kernel` (bin/lib layering),
+        // so the two literals this crate's call site passes ("tpm2" for the
+        // Linux CredentialsDirectory source, "sep" for the macOS SepSealed
+        // source) are pinned here directly against
+        // `maknae_kernel::posture::MECHANISM_TPM2`/`MECHANISM_SEP`'s exact
+        // values (asserted by name, not by import) — a drift in either
+        // literal silently downgrades every healthy sealed boot to
+        // `Unverified`.
+        assert!(build_posture_yaml("tpm2", "t").contains("mechanism: tpm2"));
+        assert!(build_posture_yaml("sep", "t").contains("mechanism: sep"));
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED

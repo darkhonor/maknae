@@ -45,6 +45,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         }
         MsgId::EnrollRotating => "기존 등록을 발견했어요 — 자격 증명을 교체하고 있어요",
         MsgId::EnrollRollbackDestroyed => "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기했어요",
+        MsgId::EnrollRollbackDestroyPartial => {
+            "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기하려 했지만 일부는 실패했어요 (아래 내용을 확인하세요)"
+        }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

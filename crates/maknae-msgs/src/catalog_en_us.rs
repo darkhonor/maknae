@@ -40,6 +40,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollRollbackDestroyed => {
             "Enrollment failed — destroyed the credentials just issued"
         }
+        MsgId::EnrollRollbackDestroyPartial => {
+            "Enrollment failed — attempted to destroy the credentials just issued, but the rollback itself partially failed (see below)"
+        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

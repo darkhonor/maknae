@@ -43,10 +43,18 @@ impl OperatorClient {
         ca_path: &std::path::Path,
         token: Zeroizing<String>,
     ) -> Result<Self, VaultError> {
+        // A HARD per-request HTTP timeout on every Vault operation this client makes
+        // during `maknae enroll` (role-id read, secret-id mint/destroy, CA-chain
+        // fetch) — matches `client.rs`'s `from_document_with_secret` exactly (same
+        // 30s value, same rationale): vaultrs defaults `timeout` to None (an
+        // UNBOUNDED reqwest client), so a hung Vault (network drop with no RST, a
+        // stalled LB) would otherwise wedge enroll indefinitely rather than
+        // surfacing as an ordinary retryable/abortable error.
         let settings = VaultClientSettingsBuilder::default()
             .address(addr)
             .ca_certs(vec![ca_path.to_string_lossy().to_string()])
             .token(token.as_str())
+            .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Operator(format!("vault client settings: {e}")))?;
         let inner = VaultClient::new(settings)
