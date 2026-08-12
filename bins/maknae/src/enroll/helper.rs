@@ -14,8 +14,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+// macOS-only: referenced solely by the `#[cfg(target_os = "macos")]` Keychain
+// probe/seal functions below. Gated so the Linux `-D warnings` clippy gate does
+// not flag them as dead_code (CI runs on Linux, where these are never used).
+#[cfg(target_os = "macos")]
 const KEYCHAIN_PROBE_SERVICE: &str = "maknae-enroll-probe";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_CLI_SERVICE: &str = "maknae-cli";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_CLI_ACCOUNT: &str = "maknae-secret-id";
 const PROBE_VALUE: &str = "maknae-enroll-probe-throwaway-value";
 
@@ -94,6 +100,10 @@ fn supplementary_groups() -> Result<Vec<u32>, EnrollError> {
     parse_id_dash_g(&String::from_utf8_lossy(&out.stdout))
 }
 
+// Non-Linux only: parses `id -G` output for the fallback `supplementary_groups`
+// impl above (Linux uses `nix::unistd::getgroups` directly and never calls this).
+// Gated with its sole consumer so the Linux `-D warnings` gate sees no dead_code.
+#[cfg(not(target_os = "linux"))]
 fn parse_id_dash_g(text: &str) -> Result<Vec<u32>, EnrollError> {
     text.split_whitespace()
         .map(|s| {
@@ -374,6 +384,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn parse_id_dash_g_parses_whitespace_separated_gids() {
         assert_eq!(
             parse_id_dash_g("20 12 61 79 80").unwrap(),
@@ -382,16 +393,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn parse_id_dash_g_rejects_non_numeric() {
         assert!(parse_id_dash_g("20 abc").is_err());
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn parse_id_dash_g_empty_is_empty_vec() {
         assert_eq!(parse_id_dash_g("").unwrap(), Vec::<u32>::new());
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn parse_id_dash_g_single_gid() {
         assert_eq!(parse_id_dash_g("1000\n").unwrap(), vec![1000]);
     }
