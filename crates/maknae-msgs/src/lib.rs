@@ -135,6 +135,20 @@ mod tests {
     }
 
     #[test]
+    fn msg_dispatches_to_correct_locale_catalog() {
+        // Content-pinning: the parity test only compares placeholder *sets*
+        // (symmetric by construction) and cargo-mutants doesn't mutate this
+        // match-arm-call shape, so a transposed dispatch arm (EnUs ->
+        // catalog_ko_kr::text, KoKr -> catalog_en_us::text) is otherwise
+        // invisible to both. Pin actual language identity so it fails RED.
+        let en = msg(Locale::EnUs, MsgId::EnrollStarted);
+        let ko = msg(Locale::KoKr, MsgId::EnrollStarted);
+        assert_ne!(en, ko);
+        assert_eq!(en, "Starting enrollment");
+        assert_eq!(ko, "등록을 시작해요");
+    }
+
+    #[test]
     fn empty_lc_messages_falls_through_to_lang() {
         // A set-but-empty LC_MESSAGES is neither a ko match nor a non-empty
         // "authoritative" value — it must fall through to LANG rather than
