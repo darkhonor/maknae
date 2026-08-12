@@ -189,29 +189,56 @@ fn match_segs(pat: &[GlobSeg], comps: &[&str]) -> bool {
 /// greedily left-to-right. `*` never crosses a `/` because this function only
 /// ever sees one path component's bytes. Byte-wise, case-sensitive (`&str`
 /// slicing below is on UTF-8 boundaries only, which `split`/`find` respect).
+///
+/// Start-anchor and end-anchor are INDEPENDENT constraints, not mutually
+/// exclusive: a pattern with no `*` at all (e.g. `passwd`) splits into a
+/// SINGLE fragment where `i == 0` and `i == last` coincide, and BOTH anchors
+/// must apply to that one fragment — i.e. exact equality, not merely a
+/// prefix. (An earlier version used `if … else if …`, so the end-anchor was
+/// silently skipped whenever it coincided with the start-anchor, making
+/// every starless literal component behave like an implicit trailing `*` —
+/// an over-ALLOW: `Read(/etc/passwd)` matched `/etc/passwd-backup`, and the
+/// shipped-default `Read(~/**)` matched a different user's home directory
+/// whenever its name shared the principal's name as a prefix, e.g.
+/// `/home/operatorbot` under principal home `/home/operator`.)
 fn component_matches(pattern: &str, text: &str) -> bool {
     let fragments: Vec<&str> = pattern.split('*').collect();
     let last = fragments.len() - 1;
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
     let mut pos = 0usize;
     for (i, frag) in fragments.iter().enumerate() {
         if frag.is_empty() {
             continue; // a `*` itself, or two adjacent `*`s — no constraint here
         }
-        if i == 0 && !pattern.starts_with('*') {
+        let is_first = i == 0;
+        let is_last = i == last;
+
+        if is_first && anchored_start {
             if !text[pos..].starts_with(frag) {
                 return false;
             }
             pos += frag.len();
-        } else if i == last && !pattern.ends_with('*') {
+            if is_last && anchored_end {
+                // Single-fragment pattern (no `*` anywhere): both anchors
+                // apply to this SAME occurrence, so it must consume the
+                // entire remaining text — a prefix match is not enough.
+                return pos == text.len();
+            }
+            continue;
+        }
+
+        if is_last && anchored_end {
             if !text[pos..].ends_with(frag) {
                 return false;
             }
             // last fragment — no `pos` advance needed, nothing follows it
-        } else {
-            match text[pos..].find(frag) {
-                Some(offset) => pos += offset + frag.len(),
-                None => return false,
-            }
+            continue;
+        }
+
+        match text[pos..].find(frag) {
+            Some(offset) => pos += offset + frag.len(),
+            None => return false,
         }
     }
     true
@@ -699,6 +726,30 @@ mod tests {
     fn double_star_matches_dotfiles() {
         let glob = read_glob("~/**");
         assert!(glob.matches(Path::new("/home/operator/.ssh/id_ed25519")));
+    }
+
+    #[test]
+    fn literal_component_is_exact_not_prefix() {
+        // A no-`*` component pattern must require EXACT component equality,
+        // not merely a start-anchor with no end check — `component_matches`
+        // splits on `*`, so a starless pattern is a single fragment where
+        // `i == 0` and `i == last` coincide; the start/end anchor branches
+        // must both apply to that one fragment (over-ALLOW otherwise).
+        let glob = read_glob("/etc/passwd");
+        assert!(glob.matches(Path::new("/etc/passwd")));
+        assert!(!glob.matches(Path::new("/etc/passwdX")));
+        assert!(!glob.matches(Path::new("/etc/passwd-backup")));
+    }
+
+    #[test]
+    fn double_star_home_does_not_leak_prefix_sharing_user() {
+        // principal home /home/operator (see `home()`); a DIFFERENT user
+        // whose name merely shares the "operator" prefix — /home/operatorbot
+        // — must NOT match `Read(~/**)`. Each path component ("operator" vs
+        // "operatorbot") must be compared for exact equality, not prefix.
+        let glob = read_glob("~/**");
+        assert!(glob.matches(Path::new("/home/operator/.ssh/id_ed25519")));
+        assert!(!glob.matches(Path::new("/home/operatorbot/.ssh/id_ed25519")));
     }
 
     #[test]
