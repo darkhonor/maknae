@@ -1,8 +1,18 @@
 //! `maknae` CLI — the untrusted interaction plane (spec §3). Resolves its own
 //! config dir, mints a short-lived plane leaf, connects to `maknaed` over the
-//! Stage-2 mTLS/UDS transport, and issues one read-only verb per invocation.
-//! STRICTLY non-privileged: this crate links ONLY `maknae-proto`, `maknae-vault`,
-//! `maknae-config`, `clap`, `tokio` (Task 9's isolation gate enforces this).
+//! Stage-2 mTLS/UDS transport, and issues one read-only verb per invocation
+//! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
+//! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).
+//!
+//! **Closed dependency enumeration** (Task 9's isolation gate enforces this):
+//! `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`, `clap`, `tokio`,
+//! `nix`, `zeroize`, `yaml-rust2`, `rpassword`, and macOS-only `security-framework`
+//! (`bins/maknae/Cargo.toml`). The `ping`/`whoami` wire path below uses only the
+//! first five; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/`security-framework` are
+//! `enroll/`-only. NO privileged crate (`maknae-kernel`/`-subject-ctx-mint`/
+//! `-audit-append`/`-spif-compile`) — spec §3 P1 — even for `enroll`: it does its
+//! own privileged work via `nix` safe wrappers and process re-exec (`sudo -u`),
+//! never by linking the daemon's privileged crates.
 
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
@@ -47,22 +57,44 @@ fn cli_config_specs() -> [SectionSpec; 2] {
     ]
 }
 
-/// `maknae` — read-only verbs over the mTLS plane.
+/// `maknae` — read-only verbs over the mTLS plane, plus one-time elevated
+/// enrollment.
 #[derive(Parser, Debug)]
-#[command(name = "maknae", about = "Untrusted CLI plane for maknaed (read-only)")]
+#[command(
+    name = "maknae",
+    about = "Untrusted CLI plane for maknaed (read-only) + one-time elevated enroll"
+)]
 struct Cli {
     #[command(subcommand)]
-    verb: Verb,
+    command: Command,
 }
 
-/// The read-only verbs this CLI can issue (mirrors `maknae_proto::Verb`, kept as
-/// a distinct clap-derived type so the wire contract doesn't grow a `clap`
-/// dependency).
-#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
-enum Verb {
+/// The top-level subcommand surface. `Ping`/`Whoami` route to the existing
+/// wire-path `execute()` below (unchanged behavior); `Enroll`/`EnrollHelper`
+/// route to `enroll/` (spec §4.1-§4.6, PR-J1 Task 8). `EnrollHelper` is hidden
+/// from `--help` — it is `mod.rs`'s own re-exec target, never operator-invoked.
+#[derive(Subcommand, Debug)]
+enum Command {
     /// Check that the daemon is reachable.
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
+    Whoami,
+    /// One-time elevated provisioning: mint credentials, seal them to the
+    /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
+    Enroll(crate::enroll::EnrollArgs),
+    /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
+    /// user-facing verb.
+    #[command(hide = true, name = "enroll-helper")]
+    EnrollHelper(crate::enroll::HelperArgs),
+}
+
+/// The read-only verbs the wire path can issue (mirrors `maknae_proto::Verb`).
+/// Plain `Copy` enum, no `clap` derive of its own — `Command::Ping`/`Whoami`
+/// above own the argument surface; this is purely the internal wire-path type
+/// `execute`/`round_trip`/`print_payload_for_verb` were already built around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Ping,
     Whoami,
 }
 
@@ -224,11 +256,24 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
     }
 }
 
-/// The `maknae` entrypoint: parse args, run the round trip, map the outcome to
-/// an exit code. Fail-closed — any error prints to stderr and exits non-zero.
+/// The `maknae` entrypoint: parse args, dispatch to the wire path
+/// (`ping`/`whoami`) or `enroll`/`enroll-helper`, map the outcome to an exit
+/// code. Fail-closed — any error prints to stderr and exits non-zero.
 pub async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
-    match execute(cli.verb).await {
+    match cli.command {
+        Command::Ping => wire_exit_code(execute(Verb::Ping).await),
+        Command::Whoami => wire_exit_code(execute(Verb::Whoami).await),
+        Command::Enroll(args) => crate::enroll::run_enroll(args).await,
+        Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
+    }
+}
+
+/// Map the wire path's `execute()` outcome to an exit code — split out of
+/// `run_cli` so `Ping`/`Whoami` share one mapping (unchanged from before the
+/// `Command`-enum restructure).
+fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
@@ -271,13 +316,13 @@ mod tests {
     #[test]
     fn parses_ping() {
         let cli = Cli::try_parse_from(["maknae", "ping"]).expect("parses");
-        assert_eq!(cli.verb, Verb::Ping);
+        assert!(matches!(cli.command, Command::Ping));
     }
 
     #[test]
     fn parses_whoami() {
         let cli = Cli::try_parse_from(["maknae", "whoami"]).expect("parses");
-        assert_eq!(cli.verb, Verb::Whoami);
+        assert!(matches!(cli.command, Command::Whoami));
     }
 
     #[test]
@@ -288,6 +333,195 @@ mod tests {
     #[test]
     fn rejects_no_verb() {
         assert!(Cli::try_parse_from(["maknae"]).is_err());
+    }
+
+    // ---- enroll / enroll-helper clap wiring (Step 3) -----------------------
+
+    const ENROLL_REQUIRED: &[&str] = &[
+        "maknae",
+        "enroll",
+        "--vault-ca",
+        "/tmp/ca.crt",
+        "--vault-addr",
+        "https://v.example:8200",
+        "--deployment-id",
+        "dev-01",
+    ];
+
+    #[test]
+    fn enroll_parses_with_required_args() {
+        let cli = Cli::try_parse_from(ENROLL_REQUIRED).expect("parses");
+        match cli.command {
+            Command::Enroll(args) => {
+                assert_eq!(args.vault_ca, Some(std::path::PathBuf::from("/tmp/ca.crt")));
+                assert_eq!(args.ca_dir, None);
+                assert_eq!(args.vault_addr, "https://v.example:8200");
+                assert_eq!(args.deployment_id, "dev-01");
+                assert_eq!(args.approle_mount, maknae_vault::DEFAULT_APPROLE_MOUNT);
+                assert_eq!(args.pki_int_mount, maknae_vault::DEFAULT_PKI_INT_MOUNT);
+                assert!(!args.rotate);
+                assert!(!args.insecure_plaintext_secret);
+                assert!(!args.verbose);
+            }
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enroll_accepts_ca_dir_instead_of_vault_ca() {
+        let cli = Cli::try_parse_from([
+            "maknae",
+            "enroll",
+            "--ca-dir",
+            "/tmp/cadir",
+            "--vault-addr",
+            "https://v.example:8200",
+            "--deployment-id",
+            "dev-01",
+        ])
+        .expect("parses");
+        match cli.command {
+            Command::Enroll(args) => {
+                assert_eq!(args.ca_dir, Some(std::path::PathBuf::from("/tmp/cadir")));
+                assert_eq!(args.vault_ca, None);
+            }
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enroll_missing_ca_source_is_refused() {
+        assert!(Cli::try_parse_from([
+            "maknae",
+            "enroll",
+            "--vault-addr",
+            "https://v.example:8200",
+            "--deployment-id",
+            "dev-01",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn enroll_both_ca_sources_is_refused() {
+        assert!(Cli::try_parse_from([
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/tmp/ca.crt",
+            "--ca-dir",
+            "/tmp/cadir",
+            "--vault-addr",
+            "https://v.example:8200",
+            "--deployment-id",
+            "dev-01",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn enroll_missing_vault_addr_is_refused() {
+        assert!(Cli::try_parse_from([
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/tmp/ca.crt",
+            "--deployment-id",
+            "dev-01",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn enroll_missing_deployment_id_is_refused() {
+        assert!(Cli::try_parse_from([
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/tmp/ca.crt",
+            "--vault-addr",
+            "https://v.example:8200",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn enroll_overrides_mounts_rotate_and_flags() {
+        let mut argv: Vec<&str> = ENROLL_REQUIRED.to_vec();
+        argv.extend([
+            "--approle-mount",
+            "alt-approle",
+            "--pki-int-mount",
+            "alt-pki-int",
+            "--rotate",
+            "--insecure-plaintext-secret",
+            "--verbose",
+        ]);
+        let cli = Cli::try_parse_from(argv).expect("parses");
+        match cli.command {
+            Command::Enroll(args) => {
+                assert_eq!(args.approle_mount, "alt-approle");
+                assert_eq!(args.pki_int_mount, "alt-pki-int");
+                assert!(args.rotate);
+                assert!(args.insecure_plaintext_secret);
+                assert!(args.verbose);
+            }
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enroll_helper_probe_parses() {
+        let cli = Cli::try_parse_from([
+            "maknae",
+            "enroll-helper",
+            "probe",
+            "--euid",
+            "1000",
+            "--egid",
+            "1000",
+        ])
+        .expect("parses");
+        match cli.command {
+            Command::EnrollHelper(args) => match args.verb {
+                crate::enroll::HelperVerb::Probe(id) => {
+                    assert_eq!(id.euid, 1000);
+                    assert_eq!(id.egid, 1000);
+                }
+                other => panic!("expected HelperVerb::Probe, got {other:?}"),
+            },
+            other => panic!("expected Command::EnrollHelper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enroll_helper_provision_parses() {
+        let cli = Cli::try_parse_from([
+            "maknae",
+            "enroll-helper",
+            "provision",
+            "--euid",
+            "1000",
+            "--egid",
+            "1000",
+        ])
+        .expect("parses");
+        assert!(matches!(cli.command, Command::EnrollHelper(_)));
+    }
+
+    #[test]
+    fn enroll_helper_is_hidden_from_help() {
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_help()
+            .to_string();
+        assert!(
+            !help.contains("enroll-helper"),
+            "enroll-helper leaked into --help:\n{help}"
+        );
+        // Sanity: the visible subcommands ARE present, so this isn't a
+        // vacuously-passing empty-help check.
+        assert!(help.contains("enroll"));
+        assert!(help.contains("ping"));
     }
 
     #[test]

@@ -20,5 +20,31 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::PostureDegraded => {
             "warning: this boot's credential posture is not hardware-root-of-trust sealed"
         }
+        MsgId::EnrollPreflightFailed => "Enrollment preflight check failed",
+        MsgId::EnrollProbeStarted => "Verifying this host can seal a credential in your context",
+        MsgId::EnrollProbeFailed => {
+            "Credential-sealing capability check failed — nothing has been changed in Vault"
+        }
+        MsgId::EnrollProbeOk => "Credential-sealing capability confirmed",
+        MsgId::EnrollTokenPrompt => "Vault token: ",
+        MsgId::EnrollVaultOpsStarted => "Requesting credentials from Vault",
+        MsgId::EnrollWritingDaemonConfig => "Writing the daemon's configuration",
+        MsgId::EnrollSealingDaemonCredential => "Sealing the daemon's credential",
+        MsgId::EnrollProvisioningCli => "Provisioning your CLI credentials",
+        MsgId::EnrollPostureSummary => "Enrollment complete. CLI config: {cli_dir}",
+        MsgId::EnrollReloginNote => {
+            "Log out and back in (or run `newgrp maknae`) before using the CLI"
+        }
+        MsgId::EnrollEnableDaemonHint => "Start the daemon with: systemctl enable --now maknaed",
+        MsgId::EnrollRotating => "Existing enrollment found — rotating credentials",
+        MsgId::EnrollRollbackDestroyed => {
+            "Enrollment failed — destroyed the credentials just issued"
+        }
+        MsgId::HelperContextMismatch => {
+            "Operator-context helper did not land in the expected identity"
+        }
+        MsgId::HelperStillPrivileged => {
+            "Operator-context helper still holds root's group membership — refusing"
+        }
     }
 }

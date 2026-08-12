@@ -17,9 +17,35 @@ path = "src/main.rs"
 maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-config = { path = "../../crates/maknae-config" }
 maknae-vault = { path = "../../crates/maknae-vault" }
+maknae-msgs = { path = "../../crates/maknae-msgs" }
 clap = { version = "4", features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
+# `user` — nix::unistd::{User,Group,geteuid,getegid} (passwd/group lookup, the enroll-
+# helper's self-verification, spec §4.1); `fs` — nix::unistd::chown (artifact_write.rs,
+# spec §4.6 ownership table). PR-J1 Task 8.
+nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
+# Zeroizing wrapper for the operator's Vault token + the minted SecretIDs in transit
+# through the enroll flow (never argv/env/log). PR-J1 Task 8.
+zeroize = "1"
+# The enroll-written YAML artifacts (spec §4.6) are emitted via yaml_rust2::YamlEmitter
+# — NOT serde_yaml (trips deny.toml) — matching maknae-config's own parser pin. PR-J1 Task 8.
+yaml-rust2 = "=0.11.0"
+# No-echo interactive Vault-token prompt (spec §4.1 step 2, `--token-file`-absent path).
+# Decided over a hand-rolled termios-via-nix no-echo read: small, no `unsafe`, actively
+# maintained, clears `cargo deny`. PR-J1 Task 8.
+rpassword = "7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The CLI's login-Keychain-backed SecretID seal (spec §6.3) and the enroll helper's
+# macOS capability probe (Keychain write/read round-trip, spec §4.1 step 1). The
+# daemon-side SEP envelope seal (spec §6.2) is a documented stub this increment —
+# see `enroll/mod.rs`'s `seal_daemon_secret_macos`. PR-J1 Task 8.
+security-framework = "3"
+
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
-# STRICTLY non-privileged (task-8 brief): the ONLY deps allowed here are
-# maknae-proto, maknae-vault, maknae-config, clap, tokio — no maknae-mcp either
-# (Task 9's isolation gate enforces this set).
+# STRICTLY non-privileged (task-8 brief): the closed set of direct deps this crate
+# links is maknae-proto, maknae-vault, maknae-config, maknae-msgs, clap, tokio, nix,
+# zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no maknae-mcp
+# either (Task 9's isolation gate enforces this set). `nix`/`zeroize`/`yaml-rust2`/
+# `rpassword`/`security-framework` are `enroll/`-only (spec §4.1-§4.6); the wire path
+# (`cli.rs`) still touches only the original five.

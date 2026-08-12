@@ -330,6 +330,33 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
 
+# PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
+# constraint (decision logic that needed 0-missed lives in the library crates
+# already — secret_source.rs, config.rs, principal.rs, etc., all T1 above).
+# `enroll/`'s own real decision points (preflight_check's euid/$SUDO_UID/
+# $SUDO_USER refusal ladder, artifact_table's pure row manifest, split_ca_chain,
+# parse_host_port, ProvisionJob's round trip) all carry discriminating unit
+# tests even though the tier is T3 — see each file's module doc.
+[[t3]]
+path = "bins/maknae/src/enroll/mod.rs"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate) + clap arg structs; the pure pieces (preflight_check, parse_host_port, the YAML content builders, ProvisionJob's round trip) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+
+[[t3]]
+path = "bins/maknae/src/enroll/artifact_table.rs"
+why = "the pure §4.6 artifact row manifest — exhaustively unit-tested (exact-row assertions against an independent oracle, negative /var/log/maknae assertion) but bin code, T3 per the tiering constraint"
+
+[[t3]]
+path = "bins/maknae/src/enroll/artifact_write.rs"
+why = "applies the artifact table to disk — chown/chmod/restorecon + yaml_rust2 YAML emission I/O; unit-tested (mkdir/write/chmod round trips, YAML round-trips through maknae_config::load_str), mutation not required at this tier"
+
+[[t3]]
+path = "bins/maknae/src/enroll/vault_ops.rs"
+why = "thin OperatorClient call wrappers; the one pure piece (split_ca_chain) carries real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
+
+[[t3]]
+path = "bins/maknae/src/enroll/helper.rs"
+why = "the operator-context helper — self-verification + systemd-creds/Keychain subprocess/FFI I/O; the pure id-G parser carries real unit tests, the seal/probe I/O is T3 like the rest of this crate's HRoT-sealing call sites"
+
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +
 # dispatch decision logic is lib.rs (T1).
