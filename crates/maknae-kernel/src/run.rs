@@ -1613,10 +1613,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(posture_rec.source.uid, nix::unistd::geteuid().as_raw());
         } else {
             // Unprivileged (every CI lane, this dev host): the authz gate still
-            // refuses — for `NotRootOwned`, not a grammar/tilde problem — proving
-            // the gate is reached and enforced, not silently bypassed.
+            // refuses — for `NotRootOwned` specifically (checked below via its
+            // exact Display text, `authz.rs`'s `AuthzError::NotRootOwned` arm),
+            // not a grammar/tilde problem — proving the gate is reached and
+            // enforced, not silently bypassed.
             match &result {
-                Err(RunError::Authz(_)) => {}
+                Err(RunError::Authz(msg)) => assert!(
+                    msg.contains("not owned by root"),
+                    "expected a NotRootOwned refusal, got: {msg}"
+                ),
                 other => panic!("expected Err(RunError::Authz), got {other:?}"),
             }
         }
