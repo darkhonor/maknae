@@ -225,7 +225,7 @@ why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the pure sha
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"
-why = "AppRole login + sys/wrapping/unwrap — live-Vault I/O; exercised by the gated live-smoke, mutation-excluded"
+why = "AppRole login (standing SecretID) — live-Vault I/O; exercised by the gated live-smoke, mutation-excluded"
 
 [[t3]]
 path = "crates/maknae-vault/src/client.rs"

@@ -1,5 +1,5 @@
-//! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005).
-//! Stage 1: config -> AppRole auth (response-wrapped SecretID) -> P-384 CSR ->
+//! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005, amended
+//! by ADR-0018). Stage 1: config -> AppRole auth (standing raw SecretID) -> P-384 CSR ->
 //! pki/sign -> memory-only leaf, plus the CA-pin loader + URI-SAN verifier.
 //! FIPS: the runtime `.fips()` assertion (assert_fips_provider, in fips_glue) is
 //! authoritative; the load-bearing install-before-first-Vault-client ordering keeps
