@@ -60,7 +60,7 @@ pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
 }
 
 /// `vault.addr` must be a well-formed `https://` URL. A plaintext `http://` addr
-/// would send the wrapping token / SecretID / Vault token in the clear (the CA cert
+/// would send the SecretID / Vault token in the clear (the CA cert
 /// cannot protect a non-TLS connection), and a malformed URL would panic vaultrs's
 /// builder — both rejected fail-closed here.
 pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn validate_vault_addr_guard() {
         assert!(validate_vault_addr("https://v.example:8200").is_ok());
-        // Plaintext http:// — would disclose the wrapping token / SecretID / Vault token.
+        // Plaintext http:// — would disclose the SecretID / Vault token.
         assert!(matches!(
             validate_vault_addr("http://v.example:8200"),
             Err(VaultError::InvalidAddr(_))

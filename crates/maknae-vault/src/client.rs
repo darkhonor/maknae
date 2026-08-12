@@ -1,5 +1,5 @@
-//! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (response-wrapped
-//! SecretID) → P-384 CSR → `pki/sign` → memory-only leaf. The identity is Arc-backed
+//! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (standing raw
+//! SecretID, ADR-0018) → P-384 CSR → `pki/sign` → memory-only leaf. The identity is Arc-backed
 //! (cheap snapshot; key wiped on drop). The credential supervisor (`spawn_supervisor`,
 //! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
@@ -104,8 +104,8 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
         })
 }
 
-/// Read a SENSITIVE credential file (the wrapped SecretID). Refuse a symlink or any
-/// group/other access BEFORE reading — the wrapping token must never be world-readable
+/// Read a SENSITIVE credential file (the standing raw SecretID). Refuse a symlink or any
+/// group/other access BEFORE reading — the SecretID must never be world-readable
 /// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
 fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
     let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
@@ -227,7 +227,7 @@ impl PlaneClient {
     /// with the full set of sections each uses and pass the parsed document here, so a
     /// realistic combined config is accepted while a genuinely-unknown section is still
     /// rejected at the single load (fail-closed on unknown preserved). `dir` still
-    /// supplies the non-section credential files (AppRole id / wrapped SecretID / CA
+    /// supplies the non-section credential files (AppRole id / standing SecretID / CA
     /// pins / Vault CA), which are read from disk, not the document.
     ///
     /// **LOAD-BEARING ordering:** `assert_fips_provider()` runs first — before the Vault
@@ -239,13 +239,15 @@ impl PlaneClient {
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
         let prefix = plane.config_prefix();
-        // RoleID is non-secret (an identifier); the wrapped SecretID is sensitive and
+        // RoleID is non-secret (an identifier); the standing SecretID is sensitive and
         // must be owner-only (perm-checked, no symlink).
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
-        let wrapped_secret_id = read_secret_credential(&dir.join(format!("{prefix}-secret-id")))?;
+        let secret_id = Zeroizing::new(read_secret_credential(
+            &dir.join(format!("{prefix}-secret-id")),
+        )?);
         let vault_ca = dir.join("tls").join("vault-ca.crt");
         // A HARD per-request HTTP timeout on every Vault operation this client ever
-        // makes (login/unwrap/mint/sign, renew_self, revoke_self). vaultrs defaults
+        // makes (login/mint/sign, renew_self, revoke_self). vaultrs defaults
         // `timeout` to None — an UNBOUNDED reqwest client — so a hung Vault connection
         // (network drop with no RST, a stalled LB) would otherwise wedge whatever
         // awaits it: the credential supervisor's renew/rotate (silently zombifying the
@@ -268,7 +270,7 @@ impl PlaneClient {
             deployment_id: cfg.deployment_id,
             auth: AppRoleAuth {
                 role_id,
-                wrapped_secret_id,
+                secret_id,
                 approle_mount: cfg.approle_mount,
             },
             pki_int_mount: cfg.pki_int_mount,
@@ -626,7 +628,7 @@ mod tests {
 
     fn tmpfile(name: &str, mode: u32) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("mv-cred-{}-{}", std::process::id(), name));
-        std::fs::write(&p, "wrapped-token-xyz").unwrap();
+        std::fs::write(&p, "secret-id-value-xyz").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         p
     }
@@ -644,7 +646,7 @@ mod tests {
     #[test]
     fn secret_credential_accepts_owner_only() {
         let p = tmpfile("secure", 0o600);
-        assert_eq!(read_secret_credential(&p).unwrap(), "wrapped-token-xyz");
+        assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
         let _ = std::fs::remove_file(&p);
     }
 }

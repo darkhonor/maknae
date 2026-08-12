@@ -31,8 +31,6 @@ pub enum VaultError {
     PermissionsUnsupported,
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
-    /// A response-wrapped SecretID could not be unwrapped (already used / expired).
-    WrapUnwrap(String),
     /// AppRole login failed.
     Auth(String),
     /// Local keypair / CSR generation failed.
@@ -87,10 +85,6 @@ impl std::fmt::Display for VaultError {
                 "cannot verify credential-file permissions on this (non-Unix) target — refusing to read (fail closed)"
             ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
-            VaultError::WrapUnwrap(msg) => write!(
-                f,
-                "response-wrapped SecretID unwrap failed (already used / expired?): {msg}"
-            ),
             VaultError::Auth(msg) => write!(f, "AppRole login failed: {msg}"),
             VaultError::CsrGen(msg) => write!(f, "keypair/CSR generation failed: {msg}"),
             VaultError::Sign(msg) => write!(f, "pki/sign rejected: {msg}"),

@@ -6,7 +6,7 @@
 # keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
 # T3-tiered.
 exclude_globs = [
-  "crates/maknae-vault/src/auth.rs",       # AppRole login + sys/wrapping/unwrap — live-Vault I/O
+  "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
