@@ -94,6 +94,14 @@ pub enum EnrollError {
     /// this increment — a documented, flagged stub (spec §11: "SEP key ACL for
     /// a launchd daemon — prototyped early in PR-J1"). Never faked.
     MacosSepUnimplemented,
+    /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
+    /// previously-recorded accessor — FATAL: enroll aborts before minting
+    /// anything new or overwriting `enroll-state.yaml`, so the still-live old
+    /// accessors stay recorded there (not orphaned) and the operator can
+    /// retry. Round-1 review Important #1: a swallowed destroy failure here
+    /// followed by an unconditional state-file overwrite is exactly the
+    /// orphaned-accessor leak class the brief calls out.
+    RotateDestroyFailed { mount: String, detail: String },
 }
 
 impl std::fmt::Display for EnrollError {
@@ -148,6 +156,12 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "macOS SEP daemon-credential sealing is not implemented yet (spec §6.2, §11) — \
                  refusing rather than writing an unsealed credential"
+            ),
+            EnrollError::RotateDestroyFailed { mount, detail } => write!(
+                f,
+                "rotate: could not destroy every accessor from the previous enrollment on mount \
+                 {mount:?} ({detail}); enroll-state.yaml was left unmodified — resolve the Vault \
+                 error and re-run enroll"
             ),
         }
     }
@@ -513,6 +527,34 @@ fn build_posture_yaml(source: &str, mechanism: &str) -> String {
         ("seal_mechanism", Yaml::String(mechanism.to_string())),
         ("sealed_at_unix", Yaml::Integer(sealed_at as i64)),
     ]))
+}
+
+/// The `approle_mount` recorded in `enroll-state.yaml` — the mount the
+/// recorded accessors were ACTUALLY minted under. Round-1 review Important
+/// #2: a rotate must destroy the previous enrollment's accessors against
+/// THIS recorded mount, never whatever `--approle-mount` the CURRENT
+/// invocation passed — an operator who changes `--approle-mount` between
+/// enrollments must not have the rotate cleanup misdirected at the new
+/// (wrong) mount, where every destroy call would 403/fail against accessors
+/// that were never minted there.
+fn parse_state_mount(text: &str) -> Result<String, EnrollError> {
+    let v = maknae_config::load_str(text)
+        .map_err(|e| EnrollError::State(format!("enroll-state.yaml: {e:?}")))?;
+    match &v {
+        maknae_config::Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k == "approle_mount")
+            .and_then(|(_, v)| match v {
+                maknae_config::Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                EnrollError::State("enroll-state.yaml missing approle_mount".to_string())
+            }),
+        _ => Err(EnrollError::State(
+            "enroll-state.yaml is not a map".to_string(),
+        )),
+    }
 }
 
 fn parse_state_accessors(text: &str) -> Result<Vec<(String, String)>, EnrollError> {
@@ -911,6 +953,19 @@ fn seal_daemon_secret_macos(
 // Rollback / rotate (spec §4.1: "any failure after step 3 destroys the
 // just-minted accessors"; "re-enroll destroys the accessors in the existing
 // enroll-state.yaml before overwriting — unconditional rotate semantics")
+//
+// Two distinct fatality contracts (round-1 review Important #1):
+//   - `destroy_and_report` (POST-mint failure ROLLBACK): best-effort/
+//     non-fatal, as before. It runs only once enroll is ALREADY failing for
+//     some other reason (a later step errored) and the operator's token is
+//     still live for a manual cleanup; a rollback-destroy failure is reported
+//     but does not change the outcome — there's no "un-failing" the enroll.
+//   - `destroy_previous_accessors_or_abort` (rotate's PRE-mint cleanup):
+//     FATAL. It runs BEFORE anything new is minted or `enroll-state.yaml` is
+//     overwritten, so a destroy failure here — if swallowed — would leave the
+//     OLD accessors still live on Vault and recorded nowhere but stderr the
+//     moment the state file is overwritten with the NEW ones. Aborting here
+//     keeps the old accessors recorded in the still-intact state file.
 // ============================================================================
 
 async fn destroy_and_report(
@@ -931,6 +986,46 @@ async fn destroy_and_report(
             eprintln!("  ! failed to destroy accessor for role {role} ({accessor}): {e}");
         }
     }
+}
+
+/// Rotate's PRE-MINT cleanup (spec §4.1). Destroys `records` (the PREVIOUS
+/// enrollment's accessors, recorded in `enroll-state.yaml`) against `mount`
+/// — the caller MUST pass the mount recorded alongside those accessors
+/// (`parse_state_mount`), never the current invocation's `--approle-mount`
+/// (round-1 review Important #2). `records.is_empty()` short-circuits to
+/// `Ok(())` without any Vault call — a fresh enroll (or a state file that
+/// somehow recorded zero accessors) has nothing to destroy and nothing to
+/// abort over.
+///
+/// Unlike [`destroy_and_report`], ANY destroy failure here is FATAL
+/// (`Err(EnrollError::RotateDestroyFailed)`, round-1 review Important #1):
+/// the caller (`enroll_inner`) propagates it with `?` BEFORE minting
+/// anything new or overwriting `enroll-state.yaml`, so the old accessors
+/// stay recorded in the untouched state file rather than being silently
+/// orphaned.
+async fn destroy_previous_accessors_or_abort(
+    client: &maknae_vault::OperatorClient,
+    mount: &str,
+    records: &[(String, String)],
+    locale: Locale,
+) -> Result<(), EnrollError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let failures = vault_ops::destroy_all(client, mount, records).await;
+    if failures.is_empty() {
+        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
+        return Ok(());
+    }
+    let detail = failures
+        .iter()
+        .map(|(role, accessor, e)| format!("role {role} ({accessor}): {e}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(EnrollError::RotateDestroyFailed {
+        mount: mount.to_string(),
+        detail,
+    })
 }
 
 // ============================================================================
@@ -1014,6 +1109,10 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
 
     // Unconditional rotate: a pre-existing enroll-state.yaml is destroyed
     // before anything new is minted, regardless of --rotate (spec §4.1).
+    // The destroy targets the MOUNT RECORDED IN THAT FILE (`parse_state_mount`)
+    // — never `args.approle_mount` — and a destroy failure is FATAL: `?`
+    // propagates it before any new mint / before the state file is
+    // overwritten (round-1 review Important #1 + #2).
     let state_path = PathBuf::from("/etc/maknae/private/enroll-state.yaml");
     if state_path.exists() {
         println!("{}", msg(locale, MsgId::EnrollRotating));
@@ -1021,8 +1120,10 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             path: state_path.clone(),
             source: e.to_string(),
         })?;
-        let existing = parse_state_accessors(&text)?;
-        destroy_and_report(&client, &args.approle_mount, &existing, locale).await;
+        let existing_mount = parse_state_mount(&text)?;
+        let existing_accessors = parse_state_accessors(&text)?;
+        destroy_previous_accessors_or_abort(&client, &existing_mount, &existing_accessors, locale)
+            .await?;
     }
 
     let (daemon_role_id, cli_role_id) =
@@ -1586,6 +1687,114 @@ mod tests {
     #[test]
     fn parse_state_accessors_rejects_malformed_entry() {
         assert!(parse_state_accessors("accessors:\n  - role: maknaed\n").is_err());
+    }
+
+    // ---- round-1 review Important #2: rotate destroys against the RECORDED
+    // mount, not whatever --approle-mount the current invocation passed ----
+
+    #[test]
+    fn parse_state_mount_round_trips() {
+        let text = build_enroll_state_yaml("maknae-approle", &[]);
+        assert_eq!(parse_state_mount(&text).unwrap(), "maknae-approle");
+    }
+
+    #[test]
+    fn parse_state_mount_returns_the_stored_mount_even_when_current_args_differ() {
+        // Pins the actual bug: enroll-state.yaml was minted under "old-approle";
+        // the CURRENT invocation's --approle-mount is "new-approle" (an operator
+        // who changed the flag between enrollments). The rotate destroy must
+        // target "old-approle" — what parse_state_mount returns — never
+        // whatever `args.approle_mount` happens to be right now.
+        let text = build_enroll_state_yaml(
+            "old-approle",
+            &[("maknaed".to_string(), "acc-1".to_string())],
+        );
+        let recorded_mount = parse_state_mount(&text).unwrap();
+        let current_args_mount = "new-approle";
+        assert_eq!(recorded_mount, "old-approle");
+        assert_ne!(recorded_mount, current_args_mount);
+    }
+
+    #[test]
+    fn parse_state_mount_rejects_missing_key() {
+        assert!(parse_state_mount("accessors: []\n").is_err());
+    }
+
+    #[test]
+    fn parse_state_mount_rejects_non_map_document() {
+        assert!(parse_state_mount("- just\n- a\n- list\n").is_err());
+    }
+
+    #[test]
+    fn parse_state_mount_rejects_wrong_type() {
+        assert!(parse_state_mount("approle_mount: 1\naccessors: []\n").is_err());
+    }
+
+    // ---- round-1 review Important #1: rotate's pre-mint destroy is FATAL --
+    //
+    // The full flow (a live Vault destroy_accessor call actually failing mid-
+    // rotate, then asserting enroll returns Err AND enroll-state.yaml still
+    // holds the OLD accessors on disk) needs a live Vault — `OperatorClient`
+    // wraps a real `vaultrs::VaultClient` with no injectable transport, and
+    // this crate has no mock-Vault harness (T3, per the task brief: the live
+    // enroll flow is exercised manually, not in CI). What IS provable without
+    // a network call: `VaultClient::new` (verified against vaultrs 0.7.4's
+    // vendored source) reads+parses the CA file but makes NO request, so a
+    // real `OperatorClient` can be built here to exercise
+    // `destroy_previous_accessors_or_abort`'s structure for real. The
+    // `records.is_empty()` short-circuit is the one branch reachable without
+    // ever calling into Vault — proven below. The failure branch's fatality
+    // (`Err(RotateDestroyFailed)`, propagated by `?` in `enroll_inner` BEFORE
+    // any mint/state-file overwrite — see the `?` on the call in
+    // `enroll_inner`, and `destroy_and_report`'s doc comment contrasting the
+    // two fatality contracts) is a live-run assertion, documented in the
+    // task report's manual live-run procedure.
+    //
+    // A fixed, valid, throwaway self-signed CA (P-384, generated once via
+    // `openssl req -x509 -newkey ec ...`, no secret material) — embedding it
+    // lets this test avoid a new `rcgen` dev-dependency for a single fixture.
+    const FIXTURE_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBwzCCAUqgAwIBAgIUD2PQ7v3W12PH7C5ZDatOgant16QwCgYIKoZIzj0EAwIw\n\
+GTEXMBUGA1UEAwwObWFrbmFlLXRlc3QtY2EwHhcNMjYwODEyMTkxMzAwWhcNMzYw\n\
+ODA5MTkxMzAwWjAZMRcwFQYDVQQDDA5tYWtuYWUtdGVzdC1jYTB2MBAGByqGSM49\n\
+AgEGBSuBBAAiA2IABElj0WbWS6Y4BjKnEMMxo1ZS58CLLfjlDjvrjucx9eQS9SAv\n\
+JZ3bFLGPVXjSOhlD0TVTnxq6Gs1bA27177Kb7ZNbjekux1YyQPz3hWivvkcPwJXd\n\
+jTEagk7s09/GEUUOxaNTMFEwHQYDVR0OBBYEFNacW0UIekDQ2gQjS+62oTzy0IMD\n\
+MB8GA1UdIwQYMBaAFNacW0UIekDQ2gQjS+62oTzy0IMDMA8GA1UdEwEB/wQFMAMB\n\
+Af8wCgYIKoZIzj0EAwIDZwAwZAIwC0JoylgM7l8gcIiSlyOkaj1mLQdddPXJgy5X\n\
+lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
+26pU6zb4+iAQy9t/45KRW6ugFuF0tfw=\n\
+-----END CERTIFICATE-----\n";
+
+    fn fixture_operator_client(tag: &str) -> maknae_vault::OperatorClient {
+        let ca_path = std::env::temp_dir().join(format!(
+            "maknae-enroll-rotate-fixture-ca-{}-{tag}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
+        // A well-formed https:// address that is never actually connected to —
+        // `OperatorClient::new` only builds settings + reads/parses the CA
+        // file; it makes no request (verified against vaultrs 0.7.4).
+        let client = maknae_vault::OperatorClient::new(
+            "https://vault.invalid.example:8200",
+            &ca_path,
+            Zeroizing::new("test-token".to_string()),
+        )
+        .expect("OperatorClient::new performs no network I/O — settings-only");
+        let _ = std::fs::remove_file(&ca_path);
+        client
+    }
+
+    #[tokio::test]
+    async fn rotate_destroy_is_a_noop_when_nothing_was_recorded() {
+        // A fresh enroll (no prior enroll-state.yaml) or a state file that
+        // somehow recorded zero accessors: nothing to destroy, so this must
+        // resolve WITHOUT calling into Vault at all (there is no live Vault
+        // in this test) and WITHOUT treating "nothing to do" as a failure.
+        let client = fixture_operator_client("empty");
+        let result =
+            destroy_previous_accessors_or_abort(&client, "maknae-approle", &[], Locale::EnUs).await;
+        assert!(result.is_ok());
     }
 
     // ---- ProvisionJob round trip --------------------------------------------
