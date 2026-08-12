@@ -6,8 +6,9 @@
 # keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
 # T3-tiered.
 exclude_globs = [
-  "crates/maknae-vault/src/auth.rs",       # AppRole login + sys/wrapping/unwrap — live-Vault I/O
+  "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
+  "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
   "crates/maknae-vault/src/csr_gen.rs",    # rcgen keygen I/O (non-deterministic); pure shape checks are csr.rs (T1)
@@ -21,6 +22,7 @@ exclude_globs = [
   "crates/maknae-vault/src/peercred.rs",      # nix getsockopt peer-creds — syscall I/O (T3)
   "crates/maknae-vault/src/stream.rs",        # PlaneListener/Connector/AuthenticatedStream — I/O (T3)
   "crates/maknae-vault/src/transport_tests.rs", # #[cfg(test)] loopback suite — test-only, uniform T3 story
+  "crates/maknae-vault/src/secret_io.rs",      # PR-J1 Task 4: reads an already-resolved secret source — file I/O + one systemd-creds subprocess; the fail-closed precedence decisions it consumes stay in secret_source.rs (T1), NOT excluded
   # Stage-3a "it responds" cohort (Task 9): T3 I/O files of the newly-mutated
   # crates (maknae-proto, maknae-audit-append) + the kernel's I/O-only files —
   # only the T1 decision logic (wire/frame/transport/audit_cfg/record/session/

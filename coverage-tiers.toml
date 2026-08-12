@@ -61,6 +61,13 @@ files = [
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
   "crates/maknae-vault/src/fips.rs",
+  # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
+  # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
+  # default here is exactly the T1 line-drawing rule (silently prefers a weaker
+  # credential source, or the daemon and CLI resolvers get conflated). In
+  # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
+  # (secret_io.rs) is T3 below.
+  "crates/maknae-vault/src/secret_source.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a
@@ -73,11 +80,45 @@ files = [
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   "crates/maknae-config/src/audit_cfg.rs",
+  # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
+  # enroll` writes into maknae.yaml). A later task's DAC authz policy resolves
+  # `~` against this — a malformed section that silently collapsed to "absent"
+  # would leave `~` unresolved instead of refused. Fail-closed decision logic,
+  # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
+  # ratchet_cohort).
+  "crates/maknae-config/src/principal.rs",
+  # PR-J1 Task 6: the DAC authz policy schema v1 (spec §7) — the
+  # Claude-Code/Codex-style permission grammar (Read/Bash patterns) a future
+  # per-request PDP evaluates, plus the secure fail-closed load (symlink
+  # refusal + mode gate + root-ownership assertion, spec §4.6). A durable
+  # contract: a mis-parsed glob/argv rule, a swapped deny/allow precedence, or
+  # a dropped owner check would silently widen what a compromised `_maknae`
+  # can read/exec — exactly the T1 line-drawing rule. In [t1].files ONLY (own
+  # 95% floor; NOT ratchet_cohort).
+  "crates/maknae-config/src/authz.rs",
   "crates/maknae-audit-append/src/record.rs",
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
   "crates/maknae-vault/src/supervisor.rs",
+  # maknae-msgs: the compiled-in en_US/ko_KR message catalog (spec §4.3, PR-J1
+  # Task 1). lib.rs owns detect_locale (env-var precedence: LC_MESSAGES then
+  # LANG, ko-prefix routing) and msg() (locale -> catalog dispatch) — a
+  # mis-detected locale or swapped dispatch arm silently ships the wrong
+  # language to an operator. In [t1].files ONLY (own 95% floor; NOT
+  # ratchet_cohort — new crate, not the security-seam+config-loading-core
+  # cohort, ADR-0016 §4). The two catalog files are pure declaration-only
+  # string tables (no decision logic) -> T3 below.
+  "crates/maknae-msgs/src/lib.rs",
+  # PR-J1 Task 7: boot credential-posture determination (spec §5.2) — the pure
+  # (CredentialSource, marker) -> Posture closed map `maknaed` states in its
+  # per-boot AU-3 record. A wrong cell would silently claim a STRONGER posture
+  # than what actually protected the SecretID (e.g. reporting a plaintext
+  # secret as `hrot_sealed`) — exactly the "emit false assurance" T1
+  # line-drawing rule. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
+  # The marker-file read + record construction/emission (I/O) stay in run.rs
+  # (already T3, mutation-excluded via .cargo/mutants.toml).
+  "crates/maknae-kernel/src/posture.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -85,7 +126,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
 
 [t2]
 floor_production_region = 90
@@ -216,11 +257,19 @@ why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the pure sha
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"
-why = "AppRole login + sys/wrapping/unwrap — live-Vault I/O; exercised by the gated live-smoke, mutation-excluded"
+why = "AppRole login (standing SecretID) — live-Vault I/O; exercised by the gated live-smoke, mutation-excluded"
 
 [[t3]]
 path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
+
+[[t3]]
+path = "crates/maknae-vault/src/secret_io.rs"
+why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
+
+[[t3]]
+path = "crates/maknae-vault/src/operator.rs"
+why = "OperatorClient — token-authed role-id/secret-id/accessor/CA-chain I/O adapter for enroll (Task 3); thin pass-throughs to verified vaultrs calls + one hand-rolled rustify Endpoint, exercised by a gated live test. The one pure helper (join_ca_chain) has real unit tests."
 
 # maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
 [[t3]]
@@ -271,7 +320,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs (T1). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/posture.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
@@ -280,6 +329,44 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 [[t3]]
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
+
+# PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
+# constraint (decision logic that needed 0-missed lives in the library crates
+# already — secret_source.rs, config.rs, principal.rs, etc., all T1 above).
+# `enroll/`'s own real decision points (preflight_check's euid/$SUDO_UID/
+# $SUDO_USER refusal ladder, artifact_table's pure row manifest, split_ca_chain,
+# parse_host_port, ProvisionJob's round trip) all carry discriminating unit
+# tests even though the tier is T3 — see each file's module doc.
+[[t3]]
+path = "bins/maknae/src/enroll/mod.rs"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate) + clap arg structs; the pure pieces (preflight_check, parse_host_port, the YAML content builders, ProvisionJob's round trip) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+
+[[t3]]
+path = "bins/maknae/src/enroll/artifact_table.rs"
+why = "the pure §4.6 artifact row manifest — exhaustively unit-tested (exact-row assertions against an independent oracle, negative /var/log/maknae assertion) but bin code, T3 per the tiering constraint"
+
+[[t3]]
+path = "bins/maknae/src/enroll/artifact_write.rs"
+why = "applies the artifact table to disk — chown/chmod/restorecon + yaml_rust2 YAML emission I/O; unit-tested (mkdir/write/chmod round trips, YAML round-trips through maknae_config::load_str), mutation not required at this tier"
+
+[[t3]]
+path = "bins/maknae/src/enroll/vault_ops.rs"
+why = "thin OperatorClient call wrappers; the one pure piece (split_ca_chain) carries real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
+
+[[t3]]
+path = "bins/maknae/src/enroll/helper.rs"
+why = "the operator-context helper — self-verification + systemd-creds/Keychain subprocess/FFI I/O; the pure id-G parser carries real unit tests, the seal/probe I/O is T3 like the rest of this crate's HRoT-sealing call sites"
+
+# maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
+# decision logic (precedent: maknae-config value.rs). The locale-detect +
+# dispatch decision logic is lib.rs (T1).
+[[t3]]
+path = "crates/maknae-msgs/src/catalog_en_us.rs"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
+
+[[t3]]
+path = "crates/maknae-msgs/src/catalog_ko_kr.rs"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
 
 # [[exception]] — documented-not-tested. Removes every code region whose
 # line_start falls within [anchor, end_anchor] from numerator AND denominator.

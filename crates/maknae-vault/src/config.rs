@@ -4,7 +4,7 @@
 //! the plane URI-SAN or be rejected by Vault). All pure/fixture-testable (T1).
 use crate::VaultError;
 use maknae_config::{load_config, Document, SectionSpec, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The config section this client reads (the Terraform `vault` block: addr + mounts).
 /// Exposed so each process registers it in the SAME `load_config` call as every OTHER
@@ -28,6 +28,12 @@ pub struct VaultConfig {
     pub approle_mount: String,
     /// Intermediate PKI mount (Terraform `int_mount_path`); defaults to `maknae-pki-int`.
     pub pki_int_mount: String,
+    /// Operator-opted-in plaintext SecretID path (spec §5.1's last-resort daemon
+    /// source, `resolve_daemon_secret_source`'s third arm) — `None` unless the
+    /// deployment explicitly sets `vault.insecure_plaintext_secret_path`. Absent by
+    /// design: there is no default plaintext path, so a deployment that never opts
+    /// in has no plaintext fallback at all (fail closed).
+    pub insecure_plaintext_secret_path: Option<PathBuf>,
 }
 
 /// Pull a string value out of a `Value::Map` by key. `Value` exposes no accessor.
@@ -60,7 +66,7 @@ pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
 }
 
 /// `vault.addr` must be a well-formed `https://` URL. A plaintext `http://` addr
-/// would send the wrapping token / SecretID / Vault token in the clear (the CA cert
+/// would send the SecretID / Vault token in the clear (the CA cert
 /// cannot protect a non-TLS connection), and a malformed URL would panic vaultrs's
 /// builder — both rejected fail-closed here.
 pub fn validate_vault_addr(addr: &str) -> Result<(), VaultError> {
@@ -124,11 +130,16 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
     let pki_int_mount = get_str(vault, "pki_int_mount")
         .unwrap_or(DEFAULT_PKI_INT_MOUNT)
         .to_string();
+    // Optional — absent (or non-string, since get_str only matches Value::Str) means
+    // None, i.e. no plaintext fallback source at all (fail-closed default).
+    let insecure_plaintext_secret_path =
+        get_str(vault, "insecure_plaintext_secret_path").map(PathBuf::from);
     Ok(VaultConfig {
         addr,
         deployment_id,
         approle_mount,
         pki_int_mount,
+        insecure_plaintext_secret_path,
     })
 }
 
@@ -151,7 +162,7 @@ mod tests {
     #[test]
     fn validate_vault_addr_guard() {
         assert!(validate_vault_addr("https://v.example:8200").is_ok());
-        // Plaintext http:// — would disclose the wrapping token / SecretID / Vault token.
+        // Plaintext http:// — would disclose the SecretID / Vault token.
         assert!(matches!(
             validate_vault_addr("http://v.example:8200"),
             Err(VaultError::InvalidAddr(_))
@@ -239,6 +250,49 @@ mod tests {
         let c = load_vault_config(&d.0).unwrap();
         assert_eq!(c.approle_mount, "alt-approle");
         assert_eq!(c.pki_int_mount, "alt-pki-int");
+    }
+
+    #[test]
+    fn insecure_plaintext_secret_path_absent_by_default() {
+        let d = TempDir::new("noplain");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\ncore:\n  deployment_id: dev-01\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.insecure_plaintext_secret_path, None);
+    }
+
+    #[test]
+    fn insecure_plaintext_secret_path_parses_when_present() {
+        let d = TempDir::new("plainpresent");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\n  \
+             insecure_plaintext_secret_path: /etc/maknaed/secret-id\n\
+             core:\n  deployment_id: dev-01\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(
+            c.insecure_plaintext_secret_path,
+            Some(PathBuf::from("/etc/maknaed/secret-id"))
+        );
+    }
+
+    #[test]
+    fn insecure_plaintext_secret_path_wrong_type_is_none() {
+        // get_str only matches Value::Str — a non-string value (e.g. a nested map)
+        // is treated as absent rather than a parse error (mirrors get_str's other
+        // callers: an int mount-path value falls back to the default, not an Err).
+        let d = TempDir::new("plainwrongtype");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\n  \
+             insecure_plaintext_secret_path:\n    nested: true\n\
+             core:\n  deployment_id: dev-01\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.insecure_plaintext_secret_path, None);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! all logic lives in `cli::run_cli` (T3 — arg parse + orchestration, no
 //! decision logic of its own).
 mod cli;
+mod enroll;
 
 use std::process::ExitCode;
 

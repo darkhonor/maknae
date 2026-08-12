@@ -7,6 +7,7 @@ members = [
   "crates/maknae-kernel",
   "crates/maknae-llm",
   "crates/maknae-mcp",
+  "crates/maknae-msgs",
   "crates/maknae-proto",
   "crates/maknae-security",
   "crates/maknae-spif",

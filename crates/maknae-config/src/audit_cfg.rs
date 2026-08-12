@@ -55,15 +55,25 @@ fn to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-/// Read the `audit` section (ADR-0019, spec/task-brief §Interfaces). `None`
-/// (section absent) → `jsonl_path = runtime_dir/audit.jsonl`, `siem = None`,
-/// `au3_1 = {}`. A present-but-non-map section (e.g. `audit: disabled`) is
-/// rejected (`ConfigError::InvalidAudit`) rather than silently falling
-/// through to all defaults (codex round-6 P2 — mirrors `transport`'s guard).
-/// Within a present MAP section, a per-field wrong shape is still treated as
-/// absent (lenient — `audit` carries no numeric ranges to fail closed on, and
-/// the only other fail-closed surface, `au3_1`'s JSON shape, always succeeds
-/// because every `Value` variant has a `serde_json::Value` equivalent).
+/// Read the `audit` section (ADR-0019, spec/task-brief §Interfaces, spec §11).
+/// `None` (section ABSENT) → `Err(ConfigError::MissingSection)`: absence fails
+/// closed rather than landing the sink's default path inside `/etc/maknae`
+/// (unwritable by `_maknae` per §4.6 — first boot would otherwise fail closed
+/// anyway, just later and less legibly, at `AuditSink::open`). A daemon config
+/// MUST carry an explicit `audit:` section; `maknae enroll` (forthcoming, PR-J1
+/// Task 8) and the PR-J2 packaging default will write it so operators don't
+/// hand-author it — **until those land, a host needs a hand-authored `audit:`
+/// block**, or the daemon refuses to start (this is current-state, not yet the
+/// steady-state operator experience). A present-but-non-map section (e.g.
+/// `audit: disabled`) is rejected (`ConfigError::InvalidAudit`) rather than
+/// silently falling through to all defaults (codex round-6 P2 — mirrors
+/// `transport`'s guard). Within a present MAP section, a per-field wrong shape
+/// (e.g. a non-string `jsonl_path`) still defaults that ONE field rather than
+/// refusing the whole section — this is deliberate, not an asymmetry to fix: a
+/// present-but-mistyped field still resolves to `runtime_dir/audit.jsonl`, and
+/// THAT path is then independently fail-closed-checked later at sink-open (the
+/// §4.6 mode/owner/MAC-append-not-create checks) — only an ABSENT section is
+/// caught here, at parse.
 pub fn audit_from_section(
     v: Option<&Value>,
     runtime_dir: &Path,
@@ -71,10 +81,8 @@ pub fn audit_from_section(
     let default_jsonl_path = runtime_dir.join("audit.jsonl");
     let section = match v {
         None => {
-            return Ok(AuditConfig {
-                jsonl_path: default_jsonl_path,
-                siem: None,
-                au3_1: serde_json::Value::Object(serde_json::Map::new()),
+            return Err(ConfigError::MissingSection {
+                section: AUDIT_SECTION.to_string(),
             })
         }
         Some(section) => section,
@@ -110,11 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn defaults_when_absent() {
-        let c = audit_from_section(None, &rt()).unwrap();
-        assert_eq!(c.jsonl_path, PathBuf::from("/var/lib/maknae/audit.jsonl"));
-        assert_eq!(c.siem, None);
-        assert_eq!(c.au3_1, serde_json::json!({}));
+    fn absent_audit_section_fails_closed() {
+        // spec §11 / round-1 C12: an ABSENT `audit` section must refuse to load
+        // rather than silently default into the (possibly-unwritable) config dir.
+        match audit_from_section(None, &rt()) {
+            Err(ConfigError::MissingSection { section }) => {
+                assert_eq!(section, AUDIT_SECTION);
+            }
+            other => panic!("expected Err(MissingSection), got {other:?}"),
+        }
     }
 
     #[test]

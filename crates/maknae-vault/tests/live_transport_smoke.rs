@@ -1,21 +1,27 @@
 //! Gated live loopback — runbook ch.2. Stands up BOTH planes in one process against the
-//! operator's real Vault (two config dirs, each with its own minted leaf), does a real
-//! mTLS + peer-cred round-trip over a real UDS. #[ignore]; operator-present only.
+//! operator's real Vault (two config dirs, each with its own seeded standing raw
+//! SecretID and its own minted leaf), does a real mTLS + peer-cred round-trip over a
+//! real UDS. #[ignore]; operator-present only.
 //!
-//!   MAKNAE_KERNEL_DIR=~/.maknae MAKNAE_CLI_DIR=~/.maknae-cli \
+//! Each config dir follows the same layout as `live_smoke.rs` (see docs/runbook.md),
+//! including a `<prefix>-secret-id` file holding a standing raw SecretID (no wrapping;
+//! ADR-0018) — the env vars below are named after the same `MAKNAE_CONFIG_DIR`
+//! convention the CLI/kernel use, one per plane since this test needs two dirs at once:
+//!
+//!   MAKNAE_KERNEL_CONFIG_DIR=~/.maknae MAKNAE_CLI_CONFIG_DIR=~/.maknae-cli \
 //!     cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
 #![cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
-#[ignore = "needs live Vault + two minted plane identities + a real UDS (operator-gated)"]
+#[ignore = "needs live Vault + two seeded standing raw SecretIDs + a real UDS (operator-gated)"]
 async fn plane_to_plane_roundtrip() {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
-    let kdir = std::env::var("MAKNAE_KERNEL_DIR").expect("set MAKNAE_KERNEL_DIR");
-    let cdir = std::env::var("MAKNAE_CLI_DIR").expect("set MAKNAE_CLI_DIR");
+    let kdir = std::env::var("MAKNAE_KERNEL_CONFIG_DIR").expect("set MAKNAE_KERNEL_CONFIG_DIR");
+    let cdir = std::env::var("MAKNAE_CLI_CONFIG_DIR").expect("set MAKNAE_CLI_CONFIG_DIR");
     // The socket's parent dir must be owner-only (PlaneListener::bind refuses a
     // group/other-writable dir like /tmp, mode 1777) — create a private 0700 subdir.
     let sockdir = std::env::temp_dir().join(format!("maknae-live-{}", std::process::id()));

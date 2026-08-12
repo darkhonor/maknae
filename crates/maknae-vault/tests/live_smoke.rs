@@ -1,6 +1,6 @@
-//! Gated live-smoke — runbook ch.1. Needs a REAL Vault + a just-seeded response-
-//! wrapped SecretID, so it is `#[ignore]` and NEVER runs in CI. Run it manually WITH
-//! the operator present (they seed the wrapped SecretID with their root cred):
+//! Gated live-smoke — runbook ch.1. Needs a REAL Vault + a seeded standing raw
+//! SecretID, so it is `#[ignore]` and NEVER runs in CI. Run it manually WITH
+//! the operator present (they seed the raw SecretID with their root cred):
 //!
 //!   MAKNAE_CONFIG_DIR=~/.maknae \
 //!     cargo test -p maknae-vault --test live_smoke -- --ignored --nocapture
@@ -11,11 +11,11 @@
 //!   <dir>/tls/maknae-root-ca.crt          -> Maknae plane root (pinned)
 //!   <dir>/tls/maknae-int-ca.crt           -> Maknae plane intermediate
 //!   <dir>/maknaed-approle-id              -> the trust-plane RoleID
-//!   <dir>/maknaed-secret-id      (0o400)  -> the response-wrapped SecretID (wrapping token)
+//!   <dir>/maknaed-secret-id      (0o400)  -> the standing raw SecretID (no wrapping; ADR-0018)
 #![cfg(unix)]
 
 #[tokio::test]
-#[ignore = "needs live Vault + a just-seeded response-wrapped SecretID (operator-gated)"]
+#[ignore = "needs live Vault + a seeded standing raw SecretID (operator-gated)"]
 async fn mint_kernel_leaf_against_live_vault() {
     let dir = std::env::var("MAKNAE_CONFIG_DIR")
         .expect("set MAKNAE_CONFIG_DIR to the config dir (e.g. ~/.maknae)");
@@ -63,7 +63,7 @@ async fn mint_kernel_leaf_against_live_vault() {
 /// does not depend on the TTL value; a 72h-TTL config dir also exercises the call path,
 /// it just won't demonstrate near-term re-rotation.
 #[tokio::test]
-#[ignore = "needs live Vault + a just-seeded response-wrapped SecretID (operator-gated); \
+#[ignore = "needs live Vault + a seeded standing raw SecretID (operator-gated); \
             use a short leaf_ttl_seconds PKI role to observe near-term rotation"]
 async fn rotate_leaf_against_live_vault() {
     let dir = std::env::var("MAKNAE_CONFIG_DIR")

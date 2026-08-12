@@ -31,8 +31,6 @@ pub enum VaultError {
     PermissionsUnsupported,
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
-    /// A response-wrapped SecretID could not be unwrapped (already used / expired).
-    WrapUnwrap(String),
     /// AppRole login failed.
     Auth(String),
     /// Local keypair / CSR generation failed.
@@ -61,6 +59,14 @@ pub enum VaultError {
     Handshake(String),
     /// The peer leaf's plane URI-SAN was wrong/absent/extra (wraps the T1 verifier error).
     PeerIdentity(crate::VerifyError),
+    /// An `OperatorClient` operation (client build, RoleID read, SecretID
+    /// mint/destroy, CA-chain fetch) failed against Vault.
+    Operator(String),
+    /// A per-plane SecretID credential SOURCE (spec §5.1) could not be resolved (no
+    /// source configured — fail-closed default) or a resolved source could not be
+    /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
+    /// or is not yet implemented on this platform/build).
+    CredentialSource(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -87,10 +93,6 @@ impl std::fmt::Display for VaultError {
                 "cannot verify credential-file permissions on this (non-Unix) target — refusing to read (fail closed)"
             ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
-            VaultError::WrapUnwrap(msg) => write!(
-                f,
-                "response-wrapped SecretID unwrap failed (already used / expired?): {msg}"
-            ),
             VaultError::Auth(msg) => write!(f, "AppRole login failed: {msg}"),
             VaultError::CsrGen(msg) => write!(f, "keypair/CSR generation failed: {msg}"),
             VaultError::Sign(msg) => write!(f, "pki/sign rejected: {msg}"),
@@ -107,6 +109,8 @@ impl std::fmt::Display for VaultError {
             VaultError::PeerCred(msg) => write!(f, "peer-credential capture failed: {msg}"),
             VaultError::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
+            VaultError::Operator(msg) => write!(f, "operator Vault operation failed: {msg}"),
+            VaultError::CredentialSource(msg) => write!(f, "credential source failed: {msg}"),
         }
     }
 }
@@ -134,6 +138,8 @@ mod tests {
             VaultError::PeerCred("getsockopt failed".into()),
             VaultError::Handshake("bad cert".into()),
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
+            VaultError::Operator("issuer/default/json: connection refused".into()),
+            VaultError::CredentialSource("no daemon SecretID source configured".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
