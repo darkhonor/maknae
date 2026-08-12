@@ -152,6 +152,30 @@ resource "vault_policy" "maknae_cli" {
   EOT
 }
 
+# ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
+# `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
+# AppRole token, so it needs its own least-privilege policy: read both RoleIDs,
+# mint/destroy both SecretIDs, and read the intermediate issuer bundle it hands to
+# the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
+# prefix (vault_auth_backend.approle.path is the BARE mount name; vaultrs/Vault
+# addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
+# enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),
+# mirroring how maknae_kernel/maknae_cli interpolate the int-mount path above.
+# No `list` anywhere (§4.5): enroll destroys SecretID accessors by the id it
+# recorded at creation time, never by listing the mount's accessors.
+resource "vault_policy" "maknae_enroll" {
+  name   = "maknae-enroll"
+  policy = <<-EOT
+    path "auth/${vault_auth_backend.approle.path}/role/maknaed/role-id"                    { capabilities = ["read"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae/role-id"                      { capabilities = ["read"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id"                   { capabilities = ["create","update"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id"                    { capabilities = ["create","update"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id-accessor/destroy" { capabilities = ["update"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id-accessor/destroy"  { capabilities = ["update"] }
+    path "${vault_mount.maknae_int.path}/issuer/default/json"                               { capabilities = ["read"] }
+  EOT
+}
+
 # ---- AppRole auth (dedicated mount; NOT the shared default 'approle') -----------
 resource "vault_auth_backend" "approle" {
   type = "approle"
