@@ -110,6 +110,15 @@ files = [
   # cohort, ADR-0016 §4). The two catalog files are pure declaration-only
   # string tables (no decision logic) -> T3 below.
   "crates/maknae-msgs/src/lib.rs",
+  # PR-J1 Task 7: boot credential-posture determination (spec §5.2) — the pure
+  # (CredentialSource, marker) -> Posture closed map `maknaed` states in its
+  # per-boot AU-3 record. A wrong cell would silently claim a STRONGER posture
+  # than what actually protected the SecretID (e.g. reporting a plaintext
+  # secret as `hrot_sealed`) — exactly the "emit false assurance" T1
+  # line-drawing rule. In [t1].files ONLY (own 95% floor; NOT ratchet_cohort).
+  # The marker-file read + record construction/emission (I/O) stay in run.rs
+  # (already T3, mutation-excluded via .cargo/mutants.toml).
+  "crates/maknae-kernel/src/posture.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -311,7 +320,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs (T1). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/posture.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"

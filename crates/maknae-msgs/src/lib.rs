@@ -26,6 +26,13 @@ pub enum MsgId {
     AuthzUnknownSubject,
     DaemonNotRunning,
     DaemonStartFailed,
+    /// PR-J1 Task 7 (spec §5.4): the boot-time DAC authz-config gate
+    /// (`authz.yaml` + the enrolled `principal`) could not be resolved — the
+    /// daemon refuses to start.
+    AuthzConfigRefused,
+    /// PR-J1 Task 7 (spec §5.2): a non-fatal boot warning — this boot's
+    /// credential posture is not hardware/OS-root-of-trust sealed.
+    PostureDegraded,
 }
 
 /// Every `MsgId` variant, in declaration order. `all_slice_is_exhaustive`
@@ -40,6 +47,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::AuthzUnknownSubject,
     MsgId::DaemonNotRunning,
     MsgId::DaemonStartFailed,
+    MsgId::AuthzConfigRefused,
+    MsgId::PostureDegraded,
 ];
 
 /// Supported locales. Unknown/unset environment locale falls back to `EnUs`.
@@ -186,10 +195,12 @@ mod tests {
                 | MsgId::AuthzPostureRefused
                 | MsgId::AuthzUnknownSubject
                 | MsgId::DaemonNotRunning
-                | MsgId::DaemonStartFailed => {}
+                | MsgId::DaemonStartFailed
+                | MsgId::AuthzConfigRefused
+                | MsgId::PostureDegraded => {}
             }
         }
-        const VARIANT_COUNT: usize = 9;
+        const VARIANT_COUNT: usize = 11;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);
