@@ -5,7 +5,7 @@
 
 use maknae_config::{
     ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec,
-    Value, AUDIT_SECTION, TRANSPORT_SECTION,
+    Value, AUDIT_SECTION, PRINCIPAL_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -49,16 +49,19 @@ impl BootConfig {
 
 /// Boot the kernel over Maknae's config directory: load the config ONCE with every
 /// section the daemon uses registered (`core` is auto-registered; `lake`+`vault`+
-/// `transport`+`audit` as optional extensions), read the `core` ceiling, and return the
-/// assembled `BootConfig`. The `vault` block is registered here — rather than re-loaded
-/// later under a `vault`-only registry — so the SAME document boots the kernel AND backs
-/// `PlaneClient::from_document`; a realistic combined config loads coherently while a
-/// genuinely-unknown section still fails closed with `UnknownSection` (P1-A).
-/// Fail-closed: any `ConfigError` short-circuits.
+/// `transport`+`audit`+`principal` as optional extensions), read the `core` ceiling,
+/// and return the assembled `BootConfig`. The `vault` block is registered here —
+/// rather than re-loaded later under a `vault`-only registry — so the SAME document
+/// boots the kernel AND backs `PlaneClient::from_document`; a realistic combined
+/// config loads coherently while a genuinely-unknown section still fails closed
+/// with `UnknownSection` (P1-A). Fail-closed: any `ConfigError` short-circuits.
 pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
-    // `vault` is registered optional (not required) so the existing minimal-config boot
-    // tests — and any core-only deployment — still load; the daemon's actual dependence
-    // on a vault block fails closed later at `from_document`/`mint` (MissingKey).
+    // `vault` and `principal` are registered optional (not required) so the existing
+    // minimal-config boot tests — and any pre-Jackrabbit deployment written before
+    // `maknae enroll` started emitting a `principal` block — still load. The daemon's
+    // actual dependence on a vault block fails closed later at `from_document`/`mint`
+    // (MissingKey); the DAC authz layer's dependence on a principal (`~` resolution,
+    // Task 6) fails closed there, not here.
     let specs = [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
@@ -74,6 +77,10 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
         },
         SectionSpec {
             name: AUDIT_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: PRINCIPAL_SECTION.to_string(),
             required: false,
         },
     ];
@@ -175,6 +182,51 @@ mod tests {
         );
         let cfg = boot(&d.0).expect("boots");
         assert!(cfg.section("lake").is_some());
+    }
+
+    // A config WITH a `principal` block loads under the boot registry (not rejected
+    // as UnknownSection) — PR-J1 Task 5.
+    #[cfg(unix)]
+    #[test]
+    fn principal_section_is_carried() {
+        let d = new_dir("principal");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  identity:\n    name: t\n\
+             principal:\n  name: aackerman\n  uid: 1000\n  home: /Users/aackerman\n",
+            0o640,
+        );
+        let cfg = boot(&d.0).expect("boots with a principal block");
+        assert!(cfg.section("principal").is_some());
+        let p = maknae_config::principal_from_section(cfg.section("principal"))
+            .expect("principal parses from the booted document")
+            .expect("principal section present");
+        assert_eq!(p.name, "aackerman");
+        assert_eq!(p.uid, 1000);
+        assert_eq!(p.home, std::path::PathBuf::from("/Users/aackerman"));
+    }
+
+    // A pre-Jackrabbit config WITHOUT a `principal` block still LOADS — the
+    // optional-registration / upgrade property (spec §5.5), scoped to the loader.
+    // (The daemon still won't *start* without a principal once DAC authz uses `~`
+    // — Task 6 covers that; this only pins that the loader doesn't reject it.)
+    #[cfg(unix)]
+    #[test]
+    fn config_without_principal_section_still_boots() {
+        let d = new_dir("no_principal");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  identity:\n    name: t\n",
+            0o640,
+        );
+        let cfg = boot(&d.0).expect("pre-Jackrabbit config without principal still boots");
+        assert!(cfg.section("principal").is_none());
+        assert_eq!(
+            maknae_config::principal_from_section(cfg.section("principal")),
+            Ok(None)
+        );
     }
 
     #[cfg(unix)]

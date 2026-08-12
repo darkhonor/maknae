@@ -32,6 +32,7 @@ mod ceiling;
 mod document;
 mod error;
 mod loader;
+mod principal;
 mod scalar;
 mod transport;
 mod value;
@@ -42,6 +43,7 @@ pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
 pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;
+pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
 pub use value::Value;
 
