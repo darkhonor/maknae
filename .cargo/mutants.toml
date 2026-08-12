@@ -8,6 +8,7 @@
 exclude_globs = [
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
+  "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
   "crates/maknae-vault/src/csr_gen.rs",    # rcgen keygen I/O (non-deterministic); pure shape checks are csr.rs (T1)

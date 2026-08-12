@@ -15,6 +15,7 @@ mod csr_gen;
 mod error;
 mod fips;
 mod fips_glue;
+mod operator;
 mod plane;
 mod plane_verify;
 mod resolver;
@@ -43,6 +44,7 @@ pub use config::{
 pub use csr_gen::generate_plane_csr;
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+pub use operator::OperatorClient;
 #[cfg(unix)]
 pub use peercred::PeerCreds;
 pub use plane::Plane;

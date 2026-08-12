@@ -231,6 +231,10 @@ why = "AppRole login (standing SecretID) — live-Vault I/O; exercised by the ga
 path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
 
+[[t3]]
+path = "crates/maknae-vault/src/operator.rs"
+why = "OperatorClient — token-authed role-id/secret-id/accessor/CA-chain I/O adapter for enroll (Task 3); thin pass-throughs to verified vaultrs calls + one hand-rolled rustify Endpoint, exercised by a gated live test. The one pure helper (join_ca_chain) has real unit tests."
+
 # maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
 [[t3]]
 path = "crates/maknae-vault/src/tls.rs"
