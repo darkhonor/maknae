@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 mod audit_cfg;
+mod authz;
 mod builder;
 mod ceiling;
 mod document;
@@ -40,6 +41,7 @@ mod value;
 pub use loader::load_config;
 
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
+pub use authz::{load_authz, AuthzError, AuthzPolicy, Decision, PathGlob, Pattern, Request};
 pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;

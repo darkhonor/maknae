@@ -87,6 +87,15 @@ files = [
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
+  # PR-J1 Task 6: the DAC authz policy schema v1 (spec §7) — the
+  # Claude-Code/Codex-style permission grammar (Read/Bash patterns) a future
+  # per-request PDP evaluates, plus the secure fail-closed load (symlink
+  # refusal + mode gate + root-ownership assertion, spec §4.6). A durable
+  # contract: a mis-parsed glob/argv rule, a swapped deny/allow precedence, or
+  # a dropped owner check would silently widen what a compromised `_maknae`
+  # can read/exec — exactly the T1 line-drawing rule. In [t1].files ONLY (own
+  # 95% floor; NOT ratchet_cohort).
+  "crates/maknae-config/src/authz.rs",
   "crates/maknae-audit-append/src/record.rs",
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
