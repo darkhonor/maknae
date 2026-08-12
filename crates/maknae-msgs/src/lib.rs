@@ -33,6 +33,43 @@ pub enum MsgId {
     /// PR-J1 Task 7 (spec §5.2): a non-fatal boot warning — this boot's
     /// credential posture is not hardware/OS-root-of-trust sealed.
     PostureDegraded,
+
+    // ---- PR-J1 Task 8 (`maknae enroll`, spec §4.1) --------------------
+    /// Preflight (euid/`$SUDO_UID`/`$SUDO_USER`) rejected the invocation.
+    EnrollPreflightFailed,
+    /// The post-drop operator-context capability probe (spec §4.1 step 1)
+    /// started, before any Vault mutation.
+    EnrollProbeStarted,
+    /// The capability probe failed — enroll aborts before minting anything.
+    EnrollProbeFailed,
+    /// The capability probe succeeded.
+    EnrollProbeOk,
+    /// The interactive no-echo Vault token prompt.
+    EnrollTokenPrompt,
+    /// Vault RoleID/SecretID/CA-chain operations (spec §4.1 step 3) started.
+    EnrollVaultOpsStarted,
+    /// Writing the daemon's `/etc/maknae` artifact set (spec §4.1 step 4).
+    EnrollWritingDaemonConfig,
+    /// Sealing the daemon's SecretID (spec §4.1 step 5).
+    EnrollSealingDaemonCredential,
+    /// Re-exec'd operator-context CLI provisioning (spec §4.1 step 7).
+    EnrollProvisioningCli,
+    /// The final posture summary. Carries a `{cli_dir}` placeholder.
+    EnrollPostureSummary,
+    /// Reminder that group membership is not live in pre-existing sessions.
+    EnrollReloginNote,
+    /// Pointer to the operator's own `systemctl enable --now maknaed` act.
+    EnrollEnableDaemonHint,
+    /// A pre-existing `enroll-state.yaml` was found — rotating (spec §4.1,
+    /// unconditional-rotate semantics on re-enroll).
+    EnrollRotating,
+    /// A failure after minting destroyed the just-minted accessors (rollback).
+    EnrollRollbackDestroyed,
+    /// The operator-context helper's self-verification (euid/egid) failed.
+    HelperContextMismatch,
+    /// The operator-context helper still carries root's supplementary groups —
+    /// the exact "helper still holding root's groups" failure spec §4.1 names.
+    HelperStillPrivileged,
 }
 
 /// Every `MsgId` variant, in declaration order. `all_slice_is_exhaustive`
@@ -49,6 +86,22 @@ pub const ALL: &[MsgId] = &[
     MsgId::DaemonStartFailed,
     MsgId::AuthzConfigRefused,
     MsgId::PostureDegraded,
+    MsgId::EnrollPreflightFailed,
+    MsgId::EnrollProbeStarted,
+    MsgId::EnrollProbeFailed,
+    MsgId::EnrollProbeOk,
+    MsgId::EnrollTokenPrompt,
+    MsgId::EnrollVaultOpsStarted,
+    MsgId::EnrollWritingDaemonConfig,
+    MsgId::EnrollSealingDaemonCredential,
+    MsgId::EnrollProvisioningCli,
+    MsgId::EnrollPostureSummary,
+    MsgId::EnrollReloginNote,
+    MsgId::EnrollEnableDaemonHint,
+    MsgId::EnrollRotating,
+    MsgId::EnrollRollbackDestroyed,
+    MsgId::HelperContextMismatch,
+    MsgId::HelperStillPrivileged,
 ];
 
 /// Supported locales. Unknown/unset environment locale falls back to `EnUs`.
@@ -197,10 +250,26 @@ mod tests {
                 | MsgId::DaemonNotRunning
                 | MsgId::DaemonStartFailed
                 | MsgId::AuthzConfigRefused
-                | MsgId::PostureDegraded => {}
+                | MsgId::PostureDegraded
+                | MsgId::EnrollPreflightFailed
+                | MsgId::EnrollProbeStarted
+                | MsgId::EnrollProbeFailed
+                | MsgId::EnrollProbeOk
+                | MsgId::EnrollTokenPrompt
+                | MsgId::EnrollVaultOpsStarted
+                | MsgId::EnrollWritingDaemonConfig
+                | MsgId::EnrollSealingDaemonCredential
+                | MsgId::EnrollProvisioningCli
+                | MsgId::EnrollPostureSummary
+                | MsgId::EnrollReloginNote
+                | MsgId::EnrollEnableDaemonHint
+                | MsgId::EnrollRotating
+                | MsgId::EnrollRollbackDestroyed
+                | MsgId::HelperContextMismatch
+                | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 11;
+        const VARIANT_COUNT: usize = 27;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

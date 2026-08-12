@@ -23,5 +23,31 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::PostureDegraded => {
             "경고: 이번 부팅의 자격 증명 상태가 하드웨어 신뢰 루트로 봉인되지 않았어요"
         }
+        MsgId::EnrollPreflightFailed => "등록 사전 점검에 실패했어요",
+        MsgId::EnrollProbeStarted => {
+            "이 호스트가 사용자 컨텍스트에서 자격 증명을 봉인할 수 있는지 확인하고 있어요"
+        }
+        MsgId::EnrollProbeFailed => {
+            "자격 증명 봉인 기능 확인에 실패했어요 — Vault에는 아무 변경도 없었어요"
+        }
+        MsgId::EnrollProbeOk => "자격 증명 봉인 기능을 확인했어요",
+        MsgId::EnrollTokenPrompt => "Vault 토큰: ",
+        MsgId::EnrollVaultOpsStarted => "Vault에서 자격 증명을 요청하고 있어요",
+        MsgId::EnrollWritingDaemonConfig => "데몬 설정을 기록하고 있어요",
+        MsgId::EnrollSealingDaemonCredential => "데몬 자격 증명을 봉인하고 있어요",
+        MsgId::EnrollProvisioningCli => "CLI 자격 증명을 준비하고 있어요",
+        MsgId::EnrollPostureSummary => "등록이 완료됐어요. CLI 설정: {cli_dir}",
+        MsgId::EnrollReloginNote => {
+            "CLI를 사용하기 전에 로그아웃 후 다시 로그인하거나 `newgrp maknae`를 실행하세요"
+        }
+        MsgId::EnrollEnableDaemonHint => {
+            "다음 명령으로 데몬을 시작하세요: systemctl enable --now maknaed"
+        }
+        MsgId::EnrollRotating => "기존 등록을 발견했어요 — 자격 증명을 교체하고 있어요",
+        MsgId::EnrollRollbackDestroyed => "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기했어요",
+        MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
+        MsgId::HelperStillPrivileged => {
+            "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"
+        }
     }
 }
