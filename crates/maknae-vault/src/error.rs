@@ -62,6 +62,11 @@ pub enum VaultError {
     /// An `OperatorClient` operation (client build, RoleID read, SecretID
     /// mint/destroy, CA-chain fetch) failed against Vault.
     Operator(String),
+    /// A per-plane SecretID credential SOURCE (spec §5.1) could not be resolved (no
+    /// source configured — fail-closed default) or a resolved source could not be
+    /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
+    /// or is not yet implemented on this platform/build).
+    CredentialSource(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -105,6 +110,7 @@ impl std::fmt::Display for VaultError {
             VaultError::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
             VaultError::Operator(msg) => write!(f, "operator Vault operation failed: {msg}"),
+            VaultError::CredentialSource(msg) => write!(f, "credential source failed: {msg}"),
         }
     }
 }
@@ -133,6 +139,7 @@ mod tests {
             VaultError::Handshake("bad cert".into()),
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
             VaultError::Operator("issuer/default/json: connection refused".into()),
+            VaultError::CredentialSource("no daemon SecretID source configured".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

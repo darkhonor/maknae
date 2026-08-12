@@ -34,9 +34,10 @@ pub struct OperatorClient {
 
 impl OperatorClient {
     /// Build a token-authed client against `addr`, trusting `ca_path` as the Vault
-    /// server's TLS CA. Mirrors `PlaneClient::from_document`'s builder use
-    /// (`client.rs:258-267`) minus the AppRole login step — the caller already holds
-    /// a valid token (e.g. from their own `vault login`) and hands it straight in.
+    /// server's TLS CA. Mirrors `PlaneClient::from_document_with_secret`'s builder
+    /// use (`client.rs`'s `VaultClientSettingsBuilder` block) minus the AppRole
+    /// login step — the caller already holds a valid token (e.g. from their own
+    /// `vault login`) and hands it straight in.
     pub fn new(
         addr: &str,
         ca_path: &std::path::Path,

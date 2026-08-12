@@ -4,6 +4,10 @@
 //! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::auth::AppRoleAuth;
+use crate::secret_io::{read_cli_secret, read_daemon_secret};
+use crate::secret_source::{
+    resolve_cli_secret_source, resolve_daemon_secret_source, CredentialSourceKind,
+};
 use crate::{
     assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
     verify::verify_plane_uri_san, Plane, VaultError, VAULT_SECTION,
@@ -11,7 +15,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use rustls::sign::CertifiedKey;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -93,6 +97,14 @@ pub struct PlaneClient {
     leaf_issued_at: Arc<AtomicU64>,
     /// The current leaf's TTL in seconds (`NotAfter - NotBefore`), 0 until first mint.
     leaf_ttl_secs: Arc<AtomicU64>,
+    /// The posture record for THIS client's SecretID credential source (Task 7's
+    /// audit reads this via `secret_source()`). Set by `from_document`'s dispatch;
+    /// `from_document_with_secret` alone (no resolution info available) defaults it
+    /// to `PlaintextPath` — the most conservative/weakest posture — as a safe
+    /// placeholder that `from_document` always overwrites with the real resolved
+    /// kind right after construction (same module — private-field access is
+    /// module-scoped, not impl-scoped, in Rust).
+    secret_source_kind: CredentialSourceKind,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
@@ -107,7 +119,10 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// Read a SENSITIVE credential file (the standing raw SecretID). Refuse a symlink or any
 /// group/other access BEFORE reading — the SecretID must never be world-readable
 /// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
-fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
+/// `pub(crate)`: `secret_io.rs`'s PLAINTEXT read branches route through this SAME
+/// gate (the sealed branches — `$CREDENTIALS_DIRECTORY`, SEP — do not, since
+/// systemd/SEP produce their own `0400` artifacts).
+pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
     let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
         path: path.to_path_buf(),
         source,
@@ -145,6 +160,28 @@ fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
                 source,
             })
     }
+}
+
+/// The daemon's SEP-sealed blob path, IF one is present — macOS only (there is no
+/// systemd on darwin, so `$CREDENTIALS_DIRECTORY` never applies there; a SEP blob is
+/// the darwin equivalent). Observing "is it present" here (rather than inside the
+/// PURE `resolve_daemon_secret_source`) is what keeps that resolver pure/testable —
+/// this is the one spot that touches the filesystem to decide what to hand it.
+#[cfg(target_os = "macos")]
+fn daemon_sep_blob_path(dir: &Path) -> Option<PathBuf> {
+    let p = dir.join("maknaed-secret-id.sep");
+    p.is_file().then_some(p)
+}
+#[cfg(not(target_os = "macos"))]
+fn daemon_sep_blob_path(_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Whether this target has a user-scoped `systemd-creds` credential file for the
+/// CLI — observed here (filesystem), handed to the PURE `resolve_cli_secret_source`
+/// as a plain `bool`.
+fn cli_dir_has_user_creds(cli_dir: &Path) -> bool {
+    cli_dir.join("maknae-secret-id.cred").is_file()
 }
 
 /// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
@@ -222,29 +259,87 @@ impl PlaneClient {
         Self::from_document(&doc, dir, plane)
     }
 
-    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir. The
-    /// coherent-config entrypoint (P1-A/P1-B): the daemon/CLI load their config once
-    /// with the full set of sections each uses and pass the parsed document here, so a
-    /// realistic combined config is accepted while a genuinely-unknown section is still
-    /// rejected at the single load (fail-closed on unknown preserved). `dir` still
-    /// supplies the non-section credential files (AppRole id / standing SecretID / CA
-    /// pins / Vault CA), which are read from disk, not the document.
+    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir,
+    /// resolving THIS PLANE's SecretID credential SOURCE (spec §5.1) and reading it,
+    /// then delegating to [`Self::from_document_with_secret`]. **Keeps its exact
+    /// pre-Task-4 signature** — every existing caller (the daemon's `run.rs`, the
+    /// CLI's `cli.rs`) is unaffected.
+    ///
+    /// **Dispatches on `plane` — the two planes do NOT share a resolver (round-1
+    /// C1 regression guard):**
+    /// - `Plane::Kernel` → [`resolve_daemon_secret_source`]: `$CREDENTIALS_DIRECTORY`
+    ///   (if set) → a SEP-sealed blob (macOS only) → `vault.insecure_plaintext_secret_path`
+    ///   (from config) → fail closed. This is EXACTLY the daemon's pre-existing boot
+    ///   path when `$CREDENTIALS_DIRECTORY` is set — that env var, when present,
+    ///   ALWAYS wins here, never falling through to a CLI-shaped order.
+    /// - `Plane::Cli` → [`resolve_cli_secret_source`]: a user-scoped `systemd-creds`
+    ///   file (if present in `dir`) → the macOS Keychain → the residual plaintext
+    ///   file in `dir`.
+    ///
+    /// `dir` still supplies the non-section credential files (AppRole id / the
+    /// resolved SecretID source / CA pins / Vault CA), read from disk, not the
+    /// document.
+    pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+        // Parsed here (in addition to inside from_document_with_secret) ONLY to
+        // reach `insecure_plaintext_secret_path` before the secret_id is resolved —
+        // vault_config_from_document is a pure in-memory parse of the
+        // already-loaded `doc` (no I/O), so parsing it twice is cheap and safe, not
+        // a double-read of anything sensitive.
+        let cfg = vault_config_from_document(doc)?;
+        let (secret_id, kind) = match plane {
+            Plane::Kernel => {
+                let src = resolve_daemon_secret_source(
+                    std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+                    daemon_sep_blob_path(dir).as_deref(),
+                    cfg.insecure_plaintext_secret_path.as_deref(),
+                )?;
+                let secret = read_daemon_secret(&src)?;
+                (secret, CredentialSourceKind::from(&src))
+            }
+            Plane::Cli => {
+                let src = resolve_cli_secret_source(
+                    dir,
+                    cli_dir_has_user_creds(dir),
+                    cfg!(target_os = "macos"),
+                )?;
+                let secret = read_cli_secret(&src)?;
+                (secret, CredentialSourceKind::from(&src))
+            }
+        };
+        let mut client = Self::from_document_with_secret(doc, dir, plane, secret_id)?;
+        client.secret_source_kind = kind;
+        Ok(client)
+    }
+
+    /// Build from an ALREADY-LOADED config [`Document`], the credential dir, AND an
+    /// already-read SecretID — the coherent-config entrypoint (P1-A/P1-B) plus the
+    /// Task-4 credential-source seam: [`Self::from_document`] resolves + reads the
+    /// SecretID per-plane (spec §5.1) and hands it here; this constructor no longer
+    /// decides WHERE the SecretID comes from, only how to build the client once it
+    /// has one. `dir` still supplies the non-secret credential files (AppRole id /
+    /// CA pins / Vault CA), read from disk, not the document.
     ///
     /// **LOAD-BEARING ordering:** `assert_fips_provider()` runs first — before the Vault
     /// client is built — so reqwest reads the FIPS default (§6.1), never falling back to
     /// ring. Fail-closed throughout.
-    pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+    ///
+    /// The returned client's `secret_source()` defaults to `PlaintextPath` (the most
+    /// conservative placeholder) since this constructor has no resolution info of its
+    /// own; `from_document` — its sole production caller — overwrites it with the
+    /// real resolved kind immediately after construction.
+    pub fn from_document_with_secret(
+        doc: &Document,
+        dir: &Path,
+        plane: Plane,
+        secret_id: Zeroizing<String>,
+    ) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         let cfg = vault_config_from_document(doc)?;
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
         let prefix = plane.config_prefix();
-        // RoleID is non-secret (an identifier); the standing SecretID is sensitive and
-        // must be owner-only (perm-checked, no symlink).
+        // RoleID is non-secret (an identifier), still read from disk here.
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
-        let secret_id = Zeroizing::new(read_secret_credential(
-            &dir.join(format!("{prefix}-secret-id")),
-        )?);
         let vault_ca = dir.join("tls").join("vault-ca.crt");
         // A HARD per-request HTTP timeout on every Vault operation this client ever
         // makes (login/mint/sign, renew_self, revoke_self). vaultrs defaults
@@ -280,7 +375,17 @@ impl PlaneClient {
             cert_sink: Arc::new(RwLock::new(None)),
             leaf_issued_at: Arc::new(AtomicU64::new(0)),
             leaf_ttl_secs: Arc::new(AtomicU64::new(0)),
+            secret_source_kind: CredentialSourceKind::PlaintextPath,
         })
+    }
+
+    /// This client's resolved SecretID credential-source posture (Task 7's audit
+    /// seam, round-1 C2). Reflects whichever source [`Self::from_document`] actually
+    /// used — `CredentialsDirectory`/`SepSealed` are the sealed postures,
+    /// `PlaintextPath` the weakest (also the default for a client built directly via
+    /// [`Self::from_document_with_secret`], which has no resolution info to report).
+    pub fn secret_source(&self) -> CredentialSourceKind {
+        self.secret_source_kind
     }
 
     /// Attach the server resolver's cert slot AND seed it from the current identity, both
@@ -648,5 +753,175 @@ mod tests {
         let p = tmpfile("secure", 0o600);
         assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ---- from_document plane dispatch (Task 4) ---------------------------------
+    //
+    // `$CREDENTIALS_DIRECTORY` is process-wide; without this lock these tests can
+    // interleave across cargo's multi-threaded test runner (env-lock pattern per
+    // bins/maknae/src/cli.rs's ENV_LOCK / crates/maknae-msgs/src/lib.rs's ENV_LOCK).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DispatchFixture(std::path::PathBuf);
+    impl DispatchFixture {
+        fn self_signed_pem() -> String {
+            let params = rcgen::CertificateParams::new(vec!["ca.test".to_string()]).unwrap();
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+            params.self_signed(&key).unwrap().pem()
+        }
+
+        /// A complete config dir: `core`+`vault` document, CA-pin trio, and the
+        /// AppRole ids for BOTH planes — everything `from_document` needs EXCEPT
+        /// the SecretID files/dirs themselves, which each test wires up per
+        /// scenario.
+        fn new(tag: &str, extra_vault_yaml: &str) -> Self {
+            // `assert_fips_provider()` (inside `from_document_with_secret`) reads the
+            // PROCESS-GLOBAL rustls default provider; install it here (idempotent —
+            // a no-op if some other test already did) rather than relying on test
+            // execution order, matching every other provider-touching test in this
+            // crate (fips_glue.rs, resolver.rs, transport_tests.rs, tls.rs,
+            // plane_verify.rs all do this same call at their own point of use).
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .ok();
+            let p =
+                std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(p.join("tls")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let yaml = format!(
+                "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n{extra_vault_yaml}"
+            );
+            let cfg_path = p.join("maknae.yaml");
+            std::fs::write(&cfg_path, yaml).unwrap();
+            std::fs::set_permissions(&cfg_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            for f in [
+                "tls/maknae-root-ca.crt",
+                "tls/maknae-int-ca.crt",
+                "tls/vault-ca.crt",
+            ] {
+                std::fs::write(p.join(f), Self::self_signed_pem()).unwrap();
+            }
+            std::fs::write(p.join("maknaed-approle-id"), "maknaed-role-id\n").unwrap();
+            std::fs::write(p.join("maknae-approle-id"), "maknae-role-id\n").unwrap();
+            DispatchFixture(p)
+        }
+
+        fn doc(&self) -> Document {
+            load_config(
+                &self.0,
+                &[SectionSpec {
+                    name: VAULT_SECTION.to_string(),
+                    required: true,
+                }],
+            )
+            .expect("fixture config loads")
+        }
+    }
+    impl Drop for DispatchFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The regression guard (round-1 C1, mandatory per plan review): `Plane::Kernel`
+    /// with a POPULATED `$CREDENTIALS_DIRECTORY` resolves THERE — never the CLI
+    /// order — even though `dir` has no `maknaed-secret-id` file of its own (so a
+    /// bug that fell through to `dir`-relative resolution would fail closed with
+    /// `Io`, not silently pass).
+    #[test]
+    fn kernel_dispatch_prefers_credentials_directory_never_cli_order() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let fx = DispatchFixture::new("kernel-cd", "");
+        let creds_dir =
+            std::env::temp_dir().join(format!("mv-dispatch-creds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&creds_dir);
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        std::fs::write(creds_dir.join("maknaed-secret-id"), "kernel-secret-value").unwrap();
+
+        std::env::set_var("CREDENTIALS_DIRECTORY", &creds_dir);
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let _ = std::fs::remove_dir_all(&creds_dir);
+
+        let client = result.expect("Kernel resolves via $CREDENTIALS_DIRECTORY");
+        assert_eq!(
+            client.secret_source(),
+            CredentialSourceKind::CredentialsDirectory
+        );
+    }
+
+    /// `$CREDENTIALS_DIRECTORY` UNSET → `Plane::Kernel` falls through to the next
+    /// configured source (`vault.insecure_plaintext_secret_path`), proving the
+    /// resolution order isn't hardcoded to always pick `CredentialsDirectory`.
+    #[test]
+    fn kernel_dispatch_falls_through_when_credentials_directory_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-plain-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fx = DispatchFixture::new(
+            "kernel-plain",
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        let doc = fx.doc();
+        let client = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel)
+            .expect("Kernel falls through to the configured plaintext path");
+        assert_eq!(client.secret_source(), CredentialSourceKind::PlaintextPath);
+        let _ = std::fs::remove_file(&plain);
+    }
+
+    /// The other half of the regression guard: with `$CREDENTIALS_DIRECTORY`
+    /// STILL populated (same env as the first test), `Plane::Cli` must NOT read
+    /// it — proving the two planes do not share a resolver. Tolerant of platform
+    /// (the CLI's own order differs by `cfg!(target_os = "macos")`): on a
+    /// non-macOS build with no user-creds file it falls through to the residual
+    /// plaintext file (`PlaintextPath`); on macOS it falls to the (stubbed)
+    /// Keychain and fails closed. Either outcome proves non-use of the Kernel's
+    /// `$CREDENTIALS_DIRECTORY` value — a regression that shared the resolver
+    /// would instead return `Ok` with `CredentialSourceKind::CredentialsDirectory`
+    /// and the KERNEL secret value, matching neither arm below.
+    #[test]
+    fn cli_dispatch_ignores_credentials_directory_uses_cli_order() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let fx = DispatchFixture::new("cli-order", "");
+        let creds_dir =
+            std::env::temp_dir().join(format!("mv-dispatch-cli-creds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&creds_dir);
+        std::fs::create_dir_all(&creds_dir).unwrap();
+        std::fs::write(creds_dir.join("maknaed-secret-id"), "kernel-secret-value").unwrap();
+        // The CLI's residual-file fallback — present so a non-macOS build (where
+        // Keychain is skipped) can resolve all the way to a successful client.
+        std::fs::write(fx.0.join("maknae-secret-id"), "cli-secret-value").unwrap();
+        std::fs::set_permissions(
+            fx.0.join("maknae-secret-id"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        std::env::set_var("CREDENTIALS_DIRECTORY", &creds_dir);
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Cli);
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let _ = std::fs::remove_dir_all(&creds_dir);
+
+        match result {
+            Ok(client) => assert_eq!(
+                client.secret_source(),
+                CredentialSourceKind::PlaintextPath,
+                "non-macOS CLI order must land on the residual plaintext file, not the kernel's $CREDENTIALS_DIRECTORY"
+            ),
+            Err(VaultError::CredentialSource(_)) => {
+                // macOS: fell to the stubbed Keychain — also proves it did not
+                // read $CREDENTIALS_DIRECTORY (which would have succeeded).
+            }
+            Err(e) => panic!("unexpected error proving the CLI plane uses its own order: {e:?}"),
+        }
     }
 }
