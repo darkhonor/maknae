@@ -78,7 +78,12 @@ fn read_systemd_creds_user(path: &Path) -> Result<Zeroizing<String>, VaultError>
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let text = String::from_utf8(output.stdout).map_err(|_| {
+    // Wrap the decrypted bytes in `Zeroizing` THE MOMENT we own them — `output.stdout`
+    // is otherwise a bare `Vec<u8>` holding the plaintext SecretID in an un-zeroized
+    // heap allocation. `str::from_utf8` below borrows from `raw` rather than producing
+    // a second owned (bare) copy, so there is no un-zeroized intermediate at any point.
+    let raw = Zeroizing::new(output.stdout);
+    let text = std::str::from_utf8(&raw).map_err(|_| {
         VaultError::CredentialSource(format!(
             "systemd-creds decrypt --user {} produced non-UTF-8 output",
             path.display()
