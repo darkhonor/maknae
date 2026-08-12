@@ -263,7 +263,12 @@ pub enum AuthzError {
     BadPattern(String),
     /// A pattern used `~` but no principal is enrolled to resolve it against.
     TildeWithoutPrincipal(String),
-    /// `authz.yaml` carries world/other-accessible permission bits.
+    /// `authz.yaml` carries world/other-accessible permission bits, OR is
+    /// group-writable (spec §4.6/§7: `authz.yaml` is `root:_maknae` and the
+    /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
+    /// group-writable file lets a compromised daemon rewrite its own DAC
+    /// policy even though `assert_root_owned` and the world-bit gate both
+    /// pass).
     InsecurePermissions,
     /// `authz.yaml` (or a path component) is a symlink — refused.
     Symlink,
@@ -438,7 +443,20 @@ fn assert_root_owned(uid: u32) -> Result<(), AuthzError> {
 /// Read `authz.yaml` via the loader's existing secure read (symlink refusal +
 /// `mode & 0o007 == 0` gate, `loader.rs:33`) PLUS an explicit root-ownership
 /// assertion (spec §4.6/§7: root ownership is the control that stops a
-/// compromised `_maknae` from widening its own DAC by editing this file).
+/// compromised `_maknae` from widening its own DAC by editing this file) PLUS
+/// an explicit group-write rejection (`mode & 0o022 != 0`).
+///
+/// The group-write check closes a gap the two controls above leave open:
+/// `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
+/// `_maknae`, whose PRIMARY group is `_maknae` — so a `root:_maknae 0660`
+/// file is root-owned (passes the owner check) and has no world bits (passes
+/// `read_secure`'s mode gate) but IS writable by the daemon's own group,
+/// letting a compromised daemon rewrite its own authorization policy. Spec
+/// §4.6's shipped mode is `0640` (group-READ only, needed so the daemon can
+/// read a root-owned file) — `0o022` covers group-write AND other-write
+/// (other-write is already unreachable past `read_secure`'s `0o007` gate,
+/// checked again here only for defense in depth / to keep this function's
+/// contract self-contained if `read_secure`'s gate ever changes).
 ///
 /// The owner check is a SEPARATE `symlink_metadata` re-resolve of `path`, not
 /// fused into `read_secure`'s already-open fd — `read_secure` returns only a
@@ -447,7 +465,9 @@ fn assert_root_owned(uid: u32) -> Result<(), AuthzError> {
 /// directory, so it cannot win a swap between the two resolves — the same
 /// bounded lstat-then-open race the loader itself already accepts, not a new
 /// one (a fused `read_secure_owned` that fstats uid on the same fd is future
-/// work, out of scope here).
+/// work, out of scope here). The mode re-check below is a THIRD stat of the
+/// same path, for the same reason: it is not fused into `read_secure` or the
+/// owner check, and accepts the identical bounded race.
 ///
 /// `owner_of` is an injected seam (real caller: [`real_owner_of`]) so the
 /// SUCCESS path is unit-testable without an actual root-owned fixture file
@@ -482,6 +502,21 @@ fn security_load(
             ConfigError::InsecurePermissions { .. } => AuthzError::InsecurePermissions,
             other => AuthzError::Io(other.to_string()),
         })?;
+
+        // Third separate stat of `path` (see this function's doc comment for
+        // why a fresh `symlink_metadata` call here — not fused into
+        // `read_secure` or the owner check below — is the accepted pattern):
+        // reject group-write (and, defensively, other-write) so a
+        // `root:_maknae 0660` file is refused even though it is root-owned
+        // and carries no world bits.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::symlink_metadata(path)
+            .map_err(|e| AuthzError::Io(e.to_string()))?
+            .permissions()
+            .mode();
+        if mode & 0o022 != 0 {
+            return Err(AuthzError::InsecurePermissions);
+        }
 
         let uid = owner_of(path).map_err(|e| AuthzError::Io(e.to_string()))?;
         assert_root_owned(uid)?;
@@ -985,6 +1020,32 @@ mod tests {
     fn missing_authz_file_is_io() {
         let got = load_authz(&tmp("nope_never_created"), Some(&home()));
         assert!(matches!(got, Err(AuthzError::Io(_))));
+    }
+
+    #[test]
+    fn group_writable_root_owned_authz_refused() {
+        // The finding this test pins: `root:_maknae 0660` passes BOTH
+        // `read_secure`'s world-bit gate (0o007 == 0) AND `assert_root_owned`
+        // (uid 0, injected here since a non-privileged test process cannot
+        // create a genuinely root-owned fixture) — the group-write bit is the
+        // ONLY thing that must reject it.
+        let p = tmp("group_writable");
+        write_mode(&p, SHIPPED_DEFAULT, 0o660);
+        let got = security_load(&p, |_| Ok(0));
+        let _ = std::fs::remove_file(&p);
+        assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
+    }
+
+    #[test]
+    fn group_readable_root_owned_authz_0640_accepted() {
+        // The spec §4.6 shipped mode (group-READ only) must remain valid —
+        // the daemon needs group-read to open a root-owned file it does not
+        // own.
+        let p = tmp("group_readable_0640");
+        write_mode(&p, SHIPPED_DEFAULT, 0o640);
+        let got = security_load(&p, |_| Ok(0));
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), SHIPPED_DEFAULT);
     }
 
     #[test]
