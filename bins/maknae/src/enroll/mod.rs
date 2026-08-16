@@ -1487,7 +1487,10 @@ mod tests {
     fn tpm2_probe_uses_systemd_creds_with_key_tpm2_not_has_tpm2_verb() {
         let (bin, args) = tpm2_probe_argv("/run/probe.cred");
         assert_eq!(bin, "systemd-creds");
-        assert!(args.iter().any(|a| a == "encrypt"), "must encrypt: {args:?}");
+        assert!(
+            args.iter().any(|a| a == "encrypt"),
+            "must encrypt: {args:?}"
+        );
         assert!(
             args.iter().any(|a| a == "--with-key=tpm2"),
             "must pin tpm2 key: {args:?}"
