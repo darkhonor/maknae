@@ -1,0 +1,84 @@
+# AppArmor profile for maknaed (the maknae trust-plane daemon).
+# Install to: /etc/apparmor.d/usr.bin.maknaed
+# Reload:     apparmor_parser -r /etc/apparmor.d/usr.bin.maknaed
+#
+# Written in AppArmor 3.x syntax for compatibility with Debian 13 (Trixie) and
+# Ubuntu 24.04 (Noble). AppArmor 4.0 accepts 3.x profiles.
+#
+# This is the Debian analog of the SELinux TE policy (packaging/common/maknae.te)
+# shipped with the rpm. Path-attached, deny-by-default: only the paths and access
+# vectors named below are permitted; everything else is refused by AppArmor.
+
+#include <tunables/global>
+
+profile maknaed /usr/bin/maknaed {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Binary — map + read.
+  /usr/bin/maknaed                       mr,
+
+  # Configuration + private tree (posture marker, CA pins, approle-id, degraded
+  # path) — READ ONLY. The daemon traverses /etc/maknae but never writes it
+  # (Jackrabbit §4.6 makes it root-owned; a compromised daemon cannot widen its
+  # own DAC or credential posture).
+  /etc/maknae/                           r,
+  /etc/maknae/**                         r,
+
+  # systemd-decrypted credential. LoadCredentialEncrypted= makes systemd (root)
+  # TPM2-decrypt the sealed SecretID into a per-service ramfs at
+  # $CREDENTIALS_DIRECTORY (/run/credentials/maknaed.service/). The daemon MUST
+  # read this decrypted credential at boot to AppRole-auth — read only. (This is
+  # the AppArmor equivalent of the .te's init_var_run_t credential-read allow;
+  # the ENCRYPTED .cred under /etc/maknae/private is read by systemd, not here.)
+  /run/credentials/maknaed.service/      r,
+  /run/credentials/maknaed.service/**    r,
+
+  # Audit sink — APPEND ONLY. `a`, never `w`: the sink opens O_APPEND and the
+  # trail is append-only by contract (§8.1 / §9.2). `w` here would let a
+  # compromised daemon truncate or rewrite the audit log. The packaging also
+  # sets `chattr +a` on the dir and file for defense-in-depth on non-MAC hosts.
+  /var/log/maknae/                       r,
+  /var/log/maknae/**                     a,
+
+  # Runtime UDS — the daemon binds its control socket in /run/maknae and needs
+  # read+write there (RuntimeDirectory=maknae, §4.6). rw covers create/bind of
+  # the 0660 _maknae:maknae socket file that gates operator access.
+  /run/maknae/                           rw,
+  /run/maknae/**                         rw,
+
+  # Network — Vault egress is MANDATORY for maknae (unlike Microkosmos's opt-in):
+  # the daemon cannot AppRole-auth or fetch/renew PKI leaves without reaching
+  # Vault, so TCP is unconditional. (SELinux's finer-grained port label has no
+  # AppArmor analog; confinement of *which* endpoint is left to the network layer
+  # and Vault policy.)
+  network tcp,
+
+  # /proc and /sys runtime introspection.
+  @{PROC}/sys/net/core/somaxconn         r,
+  /sys/devices/system/cpu/               r,
+  /sys/devices/system/cpu/**             r,
+
+  # Crypto: urandom for key/nonce generation.
+  /dev/urandom                           r,
+
+  # Tool-exec transition (structure-now). The daemon spawns NO subprocess today
+  # (confirm via a code scan for Command::new/exec in maknaed/maknae-kernel), so
+  # this rule is inert. It is declared now so that WHEN the tool-exec increment
+  # lands, tool execution is forced into the discrete `maknae_tool` profile below
+  # and can never inherit maknaed's config/credential/audit access. `px` =
+  # transition under the child profile, scrubbing the environment.
+  /usr/bin/maknae                        px -> maknae_tool,
+
+  # Deny everything else implicitly (AppArmor default-deny).
+}
+
+# Discrete tool-execution domain — structure-now, near-empty, deny-by-default.
+# Kept as a SEPARATE profile (not a child hat) so a future tool exec is confined
+# independently of maknaed and inherits none of its access. Populated when the
+# tool-exec increment lands; unreachable until the `px` transition above fires.
+profile maknae_tool flags=(enforce) {
+  #include <abstractions/base>
+
+  # Intentionally minimal. Tool-specific access is added with the exec increment.
+}

@@ -1,0 +1,27 @@
+#!/bin/bash
+# maknae postrm — mirrors the rpm removal cleanup.
+set -e
+
+case "$1" in
+    purge)
+        # Clear append-only defensively (prerm already did on the remove step, but
+        # purge may be reached directly on a config-only leftover) before removing
+        # the trees — rm cannot unlink inside a chattr +a directory.
+        chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
+        chattr -a /var/log/maknae 2>/dev/null || :
+
+        # Remove configuration and the audit trail on purge only.
+        rm -rf /etc/maknae
+        rm -rf /var/log/maknae
+
+        systemctl daemon-reload 2>/dev/null || :
+        ;;
+
+    remove)
+        systemctl daemon-reload 2>/dev/null || :
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
