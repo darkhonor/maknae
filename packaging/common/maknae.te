@@ -36,10 +36,15 @@ files_pid_file(maknae_runtime_t)
 type maknae_vault_port_t;
 corenet_port(maknae_vault_port_t)
 
-# Tool domain — structure-now, near-empty, unreachable until the exec increment.
+# Tool domain — structure-now: the TYPE is declared, compiled, and loaded so the
+# exec increment can wire transitions into it later. The automatic
+# `domain_auto_trans(maknaed_t, bin_t, maknae_tool_t)` is DEFERRED to that
+# increment on purpose: (1) it would fire on ANY bin_t exec — but maknaed spawns
+# no subprocess this cycle, so an auto-transition into a near-empty domain could
+# only break things; (2) it requires pulling in bin_t. Declaring the domain now
+# keeps the structure without the live risk (plan Task 5; reviewer-flagged).
 type maknae_tool_t;
 domain_type(maknae_tool_t)
-domain_auto_trans(maknaed_t, bin_t, maknae_tool_t)
 
 ########################################
 # Policy rules
