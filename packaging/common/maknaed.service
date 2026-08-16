@@ -40,12 +40,16 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# aws-lc-fips (BoringCrypto) integrity self-test MAY need W^X — verified at
-# acceptance (spec §5/Task 4). Remove with a documented rationale if the FIPS
-# power-on self-test aborts under this directive.
-MemoryDenyWriteExecute=yes
+# MemoryDenyWriteExecute= and SystemCallFilter=~@privileged @resources are
+# DELIBERATELY OMITTED (empirically confirmed on Rocky 10 / systemd 257,
+# 2026-08-17). Both are seccomp-enforced, and aws-lc-fips (the BoringCrypto FIPS
+# module) needs W^X memory and @resources syscalls (mlock of secret material) for
+# its power-on integrity self-test — either directive raises SIGSYS (status=31/SYS)
+# and crash-loops the daemon. The daemon serves cleanly with @system-service +
+# native; the remaining filesystem/namespace/capability hardening above is intact.
+# See spec §5 / plan Task 4 Step 3. (A FIPS-compatible syscall allowlist that can
+# re-add a tightened filter is future hardening work.)
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
 SystemCallArchitectures=native
 Restart=on-failure
 RestartSec=5s
