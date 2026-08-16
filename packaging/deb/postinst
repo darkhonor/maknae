@@ -1,0 +1,78 @@
+#!/bin/bash
+# maknae postinst — mirrors the rpm %post lifecycle (packaging/rpm/maknae.spec),
+# adapted to Debian: AppArmor instead of SELinux, dpkg conffiles instead of
+# %config, no %attr (ownership set here by hand).
+set -e
+
+case "$1" in
+    configure)
+        # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
+        # Two identities by construction: the `_maknae` daemon account (primary
+        # group `_maknae`) and the separate `maknae` OPERATOR group. Prefer
+        # systemd-sysusers (reads /usr/lib/sysusers.d/maknae.conf); fall back to
+        # groupadd/useradd on hosts without it.
+        #
+        # CRITICAL — do NOT `usermod -aG maknae _maknae`. Spec §5.3 forbids on-disk
+        # cross-membership; `_maknae`'s membership in `maknae` is provided ONLY at
+        # unit scope by the unit's `SupplementaryGroups=maknae`. That directive is
+        # the single mechanism (removed entirely once #92's socket activation lands).
+        if command -v systemd-sysusers >/dev/null 2>&1; then
+            systemd-sysusers /usr/lib/sysusers.d/maknae.conf 2>/dev/null || \
+                systemd-sysusers 2>/dev/null || :
+        fi
+        if ! getent group maknae >/dev/null 2>&1; then
+            groupadd --system maknae
+        fi
+        if ! getent group _maknae >/dev/null 2>&1; then
+            groupadd --system _maknae
+        fi
+        if ! getent passwd _maknae >/dev/null 2>&1; then
+            useradd --system -g _maknae -d /nonexistent -s /usr/sbin/nologin \
+                    --comment "Maknae trust-plane daemon" _maknae
+        fi
+
+        # --- §4.6 directory ownership + modes (no %attr on deb) ------------------
+        # The loader fail-closes on any world bit for config paths, so directory
+        # modes are load-bearing. Set them explicitly, not via umask.
+        install -d -m 0750 -o root    -g _maknae /etc/maknae
+        install -d -m 0750 -o root    -g _maknae /etc/maknae/private
+        install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+
+        # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
+        # The MAC policy grants `append`, not `create`, so a first boot that had to
+        # O_CREAT the file would be denied — pre-create it here. Guard on
+        # non-existence so an upgrade never truncates the accumulated trail. Set
+        # append-only at the FILE level ONLY: file `+a` blocks `> audit.jsonl` and
+        # unlink/truncate even on non-MAC/complain hosts. Do NOT `chattr +a` the
+        # DIRECTORY — a +a dir blocks dpkg from managing /var/log/maknae on upgrade.
+        if [ ! -e /var/log/maknae/audit.jsonl ]; then
+            install -m 0640 -o _maknae -g _maknae /dev/null /var/log/maknae/audit.jsonl
+        fi
+        chattr +a /var/log/maknae/audit.jsonl 2>/dev/null || :
+
+        # --- Conffile-ownership convergence (EVERY configure) -------------------
+        # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the
+        # loader needs group-read (root:_maknae 0640, §4.6). The rpm gets this from
+        # %attr; on deb we re-assert it idempotently on fresh install AND upgrade.
+        # dpkg tracks conffile CONTENT, not ownership, so conffile semantics stay
+        # intact.
+        chown root:_maknae /etc/maknae/authz.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+        chmod 0640         /etc/maknae/authz.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+
+        # --- AppArmor profile ----------------------------------------------------
+        if command -v apparmor_parser >/dev/null 2>&1; then
+            apparmor_parser -r /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
+        fi
+
+        # --- systemd unit --------------------------------------------------------
+        # Enable but DO NOT start: a fresh install is not runnable until
+        # `sudo maknae enroll` provisions the daemon credential and principal (the
+        # shipped authz.yaml fail-closes until then). Flow: install -> enroll -> start.
+        systemctl daemon-reload 2>/dev/null || :
+        systemctl enable maknaed.service 2>/dev/null || :
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
