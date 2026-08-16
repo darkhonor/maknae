@@ -1,0 +1,31 @@
+---
+# Maknae daemon configuration (shipped skeleton).
+#
+# `sudo maknae enroll` REWRITES this file with your real deployment values and
+# adds the `principal` section (operator uid/home). Until then the daemon
+# fail-closes: the shipped authz.yaml uses `~` patterns, and the DAC gate
+# refuses to start without a `principal` (spec §5.5) — this is deliberate.
+#
+# Ownership (do not change): root:_maknae 0640 (Jackrabbit §4.6).
+
+core:
+  # Deployment identity — the branding baked into every plane leaf's URI SAN
+  # (maknae://<deployment_id>/plane/*). Set by enroll (--deployment-id).
+  deployment_id: REPLACE_ME
+
+vault:
+  # Your HashiCorp Vault address (set by enroll).
+  addr: "https://vault.example.invalid:8200"
+  # AppRole auth mount + PKI intermediate mount (defaults match the deploy module).
+  approle_mount: maknae-approle
+  pki_int_mount: maknae-pki-int
+
+audit:
+  # MUST be under /var/log/maknae — the daemon's default sink would otherwise land
+  # in /etc/maknae, which §4.6 makes unwritable by _maknae (first boot would fail
+  # closed on an audit-open error). Pinned here so it is never defaulted.
+  jsonl_path: /var/log/maknae/audit.jsonl
+
+# principal: written by `maknae enroll` (name / uid / home). Absent by design in
+# the shipped skeleton — its absence is what keeps the `~`-based authz.yaml
+# fail-closed until enrollment.

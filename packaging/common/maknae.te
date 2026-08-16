@@ -1,0 +1,102 @@
+policy_module(maknae, 1.0.0)
+
+########################################
+# Type declarations
+########################################
+
+# Process domain — maknaed runs here (entered from maknaed_exec_t).
+type maknaed_t;
+type maknaed_exec_t;
+init_daemon_domain(maknaed_t, maknaed_exec_t)
+
+# NoNewPrivileges=yes is set in maknaed.service. Under NNP the kernel requires
+# the init_t -> maknaed_t transition to be permitted via
+# process2:{nnp_transition,nosuid_transition}; without this the transition is
+# refused (SELINUX_ERR security_bounded_transition), the daemon runs in init_t,
+# and fails on the first append into /var/log/maknae/. Do NOT use `typebounds`
+# (it strips maknaed_t's entrypoint on maknaed_exec_t -> status=203/EXEC).
+gen_require(`
+    type init_t;
+')
+allow init_t maknaed_t:process2 { nnp_transition nosuid_transition };
+
+# Config (/etc/maknae) + private (/etc/maknae/private) + audit (/var/log/maknae)
+# + runtime (/run/maknae) types.
+type maknae_etc_t;
+files_config_file(maknae_etc_t)
+type maknae_private_t;
+files_config_file(maknae_private_t)
+type maknae_audit_t;
+logging_log_file(maknae_audit_t)
+type maknae_runtime_t;
+files_pid_file(maknae_runtime_t)
+
+# Operator-labeled Vault port (namespaced — HashiCorp Vault ships no SELinux
+# type; a bare vault_port_t would collide with any future community policy).
+type maknae_vault_port_t;
+corenet_port(maknae_vault_port_t)
+
+# Tool domain — structure-now, near-empty, unreachable until the exec increment.
+type maknae_tool_t;
+domain_type(maknae_tool_t)
+domain_auto_trans(maknaed_t, bin_t, maknae_tool_t)
+
+########################################
+# Policy rules
+########################################
+
+# Self-exec
+allow maknaed_t maknaed_exec_t:file { read execute execute_no_trans open getattr };
+
+# Read config + private (posture marker + degraded path; the ENCRYPTED .cred is
+# read by init_t, NOT here — this grants only the daemon-read artifacts).
+allow maknaed_t maknae_etc_t:dir { open read search getattr };
+allow maknaed_t maknae_etc_t:file { read open getattr };
+allow maknaed_t maknae_private_t:dir { open read search getattr };
+allow maknaed_t maknae_private_t:file { read open getattr };
+
+# CRITICAL (maknae-specific; Microkosmos has no analog — it uses EnvironmentFile=):
+# LoadCredentialEncrypted= makes systemd DECRYPT the SecretID into a per-service
+# ramfs at $CREDENTIALS_DIRECTORY (/run/credentials/maknaed.service/). maknaed_t
+# must read that DECRYPTED credential at boot or it can't AppRole-auth.
+# EMPIRICALLY CONFIRMED on Rocky 10 (2026-08-17): `systemd_read_credentials` does
+# NOT exist in el10/el9 refpolicy (using it fails the .pp build), so grant by
+# TYPE. `ls -Z /run/credentials/maknaed.service/`: dir = var_run_t, the decrypted
+# credential FILE = init_var_run_t. el9 labels MAY differ — the permissive
+# shakeout (acceptance) confirms per target and adjusts.
+gen_require(`
+    type var_run_t;
+    type init_var_run_t;
+')
+allow maknaed_t var_run_t:dir { search getattr open read };
+allow maknaed_t init_var_run_t:dir { search getattr open read };
+allow maknaed_t init_var_run_t:file { read open getattr };
+
+# Audit dir: APPEND, not write (MAC-enforced append-only). NO `create`/`add_name`
+# (the package pre-creates the file; the daemon only appends). `lock` — the sink
+# is single-writer and may flock.
+allow maknaed_t maknae_audit_t:dir { open read search getattr };
+allow maknaed_t maknae_audit_t:file { append open getattr lock };
+
+# UDS bind + chgrp in /run/maknae
+allow maknaed_t maknae_runtime_t:dir { open read search getattr add_name write remove_name };
+allow maknaed_t maknae_runtime_t:sock_file { create setattr getattr unlink };
+allow maknaed_t self:unix_stream_socket { create bind listen accept read write getattr setopt getopt shutdown connectto };
+
+# Vault egress is MANDATORY for maknae (unlike Microkosmos's opt-in) — the daemon
+# cannot function without Vault, so NO boolean. The operative least-privilege
+# control is the PORT LABEL: the operator MUST label their Vault port with
+# maknae_vault_port_t (shipped helper maknae-selinux-ports.sh). Only the labeled
+# port is reachable.
+allow maknaed_t self:tcp_socket { create connect setopt getopt read write bind getattr shutdown };
+allow maknaed_t maknae_vault_port_t:tcp_socket name_connect;
+corenet_tcp_bind_generic_node(maknaed_t)
+corenet_tcp_sendrecv_generic_node(maknaed_t)
+sysnet_dns_name_resolve(maknaed_t)
+
+# Standard daemon needs
+allow maknaed_t self:process { signal sigchld };
+miscfiles_read_localization(maknaed_t)
+auth_use_nsswitch(maknaed_t)
+kernel_read_system_state(maknaed_t)
+dev_read_urand(maknaed_t)
