@@ -6,7 +6,8 @@ system unit, the sysusers.d definition (`_maknae` service account + `maknae`
 operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`), the
 SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
 fragment, and the Vault-port label helper. The `%post` sets `chattr +a` on the
-audit dir and file.
+audit **file** only (`/var/log/maknae/audit.jsonl`) — not the directory, which
+would block rpm from managing `/var/log/maknae` on upgrade.
 
 > There is **no CLI user unit** — the `maknae` CLI is operator-invoked, not a
 > systemd service. (Supersedes the earlier scaffold note; Jackrabbit §9.7.)
