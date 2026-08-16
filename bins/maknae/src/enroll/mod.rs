@@ -74,7 +74,7 @@ pub enum EnrollError {
     /// trip) failed.
     Probe(String),
     /// The coarse host-level HRoT presence check (spec §4.1 step 1:
-    /// `systemd-creds has-tpm2` on Linux, SEP detection on macOS) failed —
+    /// `systemd-analyze has-tpm2` on Linux, SEP detection on macOS) failed —
     /// checked before the deeper operator-context probe so the diagnostic is
     /// clear rather than a confusing subprocess failure.
     HrotUnavailable { detail: String },
@@ -681,13 +681,15 @@ fn detect_hrot_capability(macos: bool, verbose: bool) -> bool {
         }
         apple_silicon
     } else {
-        let ok = std::process::Command::new("systemd-creds")
+        // `systemd-analyze has-tpm2`, not `systemd-creds has-tpm2` — the latter is
+        // deprecated on systemd 257 (Rocky 10) and auto-redirects with a notice (#88).
+        let ok = std::process::Command::new("systemd-analyze")
             .arg("has-tpm2")
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if verbose {
-            eprintln!("exec: systemd-creds has-tpm2 -> {ok}");
+            eprintln!("exec: systemd-analyze has-tpm2 -> {ok}");
         }
         ok
     }
@@ -1106,7 +1108,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             detail: if macos {
                 "no Secure Enclave detected (Apple Silicon required)".to_string()
             } else {
-                "systemd-creds has-tpm2 reports no usable TPM2".to_string()
+                "systemd-analyze has-tpm2 reports no usable TPM2".to_string()
             },
         });
     }
