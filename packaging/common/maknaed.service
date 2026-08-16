@@ -1,0 +1,61 @@
+[Unit]
+Description=maknae trust-plane daemon (maknaed)
+Documentation=https://github.com/darkhonor/maknae
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=_maknae
+# Socket-group gate (spec §5.2, Option 1): _maknae must be a member of `maknae` so
+# it can chgrp its own UDS to `maknae` WITHOUT CAP_CHOWN (the daemon drops all
+# caps). This is the SOLE membership mechanism (no on-disk membership, §5.3).
+# Superseded by systemd socket activation, #92.
+SupplementaryGroups=maknae
+ExecStart=/usr/bin/maknaed
+# systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
+# (0400, _maknae-only, memory-backed). Name pinned: enroll seals
+# --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.
+LoadCredentialEncrypted=maknaed-secret-id:/etc/maknae/private/maknaed-secret-id.cred
+RuntimeDirectory=maknae
+RuntimeDirectoryMode=0751
+# ProtectSystem=strict mounts /var/log read-only; without this the audit sink
+# open() gets EROFS and every boot fails closed. Chosen over LogsDirectory=
+# (which chowns/chmods at start, colliding with the chattr +a inode).
+ReadWritePaths=/var/log/maknae
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute= and SystemCallFilter=~@privileged @resources are
+# DELIBERATELY OMITTED (empirically confirmed on Rocky 10 / systemd 257,
+# 2026-08-17). Both are seccomp-enforced, and aws-lc-fips (the BoringCrypto FIPS
+# module) needs W^X memory and @resources syscalls (mlock of secret material) for
+# its power-on integrity self-test — either directive raises SIGSYS (status=31/SYS)
+# and crash-loops the daemon. The daemon serves cleanly with @system-service +
+# native; the remaining filesystem/namespace/capability hardening above is intact.
+# See spec §5 / plan Task 4 Step 3. (A FIPS-compatible syscall allowlist that can
+# re-add a tightened filter is future hardening work.)
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maknaed
+
+[Install]
+WantedBy=multi-user.target

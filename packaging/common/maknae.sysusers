@@ -1,0 +1,10 @@
+# systemd-sysusers(8) config for Maknae.
+# Two identities by construction (Jackrabbit §4.6 / §9.1):
+#   _maknae : the daemon service account (primary group _maknae)
+#   maknae  : the OPERATOR group — members may connect to the 0660 UDS
+# Both must exist. NO on-disk cross-membership (spec §5.3): _maknae's membership
+# in `maknae` exists ONLY at unit scope via the unit's SupplementaryGroups=maknae.
+#
+# Type Name     ID   GECOS                       Home          Shell
+g      maknae   990
+u      _maknae  992  "Maknae trust-plane daemon" /nonexistent /usr/sbin/nologin

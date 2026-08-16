@@ -1,0 +1,27 @@
+#!/bin/bash
+# maknae prerm — mirrors the rpm %preun teardown, AppArmor edition.
+set -e
+
+case "$1" in
+    remove)
+        # Full removal: clear append-only, unload AppArmor, stop + disable.
+        chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
+        if command -v apparmor_parser >/dev/null 2>&1; then
+            apparmor_parser -R /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
+        fi
+        systemctl stop maknaed.service 2>/dev/null || :
+        systemctl disable maknaed.service 2>/dev/null || :
+        ;;
+    upgrade)
+        # Upgrade: DO NOT stop or disable — a running, operator-enabled daemon
+        # must survive the upgrade (postinst try-restarts it onto the new binary
+        # and preserves its enabled state). audit.jsonl is script-created (not a
+        # conffile) and %ghost-equivalent, so dpkg does not replace it; no +a
+        # clear is needed. The AppArmor profile is reloaded by the new postinst.
+        :
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
