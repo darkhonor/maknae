@@ -78,6 +78,14 @@ fi
 
 # --- Signed path ---------------------------------------------------------------
 : "${GPG_KEY_ID:?--sign requires GPG_KEY_ID (the Microkosmos signing key)}"
+# Validate GPG_KEY_ID before it reaches an rpm --define: a crafted value could
+# inject rpm macro constructs (%()) into the signing host. Accept a hex
+# fingerprint/key-id or a plain uid/email; reject %, whitespace, quotes, and
+# shell/macro metacharacters.
+if printf '%s' "$GPG_KEY_ID" | LC_ALL=C grep -qE '[%`$"'"'"'[:space:][:cntrl:]\\]'; then
+    echo "ERROR: GPG_KEY_ID contains disallowed characters (%, quotes, whitespace, or control)" >&2
+    exit 2
+fi
 command -v gpg     >/dev/null 2>&1 || { echo "sign.sh: gpg not found" >&2; exit 1; }
 command -v rpmsign >/dev/null 2>&1 || echo "sign.sh: WARNING rpmsign not found — skipping rpm embed-signing" >&2
 

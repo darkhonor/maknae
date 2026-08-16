@@ -3,25 +3,22 @@
 set -e
 
 case "$1" in
-    remove|upgrade)
-        # Clear append-only BEFORE any teardown so later steps (and, on upgrade,
-        # dpkg's unpack) are not blocked by EPERM on the +a inode. File-level
-        # first, then the directory. The audit.jsonl content itself is script-
-        # created (not a conffile), so clearing +a on upgrade is safe — the guard
-        # in postinst leaves the existing trail untouched.
+    remove)
+        # Full removal: clear append-only, unload AppArmor, stop + disable.
         chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
-        chattr -a /var/log/maknae 2>/dev/null || :
-
-        # Unload the AppArmor profile.
         if command -v apparmor_parser >/dev/null 2>&1; then
             apparmor_parser -R /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
         fi
-
-        # Stop + disable the unit on removal (harmless on upgrade; the new
-        # postinst re-enables). Not started by us until enroll, but stop anyway
-        # in case the operator started it.
         systemctl stop maknaed.service 2>/dev/null || :
         systemctl disable maknaed.service 2>/dev/null || :
+        ;;
+    upgrade)
+        # Upgrade: DO NOT stop or disable — a running, operator-enabled daemon
+        # must survive the upgrade (postinst try-restarts it onto the new binary
+        # and preserves its enabled state). audit.jsonl is script-created (not a
+        # conffile) and %ghost-equivalent, so dpkg does not replace it; no +a
+        # clear is needed. The AppArmor profile is reloaded by the new postinst.
+        :
         ;;
 esac
 

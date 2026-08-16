@@ -13,6 +13,15 @@ set -euo pipefail
 VERSION="${1:?usage: build-rpm.sh <version> [<bindir>]}"
 BINDIR="${2:-target/release}"
 
+# Validate VERSION before it reaches an rpm --define: rpm macro constructs like
+# %() would turn a crafted CI tag into build-host command execution. Accept only
+# a strict version grammar (digits, dots, and a limited safe set) — no `%`,
+# whitespace, or control chars.
+if ! printf '%s' "$VERSION" | grep -qE '^[0-9][0-9A-Za-z.~+_-]*$'; then
+    echo "ERROR: invalid version '$VERSION' (allowed: ^[0-9][0-9A-Za-z.~+_-]*\$)" >&2
+    exit 2
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"          # packaging/rpm
 REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"

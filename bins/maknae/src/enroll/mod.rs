@@ -705,6 +705,11 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
     use std::process::{Command, Stdio};
     const PROBE: &[u8] = b"maknae-tpm-probe";
     let out_path = format!("/run/maknae-tpm-probe.{}.cred", std::process::id());
+    // Unlink any stale same-name file first: `systemd-creds encrypt <file>` can
+    // refuse a pre-existing output, which would yield a FALSE "no TPM2" from a
+    // prior interrupted run. Runs as root; /run is not world-writable, so this is
+    // not an untrusted-input path — the concern is robustness, not a symlink race.
+    let _ = std::fs::remove_file(&out_path);
     let (bin, args) = tpm2_probe_argv(&out_path);
     let enc = Command::new(bin)
         .args(&args)
