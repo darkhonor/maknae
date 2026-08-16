@@ -1,6 +1,16 @@
-# fapolicyd trust fragment for maknae -> /etc/fapolicyd/trust.d/maknae
-# Apply with: fapolicyd-cli --update  (never restart fapolicyd mid-transaction)
-# rpm-installed binaries are rpmdb-trusted already; this covers the edges.
-/usr/bin/maknaed
-# Future tool-exec path (structure-now, commented until the exec increment):
-# /usr/bin/maknae
+# fapolicyd trust notes for maknae -> /etc/fapolicyd/trust.d/maknae
+#
+# The rpm-installed /usr/bin/maknaed is trusted AUTOMATICALLY by fapolicyd's
+# rpmdb trust backend (every file owned by an installed rpm is trusted) — no
+# per-file record is needed, and none is shipped here on purpose: a static
+# `path size sha256` record would go stale on every rebuild, and a bare path is
+# not a valid trust record (fapolicyd would silently ignore it).
+#
+# Verified: on a STIG-hardened enforcing host the rpm-installed daemon executes
+# under fapolicyd via rpmdb trust (Tokki PR-T1 acceptance, Rocky 10).
+#
+# FUTURE tool-exec path (out-of-rpmdb binaries, e.g. an operator-dropped helper):
+# register each explicitly with a properly-hashed record —
+#     sudo fapolicyd-cli --file add /path/to/binary
+#     sudo fapolicyd-cli --update
+# Do NOT hand-edit a bare path into this file expecting it to take effect.

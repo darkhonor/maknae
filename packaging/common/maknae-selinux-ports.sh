@@ -14,8 +14,20 @@ command -v semanage >/dev/null || {
 }
 case "$action" in
     add)
-        semanage port -a -t maknae_vault_port_t -p tcp "$port" 2>/dev/null \
-            || semanage port -m -t maknae_vault_port_t -p tcp "$port"
+        # Try to add; if the port is already defined, only MODIFY it when it is
+        # unlabeled-by-us — never clobber a foreign policy's label on that port
+        # (e.g. a base type on 443). `semanage port -m` keys on (proto,port) and
+        # ignores the current -t, so an unconditional -m would reassign it.
+        if semanage port -a -t maknae_vault_port_t -p tcp "$port" 2>/dev/null; then
+            :
+        elif semanage port -l | awk '$1=="maknae_vault_port_t"' | grep -qw "$port"; then
+            :  # already ours — idempotent no-op
+        else
+            owner=$(semanage port -l | awk -v p="$port" '$2=="tcp" { n=split($3,a,", "); for(i=1;i<=n;i++) if(a[i]==p) print $1 }' | head -1)
+            echo "ERROR: tcp/$port is already labeled '${owner:-unknown}', not maknae_vault_port_t." >&2
+            echo "       Refusing to reassign a foreign label. Choose an unlabeled Vault port." >&2
+            exit 3
+        fi
         ;;
     remove)
         # is-ours guard: `semanage port -d` keys on (proto,port) and ignores -t,

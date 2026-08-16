@@ -65,11 +65,17 @@ case "$1" in
         fi
 
         # --- systemd unit --------------------------------------------------------
-        # Enable but DO NOT start: a fresh install is not runnable until
-        # `sudo maknae enroll` provisions the daemon credential and principal (the
-        # shipped authz.yaml fail-closes until then). Flow: install -> enroll -> start.
+        # DO NOT auto-enable or start on fresh install: a fresh install is not
+        # runnable until `sudo maknae enroll` provisions the daemon credential and
+        # principal (the shipped authz.yaml fail-closes until then), and the
+        # operator enables it explicitly (matches the rpm's preset-disabled default
+        # and the documented install -> enroll -> `systemctl enable --now` flow).
         systemctl daemon-reload 2>/dev/null || :
-        systemctl enable maknaed.service 2>/dev/null || :
+        # On UPGRADE ($2 = prior version), restart ONLY if the daemon was running,
+        # onto the new binary — preserving the operator's enabled/running state.
+        if [ -n "${2:-}" ]; then
+            systemctl try-restart maknaed.service 2>/dev/null || :
+        fi
         ;;
 esac
 

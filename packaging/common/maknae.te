@@ -26,6 +26,14 @@ type maknae_etc_t;
 files_config_file(maknae_etc_t)
 type maknae_private_t;
 files_config_file(maknae_private_t)
+# Root/systemd-ONLY secrets under /etc/maknae/private: the sealed *.cred (read by
+# systemd/init_t for LoadCredentialEncrypted=, never by the daemon) and
+# enroll-state.yaml (accessor record, read by enroll/root only). maknaed_t is
+# deliberately granted NO access to this type — SELinux defense-in-depth beyond
+# the DAC 0400 root:root modes, so a compromised daemon still cannot read the
+# crown-jewel credential or the accessor record.
+type maknae_secret_t;
+files_type(maknae_secret_t)
 type maknae_audit_t;
 logging_log_file(maknae_audit_t)
 type maknae_runtime_t;
@@ -76,6 +84,11 @@ gen_require(`
 allow maknaed_t var_run_t:dir { search getattr open read };
 allow maknaed_t init_var_run_t:dir { search getattr open read };
 allow maknaed_t init_var_run_t:file { read open getattr };
+
+# systemd (init_t) must read the sealed .cred (maknae_secret_t) to decrypt it via
+# LoadCredentialEncrypted= — grant init_t (NOT maknaed_t) that access + dir search.
+allow init_t maknae_private_t:dir { search getattr };
+allow init_t maknae_secret_t:file { read open getattr };
 
 # Audit dir: APPEND, not write (MAC-enforced append-only). NO `create`/`add_name`
 # (the package pre-creates the file; the daemon only appends). `lock` — the sink

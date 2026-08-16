@@ -1,6 +1,7 @@
 # Maknae Linux packaging — install & operations guide
 
-This directory builds signed Linux packages that install the `maknaed` trust-plane
+This directory builds Linux packages (checksummed; optionally GPG-signed — the
+default build is UNSIGNED, see [Signing](#verifying-signatures)) that install the `maknaed` trust-plane
 daemon and the `maknae` operator CLI, the hardened systemd unit, the MAC policies
 (SELinux on RHEL/Rocky, AppArmor on Debian), the fapolicyd trust fragment, and the
 shipped `/etc/maknae` config defaults.
@@ -22,8 +23,8 @@ Compose/Podman profile are deferred.
 
 | Target | systemd | MAC | Status this release |
 |---|---|---|---|
-| Debian 13 | 257 | AppArmor | **Full** — install → enroll → serve |
-| RHEL / Rocky 10 | 257 | SELinux | **Full** — install → enroll → serve |
+| Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
+| RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
 | RHEL / Rocky 9 | 252 | SELinux | **Packaging + daemon-seal only** — operator `enroll` deferred to #73 (see [RHEL 9 caveat](#rhel-9-caveat)) |
 
 ---
@@ -151,7 +152,9 @@ which requires systemd ≥ 256; RHEL 9 ships systemd 252. RHEL 9 is therefore
 **packaging + daemon-seal only this release — operator enroll is deferred to #73.**
 The rpm installs cleanly, the SELinux policy loads and runs enforce-clean, and the
 daemon's own TPM2 seal works; what is *not* available on el9 is the operator
-enroll → serve round-trip. **Debian 13 and RHEL 10 support the full enroll flow.**
+enroll → serve round-trip. **RHEL 10 supports the full enroll flow (proven live,
+enforcing).** Debian 13's `--user` CLI seal works (systemd 257), but its full
+enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — deferred to #94**.
 
 ---
 
@@ -163,4 +166,17 @@ enroll → serve round-trip. **Debian 13 and RHEL 10 support the full enroll flo
   *which* — the DAC layer (`authz.yaml`) is what decides which tool is permitted.
   Per-binary MAC separation is a future tool-exec increment.
 - **RHEL 9 operator enroll** — deferred to #73 (see above).
+- **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
+  both AppArmor profiles load, but the daemon has not been run under the AppArmor
+  profile with a live credential, so serve-time `apparmor="DENIED"` cleanliness is
+  **unproven** (the profile may need iteration exactly as the SELinux `.te` did).
+  Deferred to #94.
+- **SELinux credential-read breadth** — because refpolicy exposes no
+  `systemd_read_credentials` interface, `maknaed_t` is granted read over the broad
+  `var_run_t` / `init_var_run_t` runtime labels to reach its systemd-decrypted
+  credential (not just its own file). Empirically required; narrowing via a private
+  credential type + explicit transition is future hardening.
+- **Daemon TCP `bind`** — the `.te` grants `maknaed_t` `self:tcp_socket bind` +
+  generic-node bind (needed by the Vault client connect as proven on Rocky 10);
+  tightening this egress-only daemon to drop listen-capability is future hardening.
 - **macOS / OCI / Compose-Podman** — deferred (#76 / #81 / TBD).

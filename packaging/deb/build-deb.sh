@@ -16,6 +16,12 @@
 set -euo pipefail
 
 VERSION="${1:?usage: build-deb.sh <version> [<bindir>]}"
+# Validate VERSION before it lands in control/changelog/sed/paths: a crafted
+# value could inject Debian control fields or arbitrary output paths.
+if ! printf '%s' "$VERSION" | grep -qE '^[0-9][0-9A-Za-z.~+_-]*$'; then
+    echo "ERROR: invalid version '$VERSION' (allowed: ^[0-9][0-9A-Za-z.~+_-]*\$)" >&2
+    exit 2
+fi
 BINDIR="${2:-target/release}"
 ARCH="amd64"
 DEBVER="${VERSION}-1"
