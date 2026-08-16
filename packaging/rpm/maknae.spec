@@ -100,18 +100,19 @@ restorecon -Rv %{_bindir}/maknaed %{_sysconfdir}/maknae %{_localstatedir}/log/ma
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
 # %ghost + this guard means upgrades never truncate the trail or fight chattr +a.
+# FILE-level append-only only (NOT the directory): dir +a would block rpm from
+# managing /var/log/maknae on upgrade. File +a already prevents unlink/truncate
+# of the trail, and SELinux maknae_audit_t withholds create/add_name.
 if [ $1 -eq 1 ] && [ ! -e %{_localstatedir}/log/maknae/audit.jsonl ]; then
     install -m 0640 -o _maknae -g _maknae /dev/null %{_localstatedir}/log/maknae/audit.jsonl
-    chattr +a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
 fi
-chattr +a %{_localstatedir}/log/maknae 2>/dev/null || :
+chattr +a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
 
 %preun
 %systemd_preun maknaed.service
 if [ $1 -eq 0 ]; then
-    # Full removal only: clear append-only, then unload the SELinux module.
+    # Full removal only: clear the file append-only, then unload the SELinux module.
     chattr -a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
-    chattr -a %{_localstatedir}/log/maknae 2>/dev/null || :
     semodule -r maknae 2>/dev/null || :
     # NOTE: the operator's Vault port label is intentionally NOT auto-removed here
     # (%preun cannot know the port; a default-8200 removal would orphan/clobber).
