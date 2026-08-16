@@ -134,13 +134,19 @@ fn probe_systemd_creds_user(value: &str, verbose: bool) -> Result<(), EnrollErro
     use std::process::Stdio;
 
     if verbose {
-        eprintln!("exec: systemd-creds encrypt --user --with-key=tpm2 - -");
+        eprintln!("exec: systemd-creds encrypt --user --with-key=auto - -");
     }
+    // `--user` (uid-scoped) seals CANNOT use `--with-key=tpm2`: the TPM host key
+    // needs root-only /var/lib/systemd/credential.secret, so systemd-creds refuses
+    // it in --uid= scoped mode (verified on Rocky 10 / systemd 257, issue #89). The
+    // CLI plane is untrusted (ADR-0005: operator-uid compromise is fatal to it), so
+    // host-bound `--with-key=auto` (disk-at-rest, useless off-host) is sufficient.
+    // The DAEMON seal (root, in mod.rs) keeps full `--with-key=tpm2` TPM binding.
     let mut enc = std::process::Command::new("systemd-creds")
         .args([
             "encrypt",
             "--user",
-            "--with-key=tpm2",
+            "--with-key=auto",
             "--name=maknae-enroll-probe",
             "-",
             "-",
@@ -310,14 +316,17 @@ fn seal_cli_secret_linux(
         .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
     if verbose {
         eprintln!(
-            "exec: systemd-creds encrypt --user --with-key=tpm2 --name=maknae-secret-id - {out_str}"
+            "exec: systemd-creds encrypt --user --with-key=auto --name=maknae-secret-id - {out_str}"
         );
     }
+    // `--with-key=auto`, not `tpm2` — see the probe above (#89): the TPM host key is
+    // unavailable to a uid-scoped user; host-bound encryption is sufficient for the
+    // untrusted CLI plane.
     let mut child = std::process::Command::new("systemd-creds")
         .args([
             "encrypt",
             "--user",
-            "--with-key=tpm2",
+            "--with-key=auto",
             "--name=maknae-secret-id",
             "-",
             out_str,
