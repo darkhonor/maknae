@@ -73,10 +73,13 @@ pub enum EnrollError {
     /// The post-drop capability probe (systemd-creds `--user`/Keychain round
     /// trip) failed.
     Probe(String),
-    /// The coarse host-level HRoT presence check (spec §4.1 step 1:
-    /// `systemd-analyze has-tpm2` on Linux, SEP detection on macOS) failed —
-    /// checked before the deeper operator-context probe so the diagnostic is
-    /// clear rather than a confusing subprocess failure.
+    /// The daemon-surface HRoT capability gate (spec §4.1 step 1) failed. On
+    /// Linux this is a real root `systemd-creds encrypt --with-key=tpm2` ->
+    /// `decrypt` round-trip (the same mechanism the step-5 daemon seal uses —
+    /// version-agnostic, unlike the `systemd-analyze has-tpm2` verb which is
+    /// absent on RHEL 9's systemd 252, #93); on macOS it is SEP detection.
+    /// Checked before the operator-context CLI probe so a missing daemon TPM/SEP
+    /// surfaces clearly rather than as a confusing subprocess failure.
     HrotUnavailable { detail: String },
     /// No Vault token was supplied (`--token-file` absent/empty and the
     /// interactive prompt returned empty).
@@ -670,9 +673,83 @@ fn check_vault_reachable(addr: &str) -> Result<(), EnrollError> {
     Ok(())
 }
 
-/// Informational only (verbose-gated) — the authoritative gate is the
-/// operator-context capability probe (`run_helper(..., "probe", ...)`), which
-/// actually exercises the seal mechanism rather than guessing its presence.
+/// The argv for the daemon TPM2-seal capability probe, writing ciphertext to
+/// `out_path` (a temp file). Factored out so a unit test pins the mechanism
+/// (regression guard for #93 — the `systemd-analyze has-tpm2` verb is v253+ and
+/// absent on RHEL 9's systemd 252). Uses a temp FILE for the encrypt output,
+/// exactly matching the command proven on Rocky 9 / systemd 252 (`… - <file>`);
+/// the `- -` stdout variant is NOT relied upon (unverified framing on 252).
+fn tpm2_probe_argv(out_path: &str) -> (&'static str, Vec<String>) {
+    (
+        "systemd-creds",
+        vec![
+            "encrypt".into(),
+            "--with-key=tpm2".into(),
+            "--name=maknae-tpm-probe".into(),
+            "-".into(),           // plaintext from stdin
+            out_path.to_string(), // ciphertext to a temp file (proven form)
+        ],
+    )
+}
+
+/// Encrypt a probe token with the TPM2 key to a temp file, decrypt it back;
+/// true iff the plaintext survives the round-trip. Version-agnostic across
+/// systemd 252..257+. Runs as root during `enroll_inner` (pre privilege-drop).
+///
+/// Pipe-deadlock note: the probe payload is 16 bytes, far under the 64KiB pipe
+/// buffer, so writing stdin then `wait()` cannot deadlock. stdout/stderr are sent
+/// to /dev/null (encrypt output goes to the temp FILE, not stdout) so there is no
+/// undrained pipe. DO NOT grow the probe payload — a >64KiB stdin would hang.
+fn tpm2_seal_roundtrip(verbose: bool) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    const PROBE: &[u8] = b"maknae-tpm-probe";
+    let out_path = format!("/run/maknae-tpm-probe.{}.cred", std::process::id());
+    // Unlink any stale same-name file first: `systemd-creds encrypt <file>` can
+    // refuse a pre-existing output, which would yield a FALSE "no TPM2" from a
+    // prior interrupted run. Runs as root; /run is not world-writable, so this is
+    // not an untrusted-input path — the concern is robustness, not a symlink race.
+    let _ = std::fs::remove_file(&out_path);
+    let (bin, args) = tpm2_probe_argv(&out_path);
+    let enc = Command::new(bin)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut enc = match enc {
+        Ok(c) => c,
+        Err(e) => {
+            if verbose {
+                eprintln!("tpm2 probe spawn failed: {e}");
+            }
+            return false;
+        }
+    };
+    if let Some(mut si) = enc.stdin.take() {
+        let _ = si.write_all(PROBE);
+    }
+    let enc_ok = matches!(enc.wait(), Ok(s) if s.success());
+    let result = if enc_ok {
+        Command::new("systemd-creds")
+            .args(["decrypt", "--name=maknae-tpm-probe", &out_path, "-"])
+            .output()
+            .map(|o| o.status.success() && o.stdout == PROBE)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let _ = std::fs::remove_file(&out_path); // best-effort cleanup
+    result
+}
+
+/// Daemon-surface HRoT capability gate. On Linux: exercise the REAL daemon seal
+/// mechanism — a root `systemd-creds encrypt --with-key=tpm2` -> `decrypt`
+/// round-trip — rather than probing a version-specific presence verb. This is a
+/// HARD daemon-capability gate (the caller aborts enrollment if it returns
+/// false), and it proves the same TPM binding the step-5 daemon seal uses,
+/// pre-mint (§4.1). It is NOT the operator `--user` CLI seal probe — that is a
+/// separate surface in helper.rs (#73 owns its el9 residual).
 fn detect_hrot_capability(macos: bool, verbose: bool) -> bool {
     if macos {
         let apple_silicon = std::env::consts::ARCH == "aarch64";
@@ -681,15 +758,9 @@ fn detect_hrot_capability(macos: bool, verbose: bool) -> bool {
         }
         apple_silicon
     } else {
-        // `systemd-analyze has-tpm2`, not `systemd-creds has-tpm2` — the latter is
-        // deprecated on systemd 257 (Rocky 10) and auto-redirects with a notice (#88).
-        let ok = std::process::Command::new("systemd-analyze")
-            .arg("has-tpm2")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let ok = tpm2_seal_roundtrip(verbose);
         if verbose {
-            eprintln!("exec: systemd-analyze has-tpm2 -> {ok}");
+            eprintln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
         }
         ok
     }
@@ -1096,19 +1167,23 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
 
     check_vault_reachable(&args.vault_addr)?;
 
-    // spec §4.1 step 1's two-tier HRoT gate: a coarse presence check first
-    // (clearer diagnostic than letting a missing TPM/SEP surface only as a
-    // confusing subprocess failure inside the probe below), THEN the real
-    // operator-context probe — which stays authoritative (this coarse check
-    // is advisory: it can't see the operator's own systemd-creds --user /
-    // Keychain access, only the host-level TPM/SEP presence).
+    // spec §4.1 step 1's two-tier HRoT gate, two DISJOINT surfaces:
+    //  1. the DAEMON seal capability (here): a hard gate that exercises the real
+    //     root `systemd-creds --with-key=tpm2` round-trip — the same mechanism
+    //     the step-5 daemon seal uses, proven pre-mint;
+    //  2. the OPERATOR CLI seal capability (the `--user` probe below): a separate
+    //     surface that can't be seen from here.
+    // Both must pass; this gate fails fast so a missing daemon TPM/SEP surfaces
+    // clearly rather than as a confusing subprocess failure inside the probe.
     if !detect_hrot_capability(macos, args.verbose) {
         eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
         return Err(EnrollError::HrotUnavailable {
             detail: if macos {
                 "no Secure Enclave detected (Apple Silicon required)".to_string()
             } else {
-                "systemd-analyze has-tpm2 reports no usable TPM2".to_string()
+                "daemon TPM2 seal round-trip failed (systemd-creds --with-key=tpm2) \
+                 — no usable TPM2 for the daemon credential"
+                    .to_string()
             },
         });
     }
@@ -1402,6 +1477,29 @@ pub async fn run_enroll_helper(args: HelperArgs) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #93 daemon TPM-detection mechanism (regression guard) -------------
+    // The `systemd-analyze has-tpm2` verb is v253+ and errors on RHEL 9's
+    // systemd 252. This test pins the daemon probe to the version-agnostic
+    // `systemd-creds encrypt --with-key=tpm2` round-trip so the regression
+    // cannot silently return.
+    #[test]
+    fn tpm2_probe_uses_systemd_creds_with_key_tpm2_not_has_tpm2_verb() {
+        let (bin, args) = tpm2_probe_argv("/run/probe.cred");
+        assert_eq!(bin, "systemd-creds");
+        assert!(
+            args.iter().any(|a| a == "encrypt"),
+            "must encrypt: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--with-key=tpm2"),
+            "must pin tpm2 key: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "has-tpm2"),
+            "has-tpm2 verb is v253+, absent on el9 (#93)"
+        );
+    }
 
     // ---- preflight_check (Step 2 TDD) --------------------------------------
 

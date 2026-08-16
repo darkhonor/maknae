@@ -1,0 +1,14 @@
+schema_version: 1
+permissions:
+  allow:
+    - "Read(~/**)"
+  deny:
+    - "Read(~/.ssh/**)"
+    - "Read(~/.gnupg/**)"
+    - "Read(~/.aws/**)"
+    - "Read(~/.vault-token)"
+    - "Read(~/.netrc)"
+    - "Read(~/.git-credentials)"
+    - "Read(~/.kube/**)"
+    - "Read(~/.docker/config.json)"
+    - "Read(~/.maknae/**)"

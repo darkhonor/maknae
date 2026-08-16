@@ -24,6 +24,7 @@ Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the li
 | Runtime-plane credentials (CLI SecretID + cert/key) | operator-uid; SecretID file `0o400`; CLI-generated key, memory-only cert; CLI's Vault policy signs **only** `plane/cli` ✓perms + per-plane policy-scope test (CLI SecretID cannot sign `plane/kernel`) | same ✓same | per-container identity ✓same | `deferred` |
 | Audit protection | kernel-owned `0700`; `chattr +a` **on the audit directory; the daemon appends to a single open fd it holds across the session** (rotation owed, ADR-0007) ✓`lsattr` assertion | `chflags sappnd` where securelevel permits ✓`ls -lO` | kernel-only volume ✓volume lint | `deferred` |
 | Config protection | kernel-owned `0600` (no append attr — upgrades edit) ✓perms check | same ✓same | kernel-only volume ✓lint | `deferred` |
+| Tokki packaging (MAC/trust install lifecycle) | deb/rpm (checksummed; signing #96) install the hardened unit + MAC policy + shipped DAC default. **SELinux** enforce-clean PROVEN (Rocky 10) ✓`getenforce` + scoped denial-clean run + fapolicyd-clean run. **AppArmor** profiles load ✓`aa-status`; serve-time enforce-clean pending #94 | `deferred (#76)` | `deferred` | `deferred (#81)` |
 
 ## Crate × binary matrix
 
