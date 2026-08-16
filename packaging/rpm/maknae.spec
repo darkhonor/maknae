@@ -5,7 +5,7 @@ Name:           maknae
 # tag is the single source of truth. Building without it fails loudly.
 Version:        %{_pkgversion}
 Release:        1%{?dist}
-Summary:        Maknae trust-plane daemon and CLI (local AI-agent platform)
+Summary:        Trust-plane daemon and operator CLI for a local AI-agent platform
 License:        Apache-2.0
 URL:            https://github.com/darkhonor/maknae
 
@@ -26,7 +26,7 @@ ExclusiveArch:  x86_64
 # SELinux policy compilation
 BuildRequires:  checkpolicy
 BuildRequires:  selinux-policy-devel
-# sysusers-dir / unit-dir macros + %sysusers_create_compat / %systemd_* scriptlets.
+# sysusers-dir / unit-dir macros + sysusers_create_compat / systemd_* scriptlets.
 BuildRequires:  systemd-rpm-macros
 
 Requires:       systemd
@@ -131,7 +131,7 @@ fi
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/maknae.pp
 %{_libexecdir}/maknae/maknae-selinux-ports.sh
-%{_sysconfdir}/fapolicyd/trust.d/maknae
+%config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
@@ -140,7 +140,7 @@ fi
 %ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 
 %changelog
-* Sun Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1
+* Mon Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1
 - Initial Tokki PR-T1 packaging: maknaed/maknae binaries, hardened systemd unit
   with TPM2 LoadCredentialEncrypted, SELinux TE policy (NNP process2 transition,
   credential-read, mandatory Vault egress via operator-labeled port, append-only
