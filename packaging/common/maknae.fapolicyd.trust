@@ -1,0 +1,6 @@
+# fapolicyd trust fragment for maknae -> /etc/fapolicyd/trust.d/maknae
+# Apply with: fapolicyd-cli --update  (never restart fapolicyd mid-transaction)
+# rpm-installed binaries are rpmdb-trusted already; this covers the edges.
+/usr/bin/maknaed
+# Future tool-exec path (structure-now, commented until the exec increment):
+# /usr/bin/maknae

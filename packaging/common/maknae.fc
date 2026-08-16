@@ -1,0 +1,8 @@
+# SELinux file contexts for Maknae.
+# Restore: restorecon -Rv /usr/bin/maknaed /etc/maknae /var/log/maknae
+
+/usr/bin/maknaed        --      gen_context(system_u:object_r:maknaed_exec_t,s0)
+/etc/maknae(/.*)?               gen_context(system_u:object_r:maknae_etc_t,s0)
+/etc/maknae/private(/.*)?       gen_context(system_u:object_r:maknae_private_t,s0)
+/var/log/maknae(/.*)?           gen_context(system_u:object_r:maknae_audit_t,s0)
+/run/maknae(/.*)?               gen_context(system_u:object_r:maknae_runtime_t,s0)

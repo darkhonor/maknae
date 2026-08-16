@@ -1,0 +1,57 @@
+[Unit]
+Description=maknae trust-plane daemon (maknaed)
+Documentation=https://github.com/darkhonor/maknae
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=_maknae
+# Socket-group gate (spec §5.2, Option 1): _maknae must be a member of `maknae` so
+# it can chgrp its own UDS to `maknae` WITHOUT CAP_CHOWN (the daemon drops all
+# caps). This is the SOLE membership mechanism (no on-disk membership, §5.3).
+# Superseded by systemd socket activation, #92.
+SupplementaryGroups=maknae
+ExecStart=/usr/bin/maknaed
+# systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
+# (0400, _maknae-only, memory-backed). Name pinned: enroll seals
+# --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.
+LoadCredentialEncrypted=maknaed-secret-id:/etc/maknae/private/maknaed-secret-id.cred
+RuntimeDirectory=maknae
+RuntimeDirectoryMode=0751
+# ProtectSystem=strict mounts /var/log read-only; without this the audit sink
+# open() gets EROFS and every boot fails closed. Chosen over LogsDirectory=
+# (which chowns/chmods at start, colliding with the chattr +a inode).
+ReadWritePaths=/var/log/maknae
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# aws-lc-fips (BoringCrypto) integrity self-test MAY need W^X — verified at
+# acceptance (spec §5/Task 4). Remove with a documented rationale if the FIPS
+# power-on self-test aborts under this directive.
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maknaed
+
+[Install]
+WantedBy=multi-user.target
