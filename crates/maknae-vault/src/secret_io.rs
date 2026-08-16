@@ -64,6 +64,13 @@ fn read_systemd_creds_user(path: &Path) -> Result<Zeroizing<String>, VaultError>
     let output = std::process::Command::new("systemd-creds")
         .arg("decrypt")
         .arg("--user")
+        // Pin the credential name to match the enroll-time seal
+        // (`systemd-creds encrypt --name=maknae-secret-id` in enroll/helper.rs).
+        // Without this, systemd-creds derives the expected name from the input
+        // FILENAME — `maknae-secret-id.cred`, WITH the extension — which does not
+        // match the embedded `maknae-secret-id` and fails "Name in credential
+        // doesn't match expectations." Runtime seam bug found on live hardware.
+        .arg("--name=maknae-secret-id")
         .arg(path)
         .arg("-")
         .output()
