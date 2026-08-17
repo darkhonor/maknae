@@ -34,11 +34,18 @@ profile maknaed /usr/bin/maknaed {
   /run/credentials/maknaed.service/      r,
   /run/credentials/maknaed.service/**    r,
 
-  # Audit sink — APPEND ONLY. `a`, never `w`: the sink opens O_APPEND and the
-  # trail is append-only by contract (§8.1 / §9.2). `w` here would let a
-  # compromised daemon truncate or rewrite the audit log. The packaging also
-  # sets `chattr +a` on the dir and file for defense-in-depth on non-MAC hosts.
+  # Audit sink. The sink opens the pre-created audit.jsonl with O_APPEND|O_CREAT
+  # (crates/maknae-audit-append/src/sink.rs) and may flock() it. AppArmor flags
+  # the O_CREAT as `c` (create) even on an existing file — unlike SELinux, which
+  # only checks `create` on actual creation — so `a` (append) alone denies the
+  # open and the daemon fails closed. Grant the audit FILE `rwk` (create/append/
+  # lock); the append-only GUARANTEE on AppArmor hosts is provided by the
+  # `chattr +a` the postinst sets on audit.jsonl (fs-level, survives daemon
+  # compromise), not by the MAC layer. Other files under the dir stay `a`.
+  # (Proper fix: make the sink not pass O_CREAT when the file exists, so the
+  # profile can return to append-only — tracked as a daemon follow-up.)
   /var/log/maknae/                       r,
+  /var/log/maknae/audit.jsonl            rwk,
   /var/log/maknae/**                     a,
 
   # Runtime UDS — the daemon binds its control socket in /run/maknae and needs
@@ -56,6 +63,11 @@ profile maknaed /usr/bin/maknaed {
 
   # /proc and /sys runtime introspection.
   @{PROC}/sys/net/core/somaxconn         r,
+  # cgroup detection: the runtime reads its own (and connecting peers') cgroup
+  # membership and the cgroup-v2 cpu limits (resource/parallelism detection).
+  @{PROC}/*/cgroup                       r,
+  /sys/fs/cgroup/                        r,
+  /sys/fs/cgroup/**                      r,
   /sys/devices/system/cpu/               r,
   /sys/devices/system/cpu/**             r,
 
