@@ -105,9 +105,20 @@ allow init_t maknae_secret_t:file { read open getattr };
 allow maknaed_t maknae_audit_t:dir { open read search getattr };
 allow maknaed_t maknae_audit_t:file { append open getattr lock };
 
-# UDS bind + chgrp in /run/maknae
+# UDS bind + chgrp in /run/maknae.
+# el10's systemd 257 labels the RuntimeDirectory=maknae dir `maknae_runtime_t`
+# (from the .fc), so el10 uses the tight grants below. el9's systemd 252 does NOT
+# relabel RuntimeDirectory dirs — it creates /run/maknae as `var_run_t` and
+# bypasses both the .fc selabel and a type-transition (empirically confirmed on
+# Rocky 9 fresh-boot, #101: filetrans had no effect). So on el9 the daemon binds
+# its socket in a var_run_t dir and needs the var_run_t grants too. This is
+# broader than ideal (var_run_t is a common /run type) — the accepted el9 cost of
+# the older selinux-policy; a tighter el9 RuntimeDirectory-labeling mechanism is a
+# follow-up. el10 is unaffected (it never creates objects in the bare var_run_t dir).
 allow maknaed_t maknae_runtime_t:dir { open read search getattr add_name write remove_name };
 allow maknaed_t maknae_runtime_t:sock_file { create setattr getattr unlink };
+allow maknaed_t var_run_t:dir { add_name write remove_name };
+allow maknaed_t var_run_t:sock_file { create setattr getattr unlink };
 allow maknaed_t self:unix_stream_socket { create bind listen accept read write getattr setopt getopt shutdown connectto };
 
 # Vault egress is MANDATORY for maknae (unlike Microkosmos's opt-in) — the daemon
