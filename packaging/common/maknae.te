@@ -80,10 +80,19 @@ allow maknaed_t maknae_private_t:file { read open getattr };
 gen_require(`
     type var_run_t;
     type init_var_run_t;
+    type tmpfs_t;
 ')
 allow maknaed_t var_run_t:dir { search getattr open read };
 allow maknaed_t init_var_run_t:dir { search getattr open read };
 allow maknaed_t init_var_run_t:file { read open getattr };
+# el9 vs el10 label split (empirically confirmed 2026-08-17 via an
+# `ls -Z /run/credentials/<unit>.service/` probe): el10 labels the decrypted
+# credential FILE `init_var_run_t`; RHEL/Rocky 9's older selinux-policy labels it
+# `tmpfs_t` (the per-service credentials ramfs). Without this grant the daemon is
+# denied reading its own SecretID under enforcement on el9 and can't AppRole-auth.
+# (Broader than ideal — tmpfs_t is a common type; narrow when el9 policy exposes a
+# credential-specific type, tracked with the systemd_read_credentials follow-up.)
+allow maknaed_t tmpfs_t:file { read open getattr };
 
 # systemd (init_t) must read the sealed .cred (maknae_secret_t) to decrypt it via
 # LoadCredentialEncrypted= — grant init_t (NOT maknaed_t) that access + dir search.
