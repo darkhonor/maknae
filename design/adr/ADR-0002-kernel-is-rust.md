@@ -4,6 +4,10 @@
 - **Date:** 2026-07-14
 - **Deciders:** Alex Ackerman (operator)
 
+> **Amendment (2026-08-22, via [ADR-0004](ADR-0004-modular-authorization-architecture.md) — Accepted).** Two Cedar-dependent references below are reconciled to ADR-0004 (which supersedes ADR-0003). The Rust-kernel decision and its rationale are unaffected; only these Cedar citations move:
+> - **Consequences bullet 1 ("Policy engine selection interacts… Cedar is Rust-native; see ADR-0003").** Authorization is no longer a single policy engine. The kernel reaches policy through the policy-agnostic **`maknae-security` seam** and composes pluggable **`maknae-authz-*` backends** deny-overrides ([ADR-0004](ADR-0004-modular-authorization-architecture.md), [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md)); Cedar, if ever used, is one *optional* backend (`maknae-authz-cedar`), not load-bearing for the Rust-kernel choice.
+> - **SA-17(1) mapping ("the ADR-0003 formally verified policy core").** Read that row's SA-17(1) evidence as the **type-encoded KLC §15 invariants and the seam/backend composition** alone; Cedar's verified evaluator is no longer part of this ADR's control story. (Per the RL#1 review, formal verification of an *evaluator* was never SA-17(1)'s authored-policy-model requirement anyway — claim it as SA-17(3) "evidence toward.")
+
 ## Context
 
 The trust plane kernel mediates every decision (all six KLC §10 hooks); a memory-safety defect there is not a bug but a trust-plane compromise — the one failure the architecture cannot absorb. The team's development model is AI implementation under architect direction, which shifts the language question from "what can the team write?" to "what best verifies code the humans did not write?"

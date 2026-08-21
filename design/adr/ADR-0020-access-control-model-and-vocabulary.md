@@ -4,6 +4,8 @@
 - **Date:** 2026-08-21
 - **Deciders:** Alex Ackerman (operator)
 
+> **Amendment (2026-08-22, via [ADR-0004](ADR-0004-modular-authorization-architecture.md) — Accepted).** Where the Scope boundary and References below defer engine selection to "the Cedar spike, ADR-0003," read that as **ADR-0004**: the concrete authorization architecture is the policy-agnostic `maknae-security` seam with pluggable `maknae-authz-*` backends, which *realize* this ADR's RBAC/ABAC vocabulary and deny-overrides composition. Cedar is one *optional* backend (`maknae-authz-cedar`), not a pending spike; ADR-0003 is superseded.
+
 ## Context
 
 Maknae's documentation and code have used the terms *DAC*, *MAC*, *RBAC*, *ABAC*, and *DCS* loosely and inconsistently. The cost has been real and recurring: the README described a "Data-Centric Security" design extension the code had already externalized; a refresh over-corrected to "a generic **DAC** access policy," conflating the code's operand name (`DAC`, the `Read`/`Bash` capability grammar in `maknae-config/authz.rs`) with traditional OS file-permission DAC; and reviewers repeatedly flagged apparent contradictions that were really vocabulary drift. A single authoritative vocabulary is needed before the docs harden around the wrong words.
