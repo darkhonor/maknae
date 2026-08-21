@@ -1,6 +1,6 @@
 # AGENTS.md — Maknae core development guidance
 
-Canonical, tool-agnostic guidance for everyone developing Maknae — human engineers and AI agents alike. `CLAUDE.md` is a symlink to this file; Codex, opencode, and other tools read `AGENTS.md` directly, so the guidance is identical for every tool. This file holds **core principles and conventions**; the load-bearing detail lives in the linked authority (the KLC contract, the ADRs, the code). It is deliberately short and grows in a **measured, self-correcting style** — see [How to change this file](#how-to-change-this-file).
+Canonical, tool-agnostic direction for the **AI agents and tools** that work on Maknae. `CLAUDE.md` is a symlink to this file; Codex, opencode, and other tools read `AGENTS.md` directly, so the direction is identical for every agent. Human contributors: see [`CONTRIBUTING.md`](CONTRIBUTING.md) for onboarding and the development workflow — the principles here apply to your work too, but the human-process detail lives there. This file holds **core principles and conventions**; the load-bearing detail lives in the linked authority (the KLC contract, the ADRs, the code). It is deliberately short and grows in a **measured, self-correcting style** — see [How to change this file](#how-to-change-this-file).
 
 ## Authority & currency guard
 
