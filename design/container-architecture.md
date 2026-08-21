@@ -7,6 +7,14 @@
 | **Scope** | Container decomposition for both deployment models (Compose/Podman stack; full Kubernetes), per-container language selection, trust levels, volumes |
 | **Doctrine** | Language targets best fit for the action being done. Kernel is 100% Rust (operator-ratified 2026-07-14). TDD everywhere (§5). |
 
+---
+
+> **Currency note (reconciled 2026-08-22).** This is 2026-07-14 design intent; per the AGENTS.md authority guard, the accepted **ADRs win** wherever they and this doc disagree. **Still current:** the container decomposition and the language-per-action doctrine. **Superseded, and corrected inline below:**
+> - **Authorization is modular, not "pick Cedar."** Policy is decided behind the versioned, policy-agnostic **`maknae-security` seam** with pluggable **`maknae-authz-*` backends** ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)) — a bundled RBAC default (`maknae-authz-basic`), plus optional DCS / Cedar / SELinux backends. This **supersedes the KLC §14-Q5 "Cedar vs. OPA spike"** framing (§3.1, §6, §7): Cedar is now one *optional* backend ([ADR-0003](adr/ADR-0003-cedar-policy-engine.md), **superseded**), not a spike to be won.
+> - **DCS enforcement is external.** The classification lattice, SPIF, dominance engine, and any at-rest label projection **relocated to the private `rust-dcs` library** (ADR-0008/0017 relocated), reached only through the seam. The **PostgreSQL RLS-from-SPIF backstop** described in §2 / §3.9 / §6 ("fourth projection", "Security MCP harvest", "Cedar interaction") is superseded — its "ratified 2026-07-15" status does **not** survive.
+> - **The at-rest data store is an open requirement, not settled.** Whether and how operational state is stored and label-enforced at rest is tracked in **#2** (storage / label-integrity) and **#20** (vendor-substrate trust locus); the direction under consideration is **Apache Accumulo** cell-level visibility, *not* the ratified PostgreSQL RLS below.
+> - **Locus, lifecycle, audit, vocabulary are fixed by ADRs:** [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md) (split-kernel, mTLS, sole PDP), [ADR-0018](adr/ADR-0018-local-plane-authorization-deployment-model.md) (local-plane authz + enrollment), [ADR-0019](adr/ADR-0019-audit-record-model.md) (audit record model), [ADR-0020](adr/ADR-0020-access-control-model-and-vocabulary.md) (RBAC/ABAC over DAC/MAC, deny-overrides, no clearance bypass).
+
 ## 1. Principles
 
 1. **One trust plane, few trusted containers.** The kernel and the egress enforcement point are the only containers whose compromise defeats the architecture. Everything else is constrained by them, not trusted alongside them.
@@ -27,15 +35,15 @@
 | 6 | `dreamer` | Runtime (scoped identity) | Untrusted by design | **Python** | Proposed |
 | 7 | `web-ui` | Interaction | Security-relevant | **TypeScript** | Proposed; post-MVP |
 | 8 | `vault-agent` | Cross-cutting | Vendor | n/a (HashiCorp image) | Ratified pattern |
-| 9 | `state-store` | Data | Untrusted-adjacent (enforces, never decides) | n/a (PostgreSQL vendor image + Maknae-owned SQL migrations) | **Ratified 2026-07-15** |
+| 9 | `state-store` | Data | Untrusted-adjacent (enforces, never decides) | ~~PostgreSQL + generated RLS~~ — at-rest store is the open **#2 / #20** decision (Accumulo direction) | **Superseded** — the 2026-07-15 ratification does not survive (Currency note) |
 
-MVP builds six images (1–6); `web-ui` is deferred per the roadmap; `vault-agent` and `state-store` are vendored images (the state store ships with Maknae-owned migrations and generated RLS policies, and is part of the MVP stack — RLS is live from Phase A). Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
+MVP builds six images (1–6); `web-ui` is deferred per the roadmap; `vault-agent` is a vendored image. *(The `state-store` row and its "PostgreSQL RLS live from Phase A" claim are **superseded** — see the Currency note; whether/how operational state is stored and label-enforced at rest is the open #2/#20 decision, direction Apache Accumulo, not the ratified PostgreSQL-RLS model.)* Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
 
 ## 3. Per-container detail
 
 ### 3.1 `kernel` — Rust (ratified)
 
-The trust plane: PDP (policy engine), label-schema enforcement, all six KLC hooks, skill-registry signature verification, and the append-only audit writer. Rationale for Rust: memory-safety CSI alignment (the language choice is a citable control), KLC §15 invariants encoded in the type system (illegal states unrepresentable — a `tier_ceiling` automation cannot raise, a downgrade constructible only from a consumed signed authorization), FIPS 140-3 via `aws-lc-rs` (Microkosmos precedent), static binary into a distroless/from-scratch image (TaeBot pattern). Policy engine integration is the KLC §14 Q5 spike — **noting Cedar is Rust-native (`cedar-policy` crate, formally verified core) while OPA embeds via Wasm or sidecars; the pairing is not neutral and the spike must weigh it.**
+The trust plane: PDP (the sole policy decision point, ADR-0005), label-schema enforcement, all six KLC hooks, skill-registry signature verification, and the append-only audit writer. Rationale for Rust: memory-safety CSI alignment (the language choice is a citable control), KLC §15 invariants encoded in the type system (illegal states unrepresentable — a `tier_ceiling` automation cannot raise, a downgrade constructible only from a consumed signed authorization), FIPS 140-3 via `aws-lc-rs` (Microkosmos precedent), static binary into a distroless/from-scratch image (TaeBot pattern). The kernel reaches policy through the **policy-agnostic `maknae-security` seam** and composes pluggable `maknae-authz-*` backends deny-overrides ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md), [ADR-0020](adr/ADR-0020-access-control-model-and-vocabulary.md)) — *superseding the KLC §14-Q5 "pick a policy engine" spike; Cedar is now one optional backend, not the engine.*
 
 ### 3.2 `egress-proxy` — Rust (proposed)
 
@@ -65,7 +73,9 @@ Operator console: onboarding wizard (authority map authoring — emits operator-
 
 HashiCorp Vault Agent sidecar per service that needs secrets: AppRole auto-auth, short-TTL token to a tmpfs sink, services consume via native Vault API (no shell-outs, no templated files on disk) — the TaeBot `vault_bootstrap` pattern generalized, per the README's Vault-native ruling. Secrets engines are operator-configured, potentially independent per MLS secret target.
 
-### 3.9 `state-store` — PostgreSQL (vendor image; ratified 2026-07-15)
+### 3.9 `state-store` — ~~PostgreSQL (ratified 2026-07-15)~~ **Superseded**
+
+> **Superseded (Currency note).** The concept — a labeled operational-state store distinct from the Lake — may survive, but the **engine and enforcement below are not current**: the DCS lattice/SPIF and any at-rest RLS projection relocated to `rust-dcs`, and the at-rest store is the open **#2** (storage/label-integrity) / **#20** (vendor-substrate) decision, with **Apache Accumulo** cell-visibility the direction under consideration, not PostgreSQL RLS. The 2026-07-15 ratification does not survive. Text below is retained as the original design record.
 
 The platform's labeled operational state: per-operator session/conversation state (born at the high-water mark of its inputs), scheduler task definitions, the memory recall (FTS) index, and the structured audit query surface. Knowledge stays in the Lake; Tier-0 config stays signed-git (the store may hold materialized copies for joins, never the authority). Every table carries the full DCS column set; label columns are `NOT NULL`; RLS policies are **generated from the SPIF** by trust-plane tooling and deployed with the migrations — `SET LOCAL` per-transaction subject attributes, `FORCE ROW LEVEL SECURITY`, non-superuser service roles without `BYPASSRLS`, deny-all default policies. Data plane, untrusted-adjacent: RLS *enforces* as the at-rest backstop (layer 3); the kernel remains the only decision-maker. Precedent: the Security MCP's PostgreSQL engine, with the RLS layer that project consciously deferred built here from birth.
 
@@ -79,7 +89,7 @@ The platform's labeled operational state: per-operator session/conversation stat
 | `authority-config` | kernel (ro) | Tier 0: authority map, operator attributes, lattice + instance ceiling; changes arrive as signed commits, not writes |
 | `vault-sink` | per-service tmpfs | Never a named persistent volume |
 | `persona-workspace` | runtime (rw), gateway (ro) | Multi-file bundle, first-class (never runtime-flattened — the TaeBot/Hermes lesson) |
-| `state-data` | state-store (pgdata) | Labeled operational state; DCS columns + generated RLS travel with the data; no other container mounts it — access is SQL through layer-2 PEPs only |
+| `state-data` | state-store (pgdata) | Labeled operational state. *(The DCS-columns / generated-RLS / `pgdata` specifics are superseded — see §3.9 and the Currency note; the at-rest store is the open #2/#20 decision.)* |
 
 ## 5. TDD doctrine — tests as the mutation shield
 
@@ -109,16 +119,16 @@ The risk: six containers in four languages each growing their own label/lattice/
 
 **Conformance vectors are the enforcement.** KLC §15 invariants plus label-dominance cases ship as language-neutral golden test vectors; every implementation that touches labels — the kernel, every binding, any future port — must pass the identical vectors in CI. Bindings prevent re-implementation; vectors catch divergence anyway.
 
-**The state store's RLS predicates are a fourth projection of the same policy, not a new implementation:** generated from the SPIF by trust-plane tooling (never hand-written SQL), parity-checked at kernel boot, and run against the identical conformance vectors on a real PostgreSQL in CI.
+**~~The state store's RLS predicates are a fourth projection…~~ — Superseded** (Currency note): the SPIF and any at-rest label projection relocated to `rust-dcs`, and the at-rest store itself is the open **#2 / #20** decision (Apache Accumulo direction), not the PostgreSQL-RLS-from-SPIF model described here.
 
-**Security MCP harvest:** its Go ABAC gateway is the semantic reference — attribute schemas, gating semantics, and test cases port into kernel policy and the conformance vectors. Its gateway code is candidate vendoring for the Go `gateway` container (same language, same function); its decision logic is deliberately NOT linked as a library — decisions move to the kernel, and the Go code's job becomes enforcement and identity assertion.
+**Security MCP harvest:** the Go ABAC gateway's *decision/label* semantics seeded the DCS engine, which **now lives in the external `rust-dcs` library** — that harvest is rust-dcs work, not in-repo (the Maknae-side issue closed as relocated). Its gateway *code* remains candidate vendoring for the Go `gateway` container (same language, same enforcement/identity-assertion job); decisions move to the kernel regardless.
 
-**Cedar interaction:** if Cedar wins the Q5 spike, the policy language itself becomes cross-language shared capability (official Rust core, official Go implementation, Python bindings) with upstream conformance testing — a further weight the spike must record.
+**~~Cedar interaction~~ — Superseded:** there is no "Cedar wins the spike" branch. Cedar is an optional `maknae-authz-cedar` backend behind the seam ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)) where a deployment's complexity or formal-verification needs justify it — never the platform's policy engine.
 
 ## 7. Open items
 
-1. Cedar vs. OPA spike (KLC §14 Q5) — Cedar is the leading candidate per ADR-0003 (Rust-native pairing §3.1, cross-language implementations §6, formally verified core); the spike confirms or overturns.
+1. ~~Cedar vs. OPA spike (KLC §14 Q5).~~ **Resolved** — superseded by [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md): authorization is the modular `maknae-security` seam + bundled `maknae-authz-basic` (RBAC) default, with Cedar an *optional* backend. No spike.
 2. Channel vote decides `gateway` SDK details and whether the TypeScript alternative is live (§3.3).
 3. Kubernetes profile specifics (PSA levels, NetworkPolicy set, operator vs. plain manifests) — after the Compose stack proves the shape.
 4. Whether `egress-proxy` and `kernel` share an image with distinct entrypoints or build separately — decide at kernel-skeleton time; trust-plane review treats them as one surface either way.
-5. Maknae's authorization seam — the policy-agnostic interface Maknae uses to reach an optional DCS-aware evaluation library (§6) — is the next in-repo build; the DCS library itself is external.
+5. ~~Maknae's authorization seam … is the next in-repo build.~~ **Done** — the seam is built (`crates/maknae-security`, [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)); the DCS library itself is external. Next in-repo build is the bundled `maknae-authz-basic` backend (#85) plus wiring per-request evaluation (#77).
