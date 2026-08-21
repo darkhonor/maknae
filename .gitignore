@@ -8,3 +8,27 @@ Cargo.lock.orig
 # Python bytecode (the gate helper is source-of-record only)
 __pycache__/
 *.pyc
+
+# AI agent tool working directories — kept local, never committed. Project
+# guidance is centralized in AGENTS.md (with CLAUDE.md symlinked to it); these
+# per-tool dirs hold local session/config scaffolding that does not belong in
+# the repo. Trailing slashes match directories only, so the CLAUDE.md /
+# AGENTS.md files are untouched by the .claude/ / .agents/ patterns.
+.claude/
+.codex/
+.cursor/
+.opencode/
+.gemini/
+.pi/
+.continue/
+.windsurf/
+.aider*/
+.agents/
+
+# Guidance docs stay tracked. These negations are belt-and-suspenders for the
+# untracked case only (a tracked file is unaffected by ignore rules); git is
+# last-match-wins, so they guard against a broader pattern added ABOVE and must
+# remain the last matching rules for these paths — a broader ignore added below
+# would override them.
+!AGENTS.md
+!CLAUDE.md
