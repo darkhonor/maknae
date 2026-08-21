@@ -1,0 +1,149 @@
+# Contributing to Maknae
+
+Thanks for your interest in contributing to Maknae — a security-hardened personal AI agent platform built around a deny-by-default trust plane. This is the **human contributor guide**: onboarding, the development workflow, and the conventions this repository follows. AI agents and tools working in this repo read [`AGENTS.md`](AGENTS.md) instead (`CLAUDE.md` is a symlink to it) — its **core principles apply to your work too**, so read it once before you start; this file is the human process around them.
+
+Maknae is pre-MVP and its posture is DoD DevSecOps (deny-by-default, fail-closed, RMF/STIG/FIPS-aware). Contributions are held to that bar — the discipline is the point, not an afterthought.
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). By participating you agree to uphold it. Report conduct concerns to `conduct@maknae.io`. There is no place here for harassment or hate in any form.
+
+## Where the guidance lives
+
+- [`AGENTS.md`](AGENTS.md) — the **core principles and conventions** (deny-by-default, nothing self-promotes, fail-closed testing, the access-control vocabulary). They bind human and AI work alike.
+- [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — the governance spec (KLC). Its invariants are acceptance criteria: violating one is a wrong answer even if the code works.
+- [`design/adr/`](design/adr/) — architecture decision records. A choice that constrains future work is recorded as an ADR (see the registry and the measured style in `AGENTS.md`).
+- [`design/references/`](design/references/) — assessments of comparable platforms we've surveyed.
+
+## Asking for help vs. filing an issue
+
+- **Design or usage questions** — start with the KLC contract and the ADRs; if they don't answer it, file an issue framed as a docs gap.
+- **Bug** (something behaves differently from what the spec/ADR says) — file a bug (see below).
+- **Security vulnerability** — do **not** open a public issue; see [Reporting a security vulnerability](#reporting-a-security-vulnerability).
+
+## Reporting a bug
+
+A bug report's most useful contents are the ones that let a maintainer *reproduce* it: what you did, what happened, what the spec/ADR led you to expect, and the smallest input that triggers it.
+
+**Reported bugs start with a failing test.** Before a fix, the first deliverable is a test that fails *for the reporter's reason* — then the fix makes that same test pass. Assert at the altitude the reporter is looking at it: a file on disk, an audit line, or a policy verdict can each be correct while the surface is wrong. Confirm you have *seen the test fail* before trusting it, and after fixing, revert the fix once to watch it go red again — an assertion never observed failing is not evidence. Prefer the reporter's real configuration over a convenient stand-in: a stub proves the plumbing and hides everything else; where a stand-in is unavoidable, say so in the test and name what it stands in for. (This is the `reproduce-first` discipline; `AGENTS.md` carries it as a core principle.)
+
+## Reporting a security vulnerability
+
+**Do not file a public issue for a vulnerability.** Use this repository's **private vulnerability reporting** — GitHub → the repo's **Security** tab → **Report a vulnerability** (private Security Advisories) — so the conversation stays private until a fix ships. See [`SECURITY.md`](SECURITY.md) for the full policy, scope, and what counts as high-priority. Given Maknae's threat model — the agent runtime is untrusted by design and the trust plane is the control — a report that a mediated action can escape the reference monitor, that a mandatory constraint can be bypassed, or that a label/authority can be forged is high-priority; include the smallest reproducing case you can.
+
+## Suggesting an enhancement
+
+File an issue with a summary, the use case, and a proposed approach. Call out any STIG / NIST 800-53 or KLC-invariant implications — Maknae's whole value is that security is structural, so an enhancement's effect on the trust plane is first-class context, not a footnote.
+
+## Development setup
+
+### Prerequisites
+
+Maknae is a Rust workspace. The toolchain version is pinned via [`rust-toolchain.toml`](rust-toolchain.toml) and installed automatically by [`rustup`](https://rustup.rs/) on first build (`cargo`, `rustc`, `clippy`, `rustfmt` come with it).
+
+The pre-push gates need a few cargo subcommands and helpers beyond rustup. **Derive the authoritative list from [`.github/workflows/ci.yml`](.github/workflows/ci.yml)** — it installs exactly what the gate runs, so it stays current as the gate evolves. As of this writing that is `cargo-deny` (supply-chain policy, against [`deny.toml`](deny.toml)), `cargo-llvm-cov` + the `llvm-tools` component (coverage), `cargo-mutants` (the mutation gate), and `python3` / `bash` for the `ci/gates/*` scripts. Install the cargo subcommands with `cargo install <name>` (CI runners already have them).
+
+### Cloning on Windows — turn symlinks on *first*
+
+This repository tracks `CLAUDE.md` as a **symlink** to `AGENTS.md`. Git materializes it as a real link only when `core.symlinks` is on — on Windows that means **Developer Mode is enabled** (Settings → System → For developers) or git ran elevated. Otherwise git writes `CLAUDE.md` as a plain ~9-byte text file containing the string `AGENTS.md`, silently, and any tool that reads `CLAUDE.md` for the project's conventions gets *no guidance at all*.
+
+So enable Developer Mode (or `git config --global core.symlinks true`) **before** cloning, and confirm on a fresh clone:
+
+```bash
+readlink CLAUDE.md   # must print: AGENTS.md
+```
+
+If it prints nothing and `CLAUDE.md` is a tiny text file, the clone came out wrong — re-clone with symlinks enabled.
+
+### Clone and build
+
+```bash
+git clone git@github.com:darkhonor/maknae.git
+cd maknae
+cargo build --workspace
+```
+
+## The pre-push gate
+
+CI (`.github/workflows/ci.yml`) runs a fail-closed gate on every push — a `build-and-gate` job and a `mutation` job. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
+
+At minimum, before every commit:
+
+```bash
+cargo fmt --all --check
+for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs; do
+  cargo clippy -p "$p" --all-targets -- -D warnings
+done
+cargo test --workspace
+```
+
+Before you push, run the heavier gates the CI job runs (derive the current, authoritative set from `ci.yml`):
+
+```bash
+cargo deny check
+ci/gates/p1-manifest-lint.sh
+ci/gates/p2-invert-tree.sh
+ci/gates/p2-artifact-witness.sh
+ci/gates/build-invocation-lint.sh
+ci/gates/isolation-contract-lint.sh
+ci/gates/negative-control.sh
+bash ci/gates/coverage-tiers.sh --root .            # risk-tiered coverage (ADR-0016)
+bash ci/gates/coverage-tiers.sh --root . --mutants-all   # mutation gate (slow; run before push)
+```
+
+Two gates deserve a note:
+
+- **`negative-control.sh`** exists to prove a passing gate actually *fails when it should*. A green run that was never observed failing proves nothing — respect it, and never weaken it to make a run go green.
+- **`coverage-tiers.sh`** is the **fail-closed** coverage contract ([ADR-0016](design/adr/ADR-0016-risk-tiered-test-coverage.md), [`coverage-tiers.toml`](coverage-tiers.toml)): every tracked `.rs` file resolves to exactly one tier, and unclassified / stale / (non-T3) uncovered code is a hard failure, not a warning. If you add a source file, classify it.
+
+## Testing discipline
+
+- **TDD** — write the failing test first, then the implementation. Because much of the code is AI-implemented, the suite doubles as **mutation-proofing** (`cargo-mutants` runs in CI): prove each assertion can go red.
+- **Test the real decision path**, not a mock — a genuine policy verdict with a uniquely-named fixture, not a stubbed authorizer. A stand-in proves the plumbing and hides everything else.
+- **Reproduce-first for bugs** — see [Reporting a bug](#reporting-a-bug).
+
+## Commit conventions
+
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/). The type (and optional scope) feeds `git log` scanning and future changelog tooling. Real examples from this repo:
+
+```
+fix(selinux): el9 socket bind — grant maknaed_t var_run_t dir/sock_file ops
+docs(adr): add ADR-0020 access-control model & vocabulary
+fix(apparmor): maknaed crashes on fresh AppArmor install
+docs(readme): agent-guidance labeling + name all four surveys
+```
+
+Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`. Reference issues with `Refs #NN` / `Closes #NN`.
+
+**AI-assisted commits carry a co-author trailer** for provenance, naming the actual model used:
+
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+
+## Pull requests
+
+`main` is protected: every change lands through a pull request that a maintainer reviews.
+
+1. **Branch from `main`** — `git checkout -b <type>/<short-name>` (e.g. `fix/enroll-rotate`). Do not commit to `main` directly.
+2. **Make the change with tests**, run the pre-push gate locally, and keep commits Conventional-Commit-formatted.
+3. **Open the PR** and reference related issues in the description. Say what changed and why; note any trust-plane, protocol, or ADR impact.
+4. **Wait for review.** `hobibot` reviews PRs; address every finding — fix it, or say why not. A green CI check is not the review; read the review comments before expecting a merge.
+5. **The project owner merges.** Merging (like tag pushes and any direct write to `main`) is an operator-driven action, not delegated — do not merge your own PR.
+
+## Decisions become ADRs
+
+A choice that constrains future work — an interface, a security property, a vocabulary — is recorded as an ADR under [`design/adr/`](design/adr/), allocated in the registry, and written in the measured, self-correcting style described in `AGENTS.md` (state the decision, the failure that motivated it, and date any later correction). External ADRs (from other projects) are provenance, never authority — if a decision matters here, we make it here.
+
+## Code style
+
+- **`cargo fmt`** — strict; the CI gate rejects unformatted code.
+- **`cargo clippy --all-targets -- -D warnings`** — clippy lints are errors. If you must silence one, do it inline with `#[allow(...)]` and a comment saying why.
+- **Small, focused files** — if a file grows past a couple hundred lines, that's usually a signal to split by responsibility.
+- **Doc comments on public items**, and reference the STIG ID or NIST control inline where code implements a specific control — the code is its own evidence.
+
+## What not to do
+
+- **No specs or plans in the repo** — development-process artifacts live outside it (see the rule in `AGENTS.md`); ask the operator for the location if you don't have one.
+- **Nothing self-promotes** — no content, skill, or config gains authority without transiting the promotion pipeline.
+- **No permissive or bypass modes** — deny-by-default applies to designs too; absence of an explicit permission is a denial.
