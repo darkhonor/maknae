@@ -65,8 +65,8 @@ Test-driven development applies to every container in every language; because se
 Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` daemon (with STIG-baselined packaging and SELinux/AppArmor profiles), the DAC authorization schema, and the local-plane enrollment model ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)) are landing. The phased plan:
 
 1. **Governance baseline** — Knowledge Lifecycle Contract review; authority basis aligned to the Knowledge Lake's authority-line model; the open questions resolved with rationale.
-2. **Policy engine spike** — Cedar vs. alternatives evaluated against the enforcement hooks as the acceptance test ([ADR-0003](design/adr/ADR-0003-cedar-policy-engine.md)).
-3. **Trust-plane kernel** — policy engine, the authorization seam, and audit events *(underway)*.
+2. **Authorization seam & default backend** — build the bundled RBAC default (`maknae-authz-basic`) behind the versioned, policy-agnostic `maknae-security` seam and wire per-request evaluation ([ADR-0004](design/adr/ADR-0004-modular-authorization-architecture.md)). Optional `maknae-authz-*` backends — classification via the external DCS library, or Cedar — are scoped as follow-on, not the core engine decision.
+3. **Trust-plane kernel** — the reference monitor (`maknaed` as the sole PDP) composing the authorization backends deny-overrides, and audit events *(underway)*.
 4. **Lake integration** — a portable lake instance, authority map v0.1 (egress allowlist plus authority basis), and the quarantine ingest path.
 5. **Learning loop MVP** — gap detection → authorized fetch → quarantine → out-of-band consolidation ("dreaming") → gated promotion.
 6. **Gateway and web UI** — an onboarding wizard (CLI and web) for authority configuration, and the scheduler with scoped task identities.
