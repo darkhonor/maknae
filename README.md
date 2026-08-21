@@ -7,7 +7,7 @@
 | **Status** | Early implementation. Trust-plane crates, the `maknaed` daemon, the DAC authorization schema, and local-plane enrollment are landing; pre-MVP. |
 | **Domain** | https://maknae.io (registered, Cloudflare; holding page pending) |
 | **Core spec** | [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — read this first |
-| **Contributor guide** | [`AGENTS.md`](AGENTS.md) — core principles and conventions (`CLAUDE.md` is a symlink to it) |
+| **Agent guidance** | [`AGENTS.md`](AGENTS.md) — core principles and conventions for AI agents and tools (`CLAUDE.md` is a symlink to it) |
 | **Team** | Alex (architect/owner) + two engineers |
 | **License** | TBD (MIT leaning, pending team decision) |
 
@@ -97,7 +97,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 
 ## Working in this repo
 
-Start with [`AGENTS.md`](AGENTS.md) — it carries the core principles and conventions for everyone working on Maknae, human or AI, and points at the load-bearing detail. In short: deny-by-default applies to designs too (absence of a permission is a denial); nothing self-promotes (no content, skill, or config gains authority without transiting the promotion pipeline); verify through the fail-closed gates in [`ci/gates/`](ci/gates/); and record decisions as ADRs. The [Knowledge Lifecycle Contract](design/knowledge-lifecycle-contract.md) invariants are acceptance criteria — violating one is a wrong answer even if the code works.
+Start with [`AGENTS.md`](AGENTS.md) — the direction Maknae's AI agents and tools follow, and a useful reference for human contributors. It carries the core principles and conventions and points at the load-bearing detail. In short: deny-by-default applies to designs too (absence of a permission is a denial); nothing self-promotes (no content, skill, or config gains authority without transiting the promotion pipeline); verify through the fail-closed gates in [`ci/gates/`](ci/gates/); and record decisions as ADRs. The [Knowledge Lifecycle Contract](design/knowledge-lifecycle-contract.md) invariants are acceptance criteria — violating one is a wrong answer even if the code works.
 
 ## Lineage & related work
 
@@ -106,7 +106,7 @@ Maknae's two reference implementations are the operator's production agents — 
 - **OpenClaw** — https://github.com/openclaw/openclaw (layered-control reference)
 - **Hermes Agent** — https://github.com/NousResearch/hermes-agent (learning-first reference)
 
-It also builds on the operator's prior work: the [**Knowledge Lake**](https://github.com/mpe-es/knowledgebase) (authority-tiered, deterministic markdown retrieval — the architecture Maknae's lake is a portable instance of), [**Claude Memory**](https://github.com/darkhonor/claude-memory) (the shared memory system with out-of-band "dreaming" consolidation), the **Security MCP Server** (a live OAuth 2.1 + ABAC gateway — prior art for the kernel's decision point), and [**Microkosmos**](https://github.com/mpe-es/microkosmos) (the FIPS 140-3 Rust precedent). Assessments of comparable third-party platforms live in [`design/references/`](design/references/).
+It also builds on the operator's prior work: the [**Knowledge Lake**](https://github.com/mpe-es/knowledgebase) (authority-tiered, deterministic markdown retrieval — the architecture Maknae's lake is a portable instance of), [**Claude Memory**](https://github.com/darkhonor/claude-memory) (the shared memory system with out-of-band "dreaming" consolidation), the **Security MCP Server** (a live OAuth 2.1 + ABAC gateway — prior art for the kernel's decision point), and [**Microkosmos**](https://github.com/mpe-es/microkosmos) (the FIPS 140-3 Rust precedent). Assessments of comparable third-party platforms live in [`design/references/`](design/references/): the [**DeepSeek Harness**](design/references/2026-08-14-deepseek-harness-assessment.md) (a TypeScript agent harness) and [**Agent Deck**](design/references/2026-08-21-agent-deck-assessment.md) (a Rust multi-agent TUI orchestrator).
 
 ## License
 
