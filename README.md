@@ -4,128 +4,113 @@
 
 | | |
 |---|---|
-| **Status** | Pre-implementation. Architecture and governance specs under team review. |
+| **Status** | Early implementation. Trust-plane crates, the `maknaed` daemon, the DAC authorization schema, and local-plane enrollment are landing; pre-MVP. |
 | **Domain** | https://maknae.io (registered, Cloudflare; holding page pending) |
 | **Core spec** | [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — read this first |
+| **Contributor guide** | [`AGENTS.md`](AGENTS.md) — core principles and conventions (`CLAUDE.md` is a symlink to it) |
 | **Team** | Alex (architect/owner) + two engineers |
 | **License** | TBD (MIT leaning, pending team decision) |
 
 ---
 
-## 1. What Maknae is
+## What Maknae is
 
 Maknae is a personal AI agent platform built around a **security kernel**. Where existing agent platforms treat security as configuration sprinkled on top of a capable runtime, Maknae inverts the relationship: a small, auditable **trust plane** mediates every action, every piece of knowledge, and every network flow, with the agent runtime treated as untrusted by design. Deny by default, everywhere, always.
 
 The platform's defining feature is a **governed learning loop**: the agent is permitted to learn — generating skills from experience and ingesting documents into its own local Knowledge Lake when tasked work reveals a gap — but every piece of acquired knowledge flows through a single authority-tiered, provenance-stamped promotion pipeline before it can be trusted. The operator does not fill the agent's knowledge base; **the agent fills it himself, from operator-authorized sources only**, learning the "official way" to do things as defined by a signed authority map.
 
-Deployment targets: Raspberry Pi (arm64), x64 Linux, and macOS hosts. Container-based for now, with two supported deployment models: a **Docker Compose stack** (or Podman equivalent) and a **full Kubernetes deployment**. Both assume STIG default configurations and baselines; volumes are mounted accordingly. Single-binary is *not* a requirement; small-and-auditable is.
+Deployment targets are Raspberry Pi (arm64), x64 Linux, and macOS hosts. It is container-based and targets two deployment models: a **Docker Compose stack** (or Podman equivalent) and a **full Kubernetes deployment**, both on STIG default baselines. Single-binary is *not* a goal; small-and-auditable is.
 
-The north-star deployment: a classified, multinational, air-gapped enclave — partner operators as attribute-bearing subjects, a full Bell-LaPadula classification lattice with releasability categories, and every model endpoint local and accredited. Not a special mode: the same kernel with a richer lattice and a stricter map, which a homelab runs with a trivial lattice at zero ceremony (KLC §6, §12).
+The north-star deployment is a classified, multinational, air-gapped enclave — partner operators as attribute-bearing subjects, a full Bell-LaPadula classification lattice with releasability categories, and every model endpoint local and accredited. That is not a special mode: it is the same kernel with a richer lattice and a stricter authority map, which a homelab runs with a trivial lattice at zero ceremony.
 
-## 2. Origin story
+## Why Maknae exists
 
-Maknae began as a survey project: fork-and-merge the best of two open-source agent platforms the operator runs in production —
+Maknae began as a survey project — fork-and-merge the best of two open-source agent platforms the operator runs in production:
 
-- **OpenClaw** (running as *HobiBot*, J-Hope persona, Discord/Slack) — the layered-control school: decoupled model layer, core runtime, explicit skills, atomic tool abstractions. Discipline.
-- **Hermes Agent** (Nous Research; running as *TaeBot*, V persona) — the learning-first school: self-improving skills from experience, four-layer decoupled memory, multi-channel gateways, native MCP, scheduling. Growth.
+- **OpenClaw** (running as *HobiBot*) — the layered-control school: decoupled model layer, core runtime, explicit skills, atomic tool abstractions. Discipline.
+- **Hermes Agent** (Nous Research; running as *TaeBot*) — the learning-first school: self-improving skills from experience, decoupled memory, multi-channel gateways, native MCP, scheduling. Growth.
 
-The fork premise died on inspection: **both projects make architectural decisions that are not "Ack Compliant"** — the operator's term for Secure by Design and by Default as a structural property rather than an optional configuration item. Retrofitting a deny-by-default trust plane into either codebase would fight their architecture forever. So Maknae is a **greenfield platform with two reference implementations**, adopting Hermes' learning-loop and scheduling concepts and OpenClaw's explicit-control discipline, governed by a kernel neither of them has.
+The fork premise died on inspection: **both projects make architectural decisions that treat security as configuration, not structure.** Retrofitting a deny-by-default trust plane into either codebase would fight its architecture forever. So Maknae is a **greenfield platform with two reference implementations** — it adopts Hermes' learning-loop and scheduling concepts and OpenClaw's explicit-control discipline, governed by a kernel neither of them has.
 
-Design extensions beyond both upstreams:
+Three ideas set it apart from both upstreams:
 
-1. **Data Centric Security (DCS)** — security labels travel with every knowledge object (tier, provenance, classification, handling caveats) and policy binds to the labels, not the perimeter.
-2. **Zero Trust** — every decision evaluates (subject, action, resource labels, context). Freshly retrieved content is an untrusted principal until promoted.
-3. **Unified knowledge lifecycle** — skills (procedural), lake documents (declarative), and memories (episodic/semantic) all flow through one promotion pipeline. See the contract.
+1. **Policy-bound authorization.** A deny-by-default Discretionary Access Control (DAC) access policy requires every consequential action to transit a single reference monitor. Data-Centric Security (DCS) — labels binding to knowledge objects rather than the perimeter — is available as an *optional external layer* for classified and multi-level deployments, plugged into the same policy-agnostic seam.
+2. **Zero Trust.** Every decision evaluates the tuple (subject, action, resource, context). Freshly retrieved content is an untrusted principal until it is promoted — it can *inform* a decision but never *authorize* one.
+3. **Unified knowledge lifecycle.** Skills (procedural), lake documents (declarative), and memories (episodic/semantic) all flow through one authority-tiered promotion pipeline. See the contract.
 
-## 3. Naming rationale
+## Architecture
 
-**Maknae (막내)** is the generic Korean kinship word for the youngest member of any group — family, team, or otherwise. It was chosen deliberately:
+Three planes — this describes the design; see **Status & roadmap** below for what has actually landed:
 
-- **The lore:** HobiBot and TaeBot are the hyungs (older brothers). Maknae is the youngest — born last, raised by the older two, inheriting the best of both. In Korean pop-culture usage, a "golden maknae" is a youngest member who is inexplicably good at everything, which is precisely this project's best-of-both-worlds thesis. The BTS resonance is intentional but remains the operator's private layer.
-- **The IP posture:** the word is generic Korean vocabulary — not a coined term, not trademarked, no corporate association. Namespace survey (2026-07) confirmed the name clean on PyPI, npm, and crates.io, with no significant GitHub collisions. This follows the same play as the operator's *Microkosmos* webserver (a Bartók piano cycle and Greek word long before it was anything else): the personal meaning is real, the public name is unclaimable.
-- **The convention:** in the operator's ecosystem, hosts get World of Warcraft names, agent *personas* get BTS member names, and standalone *projects* get culturally-generic names with private resonance. Maknae the platform will host personas; the personas are runtime configuration, never the product identity.
+- **Interaction plane** — gateway, web UI, and a scheduler with scoped task identities. Accepts work; trusts nothing.
+- **Trust plane** — the kernel, and the *only* trusted code. It holds the reference monitor (`maknaed` is the sole policy decision point), the deny-by-default DAC access policy, the signed and tiered skill registry, and the append-only audit log. Nothing touches anything without transiting it.
+- **Runtime plane** — the agent runtime with the gated learning loop, plus integrations acting as policy information points. Does the work, under constraint.
 
-## 4. Architecture in one paragraph
+**The kernel is 100% Rust** ([ADR-0002](design/adr/ADR-0002-kernel-is-rust.md)): memory-safety guidance makes the language choice a citable control, the contract's invariants encode into the type system, and the operator's [Microkosmos](https://github.com/mpe-es/microkosmos) webserver supplies the in-house FIPS 140-3 Rust precedent. Authorization is evaluated behind a **policy-agnostic seam** ([`crates/maknae-security`](crates/maknae-security)); the concrete policy engine is a deliberate open question — **Cedar is the leading candidate** ([ADR-0003](design/adr/ADR-0003-cedar-policy-engine.md), Rust-native), pending a spike against the enforcement hooks. The DAC capability grammar operators write policy against ships and is validated ahead of that evaluation ([`crates/maknae-config`](crates/maknae-config)). Every other container picks the language best suited to its job — see [`design/container-architecture.md`](design/container-architecture.md) — with rigor calibrated to the layer, affordable precisely because the kernel, not the runtime's good behavior, is the control.
 
-Three planes. The **interaction plane** (gateway + web UI, multi-channel, scheduler with scoped task identities) accepts work. The **trust plane** — the kernel, and the only trusted code — holds the policy engine (deny-by-default PDP), the signed/tiered skill registry, and the append-only audit log; nothing touches anything without transiting it. The **runtime plane** (agent runtime with the gated learning loop, plus integrations acting as PIPs) does the work under constraint. **The kernel is 100% Rust** (operator-ratified 2026-07-14): memory-safety CSI alignment makes the language choice a citable control, KLC §15 invariants encode into the type system, and Microkosmos supplies the in-house FIPS 140-3 Rust precedent. The policy engine remains the Cedar-vs-OPA spike (KLC §14 Q5), noting Cedar is Rust-native. All other containers pick the language that best fits the action being done — see [`design/container-architecture.md`](design/container-architecture.md) — with discipline and rigor calibrated to the layer, affordable precisely because the kernel, not the runtime's good behavior, is the control. Test-driven development applies to every container in every language; the test suite doubles as mutation-proofing for AI-implemented segments (see the autopsy §6.4). Diagrams live in [`design/diagrams/`](design/diagrams/).
+Test-driven development applies to every container in every language; because segments are AI-implemented, the suite doubles as mutation-proofing, and coverage rigor scales with how security-critical the code is ([ADR-0016](design/adr/ADR-0016-risk-tiered-test-coverage.md)). Architecture diagrams live in [`design/diagrams/`](design/diagrams/).
 
-## 5. Related projects — REQUIRED exploration for AI agents
+## The name
 
-Maknae does not stand alone. It is the integration point for several of the operator's active projects. **Before proposing designs or correlating overlap, review each of these at the paths below.**
+**Maknae (막내)** is the generic Korean kinship word for the youngest member of any group. It was chosen deliberately:
 
-### 5.1 Reference implementations — the hyungs
+- **The lore.** HobiBot and TaeBot are the hyungs (older brothers); Maknae is the youngest — born last, raised by the older two, inheriting the best of both. A "golden maknae" is a youngest member who is inexplicably good at everything, which is precisely this project's best-of-both-worlds thesis.
+- **The IP posture.** The word is generic Korean vocabulary — not coined, not trademarked, no corporate association. A 2026-07 namespace survey confirmed it clean on PyPI, npm, and crates.io. The personal meaning is real; the public name is unclaimable.
+- **The convention.** In the operator's ecosystem, hosts get World of Warcraft names, agent *personas* get their own names, and standalone *projects* get culturally-generic names. Maknae the platform hosts personas; the personas are runtime configuration, never the product identity.
 
-Both upstreams are mirrored locally as siblings of this project folder. Study their architecture; inherit their concepts, not their trust models.
+## Status & roadmap
 
-| Project | Upstream | Local mirror | Role |
-|---|---|---|---|
-| **OpenClaw** (runs as *HobiBot*) | https://github.com/openclaw/openclaw | `../openclaw` | Layered-control reference: explicit skills, atomic tools, decoupled runtime |
-| **Hermes Agent** (runs as *TaeBot*) | https://github.com/NousResearch/hermes-agent | `../hermes-agent` | Learning-first reference: self-improving skills, four-layer memory, gateways, scheduling, MCP |
+Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` daemon (with STIG-baselined packaging and SELinux/AppArmor profiles), the DAC authorization schema, and the local-plane enrollment model ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)) are landing. The phased plan:
 
-The live deployment configurations for both personas are also on this system and are **required reading alongside the upstream code** — they show how the operator hardens each platform in practice:
+1. **Governance baseline** — Knowledge Lifecycle Contract review; authority basis aligned to the Knowledge Lake's authority-line model; the open questions resolved with rationale.
+2. **Policy engine spike** — Cedar vs. alternatives evaluated against the enforcement hooks as the acceptance test ([ADR-0003](design/adr/ADR-0003-cedar-policy-engine.md)).
+3. **Trust-plane kernel** — policy engine, the authorization seam, and audit events *(underway)*.
+4. **Lake integration** — a portable lake instance, authority map v0.1 (egress allowlist plus authority basis), and the quarantine ingest path.
+5. **Learning loop MVP** — gap detection → authorized fetch → quarantine → out-of-band consolidation ("dreaming") → gated promotion.
+6. **Gateway and web UI** — an onboarding wizard (CLI and web) for authority configuration, and the scheduler with scoped task identities.
+7. **Persona layer** — the hyungs move in.
 
-| Deployment | Repo | Local | What to study |
-|---|---|---|---|
-| **HobiBot** (OpenClaw) | https://gitlab.com/homelab-systems/hobibot | `~/Development/HomeLab/Systems/hobibot` | Vault AppRole secret delivery, Docker userns-remap, auditd, fail2ban — the hardening overlay Maknae must make native |
-| **TaeBot** (Hermes) | https://gitlab.com/homelab-systems/taebot | `~/Development/HomeLab/Systems/taebot` | Same hardening pattern applied to a learning-loop platform; where the overlay strains against Hermes' architecture is exactly where Maknae's kernel must differ |
+Two capabilities are first-class *by design* from the start (design intent, not yet shipped). **Model-layer registration is dual-mode**: OAuth subscription authentication *and* OpenAI-compatible endpoint registration (including self-hosted and air-gapped inference), with provider endpoints as kernel-allowlisted egress destinations and credentials delivered via Vault, never plaintext. **Task-class model routing** is a policy decision that weighs task cost, content sensitivity (in classified deployments, no-egress or classified context may reach only endpoints authorized for it), and subject attributes — the model endpoint is itself an attribute-gated resource carrying operator-signed labels (jurisdiction, sanctioning authority, handling ceiling), so an operator's attributes constrain which models may serve them and data sovereignty holds even for unattended, scheduled work. One persona per instance is the proven deployment pattern (multi-persona is deferred behind a feature gate), while a single agent serving **multiple operators** — each with their own attribute set — is designed in from the start.
 
-### 5.2 Operator projects — integration and pattern sources
-
-| Project | Repo | Local | What it is | What Maknae takes from it |
-|---|---|---|---|---|
-| **Knowledge Lake** | https://github.com/mpe-es/knowledgebase | `~/knowledgebase` | Authority-tiered, deterministic markdown retrieval platform (anti-RAG, progressive disclosure, git-distributed, FIPS 140-3, portable architecture). Four-tier authority hierarchy, YAML frontmatter provenance, brain/organ/soul → PDP/PIP/authority.yaml model. | Maknae's lake IS a portable instance of this architecture, self-populated by the agent. Maknae's authority basis derives from the Lake's ADR-0004 authority-line model (domains/bands/natures, derived-only issuer registry, typed precedence edges — the #201 build-out); Maknae's lifecycle tiers are an orthogonal axis (KLC §7). The Tier 0/1/2 router pattern applies to retrieval. |
-| **Claude Memory** | https://github.com/darkhonor/claude-memory | `~/claude-memory` | The operator's own shared memory system (not a vendor product), with Lamis Mukta-style out-of-band "dreaming" consolidation. | Maknae's memory IS this system, wrapped in an LLM-efficient read path (bounded working set, FTS-style recall) — somewhere between Hermes' four-layer model and the operator's design. Trust model stays the operator's. |
-| **Security MCP Server** | https://gitlab.com/homelab-systems/security-mcp-server | `~/Development/MCP/security-mcp-server` | Security tooling exposed over MCP (Mozilla Observatory integration planned). | Runtime-plane integration (PIP); also informs kernel policy telemetry. Its live OAuth 2.1 + PKCE gateway with four-dimensional ABAC gating is prior art for the kernel's PDP. |
-| **STIG Remediation Loop** | https://github.com/darkhonor/stig-remediation-loop | `~/Development/stig-remediation-loop` | Compliance-ready loop design informed by HuaShu's Orange Book (loop engineering guide) and the operator's GitLab issue standards. | Directly feeds the gated learning loop and skill promotion criteria (contract §9); the compliance-automation skill domain Maknae will learn. |
-| **Microkosmos** | https://github.com/mpe-es/microkosmos | `~/Development/Containers/microkosmos` | FIPS 140-3 Rust webserver (`aws-lc-rs`, GET-only, NIST 800-53 aligned, hardened). | The Rust-perimeter precedent and FIPS story for the trust plane; likely serves maknae.io. |
-| **Microkosmos Test Sites** | https://gitlab.com/mpe-es-c3a-lab/microkosmos-test-sites | `~/Development/MPE-ES/Capabilities/microkosmos-test-sites` | Test site content and deployment configurations for Microkosmos. | Hardened static-serving and deployment validation patterns; candidate harness for Maknae's web UI hosting. |
-| **VM HomeLab** | https://github.com/darkhonor/vmhomelab | `~/Development/Containers/vmhomelab` | Microkosmos test site — VM/container homelab deployment environment. | Deployment-target realism: the container/VM patterns Maknae must install cleanly into. |
-
-The HobiBot and TaeBot deployment configurations (§5.1) embody the hardening patterns to preserve; the upstream mirrors are the code to study — including what NOT to inherit.
-
-Operational context that applies platform-wide: HashiCorp Vault for all secrets — native Vault API integration (not shell-outs or wrappers), AppRole + Agent sidecar delivery, no plaintext credentials ever, with operator-configured secrets engines and potentially independent engine configurations per MLS secret target (each classification/enclave target gets its own engine, keeping secret material DCS-scoped like everything else). Terraform/IaC-first, GitOps via Fleet where applicable, WireGuard mesh across sites, and the operator's GitLab issue standards (audit-grade, NIST control mappings, structured closing protocol).
-
-## 6. Orientation protocol for AI agents (read carefully, Fable 🐰)
-
-1. **Read [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) in full.** The machine-readable invariants in §15 are acceptance criteria for anything you build or propose. Violating an invariant is a wrong answer even if the code works.
-2. **Explore the related projects (§5) before correlating.** Your task is to map overlap and opportunity across the operator's AI project portfolio; do not reason about them from this README alone.
-3. **Deny by default applies to you.** When designing, absence of an explicit permission is a denial. Never propose a "permissive mode," a bypass flag, or a default-allow fallback.
-4. **Nothing self-promotes.** Any design where generated content, skills, or configuration gains authority without transiting the promotion pipeline is architecturally rejected.
-5. **YAGNI discipline.** The operator prefers small, phased deliverables with explicit acceptance criteria. Propose the minimum that satisfies the contract; flag speculative scope as such.
-6. **Open questions are open.** Contract §14 lists seven. Take positions with rationale; do not silently resolve them.
-
-## 7. Repository layout (current)
+## Repository layout
 
 ```
 .
-├── README.md                                  # this file
+├── AGENTS.md                # contributor/agent guidance (CLAUDE.md → symlink)
+├── Cargo.toml               # Rust workspace
+├── coverage-tiers.toml      # risk-tiered coverage contract (ADR-0016)
+├── deny.toml                # supply-chain gate (cargo-deny)
+├── bins/                    # maknae (CLI), maknaed (daemon), maknae-spifc (SPIF compiler)
+├── crates/                  # trust-plane kernel, authz, audit, SPIF, MCP, vault, subject-context
+├── ci/gates/                # fail-closed CI gates (coverage, negative-control, isolation-contract)
+├── packaging/               # STIG-baselined deb / rpm / macos / oci packaging
+├── deploy/                  # deployment assets (Vault PKI, …)
+├── docs/                    # configuration and operator runbook
 └── design/
-    ├── knowledge-lifecycle-contract.md        # KLC v0.2 — governance spec (RFC)
-    ├── reference-implementation-autopsy.md    # upstream survey evidence + build scope
-    ├── container-architecture.md              # container decomposition + language calls
-    ├── adr/                                   # architecture decision records (ADR-0001 explains the practice)
+    ├── knowledge-lifecycle-contract.md   # the governance spec — read first
+    ├── container-architecture.md         # container decomposition + language choices
+    ├── reference-implementation-autopsy.md
+    ├── adr/                              # architecture decision records
+    ├── references/                       # external-framework assessments
     └── diagrams/
-        ├── plane-architecture.svg
-        ├── knowledge-lifecycle.svg
-        └── tier-state-machine.svg
 ```
 
-## 8. Roadmap sketch (pre-implementation, subject to team review)
+## Working in this repo
 
-1. KLC v0.2 team review (authority basis aligned to the Lake's ADR-0004 authority-line model; open questions in KLC §14).
-2. Policy language spike: Cedar vs. OPA evaluated against the six enforcement hooks (KLC §10) as the acceptance test. Cedar is the leading candidate (ADR-0003: Rust-native, formally verified core, cedar-go for the Go plane); the spike confirms or overturns.
-3. Trust plane kernel skeleton: policy engine + label schema validation + audit events.
-4. Lake integration: portable lake instance, authority map v0.1 (egress allowlist + authority basis; USG sample profile as "easy mode"), quarantine ingest path.
-5. Learning loop MVP: gap detection → authorized fetch → quarantine → dreaming cycle → gated promotion.
-6. Gateway + web UI, onboarding wizard (CLI + web) for authority configuration, scheduler with scoped task identities.
-7. Persona layer (the hyungs move in).
+Start with [`AGENTS.md`](AGENTS.md) — it carries the core principles and conventions for everyone working on Maknae, human or AI, and points at the load-bearing detail. In short: deny-by-default applies to designs too (absence of a permission is a denial); nothing self-promotes (no content, skill, or config gains authority without transiting the promotion pipeline); verify through the fail-closed gates in [`ci/gates/`](ci/gates/); and record decisions as ADRs. The [Knowledge Lifecycle Contract](design/knowledge-lifecycle-contract.md) invariants are acceptance criteria — violating one is a wrong answer even if the code works.
 
-**MVP candidates (2026-07-14, operator-directed; specifics to follow):**
+## Lineage & related work
 
-1. **Model-layer registration, dual-mode from birth:** (a) OAuth subscription authentication (ChatGPT Pro — currently the only major subscription authorizing this use) and (b) OpenAI-compatible endpoint registration for generic model support, including self-hosted and air-gapped inference. Model provider endpoints are kernel-allowlisted egress destinations (KLC hook E); credentials and tokens are delivered via Vault, never plaintext config.
-2. **Task-class model assignment:** classes of work route to designated registered models — e.g., heartbeat/scheduler ticks to the cheapest registered model, the interactive channel to the flagship, the dreaming cycle to its designated model. Routing is a three-input policy decision at hook E, one table: (a) task class (cost); (b) content labels (no-egress or classified-labeled context may only route to endpoints authorized for those labels, e.g., local/air-gapped inference); (c) **subject attributes — the driver LLM is itself a DCS-gated resource.** Registered endpoints carry operator-signed DCS labels (jurisdiction, sanctioning authority, handling ceiling), and an operator's attributes constrain which models may serve them: an AUS user routes to AUS-native registered models, a KOR user to NAVER/Kakao, a US DoD user to DoD-sanctioned endpoints. Administrative role never bypasses the attribute gate. Recurring/scheduled tasks carry DCS labels at creation (bounded by their creator's attributes, re-evaluated at fire time) and execute only on eligible endpoints — data sovereignty holds for unattended work.
-3. **A single interaction channel** so the operator can converse with the agent (who states their own preferred form of address as persona configuration). Channel selection pending team vote.
-4. **One persona per instance; operators are the security subjects.** Multi-persona hosting is deliberately deferred behind a feature gate (a subscription-tier candidate) — one persona per instance is the operationally proven deployment pattern, and deny-by-default already answers the MVP's cross-persona question (no rule = no access). The dimension that IS first-class from birth: the single agent serves **multiple operators**, each carrying an assigned DCS attribute set that governs which data sources, skills, and outputs are available to them (the Security MCP ABAC lesson; sibling effort in knowledgebase #284). Memory `subject` scoping ships in the label schema from birth (KLC section 6), so extending to multiple agents per box later is additive — a gate flip plus grant rules, never a migration.
+Maknae's two reference implementations are the operator's production agents — study their architecture, inherit their concepts, not their trust models:
+
+- **OpenClaw** — https://github.com/openclaw/openclaw (layered-control reference)
+- **Hermes Agent** — https://github.com/NousResearch/hermes-agent (learning-first reference)
+
+It also builds on the operator's prior work: the [**Knowledge Lake**](https://github.com/mpe-es/knowledgebase) (authority-tiered, deterministic markdown retrieval — the architecture Maknae's lake is a portable instance of), [**Claude Memory**](https://github.com/darkhonor/claude-memory) (the shared memory system with out-of-band "dreaming" consolidation), the **Security MCP Server** (a live OAuth 2.1 + ABAC gateway — prior art for the kernel's decision point), and [**Microkosmos**](https://github.com/mpe-es/microkosmos) (the FIPS 140-3 Rust precedent). Assessments of comparable third-party platforms live in [`design/references/`](design/references/).
+
+## License
+
+To be determined (MIT leaning), pending team decision.
 
 ---
 
