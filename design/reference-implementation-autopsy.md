@@ -88,13 +88,13 @@ The HobiBot (OpenClaw, VM, maximalist runbook) and TaeBot (Hermes/OpenClaw dual-
 OpenClaw and Hermes are large codebases with active contributor communities. Maknae is three security-paranoid engineers with day jobs. Attempting feature parity is the losing move and is not the plan. Two facts make the project tractable:
 
 1. **Most upstream mass is breadth Maknae defers.** The bulk of both codebases is channel adapters (Discord/Slack/Telegram/WhatsApp/Signal/email), native companion apps, dozens of LLM provider integrations, and UX polish. None of that is the differentiator, and MCP + a single channel cover the MVP.
-2. **The differentiator is deliberately small.** The trust plane kernel is required to be small-and-auditable — that is a scope ceiling, not just a security property. The kernel integrates an existing policy engine (Cedar or OPA — evaluated per KLC §14 Q5, never written from scratch), enforces the label schema, and emits audit events. It is measured in thousands of lines, not hundreds of thousands.
+2. **The differentiator is deliberately small.** The trust plane kernel is required to be small-and-auditable — that is a scope ceiling, not just a security property. The kernel decides behind a policy-agnostic seam with pluggable backends ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)) — a simple native-Rust RBAC default (no general policy *language* written from scratch), with Cedar or another engine available as an optional backend where complexity justifies it — enforces the label schema, and emits audit events. It is measured in thousands of lines, not hundreds of thousands.
 
 ### 6.2 Do not build — leverage
 
 | Need | Leverage | Cost avoided |
 |---|---|---|
-| Policy engine | Cedar or OPA (KLC §14 Q5 spike decides) | Building a policy language |
+| Policy engine | Pluggable `maknae-authz-*` backends behind the seam (ADR-0004); simple native RBAC default, Cedar/others optional | Building a general policy *language* |
 | Secrets | Vault (AppRole + Agent sidecar → tmpfs sink, the TaeBot pattern) | Building secret delivery |
 | Authority compiler, typed edges, precedence queries | The Knowledge Lake #201 build-out (identity spine, edge graph, families, query contracts) — already built and gate-tested in the knowledgebase repo | The entire authority-basis engine |
 | Memory + dreaming | The operator's claude-memory system and consolidation doctrine | A memory subsystem |
