@@ -53,7 +53,7 @@ This ADR fixes vocabulary, the composition rule, and the no-bypass invariant. It
 ## Consequences
 
 - README and AGENTS.md adopt this vocabulary: no "generic DAC access policy"; instead RBAC-default / ABAC-via-DCS over the `maknae-security` seam, with mandatory clearance never waivable.
-- **Hosts without a hardware root of trust are unsupported targets.** Because ADR-0018 requires HRoT-sealed credentials, a Raspberry Pi with no TPM is dropped as a deployment target (Linux x64 with TPM 2.0 and macOS with the Secure Enclave remain).
+- **The bare-metal path requires a hardware root of trust.** Because ADR-0018 seals the bare-metal bootstrap credential to an HRoT (TPM 2.0 / Secure Enclave), a Raspberry Pi with no TPM is not a bare-metal target. The Kubernetes path uses platform identity (Vault Kubernetes auth) with no secret at rest and needs no HRoT — so this consequence is scoped to bare-metal, not all deployments.
 - Positive: a precise, NSS-aligned vocabulary that maps cleanly to NIST AC-3 enhancements. The no-bypass invariant is testable: `combine` structurally enforces mandatory *precedence* once a mandatory `Deny` is present, while the remaining conditions — that a mandatory operand is always composed, and that it fails closed — are kernel/backend construction invariants the acceptance tests hold (`combine`'s untyped `Vec<Verdict>` cannot enforce them on its own).
 - Negative / accepted: the code's **DAC** terminology (`authz.rs`'s "DAC authz policy schema") collides with OS-DAC until the follow-up disambiguation; the collision's meaning is documented here so it does not mislead.
 
