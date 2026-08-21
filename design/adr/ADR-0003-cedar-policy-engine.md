@@ -1,6 +1,6 @@
 # ADR-0003: Cedar as the policy engine — leading candidate
 
-- **Status:** Proposed (operator lean 2026-07-14; the KLC §14 Q5 spike against the six hooks confirms or overturns)
+- **Status:** **Superseded by [ADR-0004](ADR-0004-modular-authorization-architecture.md)** (operator-directed 2026-08-22). Cedar is **demoted, not eliminated**: the bundled default backend is a native-Rust evaluator over the `maknae-authz-basic` YAML grammar, and Cedar is preserved as an *optional* pluggable `maknae-authz-cedar` backend behind the `maknae-security` seam for deployments whose policy complexity, static analysis, or formal-verification needs justify it. The original lean (below) is retained for the record.
 - **Date:** 2026-07-14
 - **Deciders:** Alex Ackerman (operator lean); team spike pending
 
