@@ -15,7 +15,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0003 | Cedar as the policy engine (leading candidate) | **Superseded by 0004** (demoted to an optional backend) |
 | 0004 | Modular authorization architecture — the `maknae-security` contract and its pluggable `maknae-authz-*` backends | Accepted (operator-directed 2026-08-22) |
 | 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | Accepted (finalized 2026-08-10) |
-| 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform short-lived sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) |
+| 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform short-lived sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116 |
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |
 | 0016 | Risk-tiered test coverage — tiers, mutation, fail-closed gate | Accepted (2026-08-04) |
 | 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
