@@ -1,0 +1,58 @@
+# ADR-0006: Client authentication (AuthN) model — the trust plane is the sole client-facing door; clients never reach Vault; local peer-cred now, OIDC-federated gateway later
+
+- **Status:** Accepted (operator-ratified 2026-08-22)
+- **Date:** 2026-08-22
+- **Deciders:** Alex Ackerman (operator)
+- **Relates to:** ADR-0005 (enforcement locus & TCB boundary — `maknaed` is the sole PDP; the gateway is "owed"); ADR-0018 (local-plane authorization & deployment model — *amends* its operator-CLI standing-SecretID); ADR-0019 (audit record model — the authenticated uid is captured per request); ADR-0020 (access-control model — the **authorization** counterpart this AuthN model feeds). Issues: #66 (the gateway / remote-client boundary), #73 / #89 (el9 operator-CLI seal — **mooted**, see Consequences).
+
+> **Scope: authentication, not authorization.** This ADR fixes *who a client is and how it proves that* (the IA family). It does **not** decide what an authenticated client may do — that is the reference monitor's per-request call, deny-by-default (ADR-0020, the AC family). AuthN establishes identity and hands it to the PDP; establishing a session is never itself an authorization.
+
+> **Number-reuse note.** Per the registry convention (2026-08-22) an ADR takes a number at authoring and freed numbers are reused; `0006` previously held the (unwritten, since-embodied-in-AGENTS.md) single-source-of-truth doctrine. The filename and registry topic are the identity — the bare number is a handle.
+
+## Context
+
+Today Maknae is a single host: the `maknae` CLI and `maknaed` daemon run on the same box, talking over an mTLS UDS (ADR-0005). In the shipped design the CLI authenticates to **Vault** directly (its own AppRole SecretID → mint a `cli`-plane leaf → mTLS to the daemon), which forced a per-platform at-rest seal for that standing SecretID — the `systemd-creds --user` / Keychain split, and the RHEL-9 residual gap (#73, #89).
+
+Two forces make that model wrong going forward:
+
+1. **The client is untrusted by design, and will become *remote*.** The daemon will grow a network listener; the target is controlling Maknae from an iOS app over 5G/VPN. A remote, untrusted client must **not** be assumed to have — or need — a network path to Vault. Punching Vault out toward untrusted networks, and issuing every client a Vault identity, is the opposite of the reference-monitor posture.
+2. **Short-lived, brokered credentials are the idiomatic model.** The current design handed a *human operator* a *machine credential* (a standing AppRole SecretID). AppRole+SecretID is for machines; humans authenticate via a human method and receive short-lived tokens.
+
+## Decision
+
+1. **The trust plane is the sole client-facing authentication endpoint.** A client — local or remote — authenticates to and transacts only with the trust plane (`maknaed` locally; the **gateway**, #66, remotely). Clients **never** reach Vault, the lake, model endpoints, or any other trust infrastructure directly. The trust plane is the sole broker to Vault. This is the reference-monitor principle (ADR-0005, AC-25) projected onto the network boundary: one authenticated door, everything trusted behind it.
+
+2. **Clients hold no standing Vault credential at rest.** Client credentials are **short-lived and trust-plane-brokered**. (The *daemon's own* machine identity — a standing AppRole SecretID, HRoT-sealed — is a separate concern and is unchanged; ADR-0018. This ADR governs *client/operator* authentication only.)
+
+3. **Local (on-host) client authentication = OS host-login + `maknae`-group membership + peer-cred uid.** The operating system has already authenticated the user at host login; membership in the `maknae` group over the `0660` UDS is the gate, and `SO_PEERCRED` binds the principal (uid). That authenticated uid is captured in **every** AU-3 audit record (ADR-0019), so attribution of who did what on the trusted host is already exact. The on-server CLI therefore holds **no** Vault credential and needs no separate `maknae login` — the OS session is the login; the trust plane brokers everything else. Leaning on host-login is a stated, accepted assumption for the on-server CLI.
+
+4. **Remote client authentication = OIDC federation through the gateway.** The remote client authenticates natively to an external identity provider (e.g. GitHub, Azure AD) and presents the resulting **trusted token** to the gateway (#66) over TLS; the gateway validates it (federated identity, IA-8) and brokers a **short-TTL session** to the trust plane. Nothing durable is stored on the client — decisive for mobile: a lost, stolen, or seized device forfeits only an expiring session, never a standing secret.
+
+5. **The client stays untrusted across the boundary.** A client is authenticated **per session** and authorized **per request** by the sole PDP (deny-by-default, ADR-0020). A valid session is identity, never entitlement.
+
+## Consequences
+
+- **The per-platform CLI-seal problem dissolves.** With the on-server CLI holding no Vault credential (the trust plane brokers), there is nothing to seal at rest — so **#73 (the RHEL-9 `0400` plaintext residual) and #89 (`--user` cannot use `--with-key=tpm2`) are mooted**, not patched. A cleartext SecretID on disk was the symptom of the wrong model; this removes the credential, not the risk.
+- **Vault stays private, behind the trust plane** — never exposed to clients or to untrusted networks. The edge attack surface shrinks to one authenticated door.
+- **Supersedes ADR-0018's operator-CLI standing SecretID.** ADR-0018's daemon-side model (standing AppRole SecretID, HRoT-sealed, periodic token) is unchanged; only the *operator CLI* credential model moves here. An append-only amendment is added to ADR-0018.
+- **Local and remote are one model, differing only in the authentication factor** (peer-cred uid vs. OIDC-federated token) — so the local implementation built now is forward-compatible with the gateway, not a throwaway.
+- **Owed work:** the trust plane grows a client-facing authenticate-and-broker path — locally a peer-cred bootstrap that brokers a short-lived cred, remotely the gateway's OIDC front door (#66). The on-server brokered path is the near-term implementation that resolves #73 the right way.
+- **Per-operator remote identity is native** via OIDC (each human is their own IdP identity); on-host, per-user attribution comes from the peer-cred uid. Multi-operator is therefore a property of the model, not a bolt-on.
+
+## Security control mapping (informative; per ADR-0001)
+
+| Property | NIST SP 800-53 rev 5 |
+|---|---|
+| Sole authenticated client-facing door; trust infra behind it | AC-25 (reference monitor); SC-7 (boundary protection — Vault private) |
+| Identify & authenticate the operator (local uid; remote OIDC) | IA-2; IA-8 (non-organizational / federated identity) |
+| No standing client authenticator at rest; short-lived, brokered | IA-5, IA-5(2) (authenticator management); AC-12 (session termination) |
+| Authenticated uid captured on every request | AU-3 (audit content); IA-2 |
+| Session is identity, not entitlement — per-request authorization | AC-3, AC-3(3) (deny-by-default via ADR-0020) |
+
+## Scope boundary
+
+Fixes the **authentication model**: the sole-door principle, credential lifetime (short-lived, brokered, none-at-rest-on-client), and the local (peer-cred) vs. remote (OIDC) authentication factors. It does **not** specify: the concrete **gateway** mechanism or wire protocol (#66's implementing spec); the OIDC integration detail (providers, token validation, claim mapping); the local bootstrap wire protocol (implementing spec); or **authorization** — what an authenticated client may do (ADR-0020, the reference monitor). The daemon's own machine authentication (ADR-0018) is out of scope and unchanged.
+
+## References
+
+Internal: ADR-0005 (enforcement locus / sole PDP / gateway owed), ADR-0018 (local-plane authz & daemon machine identity — amended here for the operator CLI), ADR-0019 (audit / uid attribution), ADR-0020 (authorization model — the AC-family counterpart). Issues: #66 (gateway / remote-client boundary), #73 and #89 (el9 operator-CLI seal — mooted by this model). Vault AppRole (machine) vs. OIDC (human) authentication patterns; DoD Zero Trust Reference Architecture v2.0 (PE/PEP separation; a single authenticated policy-enforcement door).
