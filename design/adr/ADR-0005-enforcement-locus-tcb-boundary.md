@@ -53,7 +53,7 @@ The mTLS plane boundary is defendable only if its failure modes are proven to fa
 
 ## Scope boundary
 
-This ADR covers the **plane-to-plane channel and plane-cert identity**. It does **not** cover the object/data/audit/release signing model — that is **ADR-0007** (key & signature model, non-DCS core) — nor authoritative classification/label binding, which is delegated to the **DCS library** (STANAG 4778, rust-dcs). Subject-context minting (ADR-0014), GUC/write-path, and the gateway remain owed.
+This ADR covers the **plane-to-plane channel and plane-cert identity**. It does **not** cover the object/data/audit/release signing model — that is **ADR-0007** (key & signature model, non-DCS core) — nor authoritative classification/label binding, which is delegated to the **DCS library** (STANAG 4778, rust-dcs). Subject-context minting (owed — tracked as issue #19, not a reserved ADR number per the registry's number-at-creation rule), GUC/write-path, and the gateway remain owed.
 
 ## Consequences
 
