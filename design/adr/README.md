@@ -32,6 +32,7 @@ Decisions we may still need, carried as issues until (if) they are authored — 
 - output-interface MLS — no-write-down on replies (#7)
 - quarantine integrity-taint — "inform but not authorize" (#8)
 - internal-origin lifecycle & promotion (#9)
+- gateway / remote-client boundary — OIDC federation, enrolled subjects, gateway-held sessions, gateway machine identity (#117)
 - subject-context envelope — max-TTL / revocation (#19)
 - vendor-substrate trust locus / `untrusted-adjacent` (#20)
 

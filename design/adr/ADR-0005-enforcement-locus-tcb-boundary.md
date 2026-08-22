@@ -53,7 +53,7 @@ The mTLS plane boundary is defendable only if its failure modes are proven to fa
 
 ## Scope boundary
 
-This ADR covers the **plane-to-plane channel and plane-cert identity**. It does **not** cover the object/data/audit/release signing model — that is **ADR-0007** (key & signature model, non-DCS core) — nor authoritative classification/label binding, which is delegated to the **DCS library** (STANAG 4778, rust-dcs). Subject-context minting (owed — tracked as issue #19, not a reserved ADR number per the registry's number-at-creation rule), GUC/write-path, and the gateway remain owed.
+This ADR covers the **plane-to-plane channel and plane-cert identity**. It does **not** cover the object/data/audit/release signing model — that is **ADR-0007** (key & signature model, non-DCS core) — nor authoritative classification/label binding, which is delegated to the **DCS library** (STANAG 4778, rust-dcs). Subject-context minting (owed — tracked as issue #19, not a reserved ADR number per the registry's number-at-creation rule), GUC/write-path, and the gateway (tracked as issue #117) remain owed.
 
 ## Consequences
 
@@ -78,4 +78,4 @@ The full control matrix belongs in the RMF package, not this ADR.
 
 ## References
 
-Source specs (memory store): topology design §3/§4/§5/§9/§10; crypto-foundation design (2026-08-10). Merged Vault PKI: `deploy/vault-pki/`. Microkosmos ADR 0006 + Vault server-configuration; HashiCorp Consul-as-Vault-Connect-CA; CNSA Suite. Issues #3, #18.
+Source specs (memory store): topology design §3/§4/§5/§9/§10; crypto-foundation design (2026-08-10). Merged Vault PKI: `deploy/vault-pki/`. Microkosmos ADR 0006 + Vault server-configuration; HashiCorp Consul-as-Vault-Connect-CA; CNSA Suite. Issues #3, #18; #117 (gateway epic — the remote-client boundary this ADR's 2026-08-22 amendment defers to; #66 is the separate `maknae-transport` crate-boundary revisit the gateway triggers).
