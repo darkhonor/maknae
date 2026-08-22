@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
 
+# Supersede-and-cancel: a new push to the same ref cancels that ref's still-running
+# CI. Without this, every intermediate push on a PR branch runs to completion —
+# 8 runs x ~23 min of `build-and-gate` accumulated on a single branch on
+# 2026-08-22 and blew the monthly Actions budget. PRs only: pushes to `main` are
+# never cancelled, so every commit that lands on the default branch is fully
+# validated even if pushes arrive back-to-back.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # MUTANTS_PATHS: consumed by the mutation job's change gate AND verified by
 # ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
 # (drift = gate FAIL). Comma-separated repo-relative crate dirs. Do not add a
