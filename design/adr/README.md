@@ -34,6 +34,7 @@ Decisions we may still need, carried as issues until (if) they are authored — 
 - internal-origin lifecycle & promotion (#9)
 - subject-context envelope — max-TTL / revocation (#19)
 - vendor-substrate trust locus / `untrusted-adjacent` (#20)
+- gateway / remote-client boundary — OIDC federation, enrolled subjects, gateway-held sessions, gateway machine identity (#117)
 
 ### Relocated (not Maknae ADRs)
 
