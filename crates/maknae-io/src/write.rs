@@ -39,9 +39,9 @@ pub(crate) fn publish_at<F: AsFd>(
     bytes: &[u8],
     mode: Mode,
 ) -> Result<Strategy, IoError> {
-    // One conversion at the boundary: the inner fn propagates plain errnos, so the
-    // unprovokable failure points need one exception between them rather than five,
-    // and the happy-path regions stay in the denominator where they belong.
+    // One CONVERSION at the boundary: the inner fn propagates plain errnos, so each
+    // exception downstream names an arm rather than a `map_err` closure. It does not
+    // reduce the exception count.
     publish_raw(dirfd, final_name, bytes, mode)
         .map(|()| Strategy::Portable)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))
@@ -99,6 +99,10 @@ fn write_all(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
 }
 
 fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
+    // The trailing comments on this line and its Mode B twin are LOAD-BEARING: they
+    // are what makes each line unique, and coverage-tiers.toml anchors an exception on
+    // each. Deleting one makes its anchor match zero lines and the gate hard-fails —
+    // fail-closed, but surprising if you do not know.
     write_all(fd, bytes)?; // Mode A: a temp file this function just created
     syscall::fsync_fd(fd)
 }

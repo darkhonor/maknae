@@ -29,7 +29,12 @@ pub enum IoKind {
 /// - `EscapesAnchor` is constructed in `normalize`, a free function with no anchor in
 ///   scope, so it carries the caller's relative input verbatim;
 /// - `RelativeAnchor` carries the caller's anchor argument, which is non-absolute *by
-///   construction* — that is the error being reported.
+///   construction* — that is the error being reported;
+/// - `Io` raised by the anchor's own parent open carries **the parent**, which is one
+///   level ABOVE the anchor and so can never equal `anchor.join(rel)`. That is
+///   deliberate: when `/etc/maknae/sub/cfg` fails because `/etc/maknae/sub` is missing,
+///   naming the component that is actually absent is the useful diagnostic. It is the
+///   only site in the crate whose path is neither the anchor nor `anchor.join(rel)`.
 ///
 /// `NoDescendantForRequirement` names its field `rel` rather than `path` for the same
 /// reason: it is the caller's input, not a resolved location.

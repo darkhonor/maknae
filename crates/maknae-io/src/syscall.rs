@@ -103,8 +103,20 @@ pub(crate) fn fstatat_nofollow<F: AsFd, P: ?Sized + nix::NixPath>(
 
 /// Errno -> IoError for a *path-based* open (§4 row 0): no dirfd and no single
 /// component, so the ENOTDIR disambiguation cannot apply here.
+///
+/// ELOOP is deliberately NOT translated to `IoError::Symlink`. Row 0 opens the
+/// anchor's parent symlink-FOLLOWING by design — `lib.rs` documents a symlinked
+/// ancestor as permitted and resolved once — so an ELOOP here means the kernel gave
+/// up following a symlink LOOP, not that a symlink was refused. Reporting "symlink
+/// refused" for it would tell an operator the opposite of the crate's actual policy.
+/// Every other open in the crate carries `O_NOFOLLOW`, where ELOOP *does* mean a
+/// refusal, which is why `map_errno_no_disambiguation` translates it and this does
+/// not.
 pub(crate) fn map_open_errno(e: nix::Error, path: &Path) -> IoError {
-    crate::checks::map_errno_no_disambiguation(e, path)
+    IoError::Io {
+        path: path.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    }
 }
 
 /// The `openat2` fast path. Linux-only — the `use` sits inside the cfg'd fn, because

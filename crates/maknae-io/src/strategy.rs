@@ -34,12 +34,13 @@ pub(crate) fn select(
     Strategy::Openat2
 }
 
-/// Whether a call takes the openat2 fast path. Hoisted out of `anchor.rs`'s cfg'd
-/// dispatch block deliberately: inside `cfg(target_os = "linux")` the comparison is
-/// dead code on darwin, so a darwin-local `cargo mutants` cannot kill a mutation of
-/// it. Here it compiles and is tested on every platform.
-/// Called only from the cfg(linux) dispatch, so darwin sees it unused — but it must
-/// live outside that block to stay mutation-visible on every platform.
+/// Whether a call takes the openat2 fast path.
+///
+/// Hoisted out of `anchor.rs`'s cfg'd dispatch block deliberately: inside
+/// `cfg(target_os = "linux")` the comparison is dead code on darwin, so a
+/// darwin-local `cargo mutants` cannot kill a mutation of it. Here it compiles and is
+/// tested on every platform — which is also why darwin sees it as unused and needs
+/// the `allow` below rather than a `cfg`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn uses_openat2(lane: Strategy) -> bool {
     lane == Strategy::Openat2
@@ -107,14 +108,16 @@ mod tests {
         );
     }
 
-    /// The fallback arm is unreachable on a lane where openat2 always succeeds, so it
-    /// is covered through the injected probe result rather than the real syscall.
     #[test]
     fn uses_openat2_only_for_the_fast_lane() {
         assert!(uses_openat2(Strategy::Openat2));
         assert!(!uses_openat2(Strategy::Portable));
     }
 
+    /// The probe's fallback arm is unreachable on a host where openat2 always
+    /// succeeds, so it is exercised through an INJECTED probe result rather than the
+    /// real syscall — which is the point of `capability_from_probe` being pure over
+    /// `Result<(), Errno>`.
     #[test]
     fn any_probe_failure_is_portable() {
         assert_eq!(capability_from_probe(Ok(())), Strategy::Openat2);

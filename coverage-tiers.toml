@@ -29,6 +29,7 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   "crates/maknae-io/src/normalize.rs",
+  "crates/maknae-io/src/syscall.rs",
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",
   "crates/maknae-io/src/dir.rs",
@@ -400,22 +401,19 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 path = "crates/maknae-io/src/error.rs"
 why = "IoError/IoKind enums with Display and From only; no decision logic"
 
-[[t3]]
-path = "crates/maknae-io/src/syscall.rs"
-why = "raw syscall wrappers and flag composition; OFlag/Mode/ResolveFlag/AtFlags unions yield equivalent mutants, so the file is exclude_globs and its tier is measured at the last commit that touches it"
-
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #
-# The gate matches WHOLE LINES, and the `foo(..).map_err(..)?` idiom puts the covered
-# call and the uncovered closure on one line. An exception anchored there necessarily
-# removes both, so a few covered regions leave the denominator alongside the arm the
+# The gate matches WHOLE LINES, and several exceptions anchor on a line that carries
+# BOTH a covered call and an uncovered `?`/closure edge — the `foo(..).map_err(..)?`
+# form and the bare `x(..)?;` statement alike. An exception anchored there necessarily
+# removes both, so some covered regions leave the denominator alongside the arm the
 # `why` names. The per-exception region counts the gate prints on each run are the
 # authoritative figures; no derived percentage is quoted here, because the last attempt
 # quoted one measured on an earlier tree state and it was wrong by the exact amount of
 # the fix that landed in the same commit.
 #
-# anchor.rs currently reports 100.00% (325/325), so it has no imprecision-driven delta
-# left at all. dir.rs and write.rs clear their floors with room to spare.
+# NO file currently has an imprecision-driven delta: every [t1] file reports 100.00%,
+# so precise sub-line spans would return 100.00% for all of them.
 #
 # Not fixable by writing a narrower `why`: it needs sub-line region anchoring in the
 # gate, or reformatting every such site so the closure sits on its own line, which
@@ -423,10 +421,10 @@ why = "raw syscall wrappers and flag composition; OFlag/Mode/ResolveFlag/AtFlags
 # must excuse the arm it names and nothing adjacent to it" is the rule the rest of this
 # file is held to.
 
-[[exception]]
-path = "crates/maknae-io/src/anchor.rs"
-anchor = "syscall::open_parent_by_path(parent).map_err"
-why = "row 0's Err arm: open(parent, O_RDONLY|O_DIRECTORY) failing is not provokable on a healthy FS from a unit test (the parent exists and is a directory by construction of every fixture); the arm is a pure errno passthrough with no decision"
+# Row 0's Err arm needs NO exception any more: anchor_parent_failures_name_the_parent_
+# and_do_not_claim_a_refusal provokes it for real (a missing intermediate and a symlink
+# loop), so the gate reports it covered. Deleted rather than left behind — the gate
+# hard-fails a stale exception, which is how this one was found.
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
@@ -434,13 +432,17 @@ anchor = "syscall::fstat(&afd).map_err"
 why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
 
 
-# The last three uncovered production regions in the crate, classified rather than
+# The last three uncovered production regions in the crate's [t1] files, classified
+# rather than
 # left to clear their floors on percentage slack — which is exactly what the rule below
 # forbids for anchor.rs's loops, and the rule does not get to apply selectively.
+# Scoped to [t1] deliberately: the three [[t3]] files still hold 71 uncovered
+# production regions between them (error.rs 62, syscall.rs 5, testutil.rs 4), and
+# coverage_check.py forbids exceptions on T3 entirely, so "the crate" would be false.
 [[exception]]
 path = "crates/maknae-io/src/dir.rs"
 anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw)?;"
-why = "the `?` unwind edge. classify_entry only returns Err from its d_type == DT_UNKNOWN fallback, and d_type is populated on ext4, xfs and APFS (measured), so the fallback does not run in the real path. The fallback's own decision IS controlled, directly, by a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and none_arm_falls_back_to_the_stat"
+why = "the `?` unwind edge. NOTE, because this file elsewhere criticises exactly this: line granularity means the span also removes the COVERED production classify_entry call site — the same wiring the 26-region dir.rs span was split apart for taking. It is accepted here rather than silently, because the alternative is leaving the `?` edge unclassified; the classification decision itself is controlled by none_arm_falls_back_to_the_stat and a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering, which stand in for the coverage signal this removes. classify_entry only returns Err from its d_type == DT_UNKNOWN fallback, and d_type is populated on ext4, xfs and APFS (measured), so the fallback does not run in the real path. The fallback's own decision IS controlled, directly, by a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and none_arm_falls_back_to_the_stat"
 
 [[exception]]
 path = "crates/maknae-io/src/write.rs"

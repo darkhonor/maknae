@@ -148,6 +148,10 @@ where
     }
 }
 
+pub(crate) fn kind_of_errno(e: Errno) -> IoKind {
+    kind_of(e)
+}
+
 fn kind_of(e: Errno) -> IoKind {
     match e {
         Errno::ENOENT => IoKind::NotFound,

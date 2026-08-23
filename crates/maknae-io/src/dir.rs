@@ -63,9 +63,10 @@ pub(crate) fn classify_entry<F: AsFd>(
 
 /// Enumerate a directory relative to a pinned dirfd, raw.
 pub(crate) fn enumerate_fd<F: AsFd>(dirfd: &F, at: &Path) -> Result<Vec<Entry>, IoError> {
-    // One conversion at the boundary: the inner fn propagates plain errnos, so the
-    // three unprovokable failure points need one exception between them rather than
-    // three, and none of them is a decision.
+    // One CONVERSION at the boundary: the inner fn propagates plain errnos, so each
+    // exception downstream names an arm rather than a `map_err` closure. (It does not
+    // reduce the exception COUNT — the contract now carries this boundary plus three
+    // interior arms — which is what an earlier version of this comment claimed.)
     enumerate_raw(dirfd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))
 }
 

@@ -1061,6 +1061,48 @@ mod tests {
         assert!(rendered.contains("effective_strategy"), "{rendered}");
     }
 
+    /// Row 0's payload is the anchor's PARENT, and an ELOOP there is not a refusal.
+    ///
+    /// Two properties of the one site in the crate whose path payload is neither the
+    /// anchor nor `anchor.join(rel)`:
+    ///
+    /// 1. A missing intermediate names the component that is actually absent, which is
+    ///    the useful diagnostic — `/etc/x/y/cfg` failing on a missing `/etc/x/y`
+    ///    should say `/etc/x/y`, not repeat the path the caller already typed.
+    /// 2. Row 0 opens the parent symlink-FOLLOWING by design, so ELOOP means the
+    ///    kernel gave up on a symlink LOOP, not that a symlink was refused. Reporting
+    ///    `IoError::Symlink` — whose Display reads "symlink refused" — would state the
+    ///    opposite of the documented policy that a symlinked ancestor is permitted.
+    #[test]
+    fn anchor_parent_failures_name_the_parent_and_do_not_claim_a_refusal() {
+        let d = dir(0o750);
+
+        // (1) missing intermediate
+        let missing = d.path().join("absent").join("cfg");
+        match open_anchor(&missing, none_req(), StrategyPref::Auto).unwrap_err() {
+            IoError::Io { path, kind } => {
+                assert_eq!(kind, crate::error::IoKind::NotFound);
+                assert_eq!(path, d.path().join("absent"), "must name the ABSENT parent");
+            }
+            other => panic!("expected Io{{NotFound}}, got {other:?}"),
+        }
+
+        // (2) a symlink loop in the parent chain
+        let a = d.path().join("loop_a");
+        let b = d.path().join("loop_b");
+        symlink(&b, &a).unwrap();
+        symlink(&a, &b).unwrap();
+        let looped = a.join("cfg");
+        match open_anchor(&looped, none_req(), StrategyPref::Auto).unwrap_err() {
+            IoError::Symlink { .. } => panic!(
+                "a symlink LOOP in the anchor's parent must not be reported as a \
+                 symlink refusal — symlinked ancestors are permitted by design"
+            ),
+            IoError::Io { .. } => {}
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
     /// A non-UTF-8 ANCHOR basename is reported as such, not as "ends in `..`".
     ///
     /// `MAKNAE_CONFIG_DIR` and `argv[1]` reach this with operator-supplied bytes, so
@@ -1650,8 +1692,12 @@ mod tests {
     /// call `syscall::open_temp_excl` directly, so they only prove that WRAPPER's
     /// flags -- not that `publish_raw` uses it. Measured: swap the opener in
     /// `publish_raw` for the non-O_EXCL, non-O_TRUNC `open_append` and every one of
-    /// those tests still passes, because syscall.rs is exclude_globs (no mutants) and
-    /// the write.rs coverage exception removes the call line from the T1 denominator.
+    /// those tests still passes. Two reasons, and the second is not the one this
+    /// comment used to give: syscall.rs is `exclude_globs`, so no mutant rewrites the
+    /// flags; and region coverage cannot distinguish WHICH function a covered line
+    /// calls, so the swap is invisible to it by construction. (An earlier version
+    /// blamed a write.rs coverage exception on that call line. There is no longer one
+    /// — it was deleted as stale once this test began covering the arm.)
     ///
     /// The attack the flag stops: an attacker who can write into the anchor
     /// pre-creates the temp name with longer content. Without O_EXCL the open
