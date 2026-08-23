@@ -12,6 +12,27 @@ use nix::sys::stat::{FileStat, Mode as NixMode};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 
+/// Widen `mode_t` to `u32`. The cast is load-bearing on darwin, where `mode_t` is
+/// `u16`, and a no-op on Linux, where it is already `u32` -- so `unnecessary_cast`
+/// fires on Linux ONLY. Found by running clippy on Linux (Debian 13, rustc 1.94.1):
+/// 19 `-D warnings` errors that darwin cannot produce, which would have failed CI on
+/// push, since CI builds in Rocky 10 containers. Centralized here so the one `allow`
+/// sits on two lines instead of nineteen call sites, and never at crate root where it
+/// would mask a genuinely unnecessary cast.
+#[allow(clippy::unnecessary_cast)]
+#[inline]
+pub(crate) fn mode_bits(m: nix::libc::mode_t) -> u32 {
+    m as u32
+}
+
+/// Widen `nlink_t` to `u64`: `u64` on Linux, `u16` on darwin. Same rationale as
+/// `mode_bits`, same measurement.
+#[allow(clippy::unnecessary_cast)]
+#[inline]
+pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
+    n as u64
+}
+
 /// Open the anchor's parent BY PATH. Deliberately symlink-following: `spec:155`/`:157`
 /// make a symlinked ancestor permitted and resolved once. `O_DIRECTORY` is what makes
 /// this FIFO-safe; `O_CLOEXEC` because std::fs sets FD_CLOEXEC implicitly and nix does

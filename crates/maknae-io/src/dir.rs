@@ -9,6 +9,7 @@
 
 use crate::anchor::{Entry, Kind};
 use crate::error::IoError;
+use crate::syscall::mode_bits;
 use nix::sys::stat::FileStat;
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -29,12 +30,12 @@ fn kind_of_type(t: nix::dir::Type) -> Kind {
 
 /// Map an `S_IFMT` to `Kind`, for the `d_type == DT_UNKNOWN` fallback.
 fn kind_of_mode(mode: u32) -> Kind {
-    let fmt = mode & nix::libc::S_IFMT as u32;
-    if fmt == nix::libc::S_IFREG as u32 {
+    let fmt = mode & mode_bits(nix::libc::S_IFMT);
+    if fmt == mode_bits(nix::libc::S_IFREG) {
         Kind::File
-    } else if fmt == nix::libc::S_IFDIR as u32 {
+    } else if fmt == mode_bits(nix::libc::S_IFDIR) {
         Kind::Dir
-    } else if fmt == nix::libc::S_IFLNK as u32 {
+    } else if fmt == mode_bits(nix::libc::S_IFLNK) {
         Kind::Symlink
     } else {
         Kind::Other
@@ -57,7 +58,7 @@ where
 {
     match ty {
         Some(t) => Ok(kind_of_type(t)),
-        None => Ok(kind_of_mode(stat_fn()?.st_mode as u32)),
+        None => Ok(kind_of_mode(mode_bits(stat_fn()?.st_mode))),
     }
 }
 
@@ -148,12 +149,21 @@ mod tests {
     /// disagree on exactly the filesystems where only one of them runs.
     #[test]
     fn mode_mapping_agrees_with_type_mapping() {
-        assert_eq!(kind_of_mode(nix::libc::S_IFREG as u32 | 0o644), Kind::File);
-        assert_eq!(kind_of_mode(nix::libc::S_IFDIR as u32 | 0o755), Kind::Dir);
         assert_eq!(
-            kind_of_mode(nix::libc::S_IFLNK as u32 | 0o777),
+            kind_of_mode(mode_bits(nix::libc::S_IFREG) | 0o644),
+            Kind::File
+        );
+        assert_eq!(
+            kind_of_mode(mode_bits(nix::libc::S_IFDIR) | 0o755),
+            Kind::Dir
+        );
+        assert_eq!(
+            kind_of_mode(mode_bits(nix::libc::S_IFLNK) | 0o777),
             Kind::Symlink
         );
-        assert_eq!(kind_of_mode(nix::libc::S_IFIFO as u32 | 0o600), Kind::Other);
+        assert_eq!(
+            kind_of_mode(mode_bits(nix::libc::S_IFIFO) | 0o600),
+            Kind::Other
+        );
     }
 }

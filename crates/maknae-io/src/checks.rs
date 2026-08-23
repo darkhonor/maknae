@@ -5,6 +5,7 @@
 //! automated control.
 
 use crate::error::{IoError, IoKind};
+use crate::syscall::{mode_bits, nlink_count};
 use nix::errno::Errno;
 use nix::sys::stat::FileStat;
 use std::path::Path;
@@ -33,7 +34,7 @@ pub struct TargetRequired {
 
 /// Refuse when `st_mode & mask != 0` — `0o007` refuses any other-class bit.
 fn mode_violates(st: &FileStat, mask: u32) -> bool {
-    (st.st_mode as u32) & mask != 0
+    mode_bits(st.st_mode) & mask != 0
 }
 
 /// Owner/mode predicate shared by the anchor and descendant scopes. Takes a
@@ -48,7 +49,7 @@ pub(crate) fn check_owner_mode(
         if mode_violates(st, mask) {
             return Err(IoError::InsecurePermissions {
                 path: path.to_path_buf(),
-                mode: st.st_mode as u32,
+                mode: mode_bits(st.st_mode),
             });
         }
     }
@@ -79,18 +80,18 @@ pub(crate) fn check_target(
     req: &TargetRequired,
 ) -> Result<(), IoError> {
     if req.regular_file {
-        let fmt = (st.st_mode as u32) & nix::libc::S_IFMT as u32;
-        if fmt != nix::libc::S_IFREG as u32 {
+        let fmt = mode_bits(st.st_mode) & mode_bits(nix::libc::S_IFMT);
+        if fmt != mode_bits(nix::libc::S_IFREG) {
             return Err(IoError::NotRegularFile {
                 path: path.to_path_buf(),
             });
         }
     }
     check_owner_mode(st, path, req.owner, req.mode_mask)?;
-    if req.nlink_exactly_one && st.st_nlink as u64 != 1 {
+    if req.nlink_exactly_one && nlink_count(st.st_nlink) != 1 {
         return Err(IoError::MultiplyLinked {
             path: path.to_path_buf(),
-            nlink: st.st_nlink as u64,
+            nlink: nlink_count(st.st_nlink),
         });
     }
     Ok(())
@@ -128,7 +129,8 @@ where
         },
         Errno::ENOTDIR => match stat_fn() {
             Ok(st)
-                if (st.st_mode as u32) & nix::libc::S_IFMT as u32 == nix::libc::S_IFLNK as u32 =>
+                if mode_bits(st.st_mode) & mode_bits(nix::libc::S_IFMT)
+                    == mode_bits(nix::libc::S_IFLNK) =>
             {
                 IoError::Symlink {
                     path: path.to_path_buf(),
