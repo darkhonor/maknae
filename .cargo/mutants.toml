@@ -5,15 +5,34 @@
 # mutated crate to its pure T1 decision logic — the excluded files are I/O (network/
 # keygen/provider/file/syscall) that cannot be meaningfully unit-killed.
 #
-# ONE DELIBERATE EXEMPTION, recorded because it breaks the pattern: most excluded files
-# are also [[t3]], but `crates/maknae-io/src/syscall.rs` is `[t1]` (promoted at 87/87)
-# and still excluded here. Its exclusion is NOT about tier — it is that the file's
-# content is bitflag unions (`OFlag`/`Mode`/`ResolveFlag`/`AtFlags`), where
-# cargo-mutants' `replace | with ^` on a disjoint union is behaviourally identical: an
-# equivalent mutant, unkillable, reported MISSED, gate red. It carries a coverage floor
-# instead, plus direct FD_CLOEXEC assertions per open verb. ADR-0016 defines T1 as
+# ONE DELIBERATE EXEMPTION, and what it actually costs — MEASURED, not assumed.
+#
+# Most excluded files are also [[t3]]; `crates/maknae-io/src/syscall.rs` is `[t1]`
+# (promoted at 87/87 darwin, 107/107 Linux) and still excluded. ADR-0016 defines T1 as
 # floor + crate mutation gate, and no gate cross-checks these two files, so this note is
 # the only place the exemption is visible.
+#
+# The original justification — `replace | with ^` on a disjoint bitflag union is
+# behaviourally identical, so an equivalent mutant is reported MISSED and the gate goes
+# red — is TRUE but INCOMPLETE, and stating only that overstated the case. Lifting the
+# exclusion and running the file (73 mutants) gives 40 missed, of which only 26 are that
+# equivalent family. The rest are real and unkilled:
+#
+#   - `replace | with &` at several flag unions. NOT equivalent: `&` on disjoint flags
+#     yields the empty set, dropping every flag in the union. One of these was a genuine
+#     hole — row 0's O_DIRECTORY, whose loss makes open(2) BLOCK on a FIFO parent. It is
+#     now killed by anchor_parent_that_is_a_fifo_is_refused_and_does_not_block. The `&`
+#     mutants that drop O_NOFOLLOW or O_EXCL were already caught by behavioural tests.
+#   - `fsync_fd`/`sync_data` bodies replaced with `Ok(())`. Durability is not observable
+#     from a unit test without crash injection; genuinely uncovered.
+#   - 5 TIMEOUTs from dropping O_NONBLOCK — the FIFO hang this file documents.
+#
+# So the compensating controls are: a coverage floor; per-verb FD_CLOEXEC assertions for
+# six of the seven opens (open_dir_handle pins only the END STATE and says so on the
+# test — fdopendir sets the bit afterwards, so no external assertion can hold its
+# call-site flag); and behavioural tests for O_NOFOLLOW, O_EXCL and now O_DIRECTORY.
+# Durability and the O_NONBLOCK drops remain uncontrolled. Narrowing this to an
+# `exclude_re` on the `^` family, so the rest of the file is gated, is tracked as #126.
 exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind Display+From declarations
   "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants

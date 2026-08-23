@@ -1063,8 +1063,10 @@ mod tests {
 
     /// Row 0's payload is the anchor's PARENT, and an ELOOP there is not a refusal.
     ///
-    /// Two properties of the one site in the crate whose path payload is neither the
-    /// anchor nor `anchor.join(rel)`:
+    /// Two properties of the one site in the crate whose path payload lies ABOVE the
+    /// anchor. (Not "neither the anchor nor `anchor.join(rel)`" — that was retracted:
+    /// the portable walk's payloads are intermediate prefixes, anchor-absolute but not
+    /// `anchor.join(rel)` either. See the convention on `IoError`.)
     ///
     /// 1. A missing intermediate names the component that is actually absent, which is
     ///    the useful diagnostic — `/etc/x/y/cfg` failing on a missing `/etc/x/y`
@@ -1112,6 +1114,45 @@ mod tests {
                 assert_eq!(path, a, "must name the parent, as part (1) does");
             }
             other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    /// Row 0's `O_DIRECTORY` is what makes the anchor's parent open FIFO-SAFE.
+    ///
+    /// Found by running the mutants that `.cargo/mutants.toml` excludes: `replace | with
+    /// &` at the row-0 flag union drops `O_DIRECTORY`, and it was MISSED in 0s — no test
+    /// reached it. Row 0 is also the one open in the crate with no `O_NONBLOCK`, so
+    /// without `O_DIRECTORY` an `open(2)` on a FIFO parent BLOCKS waiting for a writer
+    /// instead of returning ENOTDIR: `maknaed` hangs at startup rather than failing
+    /// closed. The exclusion is what made the absence invisible.
+    ///
+    /// Run on a worker thread with a bounded wait, deliberately: the failure mode under
+    /// test is a HANG, and a test that reproduces it by hanging tells CI nothing except
+    /// that the job timed out. This way it fails with a sentence.
+    #[test]
+    fn anchor_parent_that_is_a_fifo_is_refused_and_does_not_block() {
+        let d = dir(0o750);
+        let fifo = d.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let target = fifo.join("cfg"); // anchor whose PARENT is the FIFO
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_anchor(&target, none_req(), StrategyPref::Auto).map(|_| ()));
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "open_anchor BLOCKED on a FIFO parent — O_DIRECTORY has been dropped \
+                 from row 0, so open(2) is waiting for a writer that will never come"
+            ),
+            Err(e) => panic!("worker died: {e:?}"),
+            Ok(Ok(())) => panic!("a FIFO parent must not yield a usable anchor"),
+            Ok(Err(IoError::Io { path, kind })) => {
+                assert_eq!(kind, crate::error::IoKind::NotADirectory);
+                assert_eq!(path, fifo, "must name the parent that is not a directory");
+            }
+            Ok(Err(other)) => panic!("expected Io{{NotADirectory}}, got {other:?}"),
         }
     }
 

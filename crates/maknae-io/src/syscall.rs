@@ -16,7 +16,8 @@ use std::path::Path;
 /// `u16`, and a no-op on Linux, where it is already `u32` -- so `unnecessary_cast`
 /// fires on Linux ONLY. Found by running clippy on Linux (Debian 13, rustc 1.94.1):
 /// 19 `-D warnings` errors that darwin cannot produce, which would have failed CI on
-/// push, since CI builds in Rocky 10 containers. Centralized here so the one `allow`
+/// push — CI runs on `ubuntu-latest` (Rocky 10 is the deployment target, not the CI
+/// runner; conflating the two is what made this comment wrong the first time). Centralized here so the one `allow`
 /// sits on two lines instead of nineteen call sites, and never at crate root where it
 /// would mask a genuinely unnecessary cast.
 #[allow(clippy::unnecessary_cast)]
@@ -245,8 +246,11 @@ mod tests {
     //! guarantee is just gone.
     //!
     //! Probe used to size these: stripping `O_CLOEXEC` from every open in this file
-    //! turns 5 of the 6 tests below RED. The sixth is `open_dir_handle`, and its
-    //! limitation is stated on the test itself -- read it before trusting it.
+    //! turns 5 of the 6 darwin-visible tests below RED — 6 of 7 on Linux, where the
+    //! openat2 assertion also compiles. The one that does NOT go red is
+    //! `open_dir_handle`, and its limitation is stated on the test itself: read that
+    //! before trusting it. Counts are lane-specific here on purpose; an unlabelled
+    //! "5 of 6" describes the dev host, not the lane CI enforces.
 
     use super::*;
     use std::os::fd::AsRawFd;
