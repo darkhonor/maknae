@@ -83,7 +83,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 ├── coverage-tiers.toml      # risk-tiered coverage contract (ADR-0016)
 ├── deny.toml                # supply-chain gate (cargo-deny)
 ├── bins/                    # maknae (CLI), maknaed (daemon), maknae-spifc (SPIF compiler)
-├── crates/                  # trust-plane kernel, authz, audit, SPIF, MCP, vault, subject-context
+├── crates/                  # trust-plane kernel, authz, audit, secure I/O, SPIF, MCP, vault, subject-context
 ├── ci/gates/                # fail-closed CI gates (coverage, negative-control, isolation-contract)
 ├── packaging/               # STIG-baselined deb / rpm / macos / oci packaging
 ├── deploy/                  # deployment assets (Vault PKI, …)
