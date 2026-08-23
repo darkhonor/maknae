@@ -166,9 +166,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let odd = std::ffi::OsStr::from_bytes(b"\xff\xfe");
         if std::os::unix::fs::symlink("/etc/hostname", d.path().join(odd)).is_err() {
-            eprintln!(
-                "SKIP a_non_utf8_entry_...: filesystem refuses non-UTF-8 names \
-                 (EILSEQ); the raw-name path is UNTESTED on this host"
+            crate::testutil::skip_or_fail(
+                "a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering",
+                "the filesystem refuses non-UTF-8 names (EILSEQ), so the raw-name \
+                 classification has no fixture",
             );
             return;
         }

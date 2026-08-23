@@ -307,7 +307,10 @@ mod tests {
         std::fs::write(d.path().join("a/f"), b"x").expect("write");
         let parent = open_parent_by_path(d.path()).expect("open parent");
         if probe_openat2(&parent).is_err() {
-            eprintln!("SKIP openat2_resolve_sets_cloexec: no openat2 on this kernel");
+            crate::testutil::skip_or_fail(
+                "openat2_resolve_sets_cloexec",
+                "openat2 is not available on this kernel",
+            );
             return;
         }
         let fd = openat2_resolve(&parent, "a/f", false).expect("openat2 resolve");

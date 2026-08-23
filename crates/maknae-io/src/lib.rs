@@ -42,6 +42,9 @@
 
 pub mod anchor;
 pub mod checks;
+#[cfg(test)]
+mod testutil;
+
 mod dir;
 pub mod error;
 pub mod normalize;

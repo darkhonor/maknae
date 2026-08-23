@@ -31,15 +31,18 @@ pub struct Outcome<T> {
     pub effective_strategy: Strategy,
 }
 
-/// `Debug` is hand-written to REDACT `value`, and must stay that way.
+/// How many bytes the `fstat` promised.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Want(usize);
+
+/// How many bytes the fill loop actually read.
 ///
-/// `read` returns `Outcome<Zeroizing<Vec<u8>>>`, and `Zeroizing`'s upstream `Debug`
-/// prints the wrapped bytes. A derived `Debug` would therefore emit plaintext
-/// credentials from anything that formats an Outcome: `dbg!`, a `tracing::debug!`,
-/// a failing `assert_eq!`, or `.expect_err()` on a `Result<Outcome, _>` -- the last
-/// two inside the test suite itself. For the crate whose stated job includes keeping
-/// secrets off the heap, letting them out through the formatter instead is not a
-/// smaller hole.
+/// A newtype purely so `size_verdict`'s two `usize` arguments cannot be transposed:
+/// swapped, the shrank case reports `got == expected` and the direction signal that
+/// callers map on is destroyed, silently. That transposition used to compile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Have(usize);
+
 /// Did the read see exactly the bytes the `fstat` promised?
 ///
 /// Pure, and separate from `finish_read`, because the two failing directions cannot
@@ -54,16 +57,25 @@ pub struct Outcome<T> {
 /// `Err(got)` carries the byte count to report. In the grew case that is `n + 1`: a
 /// LOWER BOUND, since one probe byte proves "more than expected" without revealing
 /// how much more.
-fn size_verdict(want: usize, n: usize, saw_extra: bool) -> Result<(), usize> {
-    if n != want {
-        return Err(n); // shrank: fewer bytes than the checked inode claimed
+fn size_verdict(want: Want, have: Have, saw_extra: bool) -> Result<(), usize> {
+    if have.0 != want.0 {
+        return Err(have.0); // shrank: fewer bytes than the checked inode claimed
     }
     if saw_extra {
-        return Err(n + 1); // grew: at least one byte past st_size
+        return Err(have.0 + 1); // grew: at least one byte past st_size
     }
     Ok(())
 }
 
+/// `Debug` is hand-written to REDACT `value`, and must stay that way.
+///
+/// `read` returns `Outcome<Zeroizing<Vec<u8>>>`, and `Zeroizing`'s upstream `Debug`
+/// prints the wrapped bytes. A derived `Debug` would therefore emit plaintext
+/// credentials from anything that formats an Outcome: `dbg!`, a `tracing::debug!`,
+/// a failing `assert_eq!`, or `.expect_err()` on a `Result<Outcome, _>` -- the last
+/// two inside the test suite itself. For the crate whose stated job includes keeping
+/// secrets off the heap, letting them out through the formatter instead is not a
+/// smaller hole. `outcome_debug_redacts_the_payload` holds it.
 impl<T> std::fmt::Debug for Outcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Outcome")
@@ -195,7 +207,11 @@ impl Anchor {
         let name = match norm.file_name() {
             None => return Err(IoError::EmptyRemainder),
             Some(os) => match os.to_str() {
-                None => return Err(IoError::NonUtf8Component { path: norm.clone() }),
+                None => {
+                    return Err(IoError::NonUtf8Component {
+                        path: self.path.join(&norm),
+                    })
+                }
                 Some(n) => n,
             },
         };
@@ -241,7 +257,7 @@ impl Anchor {
         if crate::strategy::uses_openat2(lane) {
             let rel_s = norm
                 .to_str()
-                .ok_or_else(|| IoError::NonUtf8Component { path: norm.clone() })?;
+                .ok_or_else(|| IoError::NonUtf8Component { path: full.clone() })?;
             let fd = crate::syscall::openat2_resolve(&self.fd, rel_s, false)
                 .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
             return self.finish_read(fd, &full, lane, &target);
@@ -389,7 +405,11 @@ impl Anchor {
         let name = match norm.file_name() {
             None => return Err(IoError::EmptyRemainder),
             Some(os) => match os.to_str() {
-                None => return Err(IoError::NonUtf8Component { path: norm.clone() }),
+                None => {
+                    return Err(IoError::NonUtf8Component {
+                        path: self.path.join(&norm),
+                    })
+                }
                 Some(n) => n.to_string(),
             },
         };
@@ -459,7 +479,8 @@ impl Anchor {
             match nix::unistd::read(&fd, &mut probe) {
                 Ok(0) => break false,
                 Ok(_) => break true,
-                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EINTR) => continue, // retry the probe
+
                 // A genuine read error is NOT a size change. Relabelling it would
                 // discard the errno that the fill loop above preserves and report
                 // e.g. EIO as "size changed under the read". Bound as `probe_err`
@@ -472,7 +493,7 @@ impl Anchor {
             }
         };
         zeroize::Zeroize::zeroize(&mut probe[..]);
-        if let Err(got) = size_verdict(want, n, saw_extra) {
+        if let Err(got) = size_verdict(Want(want), Have(n), saw_extra) {
             return Err(IoError::SizeChanged {
                 path: full.to_path_buf(),
                 expected: want,
@@ -903,6 +924,47 @@ mod tests {
         assert_eq!(std::fs::read(sub.join("a.jsonl")).unwrap(), b"one\ntwo\n");
     }
 
+    /// The SHRANK direction, through the PRODUCTION path.
+    ///
+    /// `size_verdict`'s four quadrants are unit-tested, but that held the pure
+    /// function only -- measured: replacing the production call's `Have(n)` with
+    /// `Have(want)`, which disables shrank detection entirely, left 102/102 green.
+    /// Nothing tested what `finish_read` actually feeds it.
+    ///
+    /// sysfs is the exact twin of the procfs GREW fixture: an attribute file reports
+    /// `st_size == 4096` and reads a handful of bytes, so the fill loop legitimately
+    /// ends with `n < want` and no race is required. Measured on Debian 13:
+    /// `/sys/devices/system/cpu/online` is st_size 4096, 4 bytes readable, mode 0444.
+    ///
+    /// Without the refusal this returns `Ok` with a 4096-byte buffer whose tail is
+    /// NUL -- 4092 NUL bytes appended to what the caller believes is file content.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_shorter_than_its_st_size_is_refused_not_nul_padded() {
+        let dir = std::path::Path::new("/sys/devices/system/cpu");
+        if !dir.join("online").exists() {
+            crate::testutil::skip_or_fail(
+                "a_file_shorter_than_its_st_size_is_refused_not_nul_padded",
+                "/sys is not mounted, so the SHRANK direction has no fixture",
+            );
+            return;
+        }
+        let st = std::fs::symlink_metadata(dir.join("online")).unwrap();
+        assert_eq!(st.len(), 4096, "fixture requires st_size 4096");
+
+        let a = open_anchor(dir, none_req(), StrategyPref::ForcePortable).unwrap();
+        let err = a
+            .read(Path::new("online"), None, t_req())
+            .expect_err("a file shorter than st_size must be refused, not NUL-padded");
+        match err {
+            IoError::SizeChanged { expected, got, .. } => {
+                assert_eq!(expected, 4096);
+                assert!(got < 4096, "shrank must report the ACTUAL count, got {got}");
+            }
+            other => panic!("expected SizeChanged, got {other:?}"),
+        }
+    }
+
     /// The portable half of the size-change refusal, so the control is not Linux-only.
     ///
     /// A FIFO reports `st_size == 0` while holding readable bytes -- the same shape as
@@ -1010,14 +1072,89 @@ mod tests {
     /// the remainder is not empty. This is the path PR B hits when it feeds an
     /// `enumerate` result back into `read`: `Entry.name` is a raw `OsString` by
     /// design, so a non-UTF-8 entry name arrives here legitimately.
+    /// `publish` and `append` must propagate a FAILED WALK, not just `read`.
+    ///
+    /// Each of the three verbs calls `walk_dirs` at its own site. Every existing
+    /// failing-walk test goes through `read` or `enumerate`, so the two write verbs'
+    /// propagation was uncovered -- the same parallel-surface gap as the non-UTF-8
+    /// conversion. A symlinked intermediate is the cheapest failing walk.
+    #[test]
+    fn publish_and_append_propagate_a_failed_walk() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let real = a.path.join("real");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, a.path.join("link")).unwrap();
+
+        let e = a
+            .publish(Path::new("link/out.yaml"), None, b"x", m(0o640))
+            .unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "publish: got {e:?}");
+
+        let e = a
+            .append(
+                Path::new("link/out.jsonl"),
+                None,
+                t_append(),
+                b"x",
+                m(0o640),
+            )
+            .unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "append: got {e:?}");
+
+        // And nothing was created through the symlink.
+        assert!(
+            !real.join("out.yaml").exists(),
+            "published through a symlink"
+        );
+        assert!(
+            !real.join("out.jsonl").exists(),
+            "appended through a symlink"
+        );
+    }
+
+    /// All THREE verbs, because they reach the conversion through two different
+    /// functions: `read` has its own, while `publish` and `append` share
+    /// `split_target`. Only `read`'s was covered, which is the parallel-surface trap
+    /// this crate keeps falling into. No filesystem is touched, so it runs on APFS.
     #[test]
     fn non_utf8_target_name_is_not_reported_as_empty_remainder() {
         use std::os::unix::ffi::OsStrExt;
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
         let bad = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"10-\xff.yaml"));
+
         let e = a.read(&bad, None, t_req()).unwrap_err();
-        assert!(matches!(e, IoError::NonUtf8Component { .. }), "got {e:?}");
+        assert!(
+            matches!(e, IoError::NonUtf8Component { .. }),
+            "read: got {e:?}"
+        );
+
+        let e = a.publish(&bad, None, b"x", m(0o640)).unwrap_err();
+        assert!(
+            matches!(e, IoError::NonUtf8Component { .. }),
+            "publish: got {e:?}"
+        );
+
+        let e = a
+            .append(&bad, None, t_append(), b"x", m(0o640))
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::NonUtf8Component { .. }),
+            "append: got {e:?}"
+        );
+
+        // The payload is the ABSOLUTE path, matching every other error these verbs
+        // return; it used to be the bare relative remainder on two of the three.
+        match a.read(&bad, None, t_req()).unwrap_err() {
+            IoError::NonUtf8Component { path } => {
+                assert!(
+                    path.starts_with(&a.path),
+                    "payload not anchor-absolute: {path:?}"
+                )
+            }
+            other => panic!("got {other:?}"),
+        }
     }
 
     /// All four quadrants of the read-completion verdict, on every platform.
@@ -1031,17 +1168,17 @@ mod tests {
     #[test]
     fn size_verdict_covers_all_four_quadrants() {
         // Exact: read every promised byte and found nothing past them.
-        assert_eq!(size_verdict(13, 13, false), Ok(()));
+        assert_eq!(size_verdict(Want(13), Have(13), false), Ok(()));
         // Grew: at least one byte past st_size. `got` is a lower bound, n + 1.
-        assert_eq!(size_verdict(13, 13, true), Err(14));
+        assert_eq!(size_verdict(Want(13), Have(13), true), Err(14));
         // Shrank: fewer bytes than the checked inode claimed. `got` is exact.
-        assert_eq!(size_verdict(13, 5, false), Err(5));
+        assert_eq!(size_verdict(Want(13), Have(5), false), Err(5));
         // Shrank AND something readable past the short count -- still shrank, and the
         // reported count stays the honest one rather than the +1 lower bound.
-        assert_eq!(size_verdict(13, 5, true), Err(5));
+        assert_eq!(size_verdict(Want(13), Have(5), true), Err(5));
         // The empty file is the boundary: exact, not a spurious refusal.
-        assert_eq!(size_verdict(0, 0, false), Ok(()));
-        assert_eq!(size_verdict(0, 0, true), Err(1));
+        assert_eq!(size_verdict(Want(0), Have(0), false), Ok(()));
+        assert_eq!(size_verdict(Want(0), Have(0), true), Err(1));
     }
 
     /// A file whose readable length exceeds its `st_size` must be REFUSED, not
@@ -1063,7 +1200,11 @@ mod tests {
         let me = std::process::id();
         let proc_dir = std::path::PathBuf::from(format!("/proc/{me}"));
         if !proc_dir.join("status").exists() {
-            return; // no procfs (container without /proc mounted)
+            crate::testutil::skip_or_fail(
+                "a_file_longer_than_its_st_size_is_refused_not_truncated",
+                "/proc is not mounted, so the GREW direction has no fixture",
+            );
+            return;
         }
         // st_size must really be 0 here, or the fixture is not testing what it claims.
         let sz = std::fs::symlink_metadata(proc_dir.join("status"))
@@ -1110,6 +1251,11 @@ mod tests {
     fn execute_only_descendant_separates_the_two_lanes() {
         // root ignores permission bits, so the discriminator disappears under it.
         if nix::unistd::Uid::effective().is_root() {
+            crate::testutil::skip_or_fail(
+                "execute_only_descendant_separates_the_two_lanes",
+                "running as root, which ignores the 0o311 permission bits the \
+                 fixture depends on",
+            );
             return;
         }
         let d = dir(0o750);
@@ -1121,9 +1267,9 @@ mod tests {
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
 
         if a.probed_capability() != Strategy::Openat2 {
-            eprintln!(
-                "SKIP execute_only_descendant_separates_the_two_lanes: no openat2 \
-                 here; the two lanes are NOT being discriminated on this host"
+            crate::testutil::skip_or_fail(
+                "execute_only_descendant_separates_the_two_lanes",
+                "openat2 is not available, so the two lanes are not discriminated",
             );
             return;
         }
@@ -1198,7 +1344,10 @@ mod tests {
         let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
         seed_multi(&a);
         if a.probed_capability() != Strategy::Openat2 {
-            eprintln!("SKIP multi_component_unchecked_reports_openat2: no openat2 here");
+            crate::testutil::skip_or_fail(
+                "multi_component_unchecked_reports_openat2",
+                "openat2 is not available on this host",
+            );
             return;
         }
         let out = a

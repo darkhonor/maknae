@@ -416,11 +416,21 @@ path = "crates/maknae-io/src/walk.rs"
 anchor = "map_errno_no_disambiguation(e, &sofar)"
 why = "fstat on a dirfd the kernel just returned from openat cannot fail on a healthy FS; a pure errno passthrough with no decision. The decision this loop carries is the per-component check, covered by descendant_requirement_enforced_per_component"
 
+# The size probe's two non-progress arms. Separate from the fill loop's exception
+# below because they are a different loop, and named explicitly rather than left to
+# clear the floor on percentage slack -- an uncovered region that no exception claims
+# is an unclassified one, which is the state this gate exists to prevent.
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "                Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
+end_anchor = "                Err(probe_err) => {"
+why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
+
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
 anchor = "                Ok(0) => break,"
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
-why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm above them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
+why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm below them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
@@ -476,7 +486,7 @@ why = "same, for the terminal-directory fd the walk just returned; the checked-d
 path = "crates/maknae-io/src/write.rs"
 anchor = "            Ok(0) => break,"
 end_anchor = "Err(e) => return Err(e),"
-why = "write_all's three non-progress arms, and ONLY those three — the covered progress arm above them stays in the denominator. Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
+why = "write_all's three non-progress arms, and ONLY those three — the covered progress arm below them stays in the denominator. Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
 
 # Narrowed from one 15-region span to the two arms the `why` actually names; the old
 # span also removed the cleanup wiring between them.
