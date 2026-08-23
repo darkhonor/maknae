@@ -3,11 +3,12 @@
 //! signature names `StrategyPref` at commit 2, while `strategy.rs` does not land until
 //! commit 5.
 
-use crate::checks::{check_owner_mode, AnchorRequired};
+use crate::checks::{check_owner_mode, AnchorRequired, DescendantRequired, TargetRequired};
 use crate::error::IoError;
 use crate::syscall;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Injection may only force the WEAKER lane. There is deliberately no `Openat2`
 /// variant: "demand the stronger lane" is unrepresentable rather than a runtime `Err`.
@@ -55,11 +56,9 @@ pub struct Entry {
 /// which is the deliberate consequence of pinning.
 #[derive(Debug)]
 pub struct Anchor {
-    // Read by the walk at commit 4; the pin itself is the point of holding them here.
-    #[allow(dead_code)]
     fd: OwnedFd,
-    #[allow(dead_code)]
     path: PathBuf,
+    /// Read by the lane fn at commit 5.
     #[allow(dead_code)]
     pref: StrategyPref,
     probed: Strategy,
@@ -120,6 +119,82 @@ pub fn open_anchor(
         pref,
         probed: Strategy::Portable,
     })
+}
+
+impl Anchor {
+    /// Read a file relative to the pinned anchor.
+    ///
+    /// Commit 4 hard-codes `Strategy::Portable`; the lane fn and the observable flip
+    /// arrive at commit 5, so tests here must NOT pin `effective_strategy`.
+    pub fn read(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        _target: TargetRequired,
+    ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
+        let norm = crate::normalize::normalize(rel)?;
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        let name = match norm.file_name().and_then(|s| s.to_str()) {
+            None => return Err(IoError::EmptyRemainder),
+            Some(n) => n,
+        };
+
+        // Pre-check, dominating: a named descendant requirement with no directory it
+        // can apply to is an Err, never a vacuous pass. `config.d/../maknae.yaml`
+        // collapses to `maknae.yaml`, so the caller's requirement on `config.d` would
+        // otherwise silently never run.
+        if desc.is_some() && dir.as_os_str().is_empty() {
+            return Err(IoError::NoDescendantForRequirement {
+                rel: rel.to_path_buf(),
+            });
+        }
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
+
+        let full = self.path.join(&norm);
+        let fd = crate::syscall::open_read_target(&base, name).map_err(|e| {
+            crate::checks::map_errno(e, &full, || crate::syscall::fstatat_nofollow(&base, name))
+        })?;
+
+        let st = crate::syscall::fstat(&fd)
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+
+        // Pre-size from st_size so the Zeroizing buffer never reallocates: an
+        // abandoned buffer is the one credential residual zeroize cannot reach
+        // ("cannot ensure that previous reallocations did not leave values on the
+        // heap"). with_capacity + read_to_end may still reserve.
+        let want = st.st_size.max(0) as usize;
+        let mut buf = Zeroizing::new(vec![0u8; want]);
+        let mut n = 0usize;
+        while n != want {
+            match nix::unistd::read(&fd, &mut buf[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                // The manual loop loses read_to_end's built-in retry.
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+            }
+        }
+        buf.truncate(n);
+
+        Ok(Outcome {
+            value: buf,
+            effective_strategy: Strategy::Portable,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +342,209 @@ mod tests {
         std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o750)).unwrap();
         let anchor = open_anchor(&a, none_req(), StrategyPref::Auto).unwrap();
         assert_eq!(anchor.probed_capability(), Strategy::Portable);
+    }
+
+    fn anchor_at(d: &std::path::Path, name: &str) -> Anchor {
+        let a = d.join(name);
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o750)).unwrap();
+        open_anchor(&a, none_req(), StrategyPref::Auto).unwrap()
+    }
+
+    fn t_req() -> TargetRequired {
+        TargetRequired {
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: false,
+        }
+    }
+
+    /// Without a positive case, walk.rs's walk-completed region is uncovered at the
+    /// very commit that lands it. Must NOT pin effective_strategy — it flips at 5.
+    #[test]
+    fn successful_multi_component_read() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let sub = a.path.join("config.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::write(sub.join("10-x.yaml"), b"core:\n  a: 1\n").unwrap();
+        let out = a
+            .read(Path::new("config.d/10-x.yaml"), None, t_req())
+            .unwrap();
+        assert_eq!(&out.value[..], b"core:\n  a: 1\n");
+    }
+
+    /// The pre-size must not reallocate: an abandoned buffer is the one credential
+    /// residual zeroize cannot reach.
+    #[test]
+    fn read_buffer_is_pre_sized_and_never_reallocates() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let body = vec![b'x'; 4096];
+        std::fs::write(a.path.join("big.bin"), &body).unwrap();
+        let out = a.read(Path::new("big.bin"), None, t_req()).unwrap();
+        assert_eq!(out.value.len(), 4096);
+        assert_eq!(out.value.capacity(), 4096, "buffer reallocated");
+    }
+
+    #[test]
+    fn symlinked_component_refused_as_symlink() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let real = a.path.join("real");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, a.path.join("link")).unwrap();
+        let e = a.read(Path::new("link/x.yaml"), None, t_req()).unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "got {e:?}");
+    }
+
+    #[test]
+    fn descendant_requirement_enforced_per_component() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let sub = a.path.join("config.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o772)).unwrap();
+        std::fs::write(sub.join("x.yaml"), b"y").unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let e = a
+            .read(Path::new("config.d/x.yaml"), Some(req), t_req())
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::InsecurePermissions { mode, .. } if mode & 0o007 != 0),
+            "got {e:?}"
+        );
+    }
+
+    /// Pre-check arms: a named requirement no lane can evaluate is an Err.
+    #[test]
+    fn descendant_requirement_with_no_descendant_is_err() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("maknae.yaml"), b"y").unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let e = a
+            .read(Path::new("maknae.yaml"), Some(req.clone()), t_req())
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::NoDescendantForRequirement { .. }),
+            "got {e:?}"
+        );
+        // and after normalization collapses the named directory away
+        let e2 = a
+            .read(Path::new("config.d/../maknae.yaml"), Some(req), t_req())
+            .unwrap_err();
+        assert!(
+            matches!(e2, IoError::NoDescendantForRequirement { .. }),
+            "collapsed: got {e2:?}"
+        );
+    }
+
+    #[test]
+    fn zero_component_read_is_empty_remainder() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a.read(Path::new("config.d/.."), None, t_req()).unwrap_err();
+        assert_eq!(e, IoError::EmptyRemainder);
+    }
+
+    /// Covers walk.rs's `Some(fd) => open_child(fd, ...)` arm — the SECOND and later
+    /// components. A one-component walk only exercises the `None` arm.
+    #[test]
+    fn three_component_walk_uses_the_chained_arm() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let deep = a.path.join("x").join("y");
+        std::fs::create_dir_all(&deep).unwrap();
+        for p in [a.path.join("x"), deep.clone()] {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        std::fs::write(deep.join("z.yaml"), b"deep").unwrap();
+        let out = a.read(Path::new("x/y/z.yaml"), None, t_req()).unwrap();
+        assert_eq!(&out.value[..], b"deep");
+    }
+
+    /// Covers the read target's own error arm: a symlinked TARGET (not component).
+    /// Row 3 carries no O_DIRECTORY, so this is the ELOOP path rather than ENOTDIR.
+    #[test]
+    fn symlinked_read_target_refused() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("real.yaml"), b"y").unwrap();
+        symlink(a.path.join("real.yaml"), a.path.join("link.yaml")).unwrap();
+        let e = a.read(Path::new("link.yaml"), None, t_req()).unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "got {e:?}");
+    }
+
+    /// Covers the short-read termination arm: a file that shrank between the
+    /// fstat and the read yields fewer bytes than st_size and must not spin.
+    #[test]
+    fn short_read_terminates_and_truncates() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        // /dev/null reports st_size 0 but is a char device; use an empty regular file,
+        // which exercises want == 0 and the loop body never running.
+        std::fs::write(a.path.join("empty.yaml"), b"").unwrap();
+        let out = a.read(Path::new("empty.yaml"), None, t_req()).unwrap();
+        assert!(out.value.is_empty());
+    }
+
+    /// Covers read()'s propagation of a normalize error (line 135's `?`).
+    #[test]
+    fn read_propagates_escape_refusal() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a
+            .read(Path::new("../escape.yaml"), None, t_req())
+            .unwrap_err();
+        assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
+    }
+
+    /// Covers the target open's disambiguation CLOSURE: it is invoked only on ENOTDIR,
+    /// which a symlinked target (ELOOP) never reaches. A regular file used as a
+    /// directory component gives ENOTDIR.
+    #[test]
+    fn regular_file_as_directory_component_is_not_a_directory() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("plain.yaml"), b"y").unwrap();
+        let e = a
+            .read(Path::new("plain.yaml/inner"), None, t_req())
+            .unwrap_err();
+        assert!(
+            matches!(
+                e,
+                IoError::Io {
+                    kind: crate::error::IoKind::NotADirectory,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+    }
+
+    /// Kills `replace < with <=` on the read loop: with `<=`, a fully-read buffer
+    /// makes one extra `read` into `&mut buf[want..]` — a zero-length slice — which
+    /// returns Ok(0) and breaks, so length is unaffected; the observable difference is
+    /// the extra syscall. Assert exact length AND that the content round-trips, which
+    /// pins the loop's termination to `n == want` rather than one past it.
+    #[test]
+    fn read_stops_exactly_at_st_size() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let body: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+        std::fs::write(a.path.join("exact.bin"), &body).unwrap();
+        let out = a.read(Path::new("exact.bin"), None, t_req()).unwrap();
+        assert_eq!(out.value.len(), 3000);
+        assert_eq!(&out.value[..], &body[..]);
+        assert_eq!(out.value.capacity(), 3000);
     }
 }

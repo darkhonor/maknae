@@ -29,6 +29,7 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   "crates/maknae-io/src/normalize.rs",
+  "crates/maknae-io/src/walk.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
@@ -405,3 +406,20 @@ why = "row 0's Err arm: open(parent, O_RDONLY|O_DIRECTORY) failing is not provok
 path = "crates/maknae-io/src/anchor.rs"
 anchor = "syscall::fstat(&afd).map_err"
 why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "Ok(0) => break,"
+end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full))"
+why = "the read loop's three non-progress arms. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow with no security decision — the decision is the pre-size, which read_buffer_is_pre_sized_and_never_reallocates covers"
+
+[[exception]]
+path = "crates/maknae-io/src/walk.rs"
+anchor = "map_errno_no_disambiguation(e, &sofar)"
+why = "fstat on a dirfd the kernel just returned from openat cannot fail on a healthy FS; a pure errno passthrough with no decision. The decision this loop carries is the per-component check, covered by descendant_requirement_enforced_per_component"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "crate::checks::map_errno(e, &full"
+end_anchor = "map_errno_no_disambiguation(e, &full))?;"
+why = "the read target's error arms. The disambiguation closure is invoked only on ENOTDIR, which a target open carrying no O_DIRECTORY cannot produce (a symlinked target is ELOOP, covered by symlinked_read_target_refused); and fstat on the fd openat just returned cannot fail on a healthy FS. Both are pure errno passthroughs — the decisions on this path are the pre-check and the pre-size, both covered"

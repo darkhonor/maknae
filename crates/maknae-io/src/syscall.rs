@@ -38,6 +38,17 @@ pub(crate) fn open_dir_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<OwnedFd
     )
 }
 
+/// Open a read target relative to a pinned dirfd. O_NONBLOCK because a planted FIFO
+/// blocks forever otherwise (measured: killed at 2s without it).
+pub(crate) fn open_read_target<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        dirfd,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        NixMode::empty(),
+    )
+}
+
 /// The crate's ONLY `fstat` call site, and it takes an fd — never a path. The
 /// spec:160 build requirement greps for exactly this.
 pub(crate) fn fstat<F: AsFd>(fd: &F) -> nix::Result<FileStat> {

@@ -27,6 +27,7 @@ pub mod checks;
 pub mod error;
 pub mod normalize;
 mod syscall;
+mod walk;
 
 pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
