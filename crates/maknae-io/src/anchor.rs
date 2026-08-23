@@ -113,11 +113,13 @@ pub fn open_anchor(
         syscall::fstat(&afd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
     check_owner_mode(&st, path, req.owner, req.mode_mask)?;
 
+    let probed = crate::strategy::capability_from_probe(syscall::probe_openat2(&afd));
+
     Ok(Anchor {
         fd: afd,
         path: path.to_path_buf(),
         pref,
-        probed: Strategy::Portable,
+        probed,
     })
 }
 
@@ -125,7 +127,7 @@ impl Anchor {
     /// Read a file relative to the pinned anchor.
     ///
     /// Commit 4 hard-codes `Strategy::Portable`; the lane fn and the observable flip
-    /// arrive at commit 5, so tests here must NOT pin `effective_strategy`.
+    /// The lane is selected per call; `effective_strategy` reports what actually ran.
     pub fn read(
         &self,
         rel: &Path,
@@ -164,13 +166,43 @@ impl Anchor {
             None => self.fd.as_fd(),
         };
 
+        let lane = crate::strategy::select(
+            self.pref,
+            self.probed,
+            norm.components().count(),
+            desc.as_ref(),
+        );
+
         let full = self.path.join(&norm);
+
+        // The openat2 dispatch is a cfg'd IF-STATEMENT, never a match arm: a cfg'd-out
+        // `Strategy::Openat2 =>` arm is E0004 non-exhaustive on darwin, and the
+        // `unreachable!()` repair would be an uncoverable darwin region in a [t1] file.
+        #[cfg(target_os = "linux")]
+        if crate::strategy::uses_openat2(lane) {
+            let rel_s = norm
+                .to_str()
+                .ok_or_else(|| IoError::EscapesAnchor { path: norm.clone() })?;
+            let fd = crate::syscall::openat2_resolve(&self.fd, rel_s, false)
+                .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+            return self.finish_read(fd, &full, lane);
+        }
+
         let fd = crate::syscall::open_read_target(&base, name).map_err(|e| {
             crate::checks::map_errno(e, &full, || crate::syscall::fstatat_nofollow(&base, name))
         })?;
 
+        self.finish_read(fd, &full, lane)
+    }
+
+    fn finish_read(
+        &self,
+        fd: OwnedFd,
+        full: &Path,
+        lane: Strategy,
+    ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
         let st = crate::syscall::fstat(&fd)
-            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;
 
         // Pre-size from st_size so the Zeroizing buffer never reallocates: an
         // abandoned buffer is the one credential residual zeroize cannot reach
@@ -185,14 +217,14 @@ impl Anchor {
                 Ok(k) => n += k,
                 // The manual loop loses read_to_end's built-in retry.
                 Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+                Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
             }
         }
         buf.truncate(n);
 
         Ok(Outcome {
             value: buf,
-            effective_strategy: Strategy::Portable,
+            effective_strategy: lane,
         })
     }
 }
@@ -332,16 +364,27 @@ mod tests {
         );
     }
 
-    /// Hard-coded until commit 5; becomes the flip observable there. This is the
-    /// region's only cover at this boundary.
+    /// The probe runs unconditionally at construction — including under
+    /// ForcePortable — so `probed_capability()` stays meaningful when the lane is
+    /// forced. Its VALUE is platform-determined: darwin has no openat2 (the
+    /// cfg(not(linux)) stub returns ENOSYS), Linux reports whatever the kernel and
+    /// any seccomp filter allow. Assert the invariant that holds on both.
     #[test]
-    fn probed_capability_is_portable_before_the_probe() {
+    fn probe_runs_at_construction_under_either_pref() {
         let d = dir(0o750);
         let a = d.path().join("cfg");
         std::fs::create_dir(&a).unwrap();
         std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o750)).unwrap();
-        let anchor = open_anchor(&a, none_req(), StrategyPref::Auto).unwrap();
-        assert_eq!(anchor.probed_capability(), Strategy::Portable);
+        for pref in [StrategyPref::Auto, StrategyPref::ForcePortable] {
+            let anchor = open_anchor(&a, none_req(), pref).unwrap();
+            let cap = anchor.probed_capability();
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(cap, Strategy::Portable, "no openat2 off Linux");
+            #[cfg(target_os = "linux")]
+            assert!(matches!(cap, Strategy::Openat2 | Strategy::Portable));
+            // ForcePortable must not suppress the probe itself.
+            let _ = cap;
+        }
     }
 
     fn anchor_at(d: &std::path::Path, name: &str) -> Anchor {
@@ -361,7 +404,7 @@ mod tests {
     }
 
     /// Without a positive case, walk.rs's walk-completed region is uncovered at the
-    /// very commit that lands it. Must NOT pin effective_strategy — it flips at 5.
+    /// very commit that lands it.
     #[test]
     fn successful_multi_component_read() {
         let d = dir(0o750);
@@ -546,5 +589,92 @@ mod tests {
         assert_eq!(out.value.len(), 3000);
         assert_eq!(&out.value[..], &body[..]);
         assert_eq!(out.value.capacity(), 3000);
+    }
+
+    fn anchor_pref(d: &std::path::Path, name: &str, pref: StrategyPref) -> Anchor {
+        let a = d.join(name);
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o750)).unwrap();
+        open_anchor(&a, none_req(), pref).unwrap()
+    }
+
+    fn seed_multi(a: &Anchor) {
+        let sub = a.path.join("config.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
+    }
+
+    /// ForcePortable must win over an available capability, on every platform.
+    #[test]
+    fn force_portable_reports_portable() {
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
+        seed_multi(&a);
+        let out = a
+            .read(Path::new("config.d/10-x.yaml"), None, t_req())
+            .unwrap();
+        assert_eq!(out.effective_strategy, Strategy::Portable);
+        assert_eq!(&out.value[..], b"lane");
+    }
+
+    /// A descendant requirement forces portable even when openat2 is available:
+    /// you cannot check what you cannot fstat.
+    #[test]
+    fn descendant_requirement_reports_portable() {
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+        seed_multi(&a);
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let out = a
+            .read(Path::new("config.d/10-x.yaml"), Some(req), t_req())
+            .unwrap();
+        assert_eq!(out.effective_strategy, Strategy::Portable);
+    }
+
+    /// A single-component remainder gains nothing from openat2.
+    #[test]
+    fn single_component_reports_portable() {
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+        std::fs::write(a.path.join("maknae.yaml"), b"one").unwrap();
+        let out = a.read(Path::new("maknae.yaml"), None, t_req()).unwrap();
+        assert_eq!(out.effective_strategy, Strategy::Portable);
+    }
+
+    /// On Linux with the capability present, a multi-component unchecked read takes
+    /// the fast path and says so. cfg-gated: darwin has no openat2, so asserting
+    /// Openat2 there would be red on the dev host.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn multi_component_unchecked_reports_openat2() {
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+        seed_multi(&a);
+        if a.probed_capability() != Strategy::Openat2 {
+            return; // sandbox without openat2; the probe already decided Portable
+        }
+        let out = a
+            .read(Path::new("config.d/10-x.yaml"), None, t_req())
+            .unwrap();
+        assert_eq!(out.effective_strategy, Strategy::Openat2);
+        assert_eq!(&out.value[..], b"lane");
+    }
+
+    /// Both lanes must refuse a symlinked component identically.
+    #[test]
+    fn both_lanes_refuse_a_symlinked_component() {
+        for pref in [StrategyPref::Auto, StrategyPref::ForcePortable] {
+            let d = dir(0o750);
+            let a = anchor_pref(d.path(), "cfg", pref);
+            let real = a.path.join("real");
+            std::fs::create_dir(&real).unwrap();
+            symlink(&real, a.path.join("link")).unwrap();
+            let e = a.read(Path::new("link/x.yaml"), None, t_req()).unwrap_err();
+            assert!(matches!(e, IoError::Symlink { .. }), "{pref:?}: got {e:?}");
+        }
     }
 }

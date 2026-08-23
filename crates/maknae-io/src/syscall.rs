@@ -67,3 +67,42 @@ pub(crate) fn fstatat_nofollow<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<Fi
 pub(crate) fn map_open_errno(e: nix::Error, path: &Path) -> IoError {
     crate::checks::map_errno_no_disambiguation(e, path)
 }
+
+/// The `openat2` fast path. Linux-only — the `use` sits inside the cfg'd fn, because
+/// `openat2`/`OpenHow`/`ResolveFlag` are gated behind `cfg(target_os = "linux")` in nix
+/// and a top-level import breaks the darwin dev build.
+///
+/// `RESOLVE_BENEATH` is used alongside `RESOLVE_NO_SYMLINKS`: measured, it rejects only
+/// an ESCAPING `..` (in-bounds `..` still resolves), and the remainder is relative by
+/// the time this is called, so its absolute-path refusal is unreachable. It gives
+/// kernel-enforced containment for free.
+#[cfg(target_os = "linux")]
+pub(crate) fn openat2_resolve<F: AsFd>(
+    dirfd: &F,
+    rel: &str,
+    want_dir: bool,
+) -> nix::Result<OwnedFd> {
+    use nix::fcntl::{openat2, OpenHow, ResolveFlag};
+    let mut flags = OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
+    if want_dir {
+        flags |= OFlag::O_DIRECTORY;
+    }
+    let how = OpenHow::new()
+        .flags(flags)
+        .resolve(ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_BENEATH);
+    openat2(dirfd, rel, how)
+}
+
+/// One-shot capability probe against the anchor fd itself — never AT_FDCWD, which
+/// under chdir("/") or a systemd RootDirectory= can return errnos that say nothing
+/// about openat2 availability. Uses the full production flag set: a probe under a
+/// weaker set does not establish that the real call succeeds.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_openat2<F: AsFd>(dirfd: &F) -> Result<(), nix::errno::Errno> {
+    openat2_resolve(dirfd, ".", true).map(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_openat2<F: AsFd>(_dirfd: &F) -> Result<(), nix::errno::Errno> {
+    Err(nix::errno::Errno::ENOSYS)
+}

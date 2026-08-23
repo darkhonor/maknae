@@ -26,6 +26,7 @@ pub mod anchor;
 pub mod checks;
 pub mod error;
 pub mod normalize;
+mod strategy;
 mod syscall;
 mod walk;
 
