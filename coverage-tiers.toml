@@ -28,6 +28,7 @@ floor_production_region = 95
 files = [
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
+  "crates/maknae-io/src/normalize.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",

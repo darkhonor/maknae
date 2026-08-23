@@ -25,10 +25,12 @@
 pub mod anchor;
 pub mod checks;
 pub mod error;
+pub mod normalize;
 mod syscall;
 
 pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use error::{IoError, IoKind};
+pub use normalize::normalize;
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
 pub use zeroize::Zeroizing;
