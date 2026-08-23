@@ -32,6 +32,7 @@ files = [
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",
   "crates/maknae-io/src/dir.rs",
+  "crates/maknae-io/src/write.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
@@ -441,3 +442,27 @@ path = "crates/maknae-io/src/dir.rs"
 anchor = "let mut d = crate::syscall::open_dir_handle(dirfd)?;"
 end_anchor = "crate::syscall::fstatat_nofollow(dirfd, &name.to_string_lossy())"
 why = "enumerate_raw's three propagation arms: Dir::openat on an already-pinned dirfd cannot fail on a healthy FS, a mid-iteration readdir failure is not provokable from a unit test, and the fstatat fallback closure is never invoked because d_type is populated on both CI platforms (measured). The classification decision these surround IS covered — classify_entry is pure over (Option<Type>, stat_fn) and its None arm is tested through the injected seam"
+
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "let entries = crate::dir::enumerate_fd(&self.fd, &self.path)?;"
+why = "enumerating the pinned anchor fd cannot fail on a healthy FS; the error paths inside enumerate_fd carry their own exception in dir.rs"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "let entries = crate::dir::enumerate_fd(&dirfd, &full)?;"
+why = "same, for the terminal-directory fd the walk just returned; the checked-descendant refusal that guards it IS covered, by world_writable_terminal_directory_refused"
+
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "Ok(0) => break,"
+end_anchor = "Err(e) => return Err(e),"
+why = "write_all_sync's non-progress arms: Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;"
+end_anchor = "    drop(fd);"
+why = "Mode A's unprovokable failure arms: O_EXCL failing on a name the process-global counter just minted, and a write to the fd openat returned. O_EXCL itself IS covered, directly at the syscall wrapper by temp_open_refuses_a_preexisting_name and its symlink twin; the renameat failure path IS covered by publish_onto_a_directory_name_errs_and_cleans_up, which also asserts no temp survives. The cleanup unlink is deliberately `let _ =` so the caller keeps the original error"

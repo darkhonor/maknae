@@ -121,3 +121,36 @@ pub(crate) fn probe_openat2<F: AsFd>(dirfd: &F) -> Result<(), nix::errno::Errno>
 pub(crate) fn probe_openat2<F: AsFd>(_dirfd: &F) -> Result<(), nix::errno::Errno> {
     Err(nix::errno::Errno::ENOSYS)
 }
+
+/// Mode A's temp. O_EXCL makes a pre-existing name (regular file OR symlink) EEXIST
+/// regardless of O_NOFOLLOW, so O_NOFOLLOW here is redundant-but-harmless rather than
+/// a separately observable control.
+pub(crate) fn open_temp_excl<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    mode: crate::anchor::Mode,
+) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        dirfd,
+        name,
+        OFlag::O_WRONLY
+            | OFlag::O_NOFOLLOW
+            | OFlag::O_CREAT
+            | OFlag::O_EXCL
+            | OFlag::O_NONBLOCK
+            | OFlag::O_CLOEXEC,
+        NixMode::from_bits_truncate(mode.0 as _),
+    )
+}
+
+pub(crate) fn rename_at<F: AsFd>(dirfd: &F, from: &str, to: &str) -> nix::Result<()> {
+    nix::fcntl::renameat(dirfd, from, dirfd, to)
+}
+
+pub(crate) fn unlink_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<()> {
+    nix::unistd::unlinkat(dirfd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
+}
+
+pub(crate) fn fsync_fd<F: AsFd>(fd: &F) -> nix::Result<()> {
+    nix::unistd::fsync(fd)
+}

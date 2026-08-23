@@ -30,6 +30,7 @@ pub mod normalize;
 mod strategy;
 mod syscall;
 mod walk;
+mod write;
 
 pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};

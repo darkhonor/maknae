@@ -233,6 +233,63 @@ impl Anchor {
         })
     }
 
+    /// Publish bytes atomically. Always portable: Mode A needs a dirfd to `renameat`
+    /// against, which the whole-remainder `openat2` lane never yields.
+    pub fn publish(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        bytes: &[u8],
+        mode: Mode,
+    ) -> Result<Outcome<()>, IoError> {
+        let (norm, name) = self.split_target(rel, desc.as_ref())?;
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        let full = self.path.join(&norm);
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
+
+        let lane = crate::write::publish_at(&base, &name, &full, bytes, mode)?;
+        Ok(Outcome {
+            value: (),
+            effective_strategy: lane,
+        })
+    }
+
+    /// Shared prologue for the file verbs: normalize, run the dominating pre-check,
+    /// and split off the final component. A zero-component remainder is refused here —
+    /// only `enumerate` treats it as the anchor itself.
+    fn split_target(
+        &self,
+        rel: &Path,
+        desc: Option<&DescendantRequired>,
+    ) -> Result<(std::path::PathBuf, String), IoError> {
+        let norm = crate::normalize::normalize(rel)?;
+        let name = match norm.file_name().and_then(|s| s.to_str()) {
+            None => return Err(IoError::EmptyRemainder),
+            Some(n) => n.to_string(),
+        };
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        if desc.is_some() && dir.as_os_str().is_empty() {
+            return Err(IoError::NoDescendantForRequirement {
+                rel: rel.to_path_buf(),
+            });
+        }
+        Ok((norm, name))
+    }
+
     fn finish_read(
         &self,
         fd: OwnedFd,
@@ -272,6 +329,13 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Serialises publishing tests. The temp counter is process-global (two Anchors
+    /// in one process would otherwise collide on the same name under O_EXCL with no
+    /// retry), which trades away per-test determinism under the parallel harness.
+    /// Taken with `unwrap_or_else(|p| p.into_inner())` so one failing test does not
+    /// poison-cascade the rest (sink.rs:145 precedent).
+    static PUBLISH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use crate::checks::AnchorRequired;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -889,5 +953,146 @@ mod tests {
         };
         let e = a.read(Path::new("f"), None, req).unwrap_err();
         assert!(matches!(e, IoError::NotRegularFile { .. }), "got {e:?}");
+    }
+
+    fn m(x: u32) -> Mode {
+        Mode(x)
+    }
+
+    #[test]
+    fn publish_lands_in_the_pinned_directory() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        a.publish(Path::new("out.yaml"), None, b"payload", m(0o640))
+            .unwrap();
+        assert_eq!(std::fs::read(a.path.join("out.yaml")).unwrap(), b"payload");
+    }
+
+    /// The anchor-swap fixture: "publishes to the pinned dir" passes trivially without
+    /// it. Holding the Anchor across a rename of the anchor directory proves the write
+    /// went to the pinned inode, not to a re-resolved path.
+    #[test]
+    fn publish_follows_the_pinned_fd_not_the_path() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let orig = a.path.clone();
+        let moved = d.path().join("moved");
+        std::fs::rename(&orig, &moved).unwrap();
+        std::fs::create_dir(&orig).unwrap();
+        std::fs::set_permissions(&orig, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        a.publish(Path::new("out.yaml"), None, b"pinned", m(0o640))
+            .unwrap();
+
+        assert_eq!(std::fs::read(moved.join("out.yaml")).unwrap(), b"pinned");
+        assert!(!orig.join("out.yaml").exists(), "wrote to the decoy path");
+    }
+
+    /// Effective mode post-umask, and the temp must not survive.
+    #[test]
+    fn publish_effective_mode_and_no_leftover_temp() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        a.publish(Path::new("m.yaml"), None, b"x", m(0o640))
+            .unwrap();
+        let got = std::fs::metadata(a.path.join("m.yaml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(got, 0o640 & !umask_now(), "effective mode {got:o}");
+        let leftovers: Vec<_> = std::fs::read_dir(&a.path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp survived: {leftovers:?}");
+    }
+
+    fn umask_now() -> u32 {
+        let m = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o022));
+        nix::sys::stat::umask(m);
+        m.bits() as u32
+    }
+
+    /// Covers the renameat Err arm AND the cleanup path: publishing onto an existing
+    /// DIRECTORY name is EISDIR on a healthy FS.
+    #[test]
+    fn publish_onto_a_directory_name_errs_and_cleans_up() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("busy")).unwrap();
+        let e = a
+            .publish(Path::new("busy"), None, b"y", m(0o640))
+            .unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
+        let leftovers: Vec<_> = std::fs::read_dir(&a.path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp not cleaned after rename failure: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn publish_zero_component_is_empty_remainder() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a
+            .publish(Path::new("sub/.."), None, b"y", m(0o640))
+            .unwrap_err();
+        assert_eq!(e, IoError::EmptyRemainder);
+    }
+
+    /// Multi-component publish — exercises the walked branch and its dirfd.
+    #[test]
+    fn publish_into_a_subdirectory() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let sub = a.path.join("grants.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        a.publish(Path::new("grants.d/g.yaml"), Some(req), b"grant", m(0o640))
+            .unwrap();
+        assert_eq!(std::fs::read(sub.join("g.yaml")).unwrap(), b"grant");
+    }
+
+    #[test]
+    fn publish_pre_check_rejects_an_orphan_requirement() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let e = a
+            .publish(Path::new("top.yaml"), Some(req), b"y", m(0o640))
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::NoDescendantForRequirement { .. }),
+            "got {e:?}"
+        );
+    }
+
+    #[test]
+    fn publish_propagates_escape_refusal() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a
+            .publish(Path::new("../out.yaml"), None, b"y", m(0o640))
+            .unwrap_err();
+        assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
     }
 }
