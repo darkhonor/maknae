@@ -1,0 +1,33 @@
+[package]
+name = "maknae-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# NOT optional: Cargo does not apply [workspace.lints] to a member that omits this,
+# and the workspace sets `unsafe_code = "forbid"`. Omitting it would silently exempt
+# the one crate holding raw syscall wrappers from the project's headline memory-safety
+# control, and no CI gate checks for it (p1-manifest-lint.sh covers only
+# resolver/default-members/privileged deps).
+[lints]
+workspace = true
+
+# The whole crate is cfg(unix); this mirrors maknae-audit-append's placement.
+[target.'cfg(unix)'.dependencies]
+# fs   — openat/openat2/renameat/fstat/fstatat/fcntl. Without it none of the fd-relative
+#        primitives this crate exists to provide are reachable.
+# dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
+#        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
+# user — geteuid. The owner checks are caller-named: tests assert owner == geteuid()
+#        while production asserts owner == 0 over the identical code path. libc::geteuid()
+#        is unsafe and forbidden here, so this feature is the only route.
+nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }
+# Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
+# in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.
+tempfile = "3"

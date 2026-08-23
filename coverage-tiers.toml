@@ -126,7 +126,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
 
 [t2]
 floor_production_region = 90
@@ -380,3 +380,7 @@ why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a b
 
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
+
+[[t3]]
+path = "crates/maknae-io/src/lib.rs"
+why = "crate rustdoc and re-exports only; no executable production regions, so a [t1] classification hard-fails coverage_check.py's absent-from-coverage check"
