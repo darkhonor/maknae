@@ -21,3 +21,14 @@
 //! and the caller decides what to do with each kind.
 
 // `pub mod` lines accrete per commit — declaring a module before its file exists is E0583.
+
+pub mod anchor;
+pub mod checks;
+pub mod error;
+mod syscall;
+
+pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
+pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
+pub use error::{IoError, IoKind};
+/// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
+pub use zeroize::Zeroizing;

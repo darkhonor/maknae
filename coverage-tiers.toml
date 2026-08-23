@@ -26,6 +26,8 @@ floor_production_region = 95
 # a deny — the exact T1 line-drawing rule. Re-populates the cohort emptied when
 # the DCS engine relocated (2026-08-08).
 files = [
+  "crates/maknae-io/src/anchor.rs",
+  "crates/maknae-io/src/checks.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
@@ -384,3 +386,21 @@ why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a b
 [[t3]]
 path = "crates/maknae-io/src/lib.rs"
 why = "crate rustdoc and re-exports only; no executable production regions, so a [t1] classification hard-fails coverage_check.py's absent-from-coverage check"
+
+[[t3]]
+path = "crates/maknae-io/src/error.rs"
+why = "IoError/IoKind enums with Display and From only; no decision logic"
+
+[[t3]]
+path = "crates/maknae-io/src/syscall.rs"
+why = "raw syscall wrappers and flag composition; OFlag/Mode/ResolveFlag/AtFlags unions yield equivalent mutants, so the file is exclude_globs and its tier is measured at the last commit that touches it"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "syscall::open_parent_by_path(parent).map_err"
+why = "row 0's Err arm: open(parent, O_RDONLY|O_DIRECTORY) failing is not provokable on a healthy FS from a unit test (the parent exists and is a directory by construction of every fixture); the arm is a pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "syscall::fstat(&afd).map_err"
+why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"

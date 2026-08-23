@@ -1,11 +1,13 @@
 # cargo-mutants config (read even under `cargo mutants --package`, from the workspace
 # root where the CI gate invokes it). The exclude_globs are path-scoped to maknae-vault,
-# maknae-proto, maknae-audit-append, and maknae-kernel respectively, so they do NOT
+# maknae-proto, maknae-audit-append, maknae-kernel, and maknae-io respectively, so they do NOT
 # affect the other mutated crates (config/security mutate their own files). Scope each
 # mutated crate to its pure T1 decision logic — the excluded files are I/O (network/
 # keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
 # T3-tiered.
 exclude_globs = [
+  "crates/maknae-io/src/error.rs",       # IoError/IoKind Display+From declarations
+  "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
   "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation
