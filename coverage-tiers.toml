@@ -31,6 +31,7 @@ files = [
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",
+  "crates/maknae-io/src/dir.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
@@ -429,3 +430,14 @@ why = "the read target's ENOTDIR-disambiguation closure. It is invoked only on E
 path = "crates/maknae-io/src/anchor.rs"
 anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;"
 why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "enumerate_raw(dirfd).map_err"
+why = "the single boundary conversion for enumerate's three unprovokable failure points: Dir::openat on an already-pinned dirfd, a mid-iteration readdir failure, and the fstatat fallback (d_type is populated on both CI platforms, measured, so that closure is never invoked in the real path). None is a decision — the classification decision IS covered, via classify_entry's injected seam"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "let mut d = crate::syscall::open_dir_handle(dirfd)?;"
+end_anchor = "crate::syscall::fstatat_nofollow(dirfd, &name.to_string_lossy())"
+why = "enumerate_raw's three propagation arms: Dir::openat on an already-pinned dirfd cannot fail on a healthy FS, a mid-iteration readdir failure is not provokable from a unit test, and the fstatat fallback closure is never invoked because d_type is populated on both CI platforms (measured). The classification decision these surround IS covered — classify_entry is pure over (Option<Type>, stat_fn) and its None arm is tested through the injected seam"

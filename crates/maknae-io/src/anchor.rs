@@ -195,6 +195,44 @@ impl Anchor {
         self.finish_read(fd, &full, lane, &target)
     }
 
+    /// Enumerate a directory relative to the anchor, RAW.
+    ///
+    /// A zero-component remainder returns the ANCHOR's own entries — PR B needs that
+    /// to detect `config.d` by enumerating the root. The file verbs refuse the same
+    /// remainder; only enumerate treats it as the anchor itself.
+    pub fn enumerate(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+    ) -> Result<Outcome<Vec<Entry>>, IoError> {
+        let norm = crate::normalize::normalize(rel)?;
+
+        if norm.as_os_str().is_empty() {
+            // The anchor is covered by AnchorRequired; a descendant requirement here
+            // names nothing, and a vacuous pass is exactly what the pre-check forbids.
+            if desc.is_some() {
+                return Err(IoError::NoDescendantForRequirement {
+                    rel: rel.to_path_buf(),
+                });
+            }
+            let entries = crate::dir::enumerate_fd(&self.fd, &self.path)?;
+            return Ok(Outcome {
+                value: entries,
+                effective_strategy: Strategy::Portable,
+            });
+        }
+
+        // The terminal directory IS the checked descendant, so any Some routes to the
+        // portable chain: one openat + fstat from the anchor fd is the check.
+        let full = self.path.join(&norm);
+        let dirfd = crate::walk::walk_dirs(&self.fd, &self.path, &norm, desc.as_ref())?;
+        let entries = crate::dir::enumerate_fd(&dirfd, &full)?;
+        Ok(Outcome {
+            value: entries,
+            effective_strategy: Strategy::Portable,
+        })
+    }
+
     fn finish_read(
         &self,
         fd: OwnedFd,
@@ -678,5 +716,178 @@ mod tests {
             let e = a.read(Path::new("link/x.yaml"), None, t_req()).unwrap_err();
             assert!(matches!(e, IoError::Symlink { .. }), "{pref:?}: got {e:?}");
         }
+    }
+
+    fn names(o: &Outcome<Vec<Entry>>) -> Vec<String> {
+        let mut v: Vec<String> = o
+            .value
+            .iter()
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// PR B enumerates the ANCHOR to detect config.d. A zero-component remainder must
+    /// therefore return the anchor's own entries, not an error.
+    #[test]
+    fn enumerate_empty_returns_the_anchor_entries() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("config.d")).unwrap();
+        std::fs::write(a.path.join("maknae.yaml"), b"y").unwrap();
+        for rel in ["", "."] {
+            let out = a.enumerate(Path::new(rel), None).unwrap();
+            let n = names(&out);
+            assert!(n.contains(&"config.d".to_string()), "{rel:?}: {n:?}");
+            assert!(n.contains(&"maknae.yaml".to_string()), "{rel:?}: {n:?}");
+        }
+    }
+
+    /// nix::dir yields `.` and `..`, which std::fs::read_dir does not — the caller's
+    /// dotfile rule drops them, and PR B depends on that ordering.
+    #[test]
+    fn enumerate_yields_dot_and_dotdot() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let n = names(&a.enumerate(Path::new(""), None).unwrap());
+        assert!(
+            n.contains(&".".to_string()) && n.contains(&"..".to_string()),
+            "{n:?}"
+        );
+    }
+
+    /// Nothing is refused or filtered: a symlink reports Kind::Symlink and is NOT
+    /// followed. This is the security half; the policy half stays with the parser.
+    #[test]
+    fn symlinked_entry_reports_symlink_and_is_not_followed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("real.yaml"), b"y").unwrap();
+        symlink(a.path.join("real.yaml"), a.path.join("link.yaml")).unwrap();
+        let out = a.enumerate(Path::new(""), None).unwrap();
+        let e = out.value.iter().find(|e| e.name == "link.yaml").unwrap();
+        assert_eq!(e.kind, Kind::Symlink);
+    }
+
+    /// A DANGLING symlink still reports Symlink rather than erroring — which is what
+    /// distinguishes fstatat(AT_SYMLINK_NOFOLLOW) from a stat that would ENOENT.
+    #[test]
+    fn dangling_symlink_reports_symlink_not_an_error() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        symlink(a.path.join("nonexistent"), a.path.join("dangling")).unwrap();
+        let out = a.enumerate(Path::new(""), None).unwrap();
+        let e = out.value.iter().find(|e| e.name == "dangling").unwrap();
+        assert_eq!(e.kind, Kind::Symlink);
+    }
+
+    /// The terminal-directory arm: config.d is the checked descendant, and this is
+    /// the call that preserves maknae-config's world-writable refusal. The fixture is
+    /// EMPTY, so a rule scoped to intermediates would never fire on it.
+    #[test]
+    fn world_writable_terminal_directory_refused() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let cd = a.path.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o772)).unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let e = a.enumerate(Path::new("config.d"), Some(req)).unwrap_err();
+        assert!(
+            matches!(e, IoError::InsecurePermissions { mode, .. } if mode & 0o007 != 0),
+            "got {e:?}"
+        );
+    }
+
+    /// Pre-check precedence: a Some on a remainder with no descendant is an Err, not
+    /// a silent enumeration of the anchor.
+    #[test]
+    fn enumerate_dot_with_requirement_is_err() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let e = a.enumerate(Path::new("."), Some(req)).unwrap_err();
+        assert!(
+            matches!(e, IoError::NoDescendantForRequirement { .. }),
+            "got {e:?}"
+        );
+    }
+
+    #[test]
+    fn enumerate_propagates_escape_refusal() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a.enumerate(Path::new("../escape"), None).unwrap_err();
+        assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
+    }
+
+    /// The terminal-directory SUCCESS path — world_writable_terminal_directory_refused
+    /// errors before reaching it, so without this the branch is uncovered.
+    #[test]
+    fn enumerate_terminal_directory_succeeds() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let cd = a.path.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::write(cd.join("10-x.yaml"), b"y").unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let out = a.enumerate(Path::new("config.d"), Some(req)).unwrap();
+        let n = names(&out);
+        assert!(n.contains(&"10-x.yaml".to_string()), "{n:?}");
+        assert_eq!(out.effective_strategy, Strategy::Portable);
+    }
+
+    /// read() must enforce TargetRequired — every other read test passes an all-off
+    /// requirement, leaving check_target's Err propagation uncovered.
+    #[test]
+    fn read_enforces_target_requirements() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let f = a.path.join("loose.yaml");
+        std::fs::write(&f, b"y").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let req = TargetRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let e = a.read(Path::new("loose.yaml"), None, req).unwrap_err();
+        assert!(
+            matches!(e, IoError::InsecurePermissions { .. }),
+            "got {e:?}"
+        );
+    }
+
+    /// A FIFO target is refused by regular_file — the read-side FIFO case, which
+    /// O_NONBLOCK makes reachable at all (without it the open blocks forever).
+    #[test]
+    fn fifo_read_target_refused_as_not_regular() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        nix::unistd::mkfifo(
+            &a.path.join("f"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        let req = TargetRequired {
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let e = a.read(Path::new("f"), None, req).unwrap_err();
+        assert!(matches!(e, IoError::NotRegularFile { .. }), "got {e:?}");
     }
 }

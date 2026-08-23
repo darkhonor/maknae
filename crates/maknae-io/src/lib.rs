@@ -24,6 +24,7 @@
 
 pub mod anchor;
 pub mod checks;
+mod dir;
 pub mod error;
 pub mod normalize;
 mod strategy;

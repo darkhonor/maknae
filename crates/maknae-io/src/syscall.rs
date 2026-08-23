@@ -49,6 +49,21 @@ pub(crate) fn open_read_target<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<Ow
     )
 }
 
+/// Re-open the pinned directory as a Dir handle. Dir::openat BORROWS the dirfd;
+/// Dir::from_fd would consume and Drop-close it, destroying the anchor pin.
+pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> {
+    nix::dir::Dir::openat(
+        dirfd,
+        ".",
+        OFlag::O_RDONLY
+            | OFlag::O_DIRECTORY
+            | OFlag::O_NOFOLLOW
+            | OFlag::O_NONBLOCK
+            | OFlag::O_CLOEXEC,
+        NixMode::empty(),
+    )
+}
+
 /// The crate's ONLY `fstat` call site, and it takes an fd — never a path. The
 /// spec:160 build requirement greps for exactly this.
 pub(crate) fn fstat<F: AsFd>(fd: &F) -> nix::Result<FileStat> {
