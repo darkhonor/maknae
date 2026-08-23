@@ -14,37 +14,44 @@
 #
 # The original justification — `replace | with ^` on a disjoint bitflag union is
 # behaviourally identical, so an equivalent mutant is reported MISSED and the gate goes
-# red — is TRUE but INCOMPLETE, and stating only that overstated the case. Measured, one
-# run on darwin with the exclusion lifted: 73 mutants, 20 caught, 9 unviable, 39 missed
-# + 5 timeouts. Of those 44 uncaught, 26 are the equivalent `^` family. The other 18:
+# red — is TRUE but INCOMPLETE, and stating only that overstated the case.
 #
-#   - Row 0's `O_DIRECTORY` (`| with &`). A GENUINE hole, not equivalent: `&` on
-#     disjoint flags yields the empty set, and row 0 is the one open with no
-#     `O_NONBLOCK`, so losing O_DIRECTORY makes open(2) BLOCK on a FIFO parent. Now
-#     killed by anchor_parent_that_is_a_fifo_is_refused_and_does_not_block.
-#   - SIX in `openat2_resolve`/`probe_openat2`. These are MISSED on darwin *because the
-#     code is cfg(target_os = "linux") and darwin never compiles it* — a measurement
-#     artifact of the lane, not evidence of a gap. Assessing them needs a Linux mutants
-#     run, which nothing currently does.
-#   - `open_dir_at` and `open_dir_handle` (`| with &`). Both carry `O_NONBLOCK`, so
-#     these fail closed later rather than hanging, and on `open_dir_handle` the target
-#     is `.`, which cannot be a symlink. Low severity, still uncontrolled.
-#   - `fsync_fd`/`sync_data` bodies replaced with `Ok(())`. Durability is not observable
-#     from a unit test without crash injection.
-#   - Five TIMEOUTs from dropping `O_NONBLOCK` on the read/temp/append opens — the same
-#     FIFO hang, detected but at the cost of the gate's full timeout.
+# MEASURED on darwin with the exclusion lifted, two runs, IDENTICAL both times:
+#   73 mutants: 21 caught, 9 unviable, 38 missed + 5 timeouts.
+# Of the 43 uncaught, 26 are the equivalent `^` family. The other 17:
 #
-# An earlier version of this note claimed the `&` mutants dropping O_NOFOLLOW or O_EXCL
-# "were already caught". They are not: `open_dir_at:55` is MISSED. Corrected against my
-# own run rather than restated.
+#   6  `openat2_resolve` / `probe_openat2`. MISSED on darwin *because the code is
+#      `#[cfg(target_os = "linux")]` and darwin never compiles it* — a lane artifact,
+#      not evidence of a gap. Assessing them needs a Linux mutants run, which nothing
+#      currently does. Plan for that before narrowing this exclusion (#126).
+#   4  `open_dir_handle`. It targets `.`, which cannot be a symlink, and it carries
+#      `O_NONBLOCK`. Low severity, still uncontrolled.
+#   2  `fsync_fd` / `sync_data` bodies replaced with `Ok(())`. Durability is not
+#      observable from a unit test without crash injection.
+#   5  TIMEOUTs on the read / temp / append opens. NOT all "dropped O_NONBLOCK": `&`
+#      binds TIGHTER than `|` in Rust, so a mutated `|` drops exactly the two ADJACENT
+#      operands, not the whole union. Verified at `open_temp_excl` — the mutant there
+#      drops `O_NOFOLLOW` and `O_CREAT` and KEEPS `O_NONBLOCK`; it also fails three
+#      assertions before the harness times out, so it is behaviourally detected.
 #
-# So the compensating controls are: a coverage floor (87/87 darwin, 107/107 Linux);
-# per-verb FD_CLOEXEC assertions for six of the seven opens (open_dir_handle pins only
-# the END STATE and says so on the test — fdopendir sets the bit afterwards, so no
-# external assertion can hold its call-site flag); and behavioural tests for O_NOFOLLOW,
-# O_EXCL and now O_DIRECTORY. Durability, the O_NONBLOCK drops, and the Linux-only lane
-# remain uncontrolled by mutation. Narrowing this to an `exclude_re` on the `^` family,
-# so the rest of the file is gated, is tracked as #126.
+# Two errors this note previously contained, both corrected against my own runs:
+#   - It claimed the `&` mutants dropping O_NOFOLLOW/O_EXCL "were already caught". Not
+#     true then; the ones that mattered are caught NOW, by tests added for them.
+#   - It said counts vary run to run and should be treated as approximate, inferring
+#     that from a 40/19 figure. Wrong, and harmful: 40/19 was the PRE-remediation tree,
+#     and both trees reproduce exactly. Nothing here is noise — telling the next
+#     engineer to discount mutation counts would discard the signal that found the
+#     row-0 hang in the first place.
+#
+# Compensating controls: a coverage floor (87/87 darwin, 107/107 Linux); per-verb
+# FD_CLOEXEC assertions for six of the seven opens (`open_dir_handle` pins only the END
+# state and says so on the test — `fdopendir` sets the bit afterwards, so no external
+# assertion can hold its call-site flag); and behavioural tests for O_NOFOLLOW, O_EXCL,
+# and O_DIRECTORY at BOTH rows — row 0's FIFO-parent hang and row 1's non-directory
+# anchor, each added after the mutant that exposed it. The Linux-only lane, durability,
+# and the four `open_dir_handle` drops remain uncontrolled by mutation. Narrowing this
+# to an `exclude_re` on the `^` family is tracked as #126.
+
 exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind Display+From declarations
   "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants

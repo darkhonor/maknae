@@ -1117,6 +1117,32 @@ mod tests {
         }
     }
 
+    /// The ANCHOR ITSELF must be a directory — row 1's `O_DIRECTORY`.
+    ///
+    /// Row 0's twin, and the gap was one level up from where I looked. `replace | with
+    /// &` at `open_dir_at`'s flag union drops `O_DIRECTORY` from the anchor's own open,
+    /// and it is MISSED: nothing in the crate refuses a non-directory anchor.
+    /// `check_owner_mode` has no `S_ISDIR` predicate and `open_anchor` does nothing else
+    /// with the stat, so under that mutant `open_anchor("/etc/passwd", ...)` returns
+    /// `Ok(Anchor)` — a "pinned anchor directory" that is a regular file, from which
+    /// every later verb resolves relative to a non-directory.
+    ///
+    /// "Fails closed later" is true of the verbs but NOT of construction, which is the
+    /// distinction that matters: the anchor is the thing the whole model pins.
+    #[test]
+    fn a_regular_file_is_not_an_anchor() {
+        let d = dir(0o750);
+        let f = d.path().join("not-a-dir");
+        std::fs::write(&f, b"x").unwrap();
+        match open_anchor(&f, none_req(), StrategyPref::Auto).unwrap_err() {
+            IoError::Io { path, kind } => {
+                assert_eq!(kind, crate::error::IoKind::NotADirectory);
+                assert_eq!(path, f);
+            }
+            other => panic!("expected Io{{NotADirectory}}, got {other:?}"),
+        }
+    }
+
     /// Row 0's `O_DIRECTORY` is what makes the anchor's parent open FIFO-SAFE.
     ///
     /// Found by running the mutants that `.cargo/mutants.toml` excludes: `replace | with
@@ -1143,8 +1169,11 @@ mod tests {
 
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                "open_anchor BLOCKED on a FIFO parent — O_DIRECTORY has been dropped \
-                 from row 0, so open(2) is waiting for a writer that will never come"
+                "open_anchor did not return within 10s on a FIFO parent. Most likely \
+                 row 0 lost O_DIRECTORY, so open(2) is waiting for a writer that will \
+                 never come — but a starved runner produces the same symptom, so \
+                 check the flags before concluding. (The worker stays blocked for the \
+                 life of the test binary; harmless, and only on an already-red run.)"
             ),
             Err(e) => panic!("worker died: {e:?}"),
             Ok(Ok(())) => panic!("a FIFO parent must not yield a usable anchor"),
