@@ -154,3 +154,28 @@ pub(crate) fn unlink_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<()> {
 pub(crate) fn fsync_fd<F: AsFd>(fd: &F) -> nix::Result<()> {
     nix::unistd::fsync(fd)
 }
+
+/// Mode B's append open. O_NONBLOCK because a planted FIFO otherwise blocks — and on
+/// the WRITE side a readerless FIFO is ENXIO at the open (measured), before any fstat,
+/// so `regular_file` never runs on this path.
+pub(crate) fn open_append<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    mode: crate::anchor::Mode,
+) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        dirfd,
+        name,
+        OFlag::O_WRONLY
+            | OFlag::O_APPEND
+            | OFlag::O_NOFOLLOW
+            | OFlag::O_CREAT
+            | OFlag::O_NONBLOCK
+            | OFlag::O_CLOEXEC,
+        NixMode::from_bits_truncate(mode.0 as _),
+    )
+}
+
+pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
+    nix::unistd::fdatasync(fd)
+}

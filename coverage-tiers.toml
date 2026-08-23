@@ -466,3 +466,9 @@ path = "crates/maknae-io/src/write.rs"
 anchor = "let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;"
 end_anchor = "    drop(fd);"
 why = "Mode A's unprovokable failure arms: O_EXCL failing on a name the process-global counter just minted, and a write to the fd openat returned. O_EXCL itself IS covered, directly at the syscall wrapper by temp_open_refuses_a_preexisting_name and its symlink twin; the renameat failure path IS covered by publish_onto_a_directory_name_errs_and_cleans_up, which also asserts no temp survives. The cleanup unlink is deliberately `let _ =` so the caller keeps the original error"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "let st = syscall::fstat(&fd).map_err"
+end_anchor = "append_raw(&fd, bytes).map_err"
+why = "Mode B's unprovokable arms: fstat on the fd openat just returned cannot fail on a healthy FS, and a write to it fails only on ENOSPC/EIO. The DECISIONS this brackets are both covered — check_target's hard-link refusal by append_refuses_a_hard_linked_target (probed: removing the check turns it red), and the ENXIO-at-the-open case by append_to_a_fifo_is_enxio_at_the_open"

@@ -268,6 +268,41 @@ impl Anchor {
         })
     }
 
+    /// Append bytes, creating the file if absent. Always portable.
+    pub fn append(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        target: TargetRequired,
+        bytes: &[u8],
+        mode: Mode,
+    ) -> Result<Outcome<()>, IoError> {
+        let (norm, name) = self.split_target(rel, desc.as_ref())?;
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        let full = self.path.join(&norm);
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
+
+        let lane = crate::write::append_at(&base, &name, &full, bytes, mode, &target)?;
+        Ok(Outcome {
+            value: (),
+            effective_strategy: lane,
+        })
+    }
+
     /// Shared prologue for the file verbs: normalize, run the dominating pre-check,
     /// and split off the final component. A zero-component remainder is refused here —
     /// only `enumerate` treats it as the anchor itself.
@@ -1094,5 +1129,134 @@ mod tests {
             .publish(Path::new("../out.yaml"), None, b"y", m(0o640))
             .unwrap_err();
         assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
+    }
+
+    fn t_append() -> TargetRequired {
+        TargetRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+            nlink_exactly_one: true,
+            regular_file: true,
+        }
+    }
+
+    /// Proves O_APPEND, not O_TRUNC-absence: the file is PRE-POPULATED and a second
+    /// append with a fresh fd must not clobber byte 0. A fresh-file two-append test
+    /// passes without O_APPEND and proves nothing.
+    #[test]
+    fn append_does_not_clobber_existing_bytes() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let f = a.path.join("audit.jsonl");
+        std::fs::write(&f, b"FIRST\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        a.append(
+            Path::new("audit.jsonl"),
+            None,
+            t_append(),
+            b"SECOND\n",
+            m(0o640),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"FIRST\nSECOND\n");
+    }
+
+    /// grants.d is daemon-writable by design, so a compromised writer can hard-link a
+    /// file from outside the anchor into the overlay. st_nlink == 1 is the detector.
+    #[test]
+    fn append_refuses_a_hard_linked_target() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let f = a.path.join("audit.jsonl");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::hard_link(&f, a.path.join("outside.link")).unwrap();
+        let e = a
+            .append(Path::new("audit.jsonl"), None, t_append(), b"y", m(0o640))
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::MultiplyLinked { nlink, .. } if nlink == 2),
+            "got {e:?}"
+        );
+    }
+
+    /// Creation mode post-umask. The crate must not pick this — spec decision 11 says
+    /// the caller names it, and sink.rs uses 0o640.
+    #[test]
+    fn append_creates_with_the_callers_mode() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        a.append(
+            Path::new("new.jsonl"),
+            None,
+            t_append(),
+            b"line\n",
+            m(0o640),
+        )
+        .unwrap();
+        let got = std::fs::metadata(a.path.join("new.jsonl"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(got, 0o640 & !umask_now(), "effective mode {got:o}");
+    }
+
+    /// A readerless FIFO fails the WRITE open with ENXIO before any fstat, so
+    /// regular_file never runs on this path — the read-side FIFO fact does not
+    /// transfer, and NotRegularFile would be the wrong expectation.
+    #[test]
+    fn append_to_a_fifo_is_enxio_at_the_open() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        nix::unistd::mkfifo(
+            &a.path.join("f"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        let e = a
+            .append(Path::new("f"), None, t_append(), b"y", m(0o640))
+            .unwrap_err();
+        match e {
+            IoError::Io {
+                kind: crate::error::IoKind::Other { raw },
+                ..
+            } => {
+                assert_eq!(raw, nix::errno::Errno::ENXIO as i32, "expected ENXIO");
+            }
+            other => panic!("expected Io{{Other{{ENXIO}}}}, got {other:?}"),
+        }
+    }
+
+    /// Lands in the anchor's directory — anchor-swap fixture, same reason as publish.
+    #[test]
+    fn append_follows_the_pinned_fd_not_the_path() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let orig = a.path.clone();
+        let moved = d.path().join("moved-b");
+        std::fs::rename(&orig, &moved).unwrap();
+        std::fs::create_dir(&orig).unwrap();
+        std::fs::set_permissions(&orig, std::fs::Permissions::from_mode(0o750)).unwrap();
+        a.append(
+            Path::new("a.jsonl"),
+            None,
+            t_append(),
+            b"pinned\n",
+            m(0o640),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(moved.join("a.jsonl")).unwrap(), b"pinned\n");
+        assert!(!orig.join("a.jsonl").exists(), "wrote to the decoy path");
+    }
+
+    #[test]
+    fn append_zero_component_is_empty_remainder() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let e = a
+            .append(Path::new("sub/.."), None, t_append(), b"y", m(0o640))
+            .unwrap_err();
+        assert_eq!(e, IoError::EmptyRemainder);
     }
 }

@@ -67,7 +67,9 @@ fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -
     syscall::fsync_fd(dirfd)
 }
 
-fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
+/// The shared write loop. Both modes need it, and duplicating it would duplicate its
+/// unprovokable non-progress arms — and make the exception anchor ambiguous.
+fn write_all(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
     let mut n = 0usize;
     while n != bytes.len() {
         match nix::unistd::write(fd, &bytes[n..]) {
@@ -77,15 +79,46 @@ fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
             Err(e) => return Err(e),
         }
     }
+    Ok(())
+}
+
+fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
+    write_all(fd, bytes)?;
     syscall::fsync_fd(fd)
 }
 
-/// Serialises publishing TESTS. The counter is process-global (two `Anchor`s in one
-/// process would otherwise collide), which trades away per-test determinism: under
-/// `cargo test`'s parallel harness the counter's value at any publish depends on how
-/// many other threads published first. Every test that predicts a temp name holds
-/// this across counter-read AND publish. Taken with `unwrap_or_else(|p| p.into_inner())`
-/// so one failing test does not poison-cascade the rest (sink.rs:145 precedent).
+/// Append bytes to a file in the directory `dirfd` names, creating it if absent.
+///
+/// The fstat after the open is not a formality: `grants.d` is daemon-writable by
+/// design, so a compromised writer can hard-link a file from outside the anchor into
+/// the overlay, and `st_nlink == 1` is the only detector.
+pub(crate) fn append_at<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    at: &Path,
+    bytes: &[u8],
+    mode: Mode,
+    target: &crate::checks::TargetRequired,
+) -> Result<Strategy, IoError> {
+    let fd = syscall::open_append(dirfd, name, mode)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+
+    let st = syscall::fstat(&fd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    crate::checks::check_target(&st, at, target)?;
+
+    append_raw(&fd, bytes).map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    Ok(Strategy::Portable)
+}
+
+fn append_raw(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
+    write_all(fd, bytes)?;
+    // sync_data per append; NO parent fsync — maknae-audit-append's sink has none
+    // today (only sync_data), so adding one would be a change, not the preservation
+    // the spec claims, and with O_CREAT and no O_EXCL "at create" is not detectable
+    // from the open anyway.
+    syscall::sync_data(fd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
