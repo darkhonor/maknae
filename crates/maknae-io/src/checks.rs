@@ -64,6 +64,38 @@ pub(crate) fn check_owner_mode(
     Ok(())
 }
 
+/// The fused target check, in the PINNED order:
+///   symlink -> regular-file -> mode -> owner -> nlink
+///
+/// The order is observable through the error variant, so it is contract, not an
+/// implementation detail. `maknae-config`'s world_accessible_authz_refused fixtures a
+/// 0o666 file owned by the test user: mode-before-owner yields InsecurePermissions
+/// (today's behaviour), owner-before-mode yields NotOwned. `symlink` is not an fstat
+/// predicate at all — it is O_NOFOLLOW at open time, structurally before any fstat —
+/// so only three of the four adjacent pairs are reorderable.
+pub(crate) fn check_target(
+    st: &FileStat,
+    path: &Path,
+    req: &TargetRequired,
+) -> Result<(), IoError> {
+    if req.regular_file {
+        let fmt = (st.st_mode as u32) & nix::libc::S_IFMT as u32;
+        if fmt != nix::libc::S_IFREG as u32 {
+            return Err(IoError::NotRegularFile {
+                path: path.to_path_buf(),
+            });
+        }
+    }
+    check_owner_mode(st, path, req.owner, req.mode_mask)?;
+    if req.nlink_exactly_one && st.st_nlink as u64 != 1 {
+        return Err(IoError::MultiplyLinked {
+            path: path.to_path_buf(),
+            nlink: st.st_nlink as u64,
+        });
+    }
+    Ok(())
+}
+
 /// Errno -> `IoError` where no dirfd/single-component pair is available to
 /// disambiguate an ENOTDIR (§4 row 0, and every write-path syscall failure).
 pub(crate) fn map_errno_no_disambiguation(e: Errno, path: &Path) -> IoError {
@@ -279,5 +311,121 @@ mod tests {
             ),
             "got {e:?}"
         );
+    }
+
+    fn stat_of(path: &std::path::Path) -> FileStat {
+        let f = std::fs::File::open(path).unwrap();
+        crate::syscall::fstat(&f).unwrap()
+    }
+
+    fn target(
+        mode_mask: Option<u32>,
+        owner: Option<u32>,
+        nlink: bool,
+        reg: bool,
+    ) -> TargetRequired {
+        TargetRequired {
+            owner,
+            mode_mask,
+            nlink_exactly_one: nlink,
+            regular_file: reg,
+        }
+    }
+
+    /// Pair 1 of 3 — (regular-file, mode). Both predicates must fail and every EARLIER
+    /// stage must pass, or the test does not discriminate the order.
+    #[test]
+    fn regular_file_precedes_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("f");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o666)).unwrap();
+        std::fs::set_permissions(&fifo, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .unwrap();
+        let st = {
+            let fd = nix::fcntl::open(
+                &fifo,
+                nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
+                nix::sys::stat::Mode::empty(),
+            )
+            .unwrap();
+            crate::syscall::fstat(&fd).unwrap()
+        };
+        // Both regular_file and mode_mask are violated; regular-file must win.
+        let e = check_target(&st, &fifo, &target(Some(0o007), None, false, true)).unwrap_err();
+        assert!(
+            matches!(e, IoError::NotRegularFile { .. }),
+            "order: got {e:?}"
+        );
+    }
+
+    /// Pair 2 of 3 — (mode, owner). Requirement is caller-named so the fixture stays
+    /// owned by the test user: a foreign-owner fixture needs root (chown -> EPERM).
+    #[test]
+    fn mode_precedes_owner() {
+        assert_ne!(
+            nix::unistd::geteuid().as_raw(),
+            0,
+            "fixture requires a non-root user"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("m");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o666)).unwrap();
+        let st = stat_of(&f);
+        let other = nix::unistd::geteuid().as_raw() + 1;
+        let e = check_target(&st, &f, &target(Some(0o007), Some(other), false, true)).unwrap_err();
+        assert!(
+            matches!(e, IoError::InsecurePermissions { .. }),
+            "order: got {e:?}"
+        );
+    }
+
+    /// Pair 3 of 3 — (owner, nlink). Mode is pinned to 0o600 so the EARLIER mode stage
+    /// passes; without that, mode fires first and the test proves nothing about order.
+    #[test]
+    fn owner_precedes_nlink() {
+        assert_ne!(
+            nix::unistd::geteuid().as_raw(),
+            0,
+            "fixture requires a non-root user"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("h");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&f, d.path().join("h2")).unwrap();
+        let st = stat_of(&f);
+        let other = nix::unistd::geteuid().as_raw() + 1;
+        let e = check_target(&st, &f, &target(Some(0o007), Some(other), true, true)).unwrap_err();
+        assert!(matches!(e, IoError::NotOwned { .. }), "order: got {e:?}");
+    }
+
+    /// The nlink arm itself, with every earlier stage passing.
+    #[test]
+    fn hard_linked_target_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("h");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&f, d.path().join("h2")).unwrap();
+        let st = stat_of(&f);
+        let e = check_target(&st, &f, &target(Some(0o007), None, true, true)).unwrap_err();
+        assert!(
+            matches!(e, IoError::MultiplyLinked { nlink, .. } if nlink == 2),
+            "got {e:?}"
+        );
+    }
+
+    /// A compliant target passes every stage — without this, several predicates'
+    /// "always refuse" mutants are invisible.
+    #[test]
+    fn compliant_target_passes_every_stage() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("ok");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let st = stat_of(&f);
+        let me = nix::unistd::geteuid().as_raw();
+        assert!(check_target(&st, &f, &target(Some(0o007), Some(me), true, true)).is_ok());
     }
 }

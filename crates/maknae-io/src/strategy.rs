@@ -38,6 +38,9 @@ pub(crate) fn select(
 /// dispatch block deliberately: inside `cfg(target_os = "linux")` the comparison is
 /// dead code on darwin, so a darwin-local `cargo mutants` cannot kill a mutation of
 /// it. Here it compiles and is tested on every platform.
+/// Called only from the cfg(linux) dispatch, so darwin sees it unused — but it must
+/// live outside that block to stay mutation-visible on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn uses_openat2(lane: Strategy) -> bool {
     lane == Strategy::Openat2
 }

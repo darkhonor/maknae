@@ -132,7 +132,7 @@ impl Anchor {
         &self,
         rel: &Path,
         desc: Option<DescendantRequired>,
-        _target: TargetRequired,
+        target: TargetRequired,
     ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
         let norm = crate::normalize::normalize(rel)?;
         let dir = norm.parent().unwrap_or(Path::new(""));
@@ -185,14 +185,14 @@ impl Anchor {
                 .ok_or_else(|| IoError::EscapesAnchor { path: norm.clone() })?;
             let fd = crate::syscall::openat2_resolve(&self.fd, rel_s, false)
                 .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
-            return self.finish_read(fd, &full, lane);
+            return self.finish_read(fd, &full, lane, &target);
         }
 
         let fd = crate::syscall::open_read_target(&base, name).map_err(|e| {
             crate::checks::map_errno(e, &full, || crate::syscall::fstatat_nofollow(&base, name))
         })?;
 
-        self.finish_read(fd, &full, lane)
+        self.finish_read(fd, &full, lane, &target)
     }
 
     fn finish_read(
@@ -200,9 +200,11 @@ impl Anchor {
         fd: OwnedFd,
         full: &Path,
         lane: Strategy,
+        target: &TargetRequired,
     ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
         let st = crate::syscall::fstat(&fd)
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;
+        crate::checks::check_target(&st, full, target)?;
 
         // Pre-size from st_size so the Zeroizing buffer never reallocates: an
         // abandoned buffer is the one credential residual zeroize cannot reach
