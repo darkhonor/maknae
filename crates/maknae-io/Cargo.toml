@@ -36,5 +36,10 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 # Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.
 tempfile = "3"
+
+# cfg(unix)-scoped to match the production table above; the crate is unbuildable
+# off-unix either way, but a manifest that says so in one table and not the other
+# invites the reader to think one of them is deliberate.
+[target.'cfg(unix)'.dev-dependencies]
 # "user" is a TEST need only — see the note above the production nix entry.
 nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }

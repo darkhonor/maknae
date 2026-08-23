@@ -183,6 +183,12 @@ pub(crate) fn probe_openat2<F: AsFd>(_dirfd: &F) -> Result<(), nix::errno::Errno
 /// Mode A's temp. O_EXCL makes a pre-existing name (regular file OR symlink) EEXIST
 /// regardless of O_NOFOLLOW, so O_NOFOLLOW here is redundant-but-harmless rather than
 /// a separately observable control.
+///
+/// `O_NONBLOCK` is redundant here for the same reason and is likewise kept: with
+/// `O_CREAT|O_EXCL` the inode is always freshly created and regular, so nothing can
+/// block. Both survive deletion green BECAUSE NOTHING NEEDS THEM, not for want of a
+/// test — a distinction that matters, since `open_append`'s `O_NOFOLLOW` looked
+/// identical from a deletion sweep and was load-bearing.
 pub(crate) fn open_temp_excl<F: AsFd>(
     dirfd: &F,
     name: &str,

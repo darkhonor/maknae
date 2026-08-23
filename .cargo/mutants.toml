@@ -8,7 +8,7 @@
 # ONE DELIBERATE EXEMPTION, and what it actually costs — MEASURED, not assumed.
 #
 # Most excluded files are also [[t3]]; `crates/maknae-io/src/syscall.rs` is `[t1]`
-# (promoted at 87/87 darwin, 107/107 Linux) and still excluded. ADR-0016 defines T1 as
+# (promoted at 87/87 regions darwin, 107/107 regions Linux) and still excluded. ADR-0016 defines T1 as
 # floor + crate mutation gate, and no gate cross-checks these two files, so this note is
 # the only place the exemption is visible.
 #
@@ -44,7 +44,7 @@
 #     engineer to discount mutation counts would discard the signal that found the
 #     row-0 hang in the first place.
 #
-# Compensating controls: a coverage floor (87/87 darwin, 107/107 Linux); per-verb
+# Compensating controls: a coverage floor (87/87 regions darwin, 107/107 regions Linux); per-verb
 # FD_CLOEXEC assertions for six of the seven opens (`open_dir_handle` pins only the END
 # state and says so on the test — `fdopendir` sets the bit afterwards, so no external
 # assertion can hold its call-site flag); and behavioural tests for O_NOFOLLOW, O_EXCL,

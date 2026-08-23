@@ -196,6 +196,26 @@ mod tests {
             IoError::NonUtf8Component { path: p.clone() }.to_string(),
             "path component is not valid UTF-8: /etc/maknae/cfg"
         );
+        // The three the payload-convention paragraph calls out as saying something
+        // FALSE about a non-UTF-8 path — the reason NonUtf8Component exists at all.
+        assert_eq!(
+            IoError::AnchorEndsInDotDot {
+                path: PathBuf::from("/etc/maknae/..")
+            }
+            .to_string(),
+            "anchor's final component is `..`: /etc/maknae/.."
+        );
+        assert_eq!(
+            IoError::EmptyRemainder.to_string(),
+            "empty relative remainder"
+        );
+        assert_eq!(
+            IoError::EscapesAnchor {
+                path: PathBuf::from("../x")
+            }
+            .to_string(),
+            "escapes the anchor: ../x"
+        );
         // Mode renders OCTAL — a decimal here would misreport permissions to an operator.
         assert_eq!(
             IoError::InsecurePermissions {

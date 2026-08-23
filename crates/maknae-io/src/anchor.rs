@@ -501,6 +501,11 @@ impl Anchor {
                 }
             }
         };
+        // Deleting this line leaves the suite green, and unlike every other
+        // uncontrolled item in the crate that fact had no stated reason. One byte of
+        // file content lives in this buffer; whether it was wiped is not observable
+        // from a test without reading freed stack, so the control is review, not a
+        // test. Recorded so the set of "uncontrolled, and here is why" is complete.
         zeroize::Zeroize::zeroize(&mut probe[..]);
         if let Err(got) = size_verdict(want, n, saw_extra) {
             return Err(IoError::SizeChanged {
@@ -1117,6 +1122,68 @@ mod tests {
         }
     }
 
+    /// The openat2 fast lane must not BLOCK on a FIFO either — its `O_NONBLOCK`.
+    ///
+    /// Round 10's finding, one lane over. Measured on Debian 13: deleting `O_NONBLOCK`
+    /// from `openat2_resolve` leaves the Linux suite 115/115 green, because every FIFO
+    /// fixture in the crate is single-component or unit-level and `strategy::select`
+    /// only picks the fast lane at TWO OR MORE components. So nothing ever opened a
+    /// FIFO through `openat2`, and the flag that stops `maknaed` blocking forever on
+    /// one had no control on the lane that CI runs and the deployment target uses.
+    ///
+    /// `check_target` cannot substitute, for the same reason it could not for
+    /// `open_append`'s `O_NOFOLLOW`: the block happens AT THE OPEN, before any `fstat`
+    /// exists to check.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_openat2_lane_does_not_block_on_a_fifo() {
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+        if a.probed_capability() != Strategy::Openat2 {
+            crate::testutil::skip_or_fail(
+                "the_openat2_lane_does_not_block_on_a_fifo",
+                "openat2 is not available, so the fast lane cannot be exercised",
+            );
+            return;
+        }
+        let sub = a.path.join("config.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        nix::unistd::mkfifo(
+            &sub.join("pipe"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+
+        // Two components + no descendant requirement => select() picks Openat2.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let req = TargetRequired {
+                owner: None,
+                mode_mask: None,
+                nlink_exactly_one: false,
+                regular_file: true,
+            };
+            let _ = tx.send(
+                a.read(Path::new("config.d/pipe"), None, req)
+                    .map(|o| o.effective_strategy),
+            );
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "read did not return within 10s on a FIFO through the openat2 lane. \
+                 Most likely openat2_resolve lost O_NONBLOCK, so open(2) is waiting \
+                 for a writer that will never come — but a starved runner looks the \
+                 same, so check the flags before concluding."
+            ),
+            Err(e) => panic!("worker died: {e:?}"),
+            Ok(Ok(lane)) => panic!("a FIFO must not read as a regular file (lane {lane:?})"),
+            Ok(Err(IoError::NotRegularFile { .. })) => {}
+            Ok(Err(other)) => panic!("expected NotRegularFile, got {other:?}"),
+        }
+    }
+
     /// Mode B must REFUSE a symlinked target, and no `check_target` predicate can
     /// substitute for that.
     ///
@@ -1152,7 +1219,9 @@ mod tests {
                 Path::new("audit.jsonl"),
                 None,
                 TargetRequired {
-                    owner: None,
+                    // Every predicate NAMED, including owner, so the fixture proves
+                    // what the doc claims: all of them pass on the followed inode.
+                    owner: Some(nix::unistd::geteuid().as_raw()),
                     mode_mask: Some(0o007),
                     nlink_exactly_one: true,
                     regular_file: true,
@@ -1474,7 +1543,13 @@ mod tests {
     /// which is a label `select()` computes -- not evidence that `openat2_resolve`
     /// ran. `both_lanes_refuse_a_symlinked_component` is likewise held entirely by the
     /// walk's per-component O_NOFOLLOW, leaving RESOLVE_NO_SYMLINKS/RESOLVE_BENEATH
-    /// with zero control.
+    /// with zero control. That is PAST TENSE: since selection moved ahead of the walk,
+    /// `read` returns on the openat2 lane before any walk runs, so on Linux
+    /// `both_lanes_refuse_a_symlinked_component` with `pref = Auto` IS the control for
+    /// RESOLVE_NO_SYMLINKS (see the note on `map_open_errno`). RESOLVE_BENEATH stays
+    /// redundant-by-construction — `normalize` refuses an escaping `..` above this
+    /// seam. Left in place because a reader who trusts the old wording concludes a
+    /// control is missing that is present, which is as expensive as the reverse.
     ///
     /// The fixture is the one measured difference between the lanes: an EXECUTE-ONLY
     /// (0o311) intermediate directory. Path resolution needs only `x` to traverse it,
