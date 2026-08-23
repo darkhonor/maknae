@@ -34,6 +34,45 @@ pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
     n as u64
 }
 
+// FLAG-DELETION SWEEP — the complete result, both lanes, 2026-08-24.
+//
+// Mutation cannot isolate a single flag: `&` binds tighter than `|`, so every
+// `| with &` mutant drops the TWO ADJACENT operands and is killed by whichever half
+// happens to be covered. This file is also whole-file `exclude_globs`. So the only way
+// to know whether a flag is HELD is to delete it and run the suite. Three real defects
+// were found exactly this way -- row 0's O_DIRECTORY (FIFO hang at startup),
+// open_append's O_NOFOLLOW (audit records written outside the anchor), and
+// openat2_resolve's O_NONBLOCK (FIFO hang on the fast read lane) -- so the sweep is
+// recorded rather than repeated from scratch each time.
+//
+// Method: substitute `OFlag::empty()` (NOT a regex delete -- an earlier probe matched
+// only `| OFlag::X` forms, silently no-opped on multi-line LEADING operands, and scored
+// two phantom survivors). The substitution must be asserted to differ from the original.
+//
+// Every GREEN below is redundant BY CONSTRUCTION, not an untested control:
+//
+//   O_RDONLY, everywhere            O_RDONLY IS 0 -- `empty()` is the same value, so
+//                                   this is a no-op, not a survivor.
+//   open_dir_at O_NONBLOCK          O_DIRECTORY makes a FIFO ENOTDIR before any block.
+//   open_dir_handle, all five       Target is `.`: always a directory, never a symlink.
+//                                   (Its O_CLOEXEC is the documented fdopendir case.)
+//   open_temp_excl O_NOFOLLOW,      O_CREAT|O_EXCL means a freshly created regular
+//     O_NONBLOCK                    inode -- a planted name is EEXIST, nothing blocks.
+//   openat2_resolve O_DIRECTORY     Only the want_dir branch, reached solely by
+//     (want_dir arm)                probe_openat2 against `.`.
+//   RESOLVE_BENEATH                 `normalize` refuses an escaping `..` above this
+//                                   seam, so the kernel check is belt-and-braces.
+//
+// Everything else is RED or HANGs, i.e. held. Two are held by HANGING rather than
+// failing -- open_read_target's and open_append's O_NONBLOCK -- which is why the FIFO
+// tests use a bounded wait on a worker thread.
+//
+// LANE MATTERS. Lines inside `#[cfg(target_os = "linux")]` are dead code on darwin, so
+// a darwin sweep reports them GREEN whatever the truth is. Probed separately on Debian
+// 13: openat2_resolve's O_NONBLOCK and O_CLOEXEC and RESOLVE_NO_SYMLINKS are all RED
+// there. A darwin-only sweep would have called all of them survivors -- which is the
+// mistake that hid the third defect.
+
 /// Open the anchor's parent BY PATH. Deliberately symlink-following: `spec:155`/`:157`
 /// make a symlinked ancestor permitted and resolved once. `O_DIRECTORY` is what makes
 /// this FIFO-safe; `O_CLOEXEC` because std::fs sets FD_CLOEXEC implicitly and nix does
