@@ -57,6 +57,10 @@ pub enum IoError {
     },
     /// A path component is not valid UTF-8.
     ///
+    /// `path` is ANCHOR-ABSOLUTE, like every other path payload this crate returns.
+    /// It was briefly the bare relative remainder at some construction sites, which
+    /// meant the convention depended on which site fired.
+    ///
     /// Its own variant because the previous behaviour was to fold these into
     /// `AnchorEndsInDotDot` / `EmptyRemainder` / `EscapesAnchor` -- all fail closed,
     /// but all three say something FALSE about the path, and PR B renders these

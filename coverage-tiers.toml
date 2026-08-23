@@ -389,6 +389,10 @@ why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a b
 # closed grammar ^target_os:(linux|macos|windows)$.
 
 [[t3]]
+path = "crates/maknae-io/src/testutil.rs"
+why = "test-only helper, compiled under cfg(test) only, so it has no production regions at all — a [t1] classification hard-fails coverage_check.py's absent-from-coverage check. It exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests` as a way to share a helper between module test suites"
+
+[[t3]]
 path = "crates/maknae-io/src/lib.rs"
 why = "crate rustdoc and re-exports only; no executable production regions, so a [t1] classification hard-fails coverage_check.py's absent-from-coverage check"
 
@@ -399,6 +403,21 @@ why = "IoError/IoKind enums with Display and From only; no decision logic"
 [[t3]]
 path = "crates/maknae-io/src/syscall.rs"
 why = "raw syscall wrappers and flag composition; OFlag/Mode/ResolveFlag/AtFlags unions yield equivalent mutants, so the file is exclude_globs and its tier is measured at the last commit that touches it"
+
+# KNOWN IMPRECISION, measured 2026-08-24, no floor impact.
+#
+# The exceptions below that anchor on a `foo(..).map_err(..)?` line remove that whole
+# LINE's regions, and such a line carries both the covered call and the uncovered
+# closure. Measured: anchor.rs loses 18 covered regions this way, dir.rs 8, write.rs
+# 10. Precise spans would report anchor.rs 99.42%, dir.rs 98.55%, write.rs 98.00% --
+# all still above the T1 floor, so no verdict changes and nothing is being propped up.
+#
+# It is not fixable by writing a narrower `why`: the gate matches whole lines, and the
+# `?`/`map_err` idiom puts covered and uncovered code on one line. The fix belongs in
+# the gate (sub-line region anchoring) or in reformatting every such site so the
+# closure sits on its own line, which rustfmt would fight. Recorded rather than
+# silently tolerated, because "an exception must excuse the arm it names and nothing
+# adjacent to it" is the rule the rest of this file is held to.
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
@@ -423,7 +442,7 @@ why = "fstat on a dirfd the kernel just returned from openat cannot fail on a he
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
 anchor = "                Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
-end_anchor = "                Err(probe_err) => {"
+end_anchor = "                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
 why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
 
 [[exception]]

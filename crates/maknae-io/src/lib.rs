@@ -42,9 +42,6 @@
 
 pub mod anchor;
 pub mod checks;
-#[cfg(test)]
-mod testutil;
-
 mod dir;
 pub mod error;
 pub mod normalize;
@@ -52,6 +49,13 @@ mod strategy;
 mod syscall;
 mod walk;
 mod write;
+
+// Last in the block deliberately: coverage_check.py requires that after a
+// `#[cfg(test)]` marker only the mod line, `}` or comments sit at column 0, so a
+// cfg'd declaration in the middle becomes a hard failure the moment lib.rs is
+// promoted out of [[t3]].
+#[cfg(test)]
+mod testutil;
 
 pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};

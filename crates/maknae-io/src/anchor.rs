@@ -116,8 +116,7 @@ pub struct Entry {
 pub struct Anchor {
     fd: OwnedFd,
     path: PathBuf,
-    /// Read by the lane fn at commit 5.
-    #[allow(dead_code)]
+    /// The caller's lane preference, read by `strategy::select` on every verb.
     pref: StrategyPref,
     probed: Strategy,
 }
@@ -194,7 +193,6 @@ pub fn open_anchor(
 impl Anchor {
     /// Read a file relative to the pinned anchor.
     ///
-    /// Commit 4 hard-codes `Strategy::Portable`; the lane fn and the observable flip
     /// The lane is selected per call; `effective_strategy` reports what actually ran.
     pub fn read(
         &self,
@@ -437,11 +435,16 @@ impl Anchor {
         // abandoned buffer is the one credential residual zeroize cannot reach
         // ("cannot ensure that previous reallocations did not leave values on the
         // heap"). with_capacity + read_to_end may still reserve.
-        let want = st.st_size.max(0) as usize;
-        let mut buf = Zeroizing::new(vec![0u8; want]);
-        let mut n = 0usize;
-        while n != want {
-            match nix::unistd::read(&fd, &mut buf[n..]) {
+        // Typed AT THE DEFINITION SITE, not at the call. Wrapping at the call left a
+        // bare `usize` of each role in scope, so `size_verdict(Want(n), Have(want))`
+        // -- right wrappers, wrong values -- still compiled and still destroyed the
+        // direction signal. With no unwrapped counts in scope there is nothing to
+        // transpose.
+        let want = Want(st.st_size.max(0) as usize);
+        let mut buf = Zeroizing::new(vec![0u8; want.0]);
+        let mut n = Have(0);
+        while n.0 != want.0 {
+            match nix::unistd::read(&fd, &mut buf[n.0..]) {
                 // The three non-progress arms are grouped FIRST and the covered
                 // progress arm goes last, so the coverage exception can span exactly
                 // these three and leave `Ok(k)` in the denominator. Ordering does the
@@ -451,7 +454,7 @@ impl Anchor {
                 // The manual loop loses read_to_end's built-in retry.
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
-                Ok(k) => n += k,
+                Ok(k) => n.0 += k,
             }
         }
 
@@ -493,10 +496,10 @@ impl Anchor {
             }
         };
         zeroize::Zeroize::zeroize(&mut probe[..]);
-        if let Err(got) = size_verdict(Want(want), Have(n), saw_extra) {
+        if let Err(got) = size_verdict(want, n, saw_extra) {
             return Err(IoError::SizeChanged {
                 path: full.to_path_buf(),
-                expected: want,
+                expected: want.0,
                 got,
             });
         }
@@ -949,8 +952,14 @@ mod tests {
             );
             return;
         }
+        // The property under test is "readable length < st_size", NOT "st_size is
+        // 4096". kernfs sets a sizeless attribute inode's i_size to PAGE_SIZE: 4096 on
+        // x86_64, 65536 on a 64K-page aarch64 kernel. Pinning the literal would turn
+        // this into a hard failure with a misleading message on hardware this project
+        // plausibly runs on.
         let st = std::fs::symlink_metadata(dir.join("online")).unwrap();
-        assert_eq!(st.len(), 4096, "fixture requires st_size 4096");
+        let sz = st.len() as usize;
+        assert!(sz > 0, "fixture requires a non-zero st_size, got {sz}");
 
         let a = open_anchor(dir, none_req(), StrategyPref::ForcePortable).unwrap();
         let err = a
@@ -958,8 +967,11 @@ mod tests {
             .expect_err("a file shorter than st_size must be refused, not NUL-padded");
         match err {
             IoError::SizeChanged { expected, got, .. } => {
-                assert_eq!(expected, 4096);
-                assert!(got < 4096, "shrank must report the ACTUAL count, got {got}");
+                assert_eq!(expected, sz);
+                assert!(
+                    got < sz,
+                    "shrank must report the ACTUAL count ({got}), below st_size ({sz})"
+                );
             }
             other => panic!("expected SizeChanged, got {other:?}"),
         }
@@ -1068,10 +1080,6 @@ mod tests {
         );
     }
 
-    /// Same for a non-UTF-8 TARGET name, which used to surface as `EmptyRemainder` --
-    /// the remainder is not empty. This is the path PR B hits when it feeds an
-    /// `enumerate` result back into `read`: `Entry.name` is a raw `OsString` by
-    /// design, so a non-UTF-8 entry name arrives here legitimately.
     /// `publish` and `append` must propagate a FAILED WALK, not just `read`.
     ///
     /// Each of the three verbs calls `walk_dirs` at its own site. Every existing
@@ -1113,6 +1121,11 @@ mod tests {
         );
     }
 
+    /// Same for a non-UTF-8 TARGET name, which used to surface as `EmptyRemainder` --
+    /// the remainder is not empty. This is the path PR B hits when it feeds an
+    /// `enumerate` result back into `read`: `Entry.name` is a raw `OsString` by
+    /// design, so a non-UTF-8 entry name arrives here legitimately.
+    ///
     /// All THREE verbs, because they reach the conversion through two different
     /// functions: `read` has its own, while `publish` and `append` share
     /// `split_target`. Only `read`'s was covered, which is the parallel-surface trap
@@ -1154,6 +1167,34 @@ mod tests {
                 )
             }
             other => panic!("got {other:?}"),
+        }
+
+        // A non-UTF-8 DIRECTORY component takes a DIFFERENT route: the final component
+        // is valid UTF-8, so the verb-level conversions all pass and the refusal comes
+        // from inside walk_dirs. That construction site was missed by the payload
+        // sweep and kept returning the bare relative path on every verb -- which the
+        // assertion above could never catch, since it only exercises a non-UTF-8
+        // FINAL component.
+        let baddir = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"d\xff")).join("x.yaml");
+        for (verb, e) in [
+            ("read", a.read(&baddir, None, t_req()).unwrap_err()),
+            (
+                "publish",
+                a.publish(&baddir, None, b"x", m(0o640)).unwrap_err(),
+            ),
+            (
+                "append",
+                a.append(&baddir, None, t_append(), b"x", m(0o640))
+                    .unwrap_err(),
+            ),
+        ] {
+            match e {
+                IoError::NonUtf8Component { path } => assert!(
+                    path.starts_with(&a.path),
+                    "{verb}: walk payload not anchor-absolute: {path:?}"
+                ),
+                other => panic!("{verb}: got {other:?}"),
+            }
         }
     }
 

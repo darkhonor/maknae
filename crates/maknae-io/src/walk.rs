@@ -27,9 +27,15 @@ pub(crate) fn walk_dirs<F: AsFd>(
         let name = match comp.as_os_str().to_str() {
             Some(n) => n,
             None => {
+                // `sofar` is the anchor-absolute path built as the walk descends, and
+                // every SIBLING error in this loop already uses it -- open_child's and
+                // check_owner_mode's below. This one returned the bare relative
+                // remainder, so the payload convention differed by which error fired,
+                // on all four verbs. Naming the offending component absolutely is both
+                // consistent and more useful.
                 return Err(IoError::NonUtf8Component {
-                    path: rel.to_path_buf(),
-                })
+                    path: sofar.join(comp.as_os_str()),
+                });
             }
         };
         sofar.push(name);
