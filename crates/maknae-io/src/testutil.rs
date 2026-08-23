@@ -5,6 +5,17 @@
 //! to be followed by a line beginning `mod ` -- so `pub(crate) mod tests` is not
 //! available as a way to share it.
 
+/// Is the fail-closed skip explicitly opted out of on this host?
+///
+/// Requires exactly `1`. `var_os(..).is_some()` also accepted `MAKNAE_..=0` and an
+/// empty value, so a host could opt out of every control while believing it had not
+/// -- and the panic message tells the reader to set `=1`. The check matches the
+/// message.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn opted_out() -> bool {
+    std::env::var("MAKNAE_IO_ALLOW_SKIPPED_LANES").is_ok_and(|v| v == "1")
+}
+
 /// Skips in this crate are FAIL-CLOSED, and that is not pedantry.
 ///
 /// libtest CAPTURES `eprintln!` from a test that PASSES, and CI runs plain
@@ -19,19 +30,9 @@
 /// seccomp filter returning EPERM) or the filesystem rejects the name, a quiet
 /// `return` turns each of them into a green no-op. Panicking makes that loud;
 /// a host that genuinely cannot run them opts out explicitly.
-/// Is the fail-closed skip explicitly opted out of on this host?
 ///
-/// Requires exactly `1`. `var_os(..).is_some()` also accepted `MAKNAE_..=0` and an
-/// empty value, so a host could opt out of every control while believing it had not
-/// -- and the panic message tells the reader to set `=1`. The check now matches the
-/// message.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn opted_out() -> bool {
-    std::env::var("MAKNAE_IO_ALLOW_SKIPPED_LANES").map(|v| v == "1") == Ok(true)
-}
-
-// Every caller is inside a `#[cfg(target_os = "linux")]` test, so on darwin this is
-// genuinely unreferenced rather than accidentally so.
+/// Every caller is inside a `#[cfg(target_os = "linux")]` test, so on darwin this is
+/// genuinely unreferenced rather than accidentally so.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn skip_or_fail(what: &str, why: &str) {
     if opted_out() {
@@ -60,12 +61,17 @@ mod tests {
     #[test]
     #[should_panic(expected = "could not run")]
     fn skip_or_fail_panics_when_the_opt_out_is_absent() {
-        if super::opted_out() {
-            // The opt-out is deliberately set on this host, so the fail-closed branch
-            // cannot be reached. Panic with the expected text so the test still
-            // asserts something rather than passing vacuously.
-            panic!("could not run: MAKNAE_IO_ALLOW_SKIPPED_LANES is set on this host");
-        }
+        // No vacuous guard. An earlier version panicked with the same expected
+        // substring when the opt-out was set, so on such a host the test passed
+        // WITHOUT EVER CALLING the subject -- a control that asserted nothing while
+        // reporting green, which is the exact failure this whole helper exists to
+        // prevent. If the opt-out is set, say so and fail: the control genuinely
+        // cannot run, and that is information, not an inconvenience.
+        assert!(
+            !super::opted_out(),
+            "MAKNAE_IO_ALLOW_SKIPPED_LANES is set, so skip_or_fail's fail-closed \
+             branch cannot be exercised and this control is inert on this host"
+        );
         super::skip_or_fail("a_control", "a simulated reason");
     }
 }

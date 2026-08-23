@@ -50,16 +50,19 @@ mod syscall;
 mod walk;
 mod write;
 
-// Last in the block deliberately: coverage_check.py requires that after a
-// `#[cfg(test)]` marker only the mod line, `}` or comments sit at column 0, so a
-// cfg'd declaration in the middle becomes a hard failure the moment lib.rs is
-// promoted out of [[t3]].
-#[cfg(test)]
-mod testutil;
-
 pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use error::{IoError, IoKind};
 pub use normalize::normalize;
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
 pub use zeroize::Zeroizing;
+
+// LAST IN THE FILE, not merely last in the mod block. coverage_check.py requires that
+// after a `#[cfg(test)]` marker ONLY the mod line, `}` or comments sit at column 0 —
+// for the remainder of the FILE, not the remainder of the block. With this declaration
+// above the `pub use` lines the checker hardfails ("column-0 code after the test
+// module leaves the production denominator"), verified by running it directly; today
+// that is masked only because lib.rs is `[[t3]]`, and it would bite the moment lib.rs
+// is promoted.
+#[cfg(test)]
+mod testutil;

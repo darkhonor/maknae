@@ -390,7 +390,7 @@ why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a b
 
 [[t3]]
 path = "crates/maknae-io/src/testutil.rs"
-why = "test-only helper, compiled under cfg(test) only, so it has no production regions at all — a [t1] classification hard-fails coverage_check.py's absent-from-coverage check. It exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests` as a way to share a helper between module test suites"
+why = "test-only helper shared between module test suites (it exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`). Report-only rather than [t1] because its production split — skip_or_fail and opted_out — measures 63.64%, below the 95% floor: the opt-out branch is only reachable by mutating MAKNAE_IO_ALLOW_SKIPPED_LANES for the whole process, which is not safe under the parallel harness. The FAIL-CLOSED branch, which is the one that matters, IS controlled by skip_or_fail_panics_when_the_opt_out_is_absent"
 
 [[t3]]
 path = "crates/maknae-io/src/lib.rs"
@@ -404,20 +404,24 @@ why = "IoError/IoKind enums with Display and From only; no decision logic"
 path = "crates/maknae-io/src/syscall.rs"
 why = "raw syscall wrappers and flag composition; OFlag/Mode/ResolveFlag/AtFlags unions yield equivalent mutants, so the file is exclude_globs and its tier is measured at the last commit that touches it"
 
-# KNOWN IMPRECISION, measured 2026-08-24, no floor impact.
+# KNOWN IMPRECISION in the exceptions below, no floor impact.
 #
-# The exceptions below that anchor on a `foo(..).map_err(..)?` line remove that whole
-# LINE's regions, and such a line carries both the covered call and the uncovered
-# closure. Measured: anchor.rs loses 18 covered regions this way, dir.rs 8, write.rs
-# 10. Precise spans would report anchor.rs 99.42%, dir.rs 98.55%, write.rs 98.00% --
-# all still above the T1 floor, so no verdict changes and nothing is being propped up.
+# The gate matches WHOLE LINES, and the `foo(..).map_err(..)?` idiom puts the covered
+# call and the uncovered closure on one line. An exception anchored there necessarily
+# removes both, so a few covered regions leave the denominator alongside the arm the
+# `why` names. The per-exception region counts the gate prints on each run are the
+# authoritative figures; no derived percentage is quoted here, because the last attempt
+# quoted one measured on an earlier tree state and it was wrong by the exact amount of
+# the fix that landed in the same commit.
 #
-# It is not fixable by writing a narrower `why`: the gate matches whole lines, and the
-# `?`/`map_err` idiom puts covered and uncovered code on one line. The fix belongs in
-# the gate (sub-line region anchoring) or in reformatting every such site so the
-# closure sits on its own line, which rustfmt would fight. Recorded rather than
-# silently tolerated, because "an exception must excuse the arm it names and nothing
-# adjacent to it" is the rule the rest of this file is held to.
+# anchor.rs currently reports 100.00% (325/325), so it has no imprecision-driven delta
+# left at all. dir.rs and write.rs clear their floors with room to spare.
+#
+# Not fixable by writing a narrower `why`: it needs sub-line region anchoring in the
+# gate, or reformatting every such site so the closure sits on its own line, which
+# rustfmt would undo. Recorded rather than tolerated silently, because "an exception
+# must excuse the arm it names and nothing adjacent to it" is the rule the rest of this
+# file is held to.
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
@@ -429,6 +433,24 @@ path = "crates/maknae-io/src/anchor.rs"
 anchor = "syscall::fstat(&afd).map_err"
 why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
 
+
+# The last three uncovered production regions in the crate, classified rather than
+# left to clear their floors on percentage slack — which is exactly what the rule below
+# forbids for anchor.rs's loops, and the rule does not get to apply selectively.
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw)?;"
+why = "the `?` unwind edge. classify_entry only returns Err from its d_type == DT_UNKNOWN fallback, and d_type is populated on ext4, xfs and APFS (measured), so the fallback does not run in the real path. The fallback's own decision IS controlled, directly, by a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and none_arm_falls_back_to_the_stat"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "    write_all(fd, bytes)?; // Mode A: a temp file this function just created"
+why = "the `?` unwind edge. write_all returns Err only on a short write or a write error to an fd openat just created — ENOSPC/EIO on a healthy FS, not provokable from a unit test. The short-write refusal it propagates IS the decision, and it has its own exception naming the arm"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "    write_all(fd, bytes)?; // Mode B: a caller-supplied inode"
+why = "same unwind edge for Mode B. The inode is caller-supplied here rather than freshly created, but a write failing on it is still ENOSPC/EIO; the checks that make the inode acceptable at all (check_target's hard-link and type refusals) run BEFORE this line and are covered"
 
 [[exception]]
 path = "crates/maknae-io/src/walk.rs"

@@ -1,7 +1,7 @@
 //! Anchor validation, `open_anchor`, the verb entry points, and the type declarations
-//! they need. The declarations live here (not `strategy.rs`) because `open_anchor`'s
-//! signature names `StrategyPref` at commit 2, while `strategy.rs` does not land until
-//! commit 5.
+//! they need. The declarations live here rather than in `strategy.rs` because
+//! `open_anchor`'s signature names `StrategyPref`, and a leaf module that every other
+//! module depends on is the wrong place to put the lane-selection logic.
 
 use crate::checks::{check_owner_mode, AnchorRequired, DescendantRequired, TargetRequired};
 use crate::error::IoError;
@@ -122,8 +122,14 @@ pub struct Anchor {
 }
 
 impl Anchor {
-    /// What the capability probe found, once, at construction. Hard-coded `Portable`
-    /// until the probe lands at commit 5.
+    /// What the capability probe found, once, at construction.
+    ///
+    /// `Openat2` only where the syscall is actually usable — the probe issues a real
+    /// `openat2` and treats any error as "not available", so a seccomp filter
+    /// returning EPERM yields `Portable`. This is the CAPABILITY, not the lane a given
+    /// call takes: `select` also requires a multi-component remainder and no
+    /// descendant check, and `effective_strategy` on each `Outcome` reports what
+    /// actually ran.
     pub fn probed_capability(&self) -> Strategy {
         self.probed
     }
@@ -1169,12 +1175,20 @@ mod tests {
             other => panic!("got {other:?}"),
         }
 
-        // A non-UTF-8 DIRECTORY component takes a DIFFERENT route: the final component
-        // is valid UTF-8, so the verb-level conversions all pass and the refusal comes
-        // from inside walk_dirs. That construction site was missed by the payload
-        // sweep and kept returning the bare relative path on every verb -- which the
-        // assertion above could never catch, since it only exercises a non-UTF-8
-        // FINAL component.
+        // A non-UTF-8 DIRECTORY component takes a DIFFERENT route from the case above:
+        // the final component is valid UTF-8, so the verb-level conversions pass and
+        // the refusal comes from deeper in. That site was missed by the payload sweep
+        // and kept returning the bare relative path -- which the assertion above could
+        // never catch, since it only exercises a non-UTF-8 FINAL component.
+        //
+        // WHICH site fires is lane-dependent, so this loop is not a walk_dirs test on
+        // every host: on a Linux host with openat2, `read` has a 2-component remainder
+        // and no descendant check, so select() picks the fast lane and the refusal
+        // comes from the `norm.to_str()` guard BEFORE any walk. `publish` and `append`
+        // never take that lane, so they reach walk_dirs everywhere; darwin reaches it
+        // on all three. The assertion holds either way -- both sites are
+        // anchor-absolute -- which is the point of asserting the property rather than
+        // the source.
         let baddir = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"d\xff")).join("x.yaml");
         for (verb, e) in [
             ("read", a.read(&baddir, None, t_req()).unwrap_err()),

@@ -21,6 +21,23 @@ pub enum IoKind {
     },
 }
 
+/// # Path payload convention
+///
+/// Every variant carrying a `path` reports it **anchor-absolute** — except the two
+/// that structurally cannot, because they are raised before an anchor exists:
+///
+/// - `EscapesAnchor` is constructed in `normalize`, a free function with no anchor in
+///   scope, so it carries the caller's relative input verbatim;
+/// - `RelativeAnchor` carries the caller's anchor argument, which is non-absolute *by
+///   construction* — that is the error being reported.
+///
+/// `NoDescendantForRequirement` names its field `rel` rather than `path` for the same
+/// reason: it is the caller's input, not a resolved location.
+///
+/// Stated once here rather than per-variant because the convention drifted twice while
+/// this crate was being written, and a per-variant claim is what let it: one variant
+/// said "like every other path payload this crate returns", which was false for the
+/// two above.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoError {
@@ -55,11 +72,7 @@ pub enum IoError {
     RelativeAnchor {
         path: PathBuf,
     },
-    /// A path component is not valid UTF-8.
-    ///
-    /// `path` is ANCHOR-ABSOLUTE, like every other path payload this crate returns.
-    /// It was briefly the bare relative remainder at some construction sites, which
-    /// meant the convention depended on which site fired.
+    /// A path component is not valid UTF-8. `path` is anchor-absolute.
     ///
     /// Its own variant because the previous behaviour was to fold these into
     /// `AnchorEndsInDotDot` / `EmptyRemainder` / `EscapesAnchor` -- all fail closed,

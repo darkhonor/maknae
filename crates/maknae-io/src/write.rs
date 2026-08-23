@@ -99,7 +99,7 @@ fn write_all(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
 }
 
 fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
-    write_all(fd, bytes)?;
+    write_all(fd, bytes)?; // Mode A: a temp file this function just created
     syscall::fsync_fd(fd)
 }
 
@@ -127,11 +127,11 @@ pub(crate) fn append_at<F: AsFd>(
 }
 
 fn append_raw(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
-    write_all(fd, bytes)?;
-    // sync_data per append; NO parent fsync — maknae-audit-append's sink has none
-    // today (only sync_data), so adding one would be a change, not the preservation
-    // the spec claims, and with O_CREAT and no O_EXCL "at create" is not detectable
-    // from the open anyway.
+    write_all(fd, bytes)?; // Mode B: a caller-supplied inode
+                           // sync_data per append; NO parent fsync — maknae-audit-append's sink has none
+                           // today (only sync_data), so adding one would be a change, not the preservation
+                           // the spec claims, and with O_CREAT and no O_EXCL "at create" is not detectable
+                           // from the open anyway.
     syscall::sync_data(fd)
 }
 
