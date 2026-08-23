@@ -418,9 +418,9 @@ why = "fstat on a dirfd the kernel just returned from openat cannot fail on a he
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "Ok(0) => break,"
+anchor = "                Ok(0) => break,"
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
-why = "the read loop's three non-progress arms. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
+why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm above them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
@@ -453,11 +453,12 @@ path = "crates/maknae-io/src/dir.rs"
 anchor = "let ent = ent?;"
 why = "a mid-iteration readdir failure is not provokable from a unit test without a seam; a pure propagation with no decision"
 
-[[exception]]
-path = "crates/maknae-io/src/dir.rs"
-anchor = "crate::syscall::fstatat_nofollow(dirfd, raw)"
-end_anchor = "})?;"
-why = "the d_type == DT_UNKNOWN fallback closure AND the `?` that propagates it — two lines, one arm, never invoked on either CI platform because d_type is populated on ext4 and xfs (measured). The classification decision it feeds IS covered: classify_entry is pure over (Option<Type>, stat_fn) and its None arm is tested through the injected seam, so the mapping is held even though this call site is not"
+# The d_type == DT_UNKNOWN fallback no longer needs an exception. It used to live in
+# an injected closure that no test could reach; classify_entry now takes the dirfd and
+# the raw name directly, so
+# a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and
+# none_arm_falls_back_to_the_stat exercise it for real and the gate reports it covered.
+# Deleted rather than left behind: a stale exception is a hole a later change reuses.
 
 
 [[exception]]
@@ -473,9 +474,9 @@ why = "same, for the terminal-directory fd the walk just returned; the checked-d
 
 [[exception]]
 path = "crates/maknae-io/src/write.rs"
-anchor = "Ok(0) => break,"
+anchor = "            Ok(0) => break,"
 end_anchor = "Err(e) => return Err(e),"
-why = "write_all_sync's non-progress arms: Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
+why = "write_all's three non-progress arms, and ONLY those three — the covered progress arm above them stays in the denominator. Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
 
 # Narrowed from one 15-region span to the two arms the `why` actually names; the old
 # span also removed the cleanup wiring between them.

@@ -307,7 +307,8 @@ mod tests {
         std::fs::write(d.path().join("a/f"), b"x").expect("write");
         let parent = open_parent_by_path(d.path()).expect("open parent");
         if probe_openat2(&parent).is_err() {
-            return; // kernel/sandbox without openat2; the portable lane is under test elsewhere
+            eprintln!("SKIP openat2_resolve_sets_cloexec: no openat2 on this kernel");
+            return;
         }
         let fd = openat2_resolve(&parent, "a/f", false).expect("openat2 resolve");
         assert!(is_cloexec(&fd), "openat2 fd must be FD_CLOEXEC");

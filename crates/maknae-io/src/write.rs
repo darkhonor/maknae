@@ -70,20 +70,28 @@ fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -
 /// The shared write loop. Both modes need it, and duplicating it would duplicate its
 /// unprovokable non-progress arms — and make the exception anchor ambiguous.
 fn write_all(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
-    let mut n = 0usize;
-    while n != bytes.len() {
-        match nix::unistd::write(fd, &bytes[n..]) {
+    // Advance a SLICE rather than an index. The index form (`n += k`, loop on
+    // `n != bytes.len()`) carries an arithmetic operator that cargo-mutants
+    // rewrites to `n *= k`; that pins n at zero, the write keeps succeeding, and
+    // the loop cannot terminate -- reported as a TIMEOUT, on which cargo-mutants
+    // exits 3 and the mutation gate goes red. Re-slicing has no arithmetic to
+    // mutate and is the idiom std::io::Write::write_all itself uses.
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match nix::unistd::write(fd, rest) {
+            // Non-progress arms first, covered progress arm last -- see the read
+            // loop in anchor.rs for why ordering rather than a guard.
             Ok(0) => break,
-            Ok(k) => n += k,
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => return Err(e),
+            Ok(k) => rest = &rest[k..],
         }
     }
     // `Ok(0)` breaks the loop with the write incomplete. Reporting success there
     // would let `publish` fsync and `renameat` a TRUNCATED file into the final
     // name, and let `append` report a partial audit record as written -- both
     // silent. A function named write_all does not return Ok having written less.
-    if n == bytes.len() {
+    if rest.is_empty() {
         Ok(())
     } else {
         Err(nix::errno::Errno::EIO)

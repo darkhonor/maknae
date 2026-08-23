@@ -27,7 +27,7 @@ pub(crate) fn walk_dirs<F: AsFd>(
         let name = match comp.as_os_str().to_str() {
             Some(n) => n,
             None => {
-                return Err(IoError::EscapesAnchor {
+                return Err(IoError::NonUtf8Component {
                     path: rel.to_path_buf(),
                 })
             }
@@ -72,7 +72,10 @@ mod tests {
         d
     }
 
-    /// A component whose bytes are not UTF-8 is refused rather than lossily converted.
+    /// A component whose bytes are not UTF-8 is refused rather than lossily converted,
+    /// AND is reported as what it is. It used to come back as `EscapesAnchor`, which
+    /// fails closed but tells the operator something false -- the path does not escape
+    /// the anchor, it simply is not UTF-8.
     #[test]
     fn non_utf8_component_refused() {
         let d = tmp(0o750);
@@ -80,7 +83,7 @@ mod tests {
         let bad = std::ffi::OsStr::from_bytes(b"\xff\xfe");
         let rel = std::path::PathBuf::from(bad);
         let e = walk_dirs(&fd, d.path(), &rel, None).unwrap_err();
-        assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
+        assert!(matches!(e, IoError::NonUtf8Component { .. }), "got {e:?}");
     }
 
     /// Defensive guard: the verbs check before calling, but a zero-component walk

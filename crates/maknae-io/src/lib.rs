@@ -7,9 +7,27 @@
 //! were to duplicate security-critical code or to fail open.
 //!
 //! The model is an **anchor prefix**: the caller opens an anchor directory once, holds
-//! it as an fd, and every subsequent operation resolves relative to that pinned fd with
-//! `O_NOFOLLOW` at each component. The checked inode and the used inode are the same
-//! open fd, so the check-then-reopen TOCTOU is closed.
+//! it as an fd, and every subsequent operation resolves relative to that pinned fd. The
+//! checked inode and the used inode are the same open fd, so the check-then-reopen
+//! TOCTOU is closed.
+//!
+//! Symlink refusal is carried by whichever lane runs, and the two do it differently --
+//! stating "`O_NOFOLLOW` at each component" would be false on Linux:
+//!
+//! - **portable** — `openat` per component with `O_NOFOLLOW`, so a symlinked component
+//!   fails at the component itself and the error names it;
+//! - **openat2** (Linux, multi-component remainder, no descendant check) — one
+//!   `RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH` resolve inside the kernel, carrying no
+//!   `O_NOFOLLOW` because the resolve flags subsume it.
+//!
+//! Both refuse the same inputs with the same `IoError` variant. The `path` PAYLOAD
+//! differs by lane -- the portable walk names the offending component, openat2 reports
+//! the path it was asked to resolve -- and `both_lanes_refuse_a_symlinked_component`
+//! pins both.
+//!
+//! One deliberate exception to fd-relative resolution: the anchor's own parent is
+//! opened BY PATH and follows symlinks, so a symlinked ancestor of the anchor is
+//! permitted and resolved once, at open time.
 //!
 //! Callers **name** what they require — `AnchorRequired`, `DescendantRequired`,
 //! `TargetRequired`. `None` means "this caller requires no such check": a named,

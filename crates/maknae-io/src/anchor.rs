@@ -40,6 +40,30 @@ pub struct Outcome<T> {
 /// two inside the test suite itself. For the crate whose stated job includes keeping
 /// secrets off the heap, letting them out through the formatter instead is not a
 /// smaller hole.
+/// Did the read see exactly the bytes the `fstat` promised?
+///
+/// Pure, and separate from `finish_read`, because the two failing directions cannot
+/// both be provoked through the public API on one platform: the GREW case needs a
+/// file whose readable length exceeds `st_size` (procfs, or a FIFO), and the SHRANK
+/// case needs the file to lose bytes between the `fstat` and the fill loop, which is
+/// a race no fixture can win deterministically. Extracting the decision lets all four
+/// quadrants be asserted on every platform -- the crate already uses this shape for
+/// `classify_entry` and the capability probe. The production path calls this function,
+/// so the tests hold the real decision and not a copy of it.
+///
+/// `Err(got)` carries the byte count to report. In the grew case that is `n + 1`: a
+/// LOWER BOUND, since one probe byte proves "more than expected" without revealing
+/// how much more.
+fn size_verdict(want: usize, n: usize, saw_extra: bool) -> Result<(), usize> {
+    if n != want {
+        return Err(n); // shrank: fewer bytes than the checked inode claimed
+    }
+    if saw_extra {
+        return Err(n + 1); // grew: at least one byte past st_size
+    }
+    Ok(())
+}
+
 impl<T> std::fmt::Debug for Outcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Outcome")
@@ -114,13 +138,23 @@ pub fn open_anchor(
         None => return Err(IoError::RootAnchor),
         Some(p) => p,
     };
-    let basename = match path.file_name().and_then(|s| s.to_str()) {
+    // Two distinct failures, previously reported as one: `file_name()` is None only
+    // when the path genuinely has no final component (`/etc/maknae/..`), while a
+    // Some that is not UTF-8 is a different fact entirely.
+    let basename = match path.file_name() {
         None => {
             return Err(IoError::AnchorEndsInDotDot {
                 path: path.to_path_buf(),
             })
         }
-        Some(b) => b,
+        Some(os) => match os.to_str() {
+            None => {
+                return Err(IoError::NonUtf8Component {
+                    path: path.to_path_buf(),
+                })
+            }
+            Some(b) => b,
+        },
     };
 
     // Row 0: parent BY PATH, symlink-following by design (spec:155/:157).
@@ -158,9 +192,12 @@ impl Anchor {
     ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
         let norm = crate::normalize::normalize(rel)?;
         let dir = norm.parent().unwrap_or(Path::new(""));
-        let name = match norm.file_name().and_then(|s| s.to_str()) {
+        let name = match norm.file_name() {
             None => return Err(IoError::EmptyRemainder),
-            Some(n) => n,
+            Some(os) => match os.to_str() {
+                None => return Err(IoError::NonUtf8Component { path: norm.clone() }),
+                Some(n) => n,
+            },
         };
 
         // Pre-check, dominating: a named descendant requirement with no directory it
@@ -204,7 +241,7 @@ impl Anchor {
         if crate::strategy::uses_openat2(lane) {
             let rel_s = norm
                 .to_str()
-                .ok_or_else(|| IoError::EscapesAnchor { path: norm.clone() })?;
+                .ok_or_else(|| IoError::NonUtf8Component { path: norm.clone() })?;
             let fd = crate::syscall::openat2_resolve(&self.fd, rel_s, false)
                 .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
             return self.finish_read(fd, &full, lane, &target);
@@ -349,9 +386,12 @@ impl Anchor {
         desc: Option<&DescendantRequired>,
     ) -> Result<(std::path::PathBuf, String), IoError> {
         let norm = crate::normalize::normalize(rel)?;
-        let name = match norm.file_name().and_then(|s| s.to_str()) {
+        let name = match norm.file_name() {
             None => return Err(IoError::EmptyRemainder),
-            Some(n) => n.to_string(),
+            Some(os) => match os.to_str() {
+                None => return Err(IoError::NonUtf8Component { path: norm.clone() }),
+                Some(n) => n.to_string(),
+            },
         };
         let dir = norm.parent().unwrap_or(Path::new(""));
         if desc.is_some() && dir.as_os_str().is_empty() {
@@ -382,11 +422,16 @@ impl Anchor {
         let mut n = 0usize;
         while n != want {
             match nix::unistd::read(&fd, &mut buf[n..]) {
+                // The three non-progress arms are grouped FIRST and the covered
+                // progress arm goes last, so the coverage exception can span exactly
+                // these three and leave `Ok(k)` in the denominator. Ordering does the
+                // work; a `k > 0` guard would do it too but adds a comparison that
+                // cargo-mutants rewrites into a non-terminating loop.
                 Ok(0) => break,
-                Ok(k) => n += k,
                 // The manual loop loses read_to_end's built-in retry.
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
+                Ok(k) => n += k,
             }
         }
 
@@ -410,18 +455,28 @@ impl Anchor {
         // it did not grow. EINTR is retried; any other errno is the file changing
         // under us, which is the same refusal.
         let mut probe = [0u8; 1];
-        let at_eof = loop {
+        let saw_extra = loop {
             match nix::unistd::read(&fd, &mut probe) {
-                Ok(0) => break true,
+                Ok(0) => break false,
+                Ok(_) => break true,
                 Err(nix::errno::Errno::EINTR) => continue,
-                Ok(_) | Err(_) => break false,
+                // A genuine read error is NOT a size change. Relabelling it would
+                // discard the errno that the fill loop above preserves and report
+                // e.g. EIO as "size changed under the read". Bound as `probe_err`
+                // rather than `e` so this line is textually distinct from the fill
+                // loop's identical arm -- the coverage gate anchors on whole lines
+                // and rejects an ambiguous one.
+                Err(probe_err) => {
+                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))
+                }
             }
         };
-        if n != want || !at_eof {
+        zeroize::Zeroize::zeroize(&mut probe[..]);
+        if let Err(got) = size_verdict(want, n, saw_extra) {
             return Err(IoError::SizeChanged {
                 path: full.to_path_buf(),
                 expected: want,
-                got: if at_eof { n } else { n + 1 },
+                got,
             });
         }
 
@@ -905,13 +960,88 @@ mod tests {
         std::fs::write(a.path.join("secret"), b"SUPER-SECRET-TOKEN").unwrap();
         let out = a.read(Path::new("secret"), None, t_req()).unwrap();
         let rendered = format!("{out:?}");
+        // Both spellings. The ASCII check alone is VACUOUS against the actual
+        // regression: `#[derive(Debug)]` on Outcome<Zeroizing<Vec<u8>>> renders the
+        // payload as `[83, 85, 80, ...]`, a full leak containing no such substring.
         assert!(
             !rendered.contains("SUPER-SECRET-TOKEN"),
-            "Debug leaked the payload: {rendered}"
+            "Debug leaked the payload verbatim: {rendered}"
+        );
+        let as_decimals = b"SUPER-SECRET-TOKEN"
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            !rendered.contains(&as_decimals),
+            "Debug leaked the payload as a byte list: {rendered}"
         );
         assert!(rendered.contains("<redacted>"), "{rendered}");
         // The non-secret field stays useful for diagnostics.
         assert!(rendered.contains("effective_strategy"), "{rendered}");
+    }
+
+    /// A non-UTF-8 ANCHOR basename is reported as such, not as "ends in `..`".
+    ///
+    /// `MAKNAE_CONFIG_DIR` and `argv[1]` reach this with operator-supplied bytes, so
+    /// the diagnosis is what an operator sees when it goes wrong. The old code folded
+    /// this into `AnchorEndsInDotDot` because `file_name().and_then(to_str)` returns
+    /// None for both, conflating "has no final component" with "is not UTF-8".
+    /// No filesystem is touched, so this runs on APFS too.
+    #[test]
+    fn non_utf8_anchor_basename_is_not_reported_as_dot_dot() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::path::Path::new("/etc").join(std::ffi::OsStr::from_bytes(b"ma\xffnae"));
+        let e = open_anchor(&bad, none_req(), StrategyPref::Auto).unwrap_err();
+        assert!(
+            matches!(e, IoError::NonUtf8Component { .. }),
+            "got {e:?} -- AnchorEndsInDotDot here would be a false statement"
+        );
+        // And the genuine dot-dot case must still say dot-dot.
+        let dd = std::path::Path::new("/etc/maknae/..");
+        let e2 = open_anchor(dd, none_req(), StrategyPref::Auto).unwrap_err();
+        assert!(
+            matches!(e2, IoError::AnchorEndsInDotDot { .. }),
+            "got {e2:?}"
+        );
+    }
+
+    /// Same for a non-UTF-8 TARGET name, which used to surface as `EmptyRemainder` --
+    /// the remainder is not empty. This is the path PR B hits when it feeds an
+    /// `enumerate` result back into `read`: `Entry.name` is a raw `OsString` by
+    /// design, so a non-UTF-8 entry name arrives here legitimately.
+    #[test]
+    fn non_utf8_target_name_is_not_reported_as_empty_remainder() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let bad = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"10-\xff.yaml"));
+        let e = a.read(&bad, None, t_req()).unwrap_err();
+        assert!(matches!(e, IoError::NonUtf8Component { .. }), "got {e:?}");
+    }
+
+    /// All four quadrants of the read-completion verdict, on every platform.
+    ///
+    /// The public-API fixtures only reach the GREW case (`want == 0`, bytes present).
+    /// Measured: deleting the `n != want` half of the check left 99/99 green, so the
+    /// SHRANK direction -- which the commit claiming "both directions" asserted -- had
+    /// no control at all. Its consequence is worse than truncation: the buffer is
+    /// pre-sized with `vec![0u8; want]`, so a short read that returns Ok yields a tail
+    /// of NUL bytes appended to the caller's policy content.
+    #[test]
+    fn size_verdict_covers_all_four_quadrants() {
+        // Exact: read every promised byte and found nothing past them.
+        assert_eq!(size_verdict(13, 13, false), Ok(()));
+        // Grew: at least one byte past st_size. `got` is a lower bound, n + 1.
+        assert_eq!(size_verdict(13, 13, true), Err(14));
+        // Shrank: fewer bytes than the checked inode claimed. `got` is exact.
+        assert_eq!(size_verdict(13, 5, false), Err(5));
+        // Shrank AND something readable past the short count -- still shrank, and the
+        // reported count stays the honest one rather than the +1 lower bound.
+        assert_eq!(size_verdict(13, 5, true), Err(5));
+        // The empty file is the boundary: exact, not a spurious refusal.
+        assert_eq!(size_verdict(0, 0, false), Ok(()));
+        assert_eq!(size_verdict(0, 0, true), Err(1));
     }
 
     /// A file whose readable length exceeds its `st_size` must be REFUSED, not
@@ -991,7 +1121,11 @@ mod tests {
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
 
         if a.probed_capability() != Strategy::Openat2 {
-            return; // no openat2 here; the portable half is asserted elsewhere
+            eprintln!(
+                "SKIP execute_only_descendant_separates_the_two_lanes: no openat2 \
+                 here; the two lanes are NOT being discriminated on this host"
+            );
+            return;
         }
 
         let out = a
@@ -1064,7 +1198,8 @@ mod tests {
         let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
         seed_multi(&a);
         if a.probed_capability() != Strategy::Openat2 {
-            return; // sandbox without openat2; the probe already decided Portable
+            eprintln!("SKIP multi_component_unchecked_reports_openat2: no openat2 here");
+            return;
         }
         let out = a
             .read(Path::new("config.d/10-x.yaml"), None, t_req())
@@ -1083,8 +1218,39 @@ mod tests {
             std::fs::create_dir(&real).unwrap();
             symlink(&real, a.path.join("link")).unwrap();
             let e = a.read(Path::new("link/x.yaml"), None, t_req()).unwrap_err();
-            assert!(matches!(e, IoError::Symlink { .. }), "{pref:?}: got {e:?}");
+
+            // The VARIANT is identical on both lanes, and that is the part PR B maps
+            // on. It does not come for free: the two lanes reach it from DIFFERENT
+            // errnos, measured on Linux 6.12 --
+            //   openat2 + RESOLVE_NO_SYMLINKS on a symlinked intermediate -> ELOOP
+            //   openat  + O_NOFOLLOW|O_DIRECTORY on the symlink           -> ENOTDIR
+            // ELOOP maps to Symlink directly; ENOTDIR only gets there through the
+            // fstatat disambiguation in checks::map_errno, which is exactly why that
+            // disambiguation exists.
+            let path = match &e {
+                IoError::Symlink { path } => path.clone(),
+                other => panic!("{pref:?}: expected Symlink, got {other:?}"),
+            };
+
+            // The PAYLOAD legitimately differs, and it is asserted rather than left
+            // to `..` so the divergence cannot drift unnoticed. The portable walk
+            // knows WHICH component offended and names it; openat2 refuses inside the
+            // kernel and reports only the path it was asked to resolve.
+            let expected = if pref == StrategyPref::ForcePortable || !uses_openat2_here(&a) {
+                a.path.join("link")
+            } else {
+                a.path.join("link/x.yaml")
+            };
+            assert_eq!(path, expected, "{pref:?}: payload drifted");
         }
+    }
+
+    /// True when this host will actually take the openat2 lane for a 2-component
+    /// remainder with no descendant check. Written as a helper so the expectation
+    /// above is derived from the same capability the code branches on, rather than
+    /// from `cfg!(linux)` -- a Linux kernel without openat2 takes the portable lane.
+    fn uses_openat2_here(a: &Anchor) -> bool {
+        a.probed_capability() == Strategy::Openat2
     }
 
     fn names(o: &Outcome<Vec<Entry>>) -> Vec<String> {
@@ -1309,10 +1475,15 @@ mod tests {
         let err = a
             .publish(Path::new("out.yaml"), None, b"payload", m(0o640))
             .expect_err("O_EXCL must refuse a temp name that already exists");
-        assert!(
-            matches!(err, IoError::Io { .. }),
-            "expected an errno-backed refusal, got {err:?}"
-        );
+        // EEXIST specifically. `IoError::Io { .. }` would also be satisfied by an
+        // unrelated EACCES, which would let the test pass for the wrong reason.
+        match &err {
+            IoError::Io {
+                kind: crate::error::IoKind::Other { raw },
+                ..
+            } => assert_eq!(*raw, nix::errno::Errno::EEXIST as i32, "expected EEXIST"),
+            other => panic!("expected Io{{Other{{EEXIST}}}}, got {other:?}"),
+        }
         assert!(
             !a.path.join("out.yaml").exists(),
             "nothing may be published when the temp open is refused"

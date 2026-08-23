@@ -55,6 +55,16 @@ pub enum IoError {
     RelativeAnchor {
         path: PathBuf,
     },
+    /// A path component is not valid UTF-8.
+    ///
+    /// Its own variant because the previous behaviour was to fold these into
+    /// `AnchorEndsInDotDot` / `EmptyRemainder` / `EscapesAnchor` -- all fail closed,
+    /// but all three say something FALSE about the path, and PR B renders these
+    /// strings for operators. A `MAKNAE_CONFIG_DIR` whose final component is not UTF-8
+    /// would have been reported as ending in `..`.
+    NonUtf8Component {
+        path: PathBuf,
+    },
     RootAnchor,
     /// `/etc/maknae/..` and `/..`: `parent()` is `Some` while `file_name()` is `None`,
     /// so the `RootAnchor` guard does not fire. Absoluteness is tested first, so a
@@ -101,6 +111,9 @@ impl std::fmt::Display for IoError {
                 path.display()
             ),
             Self::RelativeAnchor { path } => write!(f, "anchor is relative: {}", path.display()),
+            Self::NonUtf8Component { path } => {
+                write!(f, "path component is not valid UTF-8: {}", path.display())
+            }
             Self::RootAnchor => write!(f, "anchor is the filesystem root"),
             Self::AnchorEndsInDotDot { path } => {
                 write!(f, "anchor's final component is `..`: {}", path.display())
