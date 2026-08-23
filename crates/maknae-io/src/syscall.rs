@@ -109,9 +109,19 @@ pub(crate) fn fstatat_nofollow<F: AsFd, P: ?Sized + nix::NixPath>(
 /// ancestor as permitted and resolved once — so an ELOOP here means the kernel gave
 /// up following a symlink LOOP, not that a symlink was refused. Reporting "symlink
 /// refused" for it would tell an operator the opposite of the crate's actual policy.
-/// Every other open in the crate carries `O_NOFOLLOW`, where ELOOP *does* mean a
-/// refusal, which is why `map_errno_no_disambiguation` translates it and this does
-/// not.
+/// The invariant that actually holds — and it is NOT "every other open carries
+/// `O_NOFOLLOW`", which is false: every other open refuses symlinks STRUCTURALLY,
+/// five of them via `O_NOFOLLOW` and `openat2_resolve` via `RESOLVE_NO_SYMLINKS`
+/// (which carries no `O_NOFOLLOW` because the resolve flags subsume it). ELOOP means
+/// "refused" at all six, which is why `map_errno_no_disambiguation` translates it and
+/// this function does not. Row 0 is the sole symlink-FOLLOWING open in the crate.
+///
+/// Stated this way deliberately: the `O_NOFOLLOW` phrasing, applied literally, says
+/// the openat2 lane should use THIS mapper — and making that change turns
+/// `IoError::Symlink` into `IoError::Io{Other{ELOOP}}` on the fast lane with the
+/// darwin suite still fully green, because the only control
+/// (`both_lanes_refuse_a_symlinked_component`) takes the portable lane twice there.
+/// The site that rule protects is `anchor.rs`'s openat2 dispatch.
 pub(crate) fn map_open_errno(e: nix::Error, path: &Path) -> IoError {
     IoError::Io {
         path: path.to_path_buf(),
@@ -221,9 +231,11 @@ mod tests {
     //! Every open verb must set `FD_CLOEXEC`.
     //!
     //! This file composes the flags that ARE the crate's security model, and it is
-    //! simultaneously `[[t3]]` (report-only, no coverage floor) and `exclude_globs`
-    //! (no mutants), so until these tests existed the flag unions had NO automated
-    //! control at all: stripping `O_CLOEXEC` from all eight opens left 89/89 green.
+    //! `exclude_globs` (no mutants, because bitflag unions yield equivalent mutants),
+    //! so until these tests existed the flag unions had NO automated control at all:
+    //! stripping `O_CLOEXEC` from all seven opens left 89/89 green. It was also
+    //! `[[t3]]` then — report-only, no floor — and has since been promoted to `[t1]`,
+    //! so a coverage floor now backs these assertions.
     //!
     //! Why it matters here specifically: `std::fs` sets `FD_CLOEXEC` implicitly and
     //! `nix` does NOT. `maknae-vault` execs `systemd-creds`, and the agent runtime is

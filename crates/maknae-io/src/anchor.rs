@@ -1093,12 +1093,24 @@ mod tests {
         symlink(&b, &a).unwrap();
         symlink(&a, &b).unwrap();
         let looped = a.join("cfg");
+        // Asserts the ERRNO and the PATH, not merely "not Symlink". `Io { .. }` alone
+        // would accept any errno on any path, so if a platform returned ENOENT here the
+        // test would pass while the property it exists for went unverified.
         match open_anchor(&looped, none_req(), StrategyPref::Auto).unwrap_err() {
             IoError::Symlink { .. } => panic!(
                 "a symlink LOOP in the anchor's parent must not be reported as a \
                  symlink refusal — symlinked ancestors are permitted by design"
             ),
-            IoError::Io { .. } => {}
+            IoError::Io { path, kind } => {
+                assert_eq!(
+                    kind,
+                    crate::error::IoKind::Other {
+                        raw: nix::errno::Errno::ELOOP as i32
+                    },
+                    "the loop must surface as ELOOP, untranslated"
+                );
+                assert_eq!(path, a, "must name the parent, as part (1) does");
+            }
             other => panic!("expected Io, got {other:?}"),
         }
     }

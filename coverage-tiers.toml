@@ -29,6 +29,11 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   "crates/maknae-io/src/normalize.rs",
+  # Promoted from [[t3]] once it reached 100%. MEASURED ON BOTH LANES, because the
+  # cfg(linux) openat2 block and the real probe are regions darwin never compiles and
+  # CI enforces the floor on Linux: darwin 87/87, Linux 107/107 — the extra 20 regions
+  # are the openat2 lane, and they are covered. It carries NO exceptions, so those are
+  # raw figures.
   "crates/maknae-io/src/syscall.rs",
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",
@@ -436,9 +441,12 @@ why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the 
 # rather than
 # left to clear their floors on percentage slack — which is exactly what the rule below
 # forbids for anchor.rs's loops, and the rule does not get to apply selectively.
-# Scoped to [t1] deliberately: the three [[t3]] files still hold 71 uncovered
-# production regions between them (error.rs 62, syscall.rs 5, testutil.rs 4), and
-# coverage_check.py forbids exceptions on T3 entirely, so "the crate" would be false.
+# Scoped to [t1] deliberately: the three [[t3]] files still hold 66 uncovered
+# production regions between them (error.rs 62, testutil.rs 4, lib.rs 0 — it has no
+# production regions), and coverage_check.py forbids exceptions on T3 entirely, so
+# "the crate" would be false. syscall.rs is NOT among them: it was promoted to [t1] at
+# 87/87 in the same commit that first wrote this sentence, which counted it as T3 with
+# 5 uncovered regions.
 [[exception]]
 path = "crates/maknae-io/src/dir.rs"
 anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw)?;"

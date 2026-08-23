@@ -131,6 +131,9 @@ pub(crate) fn append_at<F: AsFd>(
 }
 
 fn append_raw(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
+    // Load-bearing trailing comment, same as its Mode A twin in write_all_sync:
+    // coverage-tiers.toml anchors an exception on this exact line, and deleting the
+    // comment makes that anchor match zero lines and hard-fails the gate.
     write_all(fd, bytes)?; // Mode B: a caller-supplied inode
                            // sync_data per append; NO parent fsync — maknae-audit-append's sink has none
                            // today (only sync_data), so adding one would be a change, not the preservation

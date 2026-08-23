@@ -3,8 +3,17 @@
 # maknae-proto, maknae-audit-append, maknae-kernel, and maknae-io respectively, so they do NOT
 # affect the other mutated crates (config/security mutate their own files). Scope each
 # mutated crate to its pure T1 decision logic — the excluded files are I/O (network/
-# keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
-# T3-tiered.
+# keygen/provider/file/syscall) that cannot be meaningfully unit-killed.
+#
+# ONE DELIBERATE EXEMPTION, recorded because it breaks the pattern: most excluded files
+# are also [[t3]], but `crates/maknae-io/src/syscall.rs` is `[t1]` (promoted at 87/87)
+# and still excluded here. Its exclusion is NOT about tier — it is that the file's
+# content is bitflag unions (`OFlag`/`Mode`/`ResolveFlag`/`AtFlags`), where
+# cargo-mutants' `replace | with ^` on a disjoint union is behaviourally identical: an
+# equivalent mutant, unkillable, reported MISSED, gate red. It carries a coverage floor
+# instead, plus direct FD_CLOEXEC assertions per open verb. ADR-0016 defines T1 as
+# floor + crate mutation gate, and no gate cross-checks these two files, so this note is
+# the only place the exemption is visible.
 exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind Display+From declarations
   "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants

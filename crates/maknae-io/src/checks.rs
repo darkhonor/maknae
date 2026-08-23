@@ -1,8 +1,10 @@
 //! Requirement declarations, their predicates, and the errno -> `IoError` map.
 //!
 //! The map lives here rather than in `error.rs` or `syscall.rs` because it *branches*,
-//! and both of those are `[[t3]]` + `exclude_globs` where a branch would carry zero
-//! automated control.
+//! and both of those are `exclude_globs` — no mutants — so a branch there would carry
+//! no mutation control. (`error.rs` is additionally `[[t3]]`, report-only;
+//! `syscall.rs` is `[t1]` and carries a coverage floor, but coverage alone does not
+//! kill a flipped comparison.)
 
 use crate::error::{IoError, IoKind};
 use crate::syscall::{mode_bits, nlink_count};

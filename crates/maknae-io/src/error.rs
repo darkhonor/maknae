@@ -23,26 +23,32 @@ pub enum IoKind {
 
 /// # Path payload convention
 ///
-/// Every variant carrying a `path` reports it **anchor-absolute** — except the two
-/// that structurally cannot, because they are raised before an anchor exists:
+/// Every variant carrying a `path` reports it **anchor-absolute** — except the three
+/// below, which structurally cannot:
 ///
 /// - `EscapesAnchor` is constructed in `normalize`, a free function with no anchor in
 ///   scope, so it carries the caller's relative input verbatim;
 /// - `RelativeAnchor` carries the caller's anchor argument, which is non-absolute *by
 ///   construction* — that is the error being reported;
-/// - `Io` raised by the anchor's own parent open carries **the parent**, which is one
-///   level ABOVE the anchor and so can never equal `anchor.join(rel)`. That is
-///   deliberate: when `/etc/maknae/sub/cfg` fails because `/etc/maknae/sub` is missing,
-///   naming the component that is actually absent is the useful diagnostic. It is the
-///   only site in the crate whose path is neither the anchor nor `anchor.join(rel)`.
+/// - `Io` raised by the anchor's own parent open carries **the parent**, one level
+///   ABOVE the anchor. Deliberate: when `/etc/maknae/sub/cfg` fails because
+///   `/etc/maknae/sub` is missing, naming the component that is actually absent is the
+///   useful diagnostic. It is the only site in the crate whose path lies **above** the
+///   anchor.
+///
+/// Anchor-absolute does NOT mean `anchor.join(rel)`. The portable walk names the
+/// offending *component* — `Symlink { path: anchor/link }` for a `read("link/x.yaml")`
+/// — which is a prefix of `anchor.join(rel)` and still anchor-absolute. `lib.rs`
+/// documents that the payload differs by lane, and
+/// `both_lanes_refuse_a_symlinked_component` pins both.
 ///
 /// `NoDescendantForRequirement` names its field `rel` rather than `path` for the same
 /// reason: it is the caller's input, not a resolved location.
 ///
-/// Stated once here rather than per-variant because the convention drifted twice while
-/// this crate was being written, and a per-variant claim is what let it: one variant
-/// said "like every other path payload this crate returns", which was false for the
-/// two above.
+/// Stated once here rather than per-variant because the convention drifted repeatedly
+/// while this crate was written, and a per-variant claim is what let it: one variant
+/// said "like every other path payload this crate returns", which was false for
+/// `EscapesAnchor` and `RelativeAnchor`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoError {
