@@ -31,8 +31,9 @@
 #   5  TIMEOUTs on the read / temp / append opens. NOT all "dropped O_NONBLOCK": `&`
 #      binds TIGHTER than `|` in Rust, so a mutated `|` drops exactly the two ADJACENT
 #      operands, not the whole union. Verified at `open_temp_excl` — the mutant there
-#      drops `O_NOFOLLOW` and `O_CREAT` and KEEPS `O_NONBLOCK`; it also fails three
-#      assertions before the harness times out, so it is behaviourally detected.
+#      drops `O_NOFOLLOW` and `O_CREAT` and KEEPS `O_NONBLOCK`. It is behaviourally
+#      detected well before the timeout — read the mutant's own log rather than trusting
+#      a remembered count, which is how "three assertions" got written here.
 #
 # Two errors this note previously contained, both corrected against my own runs:
 #   - It claimed the `&` mutants dropping O_NOFOLLOW/O_EXCL "were already caught". Not
@@ -53,7 +54,7 @@
 # to an `exclude_re` on the `^` family is tracked as #126.
 
 exclude_globs = [
-  "crates/maknae-io/src/error.rs",       # IoError/IoKind Display+From declarations
+  "crates/maknae-io/src/error.rs",       # IoError/IoKind enum + Display; no From impl exists
   "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O

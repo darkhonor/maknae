@@ -47,6 +47,12 @@ pub(crate) fn open_parent_by_path(p: &Path) -> nix::Result<OwnedFd> {
 }
 
 /// Open a directory relative to a pinned dirfd, refusing symlinks at this component.
+///
+/// `O_NONBLOCK` here is redundant BY CONSTRUCTION and deliberately kept: `O_DIRECTORY`
+/// turns a FIFO component into ENOTDIR before any blocking open can happen, so deleting
+/// `O_NONBLOCK` leaves the suite green. Recorded because "no test holds it" and
+/// "nothing needs it" look identical from a flag-deletion sweep, and the difference is
+/// the whole point — `open_append`'s `O_NOFOLLOW` looked the same and was load-bearing.
 pub(crate) fn open_dir_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
         dirfd,
@@ -73,6 +79,11 @@ pub(crate) fn open_read_target<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<Ow
 
 /// Re-open the pinned directory as a Dir handle. Dir::openat BORROWS the dirfd;
 /// Dir::from_fd would consume and Drop-close it, destroying the anchor pin.
+///
+/// `O_DIRECTORY`, `O_NOFOLLOW` and `O_NONBLOCK` are all redundant BY CONSTRUCTION here
+/// and deliberately kept: the target is `.`, which is always a directory and can never
+/// be a symlink. All three survive deletion green for that reason, not for want of a
+/// test.
 pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> {
     nix::dir::Dir::openat(
         dirfd,

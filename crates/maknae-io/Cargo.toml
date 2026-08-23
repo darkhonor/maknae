@@ -20,10 +20,15 @@ workspace = true
 #        primitives this crate exists to provide are reachable.
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
-# user — geteuid. The owner checks are caller-named: tests assert owner == geteuid()
-#        while production asserts owner == 0 over the identical code path. libc::geteuid()
-#        is unsafe and forbidden here, so this feature is the only route.
-nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }
+# NOT "user": nothing in production calls geteuid/Uid/User/Group — grep every module up
+#        to its #[cfg(test)] marker and there are zero hits. It was declared here because
+#        TESTS assert owner == geteuid() (production asserts owner == 0 over the identical
+#        code path, and libc::geteuid() is unsafe, which is forbidden here). Declaring it
+#        as a production dependency compiled nix's user/group surface into the crate
+#        AGENTS.md holds up as the minimal-TCB I/O primitive. Workspace feature
+#        unification hid it — maknae-kernel::groupres enables "user" — so it only shows
+#        in a standalone `cargo build -p maknae-io`. Moved to dev-dependencies.
+nix = { version = "0.31", default-features = false, features = ["fs", "dir"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
@@ -31,3 +36,5 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 # Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.
 tempfile = "3"
+# "user" is a TEST need only — see the note above the production nix entry.
+nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }

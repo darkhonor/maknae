@@ -406,7 +406,7 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 
 [[t3]]
 path = "crates/maknae-io/src/error.rs"
-why = "IoError/IoKind enums with Display and From only; no decision logic"
+why = "IoError/IoKind enums with Display only (there is no From impl, despite what an earlier version of this line said); no decision logic"
 
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #

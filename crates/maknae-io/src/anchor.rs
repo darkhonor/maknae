@@ -1117,6 +1117,63 @@ mod tests {
         }
     }
 
+    /// Mode B must REFUSE a symlinked target, and no `check_target` predicate can
+    /// substitute for that.
+    ///
+    /// The one control in the crate that was genuinely load-bearing and genuinely
+    /// unheld. Measured: delete `O_NOFOLLOW` from `open_append` and the suite stays
+    /// 107/107 green — then an attacker who can plant a symlink in the anchor gets
+    /// audit records written OUTSIDE it.
+    ///
+    /// Why the target checks do not catch it: the `fstat` is taken on the fd the open
+    /// returned, and that fd is the symlink's TARGET once the link has been followed.
+    /// So `regular_file`, the `0o007` mode mask and even `nlink_exactly_one` all
+    /// inspect the wrong inode and all pass. `write.rs` calls `st_nlink == 1` "the only
+    /// detector" for a planted hard link — it is not a detector for this at all.
+    /// `grants.d` is daemon-writable by design, which is what makes the plant possible.
+    ///
+    /// Why no mutant found it: `&` binds tighter than `|`, so every `| with &` mutant
+    /// on this union drops TWO adjacent operands and is killed by the `O_APPEND`/
+    /// `O_CREAT` half. Mutation cannot isolate a single flag; deleting it can.
+    #[test]
+    fn append_refuses_a_symlinked_target() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+
+        // The attacker's collection point, OUTSIDE the anchor, and passing every
+        // predicate a caller could name: regular, 0o640, nlink == 1.
+        let outside = d.path().join("collect");
+        std::fs::write(&outside, b"").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&outside, a.path.join("audit.jsonl")).unwrap();
+
+        let err = a
+            .append(
+                Path::new("audit.jsonl"),
+                None,
+                TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o007),
+                    nlink_exactly_one: true,
+                    regular_file: true,
+                },
+                b"RECORD\n",
+                m(0o640),
+            )
+            .expect_err("a symlinked append target must be refused");
+
+        match err {
+            IoError::Symlink { path } => assert_eq!(path, a.path.join("audit.jsonl")),
+            other => panic!("expected Symlink, got {other:?}"),
+        }
+        // The assertion that actually matters: nothing left the anchor.
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"",
+            "bytes were written OUTSIDE the anchor through the symlink"
+        );
+    }
+
     /// The ANCHOR ITSELF must be a directory — row 1's `O_DIRECTORY`.
     ///
     /// Row 0's twin, and the gap was one level up from where I looked. `replace | with
@@ -1865,6 +1922,11 @@ mod tests {
         assert!(leftovers.is_empty(), "temp survived: {leftovers:?}");
     }
 
+    /// MUTATES PROCESS-GLOBAL STATE. Every caller must hold `PUBLISH_LOCK`, or its
+    /// window can land inside another test's file creation and change the mode that
+    /// test observes. Benign wherever the real umask is already 0o022 — i.e. almost
+    /// always — which is exactly what makes it a latent parallel-harness flake rather
+    /// than a visible one.
     fn umask_now() -> u32 {
         let m = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o022));
         nix::sys::stat::umask(m);
@@ -2002,6 +2064,11 @@ mod tests {
     /// the caller names it, and sink.rs uses 0o640.
     #[test]
     fn append_creates_with_the_callers_mode() {
+        // Holds PUBLISH_LOCK not because it publishes, but because it calls
+        // `umask_now()`, which mutates process-global state. Without it this test's
+        // umask window can land inside a lock-holding publish test's file creation and
+        // change the mode that test observes.
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
         a.append(

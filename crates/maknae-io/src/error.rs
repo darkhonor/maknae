@@ -161,3 +161,49 @@ impl std::fmt::Display for IoError {
 }
 
 impl std::error::Error for IoError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The crate argues a correctness property IN TERMS OF the rendered text — the row-0
+    /// mapper exists because `Symlink`'s Display reads "symlink refused", which would
+    /// state the opposite of the documented policy for a symlink LOOP in the anchor's
+    /// parent. That argument had nothing holding it: no test asserted any Display
+    /// string, and `<impl Display>::fmt -> Ok(Default::default())` is the one uncaught
+    /// mutant in this file.
+    ///
+    /// These are also the strings PR B renders for operators, which is why the payloads
+    /// are contract.
+    #[test]
+    fn display_strings_the_crate_reasons_about() {
+        let p = PathBuf::from("/etc/maknae/cfg");
+        assert_eq!(
+            IoError::Symlink { path: p.clone() }.to_string(),
+            "symlink refused: /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::SizeChanged {
+                path: p.clone(),
+                expected: 4096,
+                got: 4,
+            }
+            .to_string(),
+            "size changed under the read (expected 4096 bytes, got 4): /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::NonUtf8Component { path: p.clone() }.to_string(),
+            "path component is not valid UTF-8: /etc/maknae/cfg"
+        );
+        // Mode renders OCTAL — a decimal here would misreport permissions to an operator.
+        assert_eq!(
+            IoError::InsecurePermissions {
+                path: p,
+                mode: 0o666,
+            }
+            .to_string(),
+            "insecure permissions 666: /etc/maknae/cfg"
+        );
+    }
+}
