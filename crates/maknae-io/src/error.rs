@@ -43,6 +43,15 @@ pub enum IoError {
         path: PathBuf,
         nlink: u64,
     },
+    /// The file's length changed between the `fstat` that sized the buffer and the
+    /// read that filled it. Returned rather than silently delivering the bytes we
+    /// happened to get: on a policy file, a rule appended in that window would
+    /// otherwise vanish with an `Ok`, which is a deny becoming a permit.
+    SizeChanged {
+        path: PathBuf,
+        expected: usize,
+        got: usize,
+    },
     RelativeAnchor {
         path: PathBuf,
     },
@@ -82,6 +91,15 @@ impl std::fmt::Display for IoError {
             Self::MultiplyLinked { path, nlink } => {
                 write!(f, "hard-linked (nlink={nlink}): {}", path.display())
             }
+            Self::SizeChanged {
+                path,
+                expected,
+                got,
+            } => write!(
+                f,
+                "size changed under the read (expected {expected} bytes, got {got}): {}",
+                path.display()
+            ),
             Self::RelativeAnchor { path } => write!(f, "anchor is relative: {}", path.display()),
             Self::RootAnchor => write!(f, "anchor is the filesystem root"),
             Self::AnchorEndsInDotDot { path } => {

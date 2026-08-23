@@ -53,9 +53,9 @@ fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -
 
     // Cleanup is best-effort and deliberately `let _ =`: the caller must keep the
     // ORIGINAL error, never a masking unlink error.
-    if let Err(e) = write_all_sync(&fd, bytes) {
+    if let Err(write_err) = write_all_sync(&fd, bytes) {
         let _ = syscall::unlink_at(dirfd, &tmp);
-        return Err(e);
+        return Err(write_err);
     }
     drop(fd);
 
@@ -79,7 +79,15 @@ fn write_all(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    // `Ok(0)` breaks the loop with the write incomplete. Reporting success there
+    // would let `publish` fsync and `renameat` a TRUNCATED file into the final
+    // name, and let `append` report a partial audit record as written -- both
+    // silent. A function named write_all does not return Ok having written less.
+    if n == bytes.len() {
+        Ok(())
+    } else {
+        Err(nix::errno::Errno::EIO)
+    }
 }
 
 fn write_all_sync(fd: &OwnedFd, bytes: &[u8]) -> nix::Result<()> {

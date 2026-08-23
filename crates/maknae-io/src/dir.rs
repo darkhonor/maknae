@@ -78,9 +78,19 @@ fn enumerate_raw<F: AsFd>(dirfd: &F) -> nix::Result<Vec<Entry>> {
     let mut out = Vec::new();
     for ent in d.iter() {
         let ent = ent?;
-        let name = std::ffi::OsStr::from_encoded_bytes_unchecked_shim(ent.file_name().to_bytes());
+        // Stat the entry's RAW name, never a UTF-8 rendering of it. `to_string_lossy`
+        // replaces each invalid byte with U+FFFD, so for a name like b"\xff\xfe" --
+        // legal on ext4 and xfs -- the bytes handed to fstatat are
+        // b"\xef\xbf\xbd\xef\xbf\xbd", a DIFFERENT path. Either it does not exist and
+        // one odd filename fails the whole listing, or an attacker who can write into
+        // the directory plants a decoy at that literal U+FFFD name and the symlink is
+        // classified from the DECOY's st_mode -- reported as Kind::File. That falsifies
+        // this module's central claim that `kind` is trustworthy. `CStr: NixPath`, so
+        // the raw bytes go to the syscall untouched.
+        let raw = ent.file_name();
+        let name = std::ffi::OsStr::from_encoded_bytes_unchecked_shim(raw.to_bytes());
         let kind = classify_entry(ent.file_type(), || {
-            crate::syscall::fstatat_nofollow(dirfd, &name.to_string_lossy())
+            crate::syscall::fstatat_nofollow(dirfd, raw)
         })?;
         out.push(Entry {
             name,

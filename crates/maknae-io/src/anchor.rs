@@ -25,10 +25,28 @@ pub enum Strategy {
     Portable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Outcome<T> {
     pub value: T,
     pub effective_strategy: Strategy,
+}
+
+/// `Debug` is hand-written to REDACT `value`, and must stay that way.
+///
+/// `read` returns `Outcome<Zeroizing<Vec<u8>>>`, and `Zeroizing`'s upstream `Debug`
+/// prints the wrapped bytes. A derived `Debug` would therefore emit plaintext
+/// credentials from anything that formats an Outcome: `dbg!`, a `tracing::debug!`,
+/// a failing `assert_eq!`, or `.expect_err()` on a `Result<Outcome, _>` -- the last
+/// two inside the test suite itself. For the crate whose stated job includes keeping
+/// secrets off the heap, letting them out through the formatter instead is not a
+/// smaller hole.
+impl<T> std::fmt::Debug for Outcome<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Outcome")
+            .field("value", &"<redacted>")
+            .field("effective_strategy", &self.effective_strategy)
+            .finish()
+    }
 }
 
 /// Owned mode, same reason as `IoKind`: `nix::sys::stat::Mode` in a public signature
@@ -36,7 +54,11 @@ pub struct Outcome<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mode(pub u32);
 
+/// `#[non_exhaustive]` because `Other` will eventually need splitting (fifo, socket,
+/// device) and PR B is a downstream crate: without it, that split is a breaking
+/// change to every caller that matches on `Kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Kind {
     File,
     Dir,
@@ -151,21 +173,21 @@ impl Anchor {
             });
         }
 
-        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
-            None
-        } else {
-            Some(crate::walk::walk_dirs(
-                &self.fd,
-                &self.path,
-                dir,
-                desc.as_ref(),
-            )?)
-        };
-        let base = match &walked {
-            Some(fd) => fd.as_fd(),
-            None => self.fd.as_fd(),
-        };
-
+        // Lane selection comes BEFORE the walk, and the openat2 lane RETURNS before it.
+        // Selecting after the walk left the walk running unconditionally, so on Linux
+        // the portable chain had already resolved every directory component by the time
+        // openat2 was asked to resolve the same remainder from the anchor. That made the
+        // fast lane pure overhead and, worse, a false label: `effective_strategy:
+        // Openat2` named a syscall whose properties nothing had relied on. Concretely
+        // the measured advantage in the lane table -- an execute-only 0o311 descendant,
+        // which openat2 traverses and `openat(..., O_DIRECTORY)` refuses with EACCES --
+        // was unreachable, because the walk hit EACCES first. It also meant deleting
+        // this whole block changed no observable behaviour, so no test could hold it.
+        //
+        // Skipping the walk is sound exactly here and nowhere else: select() returns
+        // Openat2 only when `desc` is None, i.e. when no caller check applies to any
+        // directory the walk would have opened. RESOLVE_NO_SYMLINKS and RESOLVE_BENEATH
+        // carry the refusals the walk's per-component O_NOFOLLOW carried.
         let lane = crate::strategy::select(
             self.pref,
             self.probed,
@@ -187,6 +209,21 @@ impl Anchor {
                 .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
             return self.finish_read(fd, &full, lane, &target);
         }
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
 
         let fd = crate::syscall::open_read_target(&base, name).map_err(|e| {
             crate::checks::map_errno(e, &full, || crate::syscall::fstatat_nofollow(&base, name))
@@ -352,7 +389,37 @@ impl Anchor {
                 Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
             }
         }
-        buf.truncate(n);
+
+        // Sizing the buffer from st_size means the read stops at the length the file
+        // had at the fstat. Both directions of a change in that window must be an
+        // ERROR, never a short `Ok`:
+        //
+        //   grew   -- bytes past st_size are dropped. On a policy file that is a rule
+        //             appended mid-read vanishing silently: a deny becoming a permit.
+        //             `std::fs::read`, which this crate replaces, reads to EOF and
+        //             cannot truncate this way, so staying silent would be a
+        //             REGRESSION against the call sites being migrated.
+        //   shrank -- `Ok(0)` breaks the loop early and we hold fewer bytes than the
+        //             checked inode claimed.
+        //
+        // One extra read detects the grew case: at n == want the file is at EOF iff
+        // it did not grow. EINTR is retried; any other errno is the file changing
+        // under us, which is the same refusal.
+        let mut probe = [0u8; 1];
+        let at_eof = loop {
+            match nix::unistd::read(&fd, &mut probe) {
+                Ok(0) => break true,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Ok(_) | Err(_) => break false,
+            }
+        };
+        if n != want || !at_eof {
+            return Err(IoError::SizeChanged {
+                path: full.to_path_buf(),
+                expected: want,
+                got: if at_eof { n } else { n + 1 },
+            });
+        }
 
         Ok(Outcome {
             value: buf,
@@ -744,6 +811,191 @@ mod tests {
         std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
     }
 
+    /// Mode B through a multi-component remainder. Every other append test targets a
+    /// single component, so `append`'s own walk -- a SEPARATE call site from `read`'s
+    /// and `publish`'s -- had no coverage at all: the descendant chain it opens could
+    /// have been wrong in either direction and no test would have moved.
+    #[test]
+    fn append_walks_a_multi_component_remainder() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let sub = a.path.join("audit.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        a.append(
+            Path::new("audit.d/a.jsonl"),
+            None,
+            t_append(),
+            b"one\n",
+            m(0o640),
+        )
+        .unwrap();
+        a.append(
+            Path::new("audit.d/a.jsonl"),
+            None,
+            t_append(),
+            b"two\n",
+            m(0o640),
+        )
+        .unwrap();
+
+        // Landed in the pinned descendant, and O_APPEND kept both records.
+        assert_eq!(std::fs::read(sub.join("a.jsonl")).unwrap(), b"one\ntwo\n");
+    }
+
+    /// The portable half of the size-change refusal, so the control is not Linux-only.
+    ///
+    /// A FIFO reports `st_size == 0` while holding readable bytes -- the same shape as
+    /// the procfs fixture, on every unix. The crate opens targets O_NONBLOCK, so the
+    /// open does not block, `want` is 0, the fill loop does not run, and the one-byte
+    /// probe finds data that the fstat did not account for. `t_req()` sets
+    /// `regular_file: false`, so the refusal under test is the size check and not the
+    /// file-type check.
+    #[test]
+    fn readable_bytes_beyond_st_size_are_refused_on_a_fifo() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let fifo = a.path.join("p");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+
+        // A reader must exist before a writer can open, so the test holds one open for
+        // the duration; that also keeps the written bytes buffered in the pipe.
+        let _rd = nix::fcntl::open(
+            &fifo,
+            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
+            nix::sys::stat::Mode::empty(),
+        )
+        .unwrap();
+        let wr = nix::fcntl::open(
+            &fifo,
+            nix::fcntl::OFlag::O_WRONLY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .unwrap();
+        nix::unistd::write(&wr, b"UNACCOUNTED").unwrap();
+
+        let err = a
+            .read(Path::new("p"), None, t_req())
+            .expect_err("bytes beyond st_size must be refused, not silently dropped");
+        assert!(
+            matches!(err, IoError::SizeChanged { expected: 0, .. }),
+            "expected SizeChanged, got {err:?}"
+        );
+    }
+
+    /// `Outcome`'s Debug must never print the payload. Re-deriving Debug turns this
+    /// RED, which is the point: the regression is one attribute wide and otherwise
+    /// invisible.
+    #[test]
+    fn outcome_debug_redacts_the_payload() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("secret"), b"SUPER-SECRET-TOKEN").unwrap();
+        let out = a.read(Path::new("secret"), None, t_req()).unwrap();
+        let rendered = format!("{out:?}");
+        assert!(
+            !rendered.contains("SUPER-SECRET-TOKEN"),
+            "Debug leaked the payload: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // The non-secret field stays useful for diagnostics.
+        assert!(rendered.contains("effective_strategy"), "{rendered}");
+    }
+
+    /// A file whose readable length exceeds its `st_size` must be REFUSED, not
+    /// silently truncated to `st_size`.
+    ///
+    /// This is the "grew under the read" case. The buffer is sized from `st_size`, so
+    /// bytes beyond it are dropped; returning `Ok` with the short content is how a
+    /// deny rule appended mid-read disappears. `std::fs::read` -- what the call sites
+    /// this crate replaces use today -- reads to EOF and cannot truncate this way, so
+    /// silence here would be a REGRESSION against the code being migrated.
+    ///
+    /// Provoking it by racing an append against the read is not deterministic. Linux
+    /// procfs gives the same shape with no race at all: `/proc/<pid>/status` is a
+    /// regular file that reports `st_size == 0` and yields content on read -- exactly
+    /// "more bytes than the fstat promised", which is the condition under test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_longer_than_its_st_size_is_refused_not_truncated() {
+        let me = std::process::id();
+        let proc_dir = std::path::PathBuf::from(format!("/proc/{me}"));
+        if !proc_dir.join("status").exists() {
+            return; // no procfs (container without /proc mounted)
+        }
+        // st_size must really be 0 here, or the fixture is not testing what it claims.
+        let sz = std::fs::symlink_metadata(proc_dir.join("status"))
+            .unwrap()
+            .len();
+        assert_eq!(sz, 0, "fixture requires st_size == 0, got {sz}");
+
+        let a = open_anchor(&proc_dir, none_req(), StrategyPref::ForcePortable).unwrap();
+        let err = a
+            .read(Path::new("status"), None, t_req())
+            .expect_err("a file longer than st_size must be refused");
+        assert!(
+            matches!(err, IoError::SizeChanged { expected: 0, .. }),
+            "expected SizeChanged, got {err:?}"
+        );
+    }
+
+    /// The lanes must be DISCRIMINABLE, or every openat2 assertion is vacuous.
+    ///
+    /// Before this test the openat2 block could be deleted outright with all tests
+    /// still green: `walk_dirs` ran unconditionally BEFORE lane selection, so the
+    /// portable chain had already resolved the remainder and openat2 merely redid it.
+    /// `multi_component_unchecked_reports_openat2` only asserts `effective_strategy`,
+    /// which is a label `select()` computes -- not evidence that `openat2_resolve`
+    /// ran. `both_lanes_refuse_a_symlinked_component` is likewise held entirely by the
+    /// walk's per-component O_NOFOLLOW, leaving RESOLVE_NO_SYMLINKS/RESOLVE_BENEATH
+    /// with zero control.
+    ///
+    /// The fixture is the one measured difference between the lanes: an EXECUTE-ONLY
+    /// (0o311) intermediate directory. Path resolution needs only `x` to traverse it,
+    /// which the kernel does internally for openat2 -- but the portable walk must
+    /// `openat(..., O_RDONLY|O_DIRECTORY)` that directory, and opening a directory for
+    /// reading needs `r`. So openat2 OPENS and portable gets EACCES. Same anchor, same
+    /// path, opposite outcomes: deleting the openat2 block turns the first half RED.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execute_only_descendant_separates_the_two_lanes() {
+        // root ignores permission bits, so the discriminator disappears under it.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let d = dir(0o750);
+        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+        let sub = a.path.join("config.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
+        // Execute-only: traversable, not readable.
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
+
+        if a.probed_capability() != Strategy::Openat2 {
+            return; // no openat2 here; the portable half is asserted elsewhere
+        }
+
+        let out = a
+            .read(Path::new("config.d/10-x.yaml"), None, t_req())
+            .expect("openat2 traverses an execute-only directory");
+        assert_eq!(out.effective_strategy, Strategy::Openat2);
+        assert_eq!(&out.value[..], b"lane");
+
+        // Same anchor, same path, portable lane forced: the walk must open the
+        // directory for reading and cannot.
+        let p = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
+        let err = p
+            .read(Path::new("config.d/10-x.yaml"), None, t_req())
+            .expect_err("portable walk must be refused by an execute-only directory");
+        assert!(
+            matches!(err, IoError::Io { .. }),
+            "expected EACCES-backed refusal, got {err:?}"
+        );
+
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+
     /// ForcePortable must win over an available capability, on every platform.
     #[test]
     fn force_portable_reports_portable() {
@@ -1002,6 +1254,51 @@ mod tests {
         a.publish(Path::new("out.yaml"), None, b"payload", m(0o640))
             .unwrap();
         assert_eq!(std::fs::read(a.path.join("out.yaml")).unwrap(), b"payload");
+    }
+
+    /// `publish`'s O_EXCL, controlled AT THE PUBLISH LEVEL.
+    ///
+    /// The wrapper tests (`temp_open_refuses_a_preexisting_name` and its symlink twin)
+    /// call `syscall::open_temp_excl` directly, so they only prove that WRAPPER's
+    /// flags -- not that `publish_raw` uses it. Measured: swap the opener in
+    /// `publish_raw` for the non-O_EXCL, non-O_TRUNC `open_append` and every one of
+    /// those tests still passes, because syscall.rs is exclude_globs (no mutants) and
+    /// the write.rs coverage exception removes the call line from the T1 denominator.
+    ///
+    /// The attack the flag stops: an attacker who can write into the anchor
+    /// pre-creates the temp name with longer content. Without O_EXCL the open
+    /// succeeds; without O_TRUNC the tail of the attacker's content survives past the
+    /// payload, and renameat publishes it under the FINAL name.
+    ///
+    /// Determinism without predicting the counter: `temp_name` is monotonic, so one
+    /// call reveals the current value and the next K names are known. Pre-creating a
+    /// range rather than a single name absorbs any interleaved counter bump -- the
+    /// build sheet's original single-name fixture was itself a race and failed 2 of 3
+    /// runs.
+    #[test]
+    fn publish_refuses_a_preexisting_temp_name() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+
+        let probe = crate::write::temp_name("out.yaml");
+        let n: u64 = probe.rsplit('.').next().unwrap().parse().unwrap();
+        let stem = probe.rsplit_once('.').unwrap().0;
+        for k in 1..=8 {
+            std::fs::write(a.path.join(format!("{stem}.{}", n + k)), b"SQUATTED-LONGER").unwrap();
+        }
+
+        let err = a
+            .publish(Path::new("out.yaml"), None, b"payload", m(0o640))
+            .expect_err("O_EXCL must refuse a temp name that already exists");
+        assert!(
+            matches!(err, IoError::Io { .. }),
+            "expected an errno-backed refusal, got {err:?}"
+        );
+        assert!(
+            !a.path.join("out.yaml").exists(),
+            "nothing may be published when the temp open is refused"
+        );
     }
 
     /// The anchor-swap fixture: "publishes to the pinned dir" passes trivially without

@@ -437,11 +437,27 @@ path = "crates/maknae-io/src/dir.rs"
 anchor = "enumerate_raw(dirfd).map_err"
 why = "the single boundary conversion for enumerate's three unprovokable failure points: Dir::openat on an already-pinned dirfd, a mid-iteration readdir failure, and the fstatat fallback (d_type is populated on both CI platforms, measured, so that closure is never invoked in the real path). None is a decision — the classification decision IS covered, via classify_entry's injected seam"
 
+# Split from one span into three, each naming exactly the arm it excuses. The single
+# wide span removed 26 regions while its `why` justified three `?` arms: it also took
+# the loop head, the entry-name construction and the production classify_entry call
+# site with it — covered wiring, removed from the denominator, which raised the file
+# above its floor rather than reporting it. An exception must excuse the arm it names
+# and nothing adjacent to it.
 [[exception]]
 path = "crates/maknae-io/src/dir.rs"
 anchor = "let mut d = crate::syscall::open_dir_handle(dirfd)?;"
-end_anchor = "crate::syscall::fstatat_nofollow(dirfd, &name.to_string_lossy())"
-why = "enumerate_raw's three propagation arms: Dir::openat on an already-pinned dirfd cannot fail on a healthy FS, a mid-iteration readdir failure is not provokable from a unit test, and the fstatat fallback closure is never invoked because d_type is populated on both CI platforms (measured). The classification decision these surround IS covered — classify_entry is pure over (Option<Type>, stat_fn) and its None arm is tested through the injected seam"
+why = "Dir::openat on an already-pinned dirfd cannot fail on a healthy FS; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "let ent = ent?;"
+why = "a mid-iteration readdir failure is not provokable from a unit test without a seam; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "crate::syscall::fstatat_nofollow(dirfd, raw)"
+end_anchor = "})?;"
+why = "the d_type == DT_UNKNOWN fallback closure AND the `?` that propagates it — two lines, one arm, never invoked on either CI platform because d_type is populated on ext4 and xfs (measured). The classification decision it feeds IS covered: classify_entry is pure over (Option<Type>, stat_fn) and its None arm is tested through the injected seam, so the mapping is held even though this call site is not"
 
 
 [[exception]]
@@ -461,14 +477,33 @@ anchor = "Ok(0) => break,"
 end_anchor = "Err(e) => return Err(e),"
 why = "write_all_sync's non-progress arms: Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
 
+# Narrowed from one 15-region span to the two arms the `why` actually names; the old
+# span also removed the cleanup wiring between them.
+# The O_EXCL open's Err arm needs NO exception any more: publish_refuses_a_preexisting_temp_name
+# provokes it for real, so the gate now reports it covered. The entry that used to
+# excuse it was deleted rather than left behind -- a stale exception is a permanent
+# hole an unrelated change can later reuse.
 [[exception]]
 path = "crates/maknae-io/src/write.rs"
-anchor = "let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;"
-end_anchor = "    drop(fd);"
-why = "Mode A's unprovokable failure arms: O_EXCL failing on a name the process-global counter just minted, and a write to the fd openat returned. O_EXCL itself IS covered, directly at the syscall wrapper by temp_open_refuses_a_preexisting_name and its symlink twin; the renameat failure path IS covered by publish_onto_a_directory_name_errs_and_cleans_up, which also asserts no temp survives. The cleanup unlink is deliberately `let _ =` so the caller keeps the original error"
+anchor = "    if let Err(write_err) = write_all_sync(&fd, bytes) {"
+end_anchor = "        return Err(write_err);"
+why = "the mid-write failure arm and its best-effort cleanup: a write to the fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test. The renameat failure path next to it IS covered, by publish_onto_a_directory_name_errs_and_cleans_up, which also asserts no temp survives. The unlink is deliberately `let _ =` so the caller keeps the ORIGINAL error"
+
+# Narrowed from one 21-region span to its two endpoints. The old span BRACKETED
+# `check_target(&st, at, target)?` -- a covered, load-bearing security decision (the
+# hard-link refusal) -- and removed it from the denominator along with the two arms
+# actually being excused.
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "        Err(nix::errno::Errno::EIO)"
+why = "write_all's short-write refusal. Reaching it needs write(2) to return 0 on a regular file with a non-empty buffer, which does not happen on a healthy FS and cannot be provoked from a unit test without a seam. It is present because the alternative -- returning Ok having written fewer bytes -- lets publish renameat a TRUNCATED file into the final name and lets append report a partial audit record as written, both silently"
 
 [[exception]]
 path = "crates/maknae-io/src/write.rs"
 anchor = "let st = syscall::fstat(&fd).map_err"
-end_anchor = "append_raw(&fd, bytes).map_err"
-why = "Mode B's unprovokable arms: fstat on the fd openat just returned cannot fail on a healthy FS, and a write to it fails only on ENOSPC/EIO. The DECISIONS this brackets are both covered — check_target's hard-link refusal by append_refuses_a_hard_linked_target (probed: removing the check turns it red), and the ENXIO-at-the-open case by append_to_a_fifo_is_enxio_at_the_open"
+why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision. The decision it FEEDS is check_target, which is deliberately left in the denominator and is covered by append_refuses_a_hard_linked_target (probed: removing the check turns it red)"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "append_raw(&fd, bytes).map_err"
+why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test; a pure errno passthrough. The ENXIO-at-the-open case beside it IS covered, by append_to_a_fifo_is_enxio_at_the_open"
