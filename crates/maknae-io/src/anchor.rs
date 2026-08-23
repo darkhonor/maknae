@@ -390,6 +390,10 @@ impl Anchor {
             }
         }
 
+        // NOTE on `got`: both call sites below are asserted exactly, including this
+        // field, because it is the only part of the error that reports WHICH direction
+        // the size moved and PR B maps on it. Left unasserted, `n + 1` mutates to
+        // `n * 1` with the whole suite still green -- caught by cargo-mutants.
         // Sizing the buffer from st_size means the read stops at the length the file
         // had at the fstat. Both directions of a change in that window must be an
         // ERROR, never a short `Ok`:
@@ -879,7 +883,14 @@ mod tests {
             .read(Path::new("p"), None, t_req())
             .expect_err("bytes beyond st_size must be refused, not silently dropped");
         assert!(
-            matches!(err, IoError::SizeChanged { expected: 0, .. }),
+            matches!(
+                err,
+                IoError::SizeChanged {
+                    expected: 0,
+                    got: 1,
+                    ..
+                }
+            ),
             "expected SizeChanged, got {err:?}"
         );
     }
@@ -935,7 +946,14 @@ mod tests {
             .read(Path::new("status"), None, t_req())
             .expect_err("a file longer than st_size must be refused");
         assert!(
-            matches!(err, IoError::SizeChanged { expected: 0, .. }),
+            matches!(
+                err,
+                IoError::SizeChanged {
+                    expected: 0,
+                    got: 1,
+                    ..
+                }
+            ),
             "expected SizeChanged, got {err:?}"
         );
     }
