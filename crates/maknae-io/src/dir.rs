@@ -49,13 +49,17 @@ fn kind_of_mode(mode: u32) -> Kind {
     }
 }
 
-/// Classify one entry. Pure over `(Option<Type>, stat_fn)` so the `None` arm is
-/// reachable in a unit test: `d_type` is populated on ext4 and APFS alike (measured:
-/// DT_UNKNOWN=0, xfs ftype=1), so the real fallback never runs on CI.
+/// Classify one entry from its `d_type`, falling back to `fstatat` when the filesystem
+/// returns `DT_UNKNOWN`. Takes `dirfd`, the entry's `raw` name, and `expected_ino` (the
+/// dirent's inode) directly — the `None` arm is reachable in a unit test by passing
+/// `None` for `ty`, so no injected `stat_fn` seam is needed. `d_type` is populated on
+/// ext4 and APFS alike (measured: DT_UNKNOWN=0, xfs ftype=1), so the fallback rarely
+/// runs on CI.
 ///
 /// The fallback MUST use AT_SYMLINK_NOFOLLOW. Without it the stat follows the link and
 /// a symlinked entry classifies as whatever it points at — the exact refusal this
-/// exists to preserve.
+/// exists to preserve. It also verifies the stat'd inode matches `expected_ino`,
+/// refusing a name repointed between readdir and stat as ESTALE.
 pub(crate) fn classify_entry<F: AsFd>(
     ty: Option<nix::dir::Type>,
     dirfd: &F,
