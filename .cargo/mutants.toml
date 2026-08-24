@@ -1,11 +1,68 @@
 # cargo-mutants config (read even under `cargo mutants --package`, from the workspace
 # root where the CI gate invokes it). The exclude_globs are path-scoped to maknae-vault,
-# maknae-proto, maknae-audit-append, and maknae-kernel respectively, so they do NOT
+# maknae-proto, maknae-audit-append, maknae-kernel, and maknae-io respectively, so they do NOT
 # affect the other mutated crates (config/security mutate their own files). Scope each
 # mutated crate to its pure T1 decision logic — the excluded files are I/O (network/
-# keygen/provider/file/syscall) that cannot be meaningfully unit-killed and are
-# T3-tiered.
+# keygen/provider/file/syscall) that cannot be meaningfully unit-killed.
+#
+# ONE DELIBERATE EXEMPTION, and what it actually costs — MEASURED, not assumed.
+#
+# Most excluded files are also [[t3]]; `crates/maknae-io/src/syscall.rs` is `[t1]`
+# (promoted at 87/87 regions darwin, 107/107 regions Linux) and still excluded. ADR-0016 defines T1 as
+# floor + crate mutation gate, and no gate cross-checks these two files, so this note is
+# the only place the exemption is visible.
+#
+# The original justification — `replace | with ^` on a disjoint bitflag union is
+# behaviourally identical, so an equivalent mutant is reported MISSED and the gate goes
+# red — is TRUE but INCOMPLETE, and stating only that overstated the case.
+#
+# MEASURED on darwin with the exclusion lifted, two runs, IDENTICAL both times:
+#   73 mutants: 21 caught, 9 unviable, 38 missed + 5 timeouts.
+# Of the 43 uncaught, 26 are the equivalent `^` family. The other 17:
+#
+#   6  `openat2_resolve` / `probe_openat2`. MISSED on darwin because the code is
+#      `#[cfg(target_os = "linux")]` and darwin never compiles it. FIVE are lane
+#      artifacts. The SIXTH was a real defect: `openat2_resolve`'s `O_NONBLOCK` had no
+#      control on either platform, so `read("config.d/<fifo>")` blocked maknaed forever
+#      on the fast lane. Closed by `the_openat2_lane_does_not_block_on_a_fifo`.
+#      (An earlier version of this note said all six were "not evidence of a gap", and
+#      two commit bodies claimed to have corrected it while changing only two labels.
+#      Corrected here for real. Assessing the remaining five by MUTATION still needs a
+#      Linux mutants run — but flag deletion on Linux assesses them today, and did.)
+#   4  `open_dir_handle`. It targets `.`, which cannot be a symlink, and it carries
+#      `O_NONBLOCK`. Low severity, still uncontrolled.
+#   2  `fsync_fd` / `sync_data` bodies replaced with `Ok(())`. Durability is not
+#      observable from a unit test without crash injection.
+#   5  TIMEOUTs on the read / temp / append opens. NOT all "dropped O_NONBLOCK": `&`
+#      binds TIGHTER than `|` in Rust, so a mutated `|` drops exactly the two ADJACENT
+#      operands, not the whole union. Verified at `open_temp_excl` — the mutant there
+#      drops `O_NOFOLLOW` and `O_CREAT` and KEEPS `O_NONBLOCK`. It is behaviourally
+#      detected well before the timeout — read the mutant's own log rather than trusting
+#      a remembered count, which is how "three assertions" got written here.
+#
+# Two errors this note previously contained, both corrected against my own runs:
+#   - It claimed the `&` mutants dropping O_NOFOLLOW/O_EXCL "were already caught". Not
+#     true then; the ones that mattered are caught NOW, by tests added for them.
+#   - It said counts vary run to run and should be treated as approximate, inferring
+#     that from a 40/19 figure. Wrong, and harmful: 40/19 was the PRE-remediation tree,
+#     and both trees reproduce exactly. Nothing here is noise — telling the next
+#     engineer to discount mutation counts would discard the signal that found the
+#     row-0 hang in the first place.
+#
+# Compensating controls: a coverage floor (87/87 regions darwin, 107/107 regions Linux); per-verb
+# FD_CLOEXEC assertions for six of the seven opens (`open_dir_handle` pins only the END
+# state and says so on the test — `fdopendir` sets the bit afterwards, so no external
+# assertion can hold its call-site flag); and behavioural tests for O_NOFOLLOW, O_EXCL,
+# and O_DIRECTORY at BOTH rows — row 0's FIFO-parent hang and row 1's non-directory
+# anchor, each added after the mutant that exposed it — plus O_NOFOLLOW on `append` and
+# O_NONBLOCK on the openat2 lane. Durability and the four `open_dir_handle` drops remain
+# uncontrolled. The Linux-only lane is uncontrolled BY MUTATION but is now covered
+# behaviourally, by tests that run there. Narrowing this
+# to an `exclude_re` on the `^` family is tracked as #126.
+
 exclude_globs = [
+  "crates/maknae-io/src/error.rs",       # IoError/IoKind enum + Display; no From impl exists
+  "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
   "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation

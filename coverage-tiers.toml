@@ -26,6 +26,21 @@ floor_production_region = 95
 # a deny — the exact T1 line-drawing rule. Re-populates the cohort emptied when
 # the DCS engine relocated (2026-08-08).
 files = [
+  "crates/maknae-io/src/anchor.rs",
+  "crates/maknae-io/src/checks.rs",
+  "crates/maknae-io/src/normalize.rs",
+  # Promoted from [[t3]] once it reached 100%. MEASURED ON BOTH LANES, because the
+  # cfg(linux) openat2 block and the real probe are regions darwin never compiles and
+  # CI enforces the floor on Linux: darwin 87/87, Linux 107/107, both 100.00%. The
+  # delta is NET, and the earlier phrasing did not reconcile — 87 - 3 + 20 is 104, not
+  # 107. Correctly: the darwin `probe_openat2` stub is 3 regions and disappears on
+  # Linux, while `openat2_resolve` plus the real `probe_openat2` add 23, for a net +20.
+  # All of them are covered, and the file carries NO exceptions, so both figures are raw.
+  "crates/maknae-io/src/syscall.rs",
+  "crates/maknae-io/src/walk.rs",
+  "crates/maknae-io/src/strategy.rs",
+  "crates/maknae-io/src/dir.rs",
+  "crates/maknae-io/src/write.rs",
   "crates/maknae-security/src/value.rs",
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
@@ -126,7 +141,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
 
 [t2]
 floor_production_region = 90
@@ -380,3 +395,179 @@ why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a b
 
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
+
+[[t3]]
+path = "crates/maknae-io/src/testutil.rs"
+why = "test-only helper shared between module test suites (it exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`). Report-only rather than [t1] because its production split — skip_or_fail and opted_out — measures 63.64%, below the 95% floor: the opt-out branch is only reachable by mutating MAKNAE_IO_ALLOW_SKIPPED_LANES for the whole process, which is not safe under the parallel harness. The FAIL-CLOSED branch, which is the one that matters, IS controlled by skip_or_fail_panics_when_the_opt_out_is_absent"
+
+[[t3]]
+path = "crates/maknae-io/src/lib.rs"
+why = "crate rustdoc and re-exports only; no executable production regions, so a [t1] classification hard-fails coverage_check.py's absent-from-coverage check"
+
+[[t3]]
+path = "crates/maknae-io/src/error.rs"
+why = "IoError/IoKind enums with Display only (there is no From impl, despite what an earlier version of this line said); no decision logic"
+
+# KNOWN IMPRECISION in the exceptions below, no floor impact.
+#
+# The gate matches WHOLE LINES, and several exceptions anchor on a line that carries
+# BOTH a covered call and an uncovered `?`/closure edge — the `foo(..).map_err(..)?`
+# form and the bare `x(..)?;` statement alike. An exception anchored there necessarily
+# removes both, so some covered regions leave the denominator alongside the arm the
+# `why` names. The per-exception region counts the gate prints on each run are the
+# authoritative figures; no derived percentage is quoted here, because the last attempt
+# quoted one measured on an earlier tree state and it was wrong by the exact amount of
+# the fix that landed in the same commit.
+#
+# NO file currently has an imprecision-driven delta: every [t1] file reports 100.00%,
+# so precise sub-line spans would return 100.00% for all of them.
+#
+# Not fixable by writing a narrower `why`: it needs sub-line region anchoring in the
+# gate, or reformatting every such site so the closure sits on its own line, which
+# rustfmt would undo. Recorded rather than tolerated silently, because "an exception
+# must excuse the arm it names and nothing adjacent to it" is the rule the rest of this
+# file is held to.
+
+# Row 0's Err arm needs NO exception any more: anchor_parent_failures_name_the_parent_
+# and_do_not_claim_a_refusal provokes it for real (a missing intermediate and a symlink
+# loop), so the gate reports it covered. Deleted rather than left behind — the gate
+# hard-fails a stale exception, which is how this one was found.
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "syscall::fstat(&afd).map_err"
+why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
+
+
+# The last three uncovered production regions in the crate's [t1] files, classified
+# rather than
+# left to clear their floors on percentage slack — which is exactly what the rule below
+# forbids for anchor.rs's loops, and the rule does not get to apply selectively.
+# Scoped to [t1] deliberately: the three [[t3]] files still hold 66 uncovered
+# production regions between them (error.rs 62, testutil.rs 4, lib.rs 0 — it has no
+# production regions), and coverage_check.py forbids exceptions on T3 entirely, so
+# "the crate" would be false. syscall.rs is NOT among them: it was promoted to [t1] at
+# 87/87 in the same commit that first wrote this sentence, which counted it as T3 with
+# 5 uncovered regions.
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw, ent.ino())?;"
+why = "the `?` unwind edge. NOTE, because this file elsewhere criticises exactly this: line granularity means the span also removes the COVERED production classify_entry call site — the same wiring the 26-region dir.rs span was split apart for taking. It is accepted here rather than silently, because the alternative is leaving the `?` edge unclassified; the classification decision itself is controlled by none_arm_falls_back_to_the_stat and a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering, which stand in for the coverage signal this removes. classify_entry only returns Err from its d_type == DT_UNKNOWN fallback, and d_type is populated on ext4, xfs and APFS (measured), so the fallback does not run in the real path. The fallback's own decision IS controlled, directly, by a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and none_arm_falls_back_to_the_stat"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "    write_all(fd, bytes)?; // Mode A: a temp file this function just created"
+why = "the `?` unwind edge. write_all returns Err only on a short write or a write error to an fd openat just created — ENOSPC/EIO on a healthy FS, not provokable from a unit test. The short-write refusal it propagates IS the decision, and it has its own exception naming the arm"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "    write_all(fd, bytes)?; // Mode B: a caller-supplied inode"
+why = "same unwind edge for Mode B. The inode is caller-supplied here rather than freshly created, but a write failing on it is still ENOSPC/EIO; the checks that make the inode acceptable at all (check_target's hard-link and type refusals) run BEFORE this line and are covered"
+
+[[exception]]
+path = "crates/maknae-io/src/walk.rs"
+anchor = "map_errno_no_disambiguation(e, &sofar)"
+why = "fstat on a dirfd the kernel just returned from openat cannot fail on a healthy FS; a pure errno passthrough with no decision. The decision this loop carries is the per-component check, covered by descendant_requirement_enforced_per_component"
+
+# The size probe's two non-progress arms. Separate from the fill loop's exception
+# below because they are a different loop, and named explicitly rather than left to
+# clear the floor on percentage slack -- an uncovered region that no exception claims
+# is an unclassified one, which is the state this gate exists to prevent.
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "                Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
+end_anchor = "                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
+why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "                Ok(0) => break,"
+end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
+why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm below them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "crate::checks::map_errno(e, &full, || crate::syscall::fstatat_nofollow(&base, name))"
+why = "the read target's ENOTDIR-disambiguation closure. It is invoked only on ENOTDIR, which a target open carrying no O_DIRECTORY cannot produce — a symlinked target is ELOOP, covered by symlinked_read_target_refused"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;"
+why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "enumerate_raw(dirfd).map_err"
+why = "the single boundary conversion for enumerate's three unprovokable failure points: Dir::openat on an already-pinned dirfd, a mid-iteration readdir failure, and the fstatat fallback (d_type is populated on both CI platforms, measured, so that closure is never invoked in the real path). None is a decision — the classification decision IS covered, via classify_entry's injected seam"
+
+# Split from one span into three, each naming exactly the arm it excuses. The single
+# wide span removed 26 regions while its `why` justified three `?` arms: it also took
+# the loop head, the entry-name construction and the production classify_entry call
+# site with it — covered wiring, removed from the denominator, which raised the file
+# above its floor rather than reporting it. An exception must excuse the arm it names
+# and nothing adjacent to it.
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "let mut d = crate::syscall::open_dir_handle(dirfd)?;"
+why = "Dir::openat on an already-pinned dirfd cannot fail on a healthy FS; a pure propagation with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/dir.rs"
+anchor = "let ent = ent?;"
+why = "a mid-iteration readdir failure is not provokable from a unit test without a seam; a pure propagation with no decision"
+
+# The d_type == DT_UNKNOWN fallback no longer needs an exception. It used to live in
+# an injected closure that no test could reach; classify_entry now takes the dirfd and
+# the raw name directly, so
+# a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and
+# none_arm_falls_back_to_the_stat exercise it for real and the gate reports it covered.
+# Deleted rather than left behind: a stale exception is a hole a later change reuses.
+
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "let entries = crate::dir::enumerate_fd(&self.fd, &self.path)?;"
+why = "enumerating the pinned anchor fd cannot fail on a healthy FS; the error paths inside enumerate_fd carry their own exception in dir.rs"
+
+[[exception]]
+path = "crates/maknae-io/src/anchor.rs"
+anchor = "let entries = crate::dir::enumerate_fd(&dirfd, &full)?;"
+why = "same, for the terminal-directory fd the walk just returned; the checked-descendant refusal that guards it IS covered, by world_writable_terminal_directory_refused"
+
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "            Ok(0) => break,"
+end_anchor = "Err(e) => return Err(e),"
+why = "write_all's three non-progress arms, and ONLY those three — the covered progress arm below them stays in the denominator. Ok(0) on a regular file, EINTR requiring signal delivery mid-syscall, and a mid-write Err which is ENOSPC or EIO on a healthy FS. None is provokable from a unit test without a seam"
+
+# Narrowed from one 15-region span to the two arms the `why` actually names; the old
+# span also removed the cleanup wiring between them.
+# The O_EXCL open's Err arm needs NO exception any more: publish_refuses_a_preexisting_temp_name
+# provokes it for real, so the gate now reports it covered. The entry that used to
+# excuse it was deleted rather than left behind -- a stale exception is a permanent
+# hole an unrelated change can later reuse.
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "    if let Err(write_err) = write_all_sync(&fd, bytes) {"
+end_anchor = "        return Err(write_err);"
+why = "the mid-write failure arm and its best-effort cleanup: a write to the fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test. The renameat failure path next to it IS covered, by publish_onto_a_directory_name_errs_and_cleans_up, which also asserts no temp survives. The unlink is deliberately `let _ =` so the caller keeps the ORIGINAL error"
+
+# Narrowed from one 21-region span to its two endpoints. The old span BRACKETED
+# `check_target(&st, at, target)?` -- a covered, load-bearing security decision (the
+# hard-link refusal) -- and removed it from the denominator along with the two arms
+# actually being excused.
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "        Err(nix::errno::Errno::EIO)"
+why = "write_all's short-write refusal. Reaching it needs write(2) to return 0 on a regular file with a non-empty buffer, which does not happen on a healthy FS and cannot be provoked from a unit test without a seam. It is present because the alternative -- returning Ok having written fewer bytes -- lets publish renameat a TRUNCATED file into the final name and lets append report a partial audit record as written, both silently"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "let st = syscall::fstat(&fd).map_err"
+why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision. The decision it FEEDS is check_target, which is deliberately left in the denominator and is covered by append_refuses_a_hard_linked_target (probed: removing the check turns it red)"
+
+[[exception]]
+path = "crates/maknae-io/src/write.rs"
+anchor = "append_raw(&fd, bytes).map_err"
+why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test; a pure errno passthrough. The ENXIO-at-the-open case beside it IS covered, by append_to_a_fifo_is_enxio_at_the_open"

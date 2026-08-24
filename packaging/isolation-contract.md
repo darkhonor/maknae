@@ -36,6 +36,7 @@ The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the 
 | maknae-kernel (priv) | linked | forbidden | — |
 | maknae-subject-ctx-mint (priv) | via kernel | forbidden | — |
 | maknae-audit-append (priv) | via kernel | forbidden | — |
+| maknae-io | — | — | — |
 | maknae-spif-compile (priv) | — | forbidden | linked |
 | maknae-proto | via kernel | linked | — |
 | maknae-spif | via kernel | — | — |

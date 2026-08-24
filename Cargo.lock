@@ -1012,6 +1012,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-io"
+version = "0.0.0"
+dependencies = [
+ "nix",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "maknae-kernel"
 version = "0.0.0"
 dependencies = [

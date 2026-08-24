@@ -4,6 +4,7 @@ members = [
   "crates/maknae-audit",
   "crates/maknae-audit-append",
   "crates/maknae-config",
+  "crates/maknae-io",
   "crates/maknae-kernel",
   "crates/maknae-llm",
   "crates/maknae-mcp",
