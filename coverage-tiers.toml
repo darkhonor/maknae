@@ -451,7 +451,7 @@ why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the 
 # 5 uncovered regions.
 [[exception]]
 path = "crates/maknae-io/src/dir.rs"
-anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw)?;"
+anchor = "        let kind = classify_entry(ent.file_type(), dirfd, raw, ent.ino())?;"
 why = "the `?` unwind edge. NOTE, because this file elsewhere criticises exactly this: line granularity means the span also removes the COVERED production classify_entry call site — the same wiring the 26-region dir.rs span was split apart for taking. It is accepted here rather than silently, because the alternative is leaving the `?` edge unclassified; the classification decision itself is controlled by none_arm_falls_back_to_the_stat and a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering, which stand in for the coverage signal this removes. classify_entry only returns Err from its d_type == DT_UNKNOWN fallback, and d_type is populated on ext4, xfs and APFS (measured), so the fallback does not run in the real path. The fallback's own decision IS controlled, directly, by a_non_utf8_entry_is_stat_by_its_raw_bytes_not_a_lossy_rendering and none_arm_falls_back_to_the_stat"
 
 [[exception]]

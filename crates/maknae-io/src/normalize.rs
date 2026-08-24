@@ -9,6 +9,17 @@
 //! `.` and in-bounds `..` are **collapsed**, not rejected: the kernel does the same
 //! (`RESOLVE_BENEATH` allows `config.d/../maknae.yaml` and returns EXDEV only on
 //! escape), so rejecting all `..` would refuse paths the kernel resolves correctly.
+//!
+//! CONSEQUENCE, and it is contract (external review made it explicit): collapse is
+//! LEXICAL and happens BEFORE any filesystem resolution, so a component cancelled by
+//! `..` is NEVER examined. `read("link/../policy.yaml")` resolves `policy.yaml` even
+//! though `link` is a symlink; `missing/../policy.yaml` succeeds where kernel-order
+//! resolution would ENOENT at `missing`. Neither can escape — the collapsed result is
+//! still anchor-relative and in-bounds `..` cannot leave the anchor — but it means the
+//! rel argument is a lexical IDENTIFIER for a location under the anchor, not a
+//! pathname walked in caller order. Symlink refusal therefore applies to the
+//! components that SURVIVE normalization, not to "every component the caller typed".
+//! `dotdot_cancelled_symlink_is_never_examined` pins this as deliberate.
 
 use crate::error::IoError;
 use std::path::{Component, Path, PathBuf};

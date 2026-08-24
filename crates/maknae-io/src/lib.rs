@@ -11,6 +11,11 @@
 //! checked inode and the used inode are the same open fd, so the check-then-reopen
 //! TOCTOU is closed.
 //!
+//! The `rel` argument to every verb is normalized LEXICALLY first: `.` and in-bounds
+//! `..` collapse before any filesystem resolution, so a component cancelled by `..` is
+//! never examined at all (see `normalize`). Symlink refusal applies to the components
+//! that survive normalization.
+//!
 //! Symlink refusal is carried by whichever lane runs, and the two do it differently --
 //! stating "`O_NOFOLLOW` at each component" would be false on Linux:
 //!

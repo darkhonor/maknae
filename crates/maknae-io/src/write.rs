@@ -48,6 +48,15 @@ pub(crate) fn publish_at<F: AsFd>(
 }
 
 fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -> nix::Result<()> {
+    // CONTRACT LIMIT (external review): the temp adds "." + ".tmp.<pid>.<counter>" to
+    // the caller's name, so a final name a filesystem accepts (up to 255 bytes on
+    // ext4/xfs) can exceed NAME_MAX in its temp form and be REFUSED — ENAMETOOLONG
+    // from the openat, on every filesystem this project targets. Pinned by
+    // a_name_whose_temp_form_exceeds_name_max_is_refused. No pre-check: one was tried
+    // and is behaviourally unobservable (the filesystem returns the identical errno),
+    // which made its comparison an unkillable mutant. A temp-name redesign
+    // (fixed-size hash) would lift the limit and change this contract; that is PR-B+
+    // work, and until then the limit is stated rather than silent.
     let tmp = temp_name(final_name);
     let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;
 

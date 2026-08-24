@@ -363,6 +363,16 @@ impl Anchor {
     }
 
     /// Append bytes, creating the file if absent. Always portable.
+    ///
+    /// NOT FAILURE-ATOMIC on create, and that is contract (external review made it
+    /// explicit): the open carries `O_CREAT`, the `TargetRequired` checks run on the
+    /// opened fd AFTER creation, so a rejection can leave a fresh EMPTY file behind.
+    /// Fail-closed for the write; not side-effect-free. Unlinking on error would be
+    /// worse — without `O_EXCL` this function cannot know it was the creator, and an
+    /// unlink could remove a name an attacker swapped in or a file that pre-existed.
+    /// A create-exclusive-with-retry design could close this; until a consumer needs
+    /// it, the residue is documented and pinned by
+    /// `rejected_append_may_leave_an_empty_file`.
     pub fn append(
         &self,
         rel: &Path,
@@ -1182,6 +1192,96 @@ mod tests {
             Ok(Err(IoError::NotRegularFile { .. })) => {}
             Ok(Err(other)) => panic!("expected NotRegularFile, got {other:?}"),
         }
+    }
+
+    /// A final name whose TEMP form exceeds NAME_MAX is refused deterministically.
+    ///
+    /// The temp adds `.` + `.tmp.<pid>.<counter>`, so a 255-byte name — valid on
+    /// ext4/xfs — cannot be published through this API. The refusal is now a
+    /// pre-check, so the caller gets ENAMETOOLONG for the same input on every
+    /// filesystem, instead of an errno that depends on where the anchor lives.
+    #[test]
+    fn a_name_whose_temp_form_exceeds_name_max_is_refused() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let long = "x".repeat(255);
+        let e = a
+            .publish(Path::new(&long), None, b"y", m(0o640))
+            .unwrap_err();
+        match e {
+            IoError::Io {
+                kind: crate::error::IoKind::Other { raw },
+                ..
+            } => assert_eq!(raw, nix::errno::Errno::ENAMETOOLONG as i32),
+            other => panic!("expected ENAMETOOLONG, got {other:?}"),
+        }
+        // And nothing was left behind under any name.
+        assert_eq!(
+            std::fs::read_dir(&a.path).unwrap().count(),
+            0,
+            "a refused publish must leave no temp"
+        );
+    }
+
+    /// A rejected append may leave an empty file behind — pinned as CONTRACT.
+    ///
+    /// Absent target, O_CREAT creates it, then the owner requirement fails on the
+    /// opened fd. The append is refused; the empty file remains. Pinned so the
+    /// side-effect is a stated property, not a surprise — and so any future
+    /// failure-atomic redesign announces itself by turning this red.
+    #[test]
+    fn rejected_append_may_leave_an_empty_file() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        // An owner the creating process can never be: euid + 1.
+        let impossible = nix::unistd::geteuid().as_raw() + 1;
+        let req = TargetRequired {
+            owner: Some(impossible),
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let e = a
+            .append(Path::new("new.jsonl"), None, req, b"x", m(0o640))
+            .unwrap_err();
+        assert!(matches!(e, IoError::NotOwned { .. }), "got {e:?}");
+        // The residue: created, empty, still there.
+        let md = std::fs::metadata(a.path.join("new.jsonl"))
+            .expect("the documented residue: a rejected create-append leaves the file");
+        assert_eq!(md.len(), 0, "and it must be EMPTY — nothing was written");
+    }
+
+    /// A component cancelled by `..` is NEVER examined — pinned as CONTRACT.
+    ///
+    /// External review: `read("link/../policy.yaml")` succeeds although `link` is a
+    /// symlink, because normalization is lexical and runs before any resolution. This
+    /// cannot escape (the collapsed path is still anchor-relative), but it falsifies
+    /// any claim that a symlink "anywhere on the path" is refused — the claim is
+    /// "any component that SURVIVES normalization". This test makes the behaviour a
+    /// stated decision rather than an accident, so a future "fix" that starts
+    /// resolving cancelled components in caller order shows up as a red test and gets
+    /// argued about, not slipped in.
+    #[test]
+    fn dotdot_cancelled_symlink_is_never_examined() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("policy.yaml"), b"p").unwrap();
+        symlink(d.path(), a.path.join("link")).unwrap(); // would escape if followed
+
+        let out = a
+            .read(Path::new("link/../policy.yaml"), None, t_req())
+            .expect("the cancelled symlink component must not be examined");
+        assert_eq!(&out.value[..], b"p");
+
+        // And a NON-cancelled symlink component is still refused, same fixture.
+        let e = a.read(Path::new("link/x.yaml"), None, t_req()).unwrap_err();
+        assert!(matches!(e, IoError::Symlink { .. }), "got {e:?}");
+
+        // A missing-but-cancelled component also never fails the lookup.
+        let out2 = a
+            .read(Path::new("missing/../policy.yaml"), None, t_req())
+            .expect("a cancelled missing component must not be examined");
+        assert_eq!(&out2.value[..], b"p");
     }
 
     /// Mode B must REFUSE a symlinked target, and no `check_target` predicate can

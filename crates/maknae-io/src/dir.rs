@@ -3,9 +3,17 @@
 //!
 //! Classification and precedence stay with the parser (spec §8 Q2): dotfile-skip,
 //! symlink/dir refusal, extension filtering and lexical sort are all `maknae-config`
-//! policy. This crate's contribution is that `kind` is TRUSTWORTHY — resolved
-//! fd-relatively and WITHOUT following the link. Given a correct kind, the caller's
-//! policy is one match arm.
+//! policy.
+//!
+//! WHAT `kind` GUARANTEES — narrowed from "TRUSTWORTHY" after external review. Where
+//! the filesystem supplies `d_type`, `kind` and `ino` originate in the SAME directory
+//! record. On the `DT_UNKNOWN` fallback the `fstatat` result is accepted only if its
+//! inode MATCHES the dirent's — a mismatch (the name repointed between readdir and
+//! stat) is refused as ESTALE rather than classified from the wrong inode. What no
+//! enumeration API can promise: the name may be repointed AFTER `Entry` is returned.
+//! Enumeration is therefore ADVISORY — a caller acting on an entry must go through
+//! `Anchor::read`/`append`/`publish` with a `TargetRequired`, which re-checks on the
+//! opened fd. That is the crate's actual guarantee; `Entry` alone is not one.
 
 use crate::anchor::{Entry, Kind};
 use crate::error::IoError;
@@ -52,12 +60,22 @@ pub(crate) fn classify_entry<F: AsFd>(
     ty: Option<nix::dir::Type>,
     dirfd: &F,
     raw: &std::ffi::CStr,
+    expected_ino: u64,
 ) -> Result<Kind, nix::errno::Errno> {
     match ty {
         Some(t) => Ok(kind_of_type(t)),
-        None => Ok(kind_of_mode(mode_bits(
-            crate::syscall::fstatat_nofollow(dirfd, raw)?.st_mode,
-        ))),
+        None => {
+            let st = crate::syscall::fstatat_nofollow(dirfd, raw)?;
+            // The dirent gave us an inode; the fallback stat gives us another. If they
+            // differ, the name was repointed between readdir and this stat, and the
+            // mode we hold belongs to an inode the Entry does not name. Classifying
+            // from it would resurrect the checked-vs-used-inode confusion INSIDE the
+            // enumeration contract. Refuse instead: ESTALE, the stale-handle errno.
+            if st.st_ino != expected_ino {
+                return Err(nix::errno::Errno::ESTALE);
+            }
+            Ok(kind_of_mode(mode_bits(st.st_mode)))
+        }
     }
 }
 
@@ -89,7 +107,7 @@ fn enumerate_raw<F: AsFd>(dirfd: &F) -> nix::Result<Vec<Entry>> {
         // the raw bytes go to the syscall untouched.
         let raw = ent.file_name();
         let name = std::ffi::OsStr::from_encoded_bytes_unchecked_shim(raw.to_bytes());
-        let kind = classify_entry(ent.file_type(), dirfd, raw)?;
+        let kind = classify_entry(ent.file_type(), dirfd, raw, ent.ino())?;
         out.push(Entry {
             name,
             kind,
@@ -130,7 +148,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("regular"), b"x").unwrap();
         let fd = dirfd_of(d.path());
-        let k = classify_entry(None, &fd, cstr(b"regular").as_c_str()).unwrap();
+        let ino = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::symlink_metadata(d.path().join("regular")).unwrap(),
+        );
+        let k = classify_entry(None, &fd, cstr(b"regular").as_c_str(), ino).unwrap();
         assert_eq!(k, Kind::File);
     }
 
@@ -138,8 +159,30 @@ mod tests {
     fn none_arm_propagates_a_failing_stat() {
         let d = tempfile::tempdir().unwrap();
         let fd = dirfd_of(d.path());
-        let e = classify_entry(None, &fd, cstr(b"missing").as_c_str()).unwrap_err();
+        let e = classify_entry(None, &fd, cstr(b"missing").as_c_str(), 0).unwrap_err();
         assert_eq!(e, nix::errno::Errno::ENOENT);
+    }
+
+    /// The DT_UNKNOWN fallback must refuse a repointed name, not classify the wrong
+    /// inode. The dirent said inode A; if the stat comes back with inode B, the name
+    /// changed between readdir and stat, and returning B's kind under A's ino is a
+    /// self-contradictory Entry — the checked-vs-used confusion inside the enumeration
+    /// contract. External review (Codex) found exactly this; the race itself cannot be
+    /// staged deterministically, but the DECISION can: hand the fallback a dirent ino
+    /// that does not match, and it must come back ESTALE.
+    #[test]
+    fn fallback_refuses_a_repointed_name_as_estale() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("x"), b"a").unwrap();
+        let fd = dirfd_of(d.path());
+        let real = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::symlink_metadata(d.path().join("x")).unwrap(),
+        );
+        let e = classify_entry(None, &fd, cstr(b"x").as_c_str(), real + 1).unwrap_err();
+        assert_eq!(e, nix::errno::Errno::ESTALE);
+        // And the matching ino still classifies.
+        let k = classify_entry(None, &fd, cstr(b"x").as_c_str(), real).unwrap();
+        assert_eq!(k, Kind::File);
     }
 
     /// A non-UTF-8 entry name must be stat'd as its RAW bytes.
@@ -179,7 +222,10 @@ mod tests {
         std::fs::write(d.path().join(&decoy), b"decoy").unwrap();
 
         let fd = dirfd_of(d.path());
-        let k = classify_entry(None, &fd, cstr(b"\xff\xfe").as_c_str()).unwrap();
+        let odd_ino = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::symlink_metadata(d.path().join(odd)).unwrap(),
+        );
+        let k = classify_entry(None, &fd, cstr(b"\xff\xfe").as_c_str(), odd_ino).unwrap();
         assert_eq!(
             k,
             Kind::Symlink,
@@ -188,7 +234,10 @@ mod tests {
 
         // And the decoy itself really is a regular file, so the assertion above
         // discriminates rather than passing for an unrelated reason.
-        let dk = classify_entry(None, &fd, cstr(decoy.as_bytes()).as_c_str()).unwrap();
+        let decoy_ino = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::symlink_metadata(d.path().join(&decoy)).unwrap(),
+        );
+        let dk = classify_entry(None, &fd, cstr(decoy.as_bytes()).as_c_str(), decoy_ino).unwrap();
         assert_eq!(dk, Kind::File);
     }
 
