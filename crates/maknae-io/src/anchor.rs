@@ -1882,8 +1882,25 @@ mod tests {
             nlink_exactly_one: false,
             regular_file: true,
         };
-        let e = a.read(Path::new("f"), None, req).unwrap_err();
-        assert!(matches!(e, IoError::NotRegularFile { .. }), "got {e:?}");
+        // BOUNDED WAIT, like the other FIFO tests. This test is what holds
+        // `open_read_target`'s O_NONBLOCK, and it holds it by HANGING if the flag goes
+        // — which tells CI nothing except that the job timed out, and on a metered
+        // runner costs the full job budget. Same shape as its two siblings.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(a.read(Path::new("f"), None, req).map(|_| ()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "read did not return within 10s on a FIFO. Most likely \
+                 open_read_target lost O_NONBLOCK, so open(2) is waiting for a writer \
+                 that will never come — a starved runner looks the same, so check the \
+                 flags before concluding."
+            ),
+            Err(e) => panic!("worker died: {e:?}"),
+            Ok(Ok(())) => panic!("a FIFO must not read as a regular file"),
+            Ok(Err(e)) => assert!(matches!(e, IoError::NotRegularFile { .. }), "got {e:?}"),
+        }
     }
 
     fn m(x: u32) -> Mode {
@@ -2174,9 +2191,25 @@ mod tests {
             nix::sys::stat::Mode::from_bits_truncate(0o600),
         )
         .unwrap();
-        let e = a
-            .append(Path::new("f"), None, t_append(), b"y", m(0o640))
-            .unwrap_err();
+        // BOUNDED WAIT: this test holds `open_append`'s O_NONBLOCK, and without the
+        // flag the write-open blocks rather than returning ENXIO.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                a.append(Path::new("f"), None, t_append(), b"y", m(0o640))
+                    .map(|_| ()),
+            );
+        });
+        let e = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "append did not return within 10s on a readerless FIFO. Most likely \
+                 open_append lost O_NONBLOCK — a starved runner looks the same, so \
+                 check the flags before concluding."
+            ),
+            Err(e) => panic!("worker died: {e:?}"),
+            Ok(Ok(())) => panic!("a readerless FIFO must not accept an append"),
+            Ok(Err(e)) => e,
+        };
         match e {
             IoError::Io {
                 kind: crate::error::IoKind::Other { raw },
