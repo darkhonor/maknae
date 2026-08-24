@@ -11,11 +11,14 @@ on:
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
 env:
-  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs"
+  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs"
 
 jobs:
   build-and-gate:
     runs-on: ubuntu-latest
+    # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
+    # this a regression burns the 360-minute default and emits no diagnostic.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain (pinned)
@@ -34,7 +37,7 @@ jobs:
           fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs; do cargo clippy -p "$p" --all-targets -- -D warnings; done
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
@@ -76,6 +79,9 @@ jobs:
     # push (push = main by the trigger set — if the trigger set ever widens,
     # revisit the base resolution here).
     runs-on: ubuntu-latest
+    # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
+    # this a regression burns the 360-minute default and emits no diagnostic.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
