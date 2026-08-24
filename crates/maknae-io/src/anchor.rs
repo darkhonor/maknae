@@ -1194,12 +1194,14 @@ mod tests {
         }
     }
 
-    /// A final name whose TEMP form exceeds NAME_MAX is refused deterministically.
+    /// A final name whose TEMP form exceeds NAME_MAX is refused — documented limit.
     ///
     /// The temp adds `.` + `.tmp.<pid>.<counter>`, so a 255-byte name — valid on
-    /// ext4/xfs — cannot be published through this API. The refusal is now a
-    /// pre-check, so the caller gets ENAMETOOLONG for the same input on every
-    /// filesystem, instead of an errno that depends on where the anchor lives.
+    /// ext4/xfs — cannot be published through this API: `openat` returns ENAMETOOLONG
+    /// on the temp. There is deliberately NO pre-check (write.rs says why: the
+    /// filesystem returns the identical errno, so a pre-check adds no observable
+    /// behaviour and only an unkillable mutant). This test pins the limit as contract
+    /// so a temp-name redesign that lifts it turns the test red.
     #[test]
     fn a_name_whose_temp_form_exceeds_name_max_is_refused() {
         let d = dir(0o750);
