@@ -161,7 +161,7 @@ fn is_yaml_ext(name: &str) -> bool {
 #[cfg(unix)]
 pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError> {
     let root = std::path::absolute(dir).map_err(io_err)?;
-    let anchor = maknae_io::open_anchor(
+    let anchor = maknae_io::open_anchor_resolved(
         &root,
         maknae_io::AnchorRequired {
             owner: None,
@@ -791,6 +791,20 @@ mod tests {
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o750)).unwrap();
         std::os::unix::fs::symlink(&real, d.0.join("config.d")).unwrap();
         assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_top_level_config_directory_is_resolved_once() {
+        let d = new_dir("top-symlink-target");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let link = d.0.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&d.0, &link).unwrap();
+        let got = scan_dir(&link).unwrap();
+        let _ = std::fs::remove_file(&link);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "core:\n  a: 1\n");
     }
 
     #[cfg(unix)]

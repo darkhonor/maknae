@@ -33,9 +33,6 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
-#[cfg(test)]
-mod transport_tests;
-
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity};
@@ -67,10 +64,27 @@ fn read_storage(
     path: &std::path::Path,
     target: maknae_io::TargetRequired,
 ) -> Result<maknae_io::Zeroizing<Vec<u8>>, VaultError> {
-    maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+    let absolute = absolute_storage_path(path)?;
+    maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
         .map(|out| out.value)
         .map_err(|error| VaultError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::other(error.to_string()),
         })
 }
+
+fn absolute_storage_path(path: &std::path::Path) -> Result<std::path::PathBuf, VaultError> {
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|source| VaultError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+    })
+}
+
+#[cfg(test)]
+mod transport_tests;

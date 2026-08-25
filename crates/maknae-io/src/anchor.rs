@@ -196,6 +196,34 @@ pub fn open_anchor(
     })
 }
 
+/// Open an absolute directory path once, following a symlink in the anchor path and
+/// pinning the resolved directory inode. Descendant resolution remains symlink-refusing.
+pub fn open_anchor_resolved(
+    path: &Path,
+    req: AnchorRequired,
+    pref: StrategyPref,
+) -> Result<Anchor, IoError> {
+    if !path.is_absolute() {
+        return Err(IoError::RelativeAnchor {
+            path: path.to_path_buf(),
+        });
+    }
+    if path.parent().is_none() {
+        return Err(IoError::RootAnchor);
+    }
+    let afd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
+    let st =
+        syscall::fstat(&afd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
+    check_owner_mode(&st, path, req.owner, req.mode_mask)?;
+    let probed = crate::strategy::capability_from_probe(syscall::probe_openat2(&afd));
+    Ok(Anchor {
+        fd: afd,
+        path: path.to_path_buf(),
+        pref,
+        probed,
+    })
+}
+
 /// Read one absolute file through a pinned parent anchor. This is the adapter for
 /// callers that own a single configured path rather than a reusable subtree.
 pub fn read_absolute(
@@ -572,6 +600,30 @@ mod tests {
             got,
             Err(IoError::RelativeAnchor { path }) if path == Path::new("relative")
         ));
+    }
+
+    #[test]
+    fn resolved_anchor_follows_and_pins_a_symlinked_directory() {
+        let real = dir(0o750);
+        let value = real.path().join("value");
+        std::fs::write(&value, b"before").unwrap();
+        std::fs::set_permissions(&value, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("config-link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let anchor = open_anchor_resolved(
+            &link,
+            AnchorRequired {
+                owner: None,
+                mode_mask: Some(0o007),
+            },
+            StrategyPref::Auto,
+        )
+        .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(holder.path(), &link).unwrap();
+        let got = anchor.read(Path::new("value"), None, t_req()).unwrap();
+        assert_eq!(&*got.value, b"before");
     }
     /// Serialises publishing tests. The temp counter is process-global (two Anchors
     /// in one process would otherwise collide on the same name under O_EXCL with no

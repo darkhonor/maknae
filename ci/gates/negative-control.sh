@@ -185,6 +185,23 @@ git -C "$tmpF" init -q
 git -C "$tmpF" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
 expect_reject "std-fs-drift/production-call" "$tmpF/ci/gates/std-fs-drift.sh" "$tmpF"
 
+std_fs_reject() {
+  local label="$1" source="$2" fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
+  cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
+  : > "$fixture/ci/gates/std-fs-allowlist.txt"
+  printf '%b' "$source" > "$fixture/crates/x/src/lib.rs"
+  git -C "$fixture" init -q
+  git -C "$fixture" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+  expect_reject "std-fs-drift/$label" "$fixture/ci/gates/std-fs-drift.sh" "$fixture"
+}
+
+std_fs_reject "grouped-import" 'use std::{fs};\npub fn bad() { let _ = fs::copy("a", "b"); }\n'
+std_fs_reject "unlisted-operation" 'pub fn bad() { let _ = std::fs::copy("a", "b"); }\n'
+std_fs_reject "whitespace-qualified" 'pub fn bad() { let _ = std :: fs :: read("a"); }\n'
+std_fs_reject "production-after-test" '#[cfg(test)]\nmod tests {}\npub fn bad() { let _ = std::fs::read("a"); }\n'
+
 tmpF_alias="$(mktemp -d)"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF_alias/ci/gates/"

@@ -1,6 +1,7 @@
 # Enrollment is one privileged create/chmod/chown transaction. maknae-io has no
 # chown-capable transaction contract; wrapping only the byte write would split it.
 bins/maknae/src/enroll/artifact_write.rs:119|std::fs::set_permissions(
+bins/maknae/src/enroll/artifact_write.rs:121|std::fs::Permissions::from_mode(artifact.mode),
 bins/maknae/src/enroll/artifact_write.rs:130|std::fs::create_dir_all(&artifact.path).map_err(|e| io_err(&artifact.path, e))?;
 bins/maknae/src/enroll/artifact_write.rs:140|std::fs::write(&artifact.path, bytes).map_err(|e| io_err(&artifact.path, e))?;
 bins/maknae/src/enroll/mod.rs:712|let _ = std::fs::remove_file(&out_path);
@@ -42,7 +43,3 @@ crates/maknae-vault/src/socket.rs:102|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs:114|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
 crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
-
-# Compiled only through #[cfg(test)] mod transport_tests; scanner cannot infer parent cfg.
-crates/maknae-vault/src/transport_tests.rs:291|std::fs::create_dir_all(&p).unwrap();
-crates/maknae-vault/src/transport_tests.rs:292|std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();

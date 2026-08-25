@@ -147,7 +147,8 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
             nlink_exactly_one: false,
             regular_file: true,
         };
-        let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        let absolute = crate::absolute_storage_path(path)?;
+        let bytes = maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
             .map_err(|error| match error {
                 maknae_io::IoError::Symlink { .. } => VaultError::InsecureCredential {
                     path: path.to_path_buf(),
@@ -768,6 +769,17 @@ mod tests {
         let p = tmpfile("secure", 0o600);
         assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn secret_credential_accepts_a_relative_path() {
+        let name = format!("mv-relative-{}", std::process::id());
+        let path = std::path::PathBuf::from(&name);
+        std::fs::write(&path, "relative-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let got = read_secret_credential(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), "relative-secret");
     }
 
     // ---- from_document plane dispatch (Task 4) ---------------------------------
