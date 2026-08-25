@@ -267,8 +267,7 @@ pub enum AuthzError {
     /// group-writable (spec §4.6/§7: `authz.yaml` is `root:_maknae` and the
     /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
     /// group-writable file lets a compromised daemon rewrite its own DAC
-    /// policy even though `assert_root_owned` and the world-bit gate both
-    /// pass).
+    /// policy even though root ownership and a world-bit-only gate both pass.
     InsecurePermissions,
     /// `authz.yaml` (or a path component) is a symlink — refused.
     Symlink,
@@ -441,39 +440,17 @@ fn authz_target_required() -> maknae_io::TargetRequired {
     }
 }
 
-/// Read `authz.yaml` via the loader's existing secure read (symlink refusal +
-/// `mode & 0o007 == 0` gate, `loader.rs:33`) PLUS an explicit root-ownership
-/// assertion (spec §4.6/§7: root ownership is the control that stops a
-/// compromised `_maknae` from widening its own DAC by editing this file) PLUS
-/// an explicit group-write rejection (`mode & 0o022 != 0`).
+/// Read `authz.yaml` through a pinned [`maknae_io`] anchor with an explicit
+/// root-owner requirement and `mode & 0o022 == 0` target requirement. Root
+/// ownership stops a compromised `_maknae` process from replacing its own
+/// policy; the mode mask separately rejects group- or world-writable policy.
 ///
 /// The group-write check closes a gap the two controls above leave open:
 /// `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
-/// `_maknae`, whose PRIMARY group is `_maknae` — so a `root:_maknae 0660`
-/// file is root-owned (passes the owner check) and has no world bits (passes
-/// `read_secure`'s mode gate) but IS writable by the daemon's own group,
-/// letting a compromised daemon rewrite its own authorization policy. Spec
-/// §4.6's shipped mode is `0640` (group-READ only, needed so the daemon can
-/// read a root-owned file) — `0o022` covers group-write AND other-write
-/// (other-write is already unreachable past `read_secure`'s `0o007` gate,
-/// checked again here only for defense in depth / to keep this function's
-/// contract self-contained if `read_secure`'s gate ever changes).
-///
-/// The owner check is a SEPARATE `symlink_metadata` re-resolve of `path`, not
-/// fused into `read_secure`'s already-open fd — `read_secure` returns only a
-/// `String` and checks no owner. This is safe because `authz.yaml` lives in
-/// the root-owned `/etc/maknae` (spec §4.6): `_maknae` cannot write that
-/// directory, so it cannot win a swap between the two resolves — the same
-/// bounded lstat-then-open race the loader itself already accepts, not a new
-/// one (a fused `read_secure_owned` that fstats uid on the same fd is future
-/// work, out of scope here). The mode re-check below is a THIRD stat of the
-/// same path, for the same reason: it is not fused into `read_secure` or the
-/// owner check, and accepts the identical bounded race.
-///
-/// `owner_of` is an injected seam (real caller: [`real_owner_of`]) so the
-/// SUCCESS path is unit-testable without an actual root-owned fixture file
-/// (which a non-privileged test process cannot create) — the real resolver
-/// and `assert_root_owned`'s comparison are each tested directly too.
+/// `_maknae`, whose primary group is `_maknae` — so `root:_maknae 0660` is
+/// root-owned but still writable by the daemon's group. Spec §4.6's shipped
+/// mode is `0640`, which deliberately permits group read. `maknae-io` checks
+/// ownership, type, mode, and the bytes read against the same opened inode.
 ///
 /// One function with an INLINE `#[cfg(unix)]`/`#[cfg(not(unix))]` split
 /// (mirrors `loader.rs::load_config`'s idiom), not two separate `fn` items —
@@ -1009,11 +986,9 @@ mod tests {
 
     #[test]
     fn group_writable_root_owned_authz_refused() {
-        // The finding this test pins: `root:_maknae 0660` passes BOTH
-        // `read_secure`'s world-bit gate (0o007 == 0) AND `assert_root_owned`
-        // (uid 0, injected here since a non-privileged test process cannot
-        // create a genuinely root-owned fixture) — the group-write bit is the
-        // ONLY thing that must reject it.
+        // The finding this test pins: `root:_maknae 0660` is root-owned and
+        // has no world bits, but the daemon's group can rewrite it. The
+        // group-write bit must reject it.
         let p = tmp("group_writable");
         write_mode(&p, SHIPPED_DEFAULT, 0o660);
         let got = security_load(&p);

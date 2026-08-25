@@ -1775,9 +1775,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
         // determine HrotSealed for a SepSealed boot.
         let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_sep_hrot_sealed");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0);
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::SepSealed,
             marker.as_ref(),
@@ -1794,9 +1793,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // credential path (e.g. a marker copied from another host) — must
         // yield Unverified, not HrotSealed.
         let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_foreign_target");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0);
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::CredentialsDirectory,
             marker.as_ref(),

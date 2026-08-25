@@ -15,7 +15,7 @@ files = subprocess.check_output(
 excluded_parts = {"tests", "benches", "examples"}
 pattern = re.compile(
     r"std::fs::(?:read|read_to_string|write|remove_file|create_dir|create_dir_all|"
-    r"set_permissions|symlink_metadata|metadata|OpenOptions)|use std::fs::|"
+    r"set_permissions|symlink_metadata|metadata|OpenOptions)|use std::fs(?:::|\s+as\s+\w+\s*;)|"
     r"\bFile::(?:open|create)|\bOpenOptions::|owner:\s*None|mode_mask:\s*None"
 )
 found = set()

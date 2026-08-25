@@ -20,7 +20,7 @@ crates/maknae-audit-append/src/sink.rs:76|let mut opts = std::fs::OpenOptions::n
 
 # None means OS DAC is sufficient at that scope; stronger artifact requirements are
 # separately named on the target (authz/posture/plaintext credential where applicable).
-crates/maknae-config/src/authz.rs:508|owner: None,
+crates/maknae-config/src/authz.rs:485|owner: None,
 crates/maknae-config/src/loader.rs:48|owner: None,
 crates/maknae-config/src/loader.rs:49|mode_mask: None,
 crates/maknae-config/src/loader.rs:167|owner: None,

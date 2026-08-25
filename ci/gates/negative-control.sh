@@ -185,6 +185,24 @@ git -C "$tmpF" init -q
 git -C "$tmpF" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
 expect_reject "std-fs-drift/production-call" "$tmpF/ci/gates/std-fs-drift.sh" "$tmpF"
 
+tmpF_alias="$(mktemp -d)"
+mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF_alias/ci/gates/"
+: > "$tmpF_alias/ci/gates/std-fs-allowlist.txt"
+printf 'use std::fs as disk;\npub fn bad(p: &std::path::Path) { let _ = disk::read(p); }\n' > "$tmpF_alias/crates/x/src/lib.rs"
+git -C "$tmpF_alias" init -q
+git -C "$tmpF_alias" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/module-alias" "$tmpF_alias/ci/gates/std-fs-drift.sh" "$tmpF_alias"
+
+tmpF_stale="$(mktemp -d)"
+mkdir -p "$tmpF_stale/ci/gates" "$tmpF_stale/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF_stale/ci/gates/"
+printf 'crates/x/src/lib.rs:1|use std::fs::File;\n' > "$tmpF_stale/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn clean() {}\n' > "$tmpF_stale/crates/x/src/lib.rs"
+git -C "$tmpF_stale" init -q
+git -C "$tmpF_stale" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/stale-exemption" "$tmpF_stale/ci/gates/std-fs-drift.sh" "$tmpF_stale"
+
 tmpF2="$(mktemp -d)"
 mkdir -p "$tmpF2/ci/gates" "$tmpF2/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF2/ci/gates/"
