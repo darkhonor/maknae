@@ -482,8 +482,11 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
         let anchor = maknae_io::open_anchor(
             parent,
             maknae_io::AnchorRequired {
+                // Directory traversal and replacement authority come from the
+                // current process's OS DAC rights. The opened policy inode
+                // itself is separately required to remain root-owned.
                 owner: None,
-                mode_mask: Some(0o007),
+                mode_mask: Some(0o022),
             },
             maknae_io::StrategyPref::Auto,
         )
@@ -982,6 +985,20 @@ mod tests {
     fn missing_authz_file_is_io() {
         let got = load_authz(&tmp("nope_never_created"), Some(&home()));
         assert!(matches!(got, Err(AuthzError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_loader_reads_a_real_root_owned_host_file() {
+        #[cfg(target_os = "macos")]
+        let host_file = Path::new("/private/etc/hosts");
+        #[cfg(not(target_os = "macos"))]
+        let host_file = Path::new("/etc/hosts");
+        let got = security_load(host_file);
+        assert!(
+            got.is_ok(),
+            "root-owned /etc/hosts must pass I/O checks: {got:?}"
+        );
     }
 
     #[test]

@@ -208,6 +208,20 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn root_file_loader_reaches_parsing_for_a_real_root_owned_host_file() {
+        #[cfg(target_os = "macos")]
+        let host_file = std::path::Path::new("/private/etc/hosts");
+        #[cfg(not(target_os = "macos"))]
+        let host_file = std::path::Path::new("/etc/hosts");
+        let got = load_root_file(host_file);
+        assert!(
+            !matches!(got, Err(ConfigError::Io(_))),
+            "root-owned /etc/hosts must pass I/O checks: {got:?}"
+        );
+    }
+
     #[test]
     fn load_file_reads_and_parses() {
         use std::os::unix::fs::PermissionsExt;
