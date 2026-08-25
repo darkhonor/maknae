@@ -182,18 +182,7 @@ pub fn open_anchor(
         crate::checks::map_errno(e, path, || syscall::fstatat_nofollow(&pfd, basename))
     })?;
 
-    let st =
-        syscall::fstat(&afd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
-    check_owner_mode(&st, path, req.owner, req.mode_mask)?;
-
-    let probed = crate::strategy::capability_from_probe(syscall::probe_openat2(&afd));
-
-    Ok(Anchor {
-        fd: afd,
-        path: path.to_path_buf(),
-        pref,
-        probed,
-    })
+    finish_anchor(afd, path, req, pref)
 }
 
 /// Open an absolute directory path once, following a symlink in the anchor path and
@@ -212,6 +201,15 @@ pub fn open_anchor_resolved(
         return Err(IoError::RootAnchor);
     }
     let afd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
+    finish_anchor(afd, path, req, pref)
+}
+
+fn finish_anchor(
+    afd: OwnedFd,
+    path: &Path,
+    req: AnchorRequired,
+    pref: StrategyPref,
+) -> Result<Anchor, IoError> {
     let st =
         syscall::fstat(&afd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
     check_owner_mode(&st, path, req.owner, req.mode_mask)?;
