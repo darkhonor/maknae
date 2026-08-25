@@ -86,15 +86,31 @@ pub fn load_str(input: &str) -> Result<Value, ConfigError> {
 
 /// Read a file and parse it. Invalid UTF-8 or an I/O failure → [`ConfigError::Io`].
 pub fn load_file(path: &std::path::Path) -> Result<Value, ConfigError> {
-    let text = loader::read_secure(path)?;
-    load_str(&text)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        let text = loader::read_secure(path)?;
+        load_str(&text)
+    }
 }
 
 /// Read and parse a root-controlled host artifact. The opened file must be regular,
 /// root-owned, and not writable by group or other users.
 pub fn load_root_file(path: &std::path::Path) -> Result<Value, ConfigError> {
-    let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
-    load_str(&text)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
+        load_str(&text)
+    }
 }
 
 #[cfg(test)]

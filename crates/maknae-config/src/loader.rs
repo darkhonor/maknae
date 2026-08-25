@@ -54,20 +54,6 @@ pub(crate) fn read_secure_required(
     read_from_anchor_required(&anchor, Path::new(name), None, owner, mode_mask)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn read_secure(_path: &Path) -> Result<String, ConfigError> {
-    Err(ConfigError::PermissionsUnsupported)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn read_secure_required(
-    _path: &Path,
-    _owner: Option<u32>,
-    _mode_mask: Option<u32>,
-) -> Result<String, ConfigError> {
-    Err(ConfigError::PermissionsUnsupported)
-}
-
 #[cfg(unix)]
 fn map_io(e: maknae_io::IoError) -> ConfigError {
     match e {
