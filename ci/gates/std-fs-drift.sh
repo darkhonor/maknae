@@ -16,7 +16,7 @@ excluded_parts = {"tests", "benches", "examples"}
 pattern = re.compile(
     r"std::fs::(?:read|read_to_string|write|remove_file|create_dir|create_dir_all|"
     r"set_permissions|symlink_metadata|metadata|OpenOptions)|use std::fs::|"
-    r"\bFile::(?:open|create)|\bOpenOptions::"
+    r"\bFile::(?:open|create)|\bOpenOptions::|owner:\s*None|mode_mask:\s*None"
 )
 found = set()
 for rel in files:
@@ -28,21 +28,24 @@ for rel in files:
     lines = (root / rel).read_text().splitlines()
     if any("#![cfg(test)]" in line for line in lines[:5]):
         continue
-    for line in lines:
+    for number, line in enumerate(lines, 1):
         if line.startswith("#[cfg(test)]") or line.startswith("#[cfg(all(test,"):
             break
         stripped = line.strip()
         if stripped.startswith("//"):
             continue
         if pattern.search(stripped):
-            found.add(f"{rel}|{stripped}")
+            found.add(f"{rel}:{number}|{stripped}")
 if found:
     print("\n".join(sorted(found)))
 PY
 
-if ! diff -u "$allow" "$tmp" >/dev/null; then
+reviewed="$(mktemp)"
+trap 'rm -f "$tmp" "$reviewed"' EXIT
+awk '!/^#/ && NF' "$allow" | sort >"$reviewed"
+if ! diff -u "$reviewed" "$tmp" >/dev/null; then
   echo "FAIL: production std::fs inventory differs from the exact reviewed allowlist"
-  diff -u "$allow" "$tmp" || true
+  diff -u "$reviewed" "$tmp" || true
   exit 1
 fi
 echo "std-fs-drift: exact production inventory matches reviewed allowlist"
