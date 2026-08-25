@@ -115,7 +115,7 @@ for rel in files:
     scan_source = production_only(source)
     fs_source = mask_noncode(scan_source)
     forbidden_import = re.compile(
-        r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+|"
+        r"\b(?:use|extern\s+crate)\s+(?:::)?std\s+as\s+\w+|"
         r"\buse\s+std\s*::\s*fs\s+as\s+\w+|"
         r"\buse\s+std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
         r"\buse\s+std\s*::\s*\{[^}]{0,500}?\bfs\b"

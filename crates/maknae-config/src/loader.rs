@@ -42,7 +42,7 @@ pub(crate) fn read_secure_required(
     let name = absolute
         .file_name()
         .ok_or_else(|| io_err("file has no name"))?;
-    let anchor = maknae_io::open_anchor(
+    let anchor = maknae_io::open_anchor_resolved(
         parent,
         maknae_io::AnchorRequired {
             owner: None,

@@ -478,14 +478,14 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
         let name = absolute
             .file_name()
             .ok_or_else(|| AuthzError::Io("authz path has no name".into()))?;
-        let anchor = maknae_io::open_anchor(
+        let anchor = maknae_io::open_anchor_resolved(
             parent,
             maknae_io::AnchorRequired {
                 // Directory traversal and replacement authority come from the
                 // current process's OS DAC rights. The opened policy inode
                 // itself is separately required to remain root-owned.
                 owner: None,
-                mode_mask: Some(0o022),
+                mode_mask: None,
             },
             maknae_io::StrategyPref::Auto,
         )

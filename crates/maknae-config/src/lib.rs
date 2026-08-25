@@ -253,6 +253,27 @@ mod tests {
         assert!(matches!(r, Err(ConfigError::Io(_))));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn load_file_resolves_a_symlinked_parent_once() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = std::env::temp_dir().join("maknae_config_symlink_parent");
+        let real = base.join("real");
+        let link = base.join("current");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("config.yaml"), "x: 1\n").unwrap();
+        std::fs::set_permissions(
+            real.join("config.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        symlink(&real, &link).unwrap();
+        let got = load_file(&link.join("config.yaml"));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
+    }
+
     #[cfg(not(unix))]
     #[test]
     fn filesystem_loaders_refuse_without_unix_permissions() {
