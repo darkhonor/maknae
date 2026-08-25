@@ -90,6 +90,13 @@ pub fn load_file(path: &std::path::Path) -> Result<Value, ConfigError> {
     load_str(&text)
 }
 
+/// Read and parse a root-controlled host artifact. The opened file must be regular,
+/// root-owned, and not writable by group or other users.
+pub fn load_root_file(path: &std::path::Path) -> Result<Value, ConfigError> {
+    let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
+    load_str(&text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +234,17 @@ mod tests {
         let r = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(r, Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_root_file_refuses_non_root_owned_artifact() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join("maknae_config_nonroot.yaml");
+        std::fs::write(&path, "x: 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let got = load_root_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(got, Err(ConfigError::Io(message)) if message.contains("require 0")));
     }
 }

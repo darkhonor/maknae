@@ -26,6 +26,15 @@ pub(crate) fn io_err(e: impl std::fmt::Display) -> ConfigError {
 /// bounded lstat→open race within the trusted-group dir boundary (spec §3).
 #[cfg(unix)]
 pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
+    read_secure_required(path, None, Some(0o007))
+}
+
+#[cfg(unix)]
+pub(crate) fn read_secure_required(
+    path: &Path,
+    owner: Option<u32>,
+    mode_mask: Option<u32>,
+) -> Result<String, ConfigError> {
     let absolute = std::path::absolute(path).map_err(io_err)?;
     let parent = absolute
         .parent()
@@ -42,7 +51,7 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
         maknae_io::StrategyPref::Auto,
     )
     .map_err(map_io)?;
-    read_from_anchor(&anchor, Path::new(name), None)
+    read_from_anchor_required(&anchor, Path::new(name), None, owner, mode_mask)
 }
 
 #[cfg(unix)]
@@ -67,13 +76,24 @@ fn read_from_anchor(
     rel: &Path,
     desc: Option<maknae_io::DescendantRequired>,
 ) -> Result<String, ConfigError> {
+    read_from_anchor_required(anchor, rel, desc, None, Some(0o007))
+}
+
+#[cfg(unix)]
+fn read_from_anchor_required(
+    anchor: &maknae_io::Anchor,
+    rel: &Path,
+    desc: Option<maknae_io::DescendantRequired>,
+    owner: Option<u32>,
+    mode_mask: Option<u32>,
+) -> Result<String, ConfigError> {
     let bytes = anchor
         .read(
             rel,
             desc,
             maknae_io::TargetRequired {
-                owner: None,
-                mode_mask: Some(0o007),
+                owner,
+                mode_mask,
                 nlink_exactly_one: false,
                 regular_file: true,
             },
