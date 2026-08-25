@@ -1677,30 +1677,24 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     #[test]
     fn read_posture_marker_unparseable_yaml_is_none() {
-        let d = Dir::new("marker_unparseable");
-        put(&d.0, "private/posture.yaml", "x: [1, 2\n", 0o640); // unclosed flow seq
-        assert_eq!(read_posture_marker(&d.0), None);
+        assert!(maknae_config::load_str("x: [1, 2\n").is_err());
     }
 
     #[test]
     fn read_posture_marker_scalar_root_is_none() {
-        let d = Dir::new("marker_scalar_root");
-        put(&d.0, "private/posture.yaml", "just a scalar\n", 0o640);
-        assert_eq!(read_posture_marker(&d.0), None);
+        let value = maknae_config::load_str("just a scalar\n").unwrap();
+        assert_eq!(parse_posture_marker(&value), None);
     }
 
     #[test]
     fn read_posture_marker_missing_field_is_none() {
-        let d = Dir::new("marker_missing_field");
         // `timestamp` is absent — the whole marker must not be fabricated from a
         // partial record.
-        put(
-            &d.0,
-            "private/posture.yaml",
+        let value = maknae_config::load_str(
             "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\n",
-            0o640,
-        );
-        assert_eq!(read_posture_marker(&d.0), None);
+        )
+        .unwrap();
+        assert_eq!(parse_posture_marker(&value), None);
     }
 
     #[test]

@@ -12,16 +12,12 @@ root = Path(sys.argv[1])
 files = subprocess.check_output(
     ["git", "-C", str(root), "ls-files", "*.rs"], text=True
 ).splitlines()
-excluded_parts = {"tests", "benches", "examples"}
 fs_pattern = re.compile(
     r"std\s*::\s*fs|use\s+std\s*::\s*\{[\s\S]{0,500}?\bfs\b|"
     r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+|"
     r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
 requirements_pattern = re.compile(r"owner:\s*None|mode_mask:\s*None")
-# This external module is compiled only by `#[cfg(test)] mod transport_tests;` in
-# maknae-vault/lib.rs. Keep the exemption exact rather than exempting src/*_tests.rs.
-test_only_files = {"crates/maknae-vault/src/transport_tests.rs"}
 found = set()
 
 def mask_noncode(source):
@@ -104,9 +100,12 @@ def production_only(source):
 
 for rel in files:
     p = Path(rel)
-    if rel.startswith("crates/maknae-io/") or p.name == "build.rs" or rel in test_only_files:
+    if rel.startswith("crates/maknae-io/") or p.name == "build.rs":
         continue
-    if excluded_parts.intersection(p.parts):
+    # Cargo's package-root integration-test/benchmark/example targets never enter
+    # a production library or binary. A `src/tests/` path is deliberately not covered.
+    if any(part in {"tests", "benches", "examples"} and "src" not in p.parts[:i]
+           for i, part in enumerate(p.parts)):
         continue
     source = (root / rel).read_text()
     lines = source.splitlines()
@@ -115,6 +114,16 @@ for rel in files:
     scan_source = production_only(source)
     scan_lines = ["" if line.lstrip().startswith("//") else line for line in scan_source.splitlines()]
     fs_source = "\n".join(scan_lines)
+    forbidden_import = re.compile(
+        r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+|"
+        r"\buse\s+std\s*::\s*fs\s+as\s+\w+|"
+        r"\buse\s+std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
+        r"\buse\s+std\s*::\s*\{[\s\S]{0,500}?\bfs\b"
+    )
+    match = forbidden_import.search(fs_source)
+    if match:
+        number = fs_source.count("\n", 0, match.start()) + 1
+        found.add(f"__VIOLATION__ {rel}:{number}: aliased or unqualified std::fs import is forbidden")
     for match in fs_pattern.finditer(fs_source):
         number = fs_source.count("\n", 0, match.start()) + 1
         found.add(f"{rel}:{number}|{lines[number - 1].strip()}")
@@ -127,6 +136,12 @@ for rel in files:
 if found:
     print("\n".join(sorted(found)))
 PY
+
+if grep -q '^__VIOLATION__' "$tmp"; then
+  echo "FAIL: production std::fs aliases and unqualified imports are forbidden"
+  grep '^__VIOLATION__' "$tmp"
+  exit 1
+fi
 
 reviewed="$(mktemp)"
 trap 'rm -f "$tmp" "$reviewed"' EXIT

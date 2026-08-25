@@ -203,6 +203,7 @@ std_fs_reject "whitespace-qualified" 'pub fn bad() { let _ = std :: fs :: read("
 std_fs_reject "production-after-test" '#[cfg(test)]\nmod tests {}\npub fn bad() { let _ = std::fs::read("a"); }\n'
 std_fs_reject "async-production-after-test" '#[cfg(test)]\nmod tests {}\npub async fn bad() { let _ = std::fs::read("a"); }\n'
 std_fs_reject "std-module-alias" 'use std as platform;\npub fn bad() { let _ = platform::fs::read("a"); }\n'
+std_fs_reject "unqualified-import" 'use std::fs::read;\npub fn bad() { let _ = read("a"); }\n'
 
 tmpF_alias="$(mktemp -d)"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
@@ -234,6 +235,24 @@ if ! "$tmpF2/ci/gates/std-fs-drift.sh" "$tmpF2" >/dev/null; then
   exit 1
 fi
 echo "neg-ok: [std-fs-drift/test-only] test fixture permitted"
+
+tmpF3="$(mktemp -d)"
+mkdir -p "$tmpF3/ci/gates" "$tmpF3/crates/x/src/tests"
+cp "$here/std-fs-drift.sh" "$tmpF3/ci/gates/"
+: > "$tmpF3/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn bad() { let _ = std::fs::read("a"); }\n' > "$tmpF3/crates/x/src/tests/bad.rs"
+git -C "$tmpF3" init -q
+git -C "$tmpF3" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/tests/bad.rs
+expect_reject "std-fs-drift/src-tests-production" "$tmpF3/ci/gates/std-fs-drift.sh" "$tmpF3"
+
+tmpF4="$(mktemp -d)"
+mkdir -p "$tmpF4/ci/gates" "$tmpF4/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF4/ci/gates/"
+: > "$tmpF4/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn fixture() { let _ = std::fs::read("a"); }\n' > "$tmpF4/crates/x/src/transport_tests.rs"
+git -C "$tmpF4" init -q
+git -C "$tmpF4" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/transport_tests.rs
+expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drift.sh" "$tmpF4"
 
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]
