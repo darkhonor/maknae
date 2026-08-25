@@ -116,7 +116,7 @@ for rel in files:
         r"\b(?:use|extern\s+crate)\s+(?:::)?std\s+as\s+\w+|"
         r"\buse\s+(?:::)?std\s*::\s*fs\s+as\s+\w+|"
         r"\buse\s+(?:::)?std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
-        r"\buse\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\bfs\b"
+        r"\buse\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\b(?:fs\b|self\s+as\b)"
     )
     match = forbidden_import.search(fs_source)
     if match:
