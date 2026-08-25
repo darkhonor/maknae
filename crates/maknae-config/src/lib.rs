@@ -86,10 +86,8 @@ pub fn load_str(input: &str) -> Result<Value, ConfigError> {
 
 /// Read a file and parse it. Invalid UTF-8 or an I/O failure → [`ConfigError::Io`].
 pub fn load_file(path: &std::path::Path) -> Result<Value, ConfigError> {
-    let bytes = std::fs::read(path).map_err(|e| ConfigError::Io(e.to_string()))?;
-    let text =
-        std::str::from_utf8(&bytes).map_err(|e| ConfigError::Io(format!("invalid UTF-8: {e}")))?;
-    load_str(text)
+    let text = loader::read_secure(path)?;
+    load_str(&text)
 }
 
 #[cfg(test)]
@@ -205,8 +203,10 @@ mod tests {
 
     #[test]
     fn load_file_reads_and_parses() {
+        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join("maknae_config_ok.yaml");
         std::fs::write(&path, "x: 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let got = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
@@ -220,8 +220,10 @@ mod tests {
 
     #[test]
     fn load_file_bad_utf8_is_io() {
+        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join("maknae_config_badutf8.yaml");
         std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let r = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(r, Err(ConfigError::Io(_))));
