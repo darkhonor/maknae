@@ -222,6 +222,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_file_reads_and_parses() {
         use std::os::unix::fs::PermissionsExt;
@@ -233,12 +234,14 @@ mod tests {
         assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_file_missing_is_io() {
         let path = std::path::Path::new("/nonexistent/maknae_config_nope.yaml");
         assert!(matches!(load_file(path), Err(ConfigError::Io(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_file_bad_utf8_is_io() {
         use std::os::unix::fs::PermissionsExt;
@@ -248,6 +251,17 @@ mod tests {
         let r = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(r, Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn filesystem_loaders_refuse_without_unix_permissions() {
+        let path = std::path::Path::new("config.yaml");
+        assert_eq!(load_file(path), Err(ConfigError::PermissionsUnsupported));
+        assert_eq!(
+            load_root_file(path),
+            Err(ConfigError::PermissionsUnsupported)
+        );
     }
 
     #[cfg(unix)]

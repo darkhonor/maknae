@@ -13,7 +13,7 @@ files = subprocess.check_output(
     ["git", "-C", str(root), "ls-files", "*.rs"], text=True
 ).splitlines()
 fs_pattern = re.compile(
-    r"std\s*::\s*fs|use\s+std\s*::\s*\{[\s\S]{0,500}?\bfs\b|"
+    r"\bstd\s*::\s*fs\b|use\s+std\s*::\s*\{[^}]{0,500}?\bfs\b|"
     r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+|"
     r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
@@ -100,7 +100,7 @@ def production_only(source):
 
 for rel in files:
     p = Path(rel)
-    if rel.startswith("crates/maknae-io/") or p.name == "build.rs":
+    if p.name == "build.rs":
         continue
     # Cargo's package-root integration-test/benchmark/example targets never enter
     # a production library or binary. A `src/tests/` path is deliberately not covered.
@@ -109,16 +109,16 @@ for rel in files:
         continue
     source = (root / rel).read_text()
     lines = source.splitlines()
-    if any("#![cfg(test)]" in line for line in lines[:5]):
+    masked = mask_noncode(source)
+    if re.search(r"(?m)\A(?:[ \t]*\n)*[ \t]*#!\[cfg\(test\)\]", masked):
         continue
     scan_source = production_only(source)
-    scan_lines = ["" if line.lstrip().startswith("//") else line for line in scan_source.splitlines()]
-    fs_source = "\n".join(scan_lines)
+    fs_source = mask_noncode(scan_source)
     forbidden_import = re.compile(
         r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+|"
         r"\buse\s+std\s*::\s*fs\s+as\s+\w+|"
         r"\buse\s+std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
-        r"\buse\s+std\s*::\s*\{[\s\S]{0,500}?\bfs\b"
+        r"\buse\s+std\s*::\s*\{[^}]{0,500}?\bfs\b"
     )
     match = forbidden_import.search(fs_source)
     if match:

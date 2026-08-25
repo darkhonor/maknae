@@ -6,6 +6,40 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+#[cfg(not(unix))]
+mod maknae_io {
+    pub use zeroize::Zeroizing;
+
+    pub struct TargetRequired {
+        pub owner: Option<u32>,
+        pub mode_mask: Option<u32>,
+        pub nlink_exactly_one: bool,
+        pub regular_file: bool,
+    }
+
+    pub enum StrategyPref {
+        Auto,
+    }
+
+    pub struct Outcome<T> {
+        pub value: T,
+    }
+
+    pub fn read_absolute(
+        _path: &std::path::Path,
+        target: TargetRequired,
+        _pref: StrategyPref,
+    ) -> Result<Outcome<Zeroizing<Vec<u8>>>, &'static str> {
+        let _ = (
+            target.owner,
+            target.mode_mask,
+            target.nlink_exactly_one,
+            target.regular_file,
+        );
+        Err("secure storage permission enforcement is unavailable on this platform")
+    }
+}
+
 mod auth;
 mod ca;
 mod client;

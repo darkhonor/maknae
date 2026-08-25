@@ -28,6 +28,11 @@ crates/maknae-audit-append/src/sink.rs:76|let mut opts = std::fs::OpenOptions::n
 crates/maknae-config/src/authz.rs:487|owner: None,
 crates/maknae-config/src/loader.rs:48|owner: None,
 crates/maknae-config/src/loader.rs:49|mode_mask: None,
+
+# read_absolute pins the configured path's parent; OS DAC is the named directory
+# requirement while the caller supplies the target artifact requirements.
+crates/maknae-io/src/anchor.rs:243|owner: None,
+crates/maknae-io/src/anchor.rs:244|mode_mask: None,
 crates/maknae-config/src/loader.rs:181|owner: None,
 crates/maknae-config/src/loader.rs:223|owner: None,
 crates/maknae-config/src/loader.rs:269|owner: None,

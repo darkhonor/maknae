@@ -197,9 +197,6 @@ pub fn open_anchor_resolved(
             path: path.to_path_buf(),
         });
     }
-    if path.parent().is_none() {
-        return Err(IoError::RootAnchor);
-    }
     let afd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
     finish_anchor(afd, path, req, pref)
 }
@@ -240,7 +237,7 @@ pub fn read_absolute(
         .ok_or_else(|| IoError::AnchorEndsInDotDot {
             path: path.to_path_buf(),
         })?;
-    let anchor = open_anchor(
+    let anchor = open_anchor_resolved(
         parent,
         AnchorRequired {
             owner: None,
@@ -598,6 +595,20 @@ mod tests {
             got,
             Err(IoError::RelativeAnchor { path }) if path == Path::new("relative")
         ));
+    }
+
+    #[test]
+    fn resolved_anchor_accepts_filesystem_root() {
+        let anchor = open_anchor_resolved(
+            Path::new("/"),
+            AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            StrategyPref::ForcePortable,
+        )
+        .expect("filesystem root is a valid resolved anchor");
+        assert_eq!(anchor.path, Path::new("/"));
     }
 
     #[test]
