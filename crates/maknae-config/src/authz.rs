@@ -934,7 +934,12 @@ mod tests {
     // ---- secure load (cfg(unix)): symlink / mode / owner / io ----
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("maknae_authz_{}_{name}", std::process::id()))
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("maknae_authz_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir.join(name)
     }
 
     fn write_mode(path: &Path, body: &str, mode: u32) {
