@@ -1,0 +1,59 @@
+# Enrollment is one privileged create/chmod/chown transaction. maknae-io has no
+# chown-capable transaction contract; wrapping only the byte write would split it.
+bins/maknae/src/enroll/artifact_write.rs:119|std::fs::set_permissions(
+bins/maknae/src/enroll/artifact_write.rs:121|std::fs::Permissions::from_mode(artifact.mode),
+bins/maknae/src/enroll/artifact_write.rs:130|std::fs::create_dir_all(&artifact.path).map_err(|e| io_err(&artifact.path, e))?;
+bins/maknae/src/enroll/artifact_write.rs:140|std::fs::write(&artifact.path, bytes).map_err(|e| io_err(&artifact.path, e))?;
+bins/maknae/src/enroll/mod.rs:712|let _ = std::fs::remove_file(&out_path);
+bins/maknae/src/enroll/mod.rs:742|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
+
+# Enrollment input reads intentionally preserve their existing caller-selected symlink and
+# permission semantics. maknae-io has no follow-final-symlink read contract; migration would
+# be a behavior change and belongs to the enrollment I/O contract work, not this storage pass.
+bins/maknae/src/enroll/mod.rs:857|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs:1205|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs:1221|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs:1263|Some(root_path) => match std::fs::read_to_string(&root_path) {
+
+# Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
+# opens per call and intentionally has a different lifecycle/durability contract.
+crates/maknae-audit-append/src/sink.rs:13|use std::fs::File;
+crates/maknae-audit-append/src/sink.rs:19|fn open_options() -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:21|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs:75|fn open_options() -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:76|let mut opts = std::fs::OpenOptions::new();
+
+# None means OS DAC is sufficient at that scope; stronger artifact requirements are
+# separately named on the target (authz/posture/plaintext credential where applicable).
+crates/maknae-config/src/authz.rs:487|owner: None,
+crates/maknae-config/src/authz.rs:488|mode_mask: None,
+crates/maknae-config/src/loader.rs:48|owner: None,
+crates/maknae-config/src/loader.rs:49|mode_mask: None,
+
+# read_absolute pins the configured path's parent; OS DAC is the named directory
+# requirement while the caller supplies the target artifact requirements.
+crates/maknae-io/src/anchor.rs:243|owner: None,
+crates/maknae-io/src/anchor.rs:244|mode_mask: None,
+crates/maknae-config/src/loader.rs:167|owner: None,
+crates/maknae-config/src/loader.rs:209|owner: None,
+crates/maknae-config/src/loader.rs:255|owner: None,
+crates/maknae-vault/src/ca.rs:21|owner: None,
+crates/maknae-vault/src/ca.rs:22|mode_mask: None,
+crates/maknae-vault/src/client.rs:114|owner: None,
+crates/maknae-vault/src/client.rs:115|mode_mask: None,
+crates/maknae-vault/src/client.rs:145|owner: None,
+
+# Non-Unix Stage-1 requirement-free CA/RoleID reads preserve the crate's documented
+# cross-platform behavior; reads naming owner/mode/nlink requirements refuse instead.
+crates/maknae-vault/src/lib.rs:37|std::fs::read(path)
+crates/maknae-vault/src/secret_io.rs:31|owner: None,
+crates/maknae-vault/src/secret_io.rs:32|mode_mask: None,
+
+# Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
+crates/maknae-vault/src/socket.rs:16|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {
+crates/maknae-vault/src/socket.rs:56|match std::fs::symlink_metadata(path) {
+crates/maknae-vault/src/socket.rs:70|std::fs::remove_file(path)
+crates/maknae-vault/src/socket.rs:102|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/socket.rs:114|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
+crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);

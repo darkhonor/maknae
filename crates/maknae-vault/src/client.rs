@@ -108,11 +108,20 @@ pub struct PlaneClient {
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
-    std::fs::read_to_string(path)
+    let bytes = crate::read_storage(
+        path,
+        maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        },
+    )?;
+    std::str::from_utf8(&bytes)
         .map(|s| s.trim().to_string())
-        .map_err(|source| VaultError::Io {
+        .map_err(|e| VaultError::Io {
             path: path.to_path_buf(),
-            source,
+            source: std::io::Error::other(e.to_string()),
         })
 }
 
@@ -123,41 +132,48 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// gate (the sealed branches — `$CREDENTIALS_DIRECTORY`, SEP — do not, since
 /// systemd/SEP produce their own `0400` artifacts).
 pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
-    let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if meta.file_type().is_symlink() {
-        return Err(VaultError::InsecureCredential {
-            path: path.to_path_buf(),
-            detail: "is a symlink".to_string(),
-        });
-    }
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
     // a unix CI runner, hence no mutation/coverage obligation on the non-unix arm.
     #[cfg(not(unix))]
     {
-        let _ = &meta;
         Err(VaultError::PermissionsUnsupported)
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(VaultError::InsecureCredential {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "mode {mode:o} allows group/other access (require 0600 or stricter)"
-                ),
-            });
-        }
-        std::fs::read_to_string(path)
+        let target = maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o077),
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let absolute = crate::absolute_storage_path(path)?;
+        let bytes = maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
+            .map_err(|error| match error {
+                maknae_io::IoError::Symlink { .. } => VaultError::InsecureCredential {
+                    path: path.to_path_buf(),
+                    detail: "is a symlink".into(),
+                },
+                maknae_io::IoError::InsecurePermissions { mode, .. } => {
+                    VaultError::InsecureCredential {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "mode {:o} allows group/other access (require 0600 or stricter)",
+                            mode & 0o777
+                        ),
+                    }
+                }
+                other => VaultError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other(other.to_string()),
+                },
+            })?
+            .value;
+        std::str::from_utf8(&bytes)
             .map(|s| s.trim().to_string())
-            .map_err(|source| VaultError::Io {
+            .map_err(|e| VaultError::Io {
                 path: path.to_path_buf(),
-                source,
+                source: std::io::Error::other(e.to_string()),
             })
     }
 }
@@ -753,6 +769,17 @@ mod tests {
         let p = tmpfile("secure", 0o600);
         assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn secret_credential_accepts_a_relative_path() {
+        let name = format!("mv-relative-{}", std::process::id());
+        let path = std::path::PathBuf::from(&name);
+        std::fs::write(&path, "relative-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let got = read_secret_credential(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), "relative-secret");
     }
 
     // ---- from_document plane dispatch (Task 4) ---------------------------------

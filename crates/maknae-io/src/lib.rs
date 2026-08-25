@@ -55,7 +55,10 @@ mod syscall;
 mod walk;
 mod write;
 
-pub use anchor::{open_anchor, Anchor, Entry, Kind, Mode, Outcome, Strategy, StrategyPref};
+pub use anchor::{
+    open_anchor, open_anchor_resolved, read_absolute, Anchor, Entry, Kind, Mode, Outcome, Strategy,
+    StrategyPref,
+};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use error::{IoError, IoKind};
 pub use normalize::normalize;

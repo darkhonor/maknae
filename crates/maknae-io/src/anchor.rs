@@ -182,18 +182,70 @@ pub fn open_anchor(
         crate::checks::map_errno(e, path, || syscall::fstatat_nofollow(&pfd, basename))
     })?;
 
+    finish_anchor(afd, path, req, pref)
+}
+
+/// Open an absolute directory path once, following a symlink in the anchor path and
+/// pinning the resolved directory inode. Descendant resolution remains symlink-refusing.
+pub fn open_anchor_resolved(
+    path: &Path,
+    req: AnchorRequired,
+    pref: StrategyPref,
+) -> Result<Anchor, IoError> {
+    if !path.is_absolute() {
+        return Err(IoError::RelativeAnchor {
+            path: path.to_path_buf(),
+        });
+    }
+    let afd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
+    finish_anchor(afd, path, req, pref)
+}
+
+fn finish_anchor(
+    afd: OwnedFd,
+    path: &Path,
+    req: AnchorRequired,
+    pref: StrategyPref,
+) -> Result<Anchor, IoError> {
     let st =
         syscall::fstat(&afd).map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
     check_owner_mode(&st, path, req.owner, req.mode_mask)?;
-
     let probed = crate::strategy::capability_from_probe(syscall::probe_openat2(&afd));
-
     Ok(Anchor {
         fd: afd,
         path: path.to_path_buf(),
         pref,
         probed,
     })
+}
+
+/// Read one absolute file through a pinned parent anchor. This is the adapter for
+/// callers that own a single configured path rather than a reusable subtree.
+pub fn read_absolute(
+    path: &Path,
+    target: TargetRequired,
+    pref: StrategyPref,
+) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
+    if !path.is_absolute() {
+        return Err(IoError::RelativeAnchor {
+            path: path.to_path_buf(),
+        });
+    }
+    let parent = path.parent().ok_or(IoError::RootAnchor)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| IoError::AnchorEndsInDotDot {
+            path: path.to_path_buf(),
+        })?;
+    let anchor = open_anchor_resolved(
+        parent,
+        AnchorRequired {
+            owner: None,
+            mode_mask: None,
+        },
+        pref,
+    )?;
+    anchor.read(Path::new(name), None, target)
 }
 
 impl Anchor {
@@ -535,6 +587,53 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_absolute_refuses_relative_input() {
+        let got = read_absolute(Path::new("relative"), t_req(), StrategyPref::Auto);
+        assert!(matches!(
+            got,
+            Err(IoError::RelativeAnchor { path }) if path == Path::new("relative")
+        ));
+    }
+
+    #[test]
+    fn resolved_anchor_accepts_filesystem_root() {
+        let anchor = open_anchor_resolved(
+            Path::new("/"),
+            AnchorRequired {
+                owner: None,
+                mode_mask: None,
+            },
+            StrategyPref::ForcePortable,
+        )
+        .expect("filesystem root is a valid resolved anchor");
+        assert_eq!(anchor.path, Path::new("/"));
+    }
+
+    #[test]
+    fn resolved_anchor_follows_and_pins_a_symlinked_directory() {
+        let real = dir(0o750);
+        let value = real.path().join("value");
+        std::fs::write(&value, b"before").unwrap();
+        std::fs::set_permissions(&value, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("config-link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let anchor = open_anchor_resolved(
+            &link,
+            AnchorRequired {
+                owner: None,
+                mode_mask: Some(0o007),
+            },
+            StrategyPref::Auto,
+        )
+        .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(holder.path(), &link).unwrap();
+        let got = anchor.read(Path::new("value"), None, t_req()).unwrap();
+        assert_eq!(&*got.value, b"before");
+    }
     /// Serialises publishing tests. The temp counter is process-global (two Anchors
     /// in one process would otherwise collide on the same name under O_EXCL with no
     /// retry), which trades away per-test determinism under the parallel harness.

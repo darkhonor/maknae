@@ -15,7 +15,7 @@
 //! variant to a `MsgId` is the daemon call site's job (`run.rs`), not this
 //! crate's — keeps `maknae-config` off the `maknae-msgs` dependency (spec §4.3).
 
-use crate::{ConfigError, Value};
+use crate::Value;
 use std::path::Path;
 
 // ============================================================================
@@ -263,12 +263,11 @@ pub enum AuthzError {
     BadPattern(String),
     /// A pattern used `~` but no principal is enrolled to resolve it against.
     TildeWithoutPrincipal(String),
-    /// `authz.yaml` carries world/other-accessible permission bits, OR is
-    /// group-writable (spec §4.6/§7: `authz.yaml` is `root:_maknae` and the
+    /// `authz.yaml` is writable by group/other (spec §4.6/§7: it is
+    /// `root:_maknae` and the
     /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
     /// group-writable file lets a compromised daemon rewrite its own DAC
-    /// policy even though `assert_root_owned` and the world-bit gate both
-    /// pass).
+    /// policy even though root ownership and a world-bit-only gate both pass.
     InsecurePermissions,
     /// `authz.yaml` (or a path component) is a symlink — refused.
     Symlink,
@@ -296,10 +295,9 @@ impl std::fmt::Display for AuthzError {
                 f,
                 "pattern '{p}' uses '~' but no principal is enrolled to resolve it"
             ),
-            AuthzError::InsecurePermissions => write!(
-                f,
-                "authz.yaml has insecure (world/other-accessible) permissions"
-            ),
+            AuthzError::InsecurePermissions => {
+                write!(f, "authz.yaml has insecure group/other write permissions")
+            }
             AuthzError::Symlink => write!(f, "authz.yaml path is a symlink (refused)"),
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
             AuthzError::Io(m) => write!(f, "authz i/o error: {m}"),
@@ -432,47 +430,26 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
 /// filesystem access or root privilege (mirrors the mode-mask precedent in
 /// `loader.rs::mode_is_secure`).
 #[cfg(unix)]
-fn assert_root_owned(uid: u32) -> Result<(), AuthzError> {
-    if uid == 0 {
-        Ok(())
-    } else {
-        Err(AuthzError::NotRootOwned)
+fn authz_target_required() -> maknae_io::TargetRequired {
+    maknae_io::TargetRequired {
+        owner: Some(0),
+        mode_mask: Some(0o022),
+        nlink_exactly_one: false,
+        regular_file: true,
     }
 }
 
-/// Read `authz.yaml` via the loader's existing secure read (symlink refusal +
-/// `mode & 0o007 == 0` gate, `loader.rs:33`) PLUS an explicit root-ownership
-/// assertion (spec §4.6/§7: root ownership is the control that stops a
-/// compromised `_maknae` from widening its own DAC by editing this file) PLUS
-/// an explicit group-write rejection (`mode & 0o022 != 0`).
+/// Read `authz.yaml` through a pinned [`maknae_io`] anchor with an explicit
+/// root-owner requirement and `mode & 0o022 == 0` target requirement. Root
+/// ownership stops a compromised `_maknae` process from replacing its own
+/// policy; the mode mask separately rejects group- or world-writable policy.
 ///
 /// The group-write check closes a gap the two controls above leave open:
 /// `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
-/// `_maknae`, whose PRIMARY group is `_maknae` — so a `root:_maknae 0660`
-/// file is root-owned (passes the owner check) and has no world bits (passes
-/// `read_secure`'s mode gate) but IS writable by the daemon's own group,
-/// letting a compromised daemon rewrite its own authorization policy. Spec
-/// §4.6's shipped mode is `0640` (group-READ only, needed so the daemon can
-/// read a root-owned file) — `0o022` covers group-write AND other-write
-/// (other-write is already unreachable past `read_secure`'s `0o007` gate,
-/// checked again here only for defense in depth / to keep this function's
-/// contract self-contained if `read_secure`'s gate ever changes).
-///
-/// The owner check is a SEPARATE `symlink_metadata` re-resolve of `path`, not
-/// fused into `read_secure`'s already-open fd — `read_secure` returns only a
-/// `String` and checks no owner. This is safe because `authz.yaml` lives in
-/// the root-owned `/etc/maknae` (spec §4.6): `_maknae` cannot write that
-/// directory, so it cannot win a swap between the two resolves — the same
-/// bounded lstat-then-open race the loader itself already accepts, not a new
-/// one (a fused `read_secure_owned` that fstats uid on the same fd is future
-/// work, out of scope here). The mode re-check below is a THIRD stat of the
-/// same path, for the same reason: it is not fused into `read_secure` or the
-/// owner check, and accepts the identical bounded race.
-///
-/// `owner_of` is an injected seam (real caller: [`real_owner_of`]) so the
-/// SUCCESS path is unit-testable without an actual root-owned fixture file
-/// (which a non-privileged test process cannot create) — the real resolver
-/// and `assert_root_owned`'s comparison are each tested directly too.
+/// `_maknae`, whose primary group is `_maknae` — so `root:_maknae 0660` is
+/// root-owned but still writable by the daemon's group. Spec §4.6's shipped
+/// mode is `0640`, which deliberately permits group read. `maknae-io` checks
+/// ownership, type, mode, and the bytes read against the same opened inode.
 ///
 /// One function with an INLINE `#[cfg(unix)]`/`#[cfg(not(unix))]` split
 /// (mirrors `loader.rs::load_config`'s idiom), not two separate `fn` items —
@@ -480,65 +457,56 @@ fn assert_root_owned(uid: u32) -> Result<(), AuthzError> {
 /// its own mutation target on a unix build even though its body never
 /// compiles in, which is not exercisable/killable on a unix CI runner and
 /// would report as a permanently-missed mutant for dead code.
-fn security_load(
-    path: &Path,
-    owner_of: impl Fn(&Path) -> std::io::Result<u32>,
-) -> Result<String, AuthzError> {
+fn security_load(path: &Path) -> Result<String, AuthzError> {
     #[cfg(not(unix))]
     {
         // The permission/ownership model this control depends on is
         // unavailable on this target — refuse to load rather than proceed
         // unchecked (fail-closed). Not exercisable on a unix CI runner,
         // hence no mutation/coverage obligation on this arm.
-        let _ = (path, owner_of);
+        let _ = path;
         return Err(AuthzError::Io(
             "authz permission enforcement is unavailable on this platform; refusing to load".into(),
         ));
     }
     #[cfg(unix)]
     {
-        let body = crate::loader::read_secure(path).map_err(|e| match e {
-            ConfigError::Symlink { .. } => AuthzError::Symlink,
-            ConfigError::InsecurePermissions { .. } => AuthzError::InsecurePermissions,
-            other => AuthzError::Io(other.to_string()),
-        })?;
-
-        // Third separate stat of `path` (see this function's doc comment for
-        // why a fresh `symlink_metadata` call here — not fused into
-        // `read_secure` or the owner check below — is the accepted pattern):
-        // reject group-write (and, defensively, other-write) so a
-        // `root:_maknae 0660` file is refused even though it is root-owned
-        // and carries no world bits.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::symlink_metadata(path)
-            .map_err(|e| AuthzError::Io(e.to_string()))?
-            .permissions()
-            .mode();
-        if mode & 0o022 != 0 {
-            return Err(AuthzError::InsecurePermissions);
-        }
-
-        let uid = owner_of(path).map_err(|e| AuthzError::Io(e.to_string()))?;
-        assert_root_owned(uid)?;
-        Ok(body)
+        let absolute = std::path::absolute(path).map_err(|e| AuthzError::Io(e.to_string()))?;
+        let parent = absolute
+            .parent()
+            .ok_or_else(|| AuthzError::Io("authz path has no parent".into()))?;
+        let name = absolute
+            .file_name()
+            .ok_or_else(|| AuthzError::Io("authz path has no name".into()))?;
+        let anchor = maknae_io::open_anchor_resolved(
+            parent,
+            maknae_io::AnchorRequired {
+                // Directory traversal and replacement authority come from the
+                // current process's OS DAC rights. The opened policy inode
+                // itself is separately required to remain root-owned.
+                owner: None,
+                mode_mask: None,
+            },
+            maknae_io::StrategyPref::Auto,
+        )
+        .map_err(map_authz_io)?;
+        let bytes = anchor
+            .read(Path::new(name), None, authz_target_required())
+            .map_err(map_authz_io)?
+            .value;
+        std::str::from_utf8(&bytes)
+            .map(str::to_owned)
+            .map_err(|e| AuthzError::Io(format!("invalid UTF-8: {e}")))
     }
 }
 
-/// The real `owner_of` resolver `load_authz` injects into [`security_load`]
-/// (tests inject a stub instead — see `security_load_succeeds_with_injected_root_owner`).
-fn real_owner_of(path: &Path) -> std::io::Result<u32> {
-    #[cfg(not(unix))]
-    {
-        // Dead on a unix build: `security_load`'s non-unix arm refuses
-        // before ever calling `owner_of`. Kept as one function (not a second
-        // `#[cfg(not(unix))] fn`) for the same dead-mutant reason as above.
-        let _ = path;
-        Ok(0)
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::symlink_metadata(path).map(|m| m.uid())
+#[cfg(unix)]
+fn map_authz_io(e: maknae_io::IoError) -> AuthzError {
+    match e {
+        maknae_io::IoError::Symlink { .. } => AuthzError::Symlink,
+        maknae_io::IoError::InsecurePermissions { .. } => AuthzError::InsecurePermissions,
+        maknae_io::IoError::NotOwned { .. } => AuthzError::NotRootOwned,
+        other => AuthzError::Io(other.to_string()),
     }
 }
 
@@ -546,7 +514,7 @@ fn real_owner_of(path: &Path) -> std::io::Result<u32> {
 /// root-ownership assertion, then fail-closed grammar validation. `~` in any
 /// pattern resolves against `principal_home` (spec §7's enrolled operator).
 pub fn load_authz(path: &Path, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
-    let body = security_load(path, real_owner_of)?;
+    let body = security_load(path)?;
     parse_policy(&body, principal_home)
 }
 
@@ -954,22 +922,23 @@ mod tests {
     // ---- owner-check pure helper (no filesystem / root needed) ----
 
     #[test]
-    fn owner_check_helper_boundary() {
-        assert!(assert_root_owned(0).is_ok());
-        assert!(matches!(
-            assert_root_owned(1),
-            Err(AuthzError::NotRootOwned)
-        ));
-        assert!(matches!(
-            assert_root_owned(65_534),
-            Err(AuthzError::NotRootOwned)
-        ));
+    fn authz_target_contract_is_root_owned_and_not_group_writable() {
+        let req = authz_target_required();
+        assert_eq!(req.owner, Some(0));
+        assert_eq!(req.mode_mask, Some(0o022));
+        assert!(req.regular_file);
+        assert!(!req.nlink_exactly_one);
     }
 
     // ---- secure load (cfg(unix)): symlink / mode / owner / io ----
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("maknae_authz_{}_{name}", std::process::id()))
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("maknae_authz_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir.join(name)
     }
 
     fn write_mode(path: &Path, body: &str, mode: u32) {
@@ -1022,65 +991,30 @@ mod tests {
         assert!(matches!(got, Err(AuthzError::Io(_))));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn secure_loader_reads_a_real_root_owned_host_file() {
+        #[cfg(target_os = "macos")]
+        let host_file = Path::new("/private/etc/hosts");
+        #[cfg(not(target_os = "macos"))]
+        let host_file = Path::new("/etc/hosts");
+        let got = security_load(host_file);
+        assert!(
+            got.is_ok(),
+            "root-owned /etc/hosts must pass I/O checks: {got:?}"
+        );
+    }
+
     #[test]
     fn group_writable_root_owned_authz_refused() {
-        // The finding this test pins: `root:_maknae 0660` passes BOTH
-        // `read_secure`'s world-bit gate (0o007 == 0) AND `assert_root_owned`
-        // (uid 0, injected here since a non-privileged test process cannot
-        // create a genuinely root-owned fixture) — the group-write bit is the
-        // ONLY thing that must reject it.
+        // The finding this test pins: `root:_maknae 0660` is root-owned and
+        // has no world bits, but the daemon's group can rewrite it. The
+        // group-write bit must reject it.
         let p = tmp("group_writable");
         write_mode(&p, SHIPPED_DEFAULT, 0o660);
-        let got = security_load(&p, |_| Ok(0));
+        let got = security_load(&p);
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
-    }
-
-    #[test]
-    fn group_readable_root_owned_authz_0640_accepted() {
-        // The spec §4.6 shipped mode (group-READ only) must remain valid —
-        // the daemon needs group-read to open a root-owned file it does not
-        // own.
-        let p = tmp("group_readable_0640");
-        write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        let got = security_load(&p, |_| Ok(0));
-        let _ = std::fs::remove_file(&p);
-        assert_eq!(got.unwrap(), SHIPPED_DEFAULT);
-    }
-
-    #[test]
-    fn security_load_succeeds_with_injected_root_owner() {
-        // `load_authz` can never observe a genuinely root-owned fixture file
-        // without real root privilege — so the SUCCESS arm of `security_load`
-        // (symlink refusal + mode gate both pass, owner check passes) is
-        // pinned here via the injected `owner_of` seam instead: same function,
-        // same code path, a deterministic stand-in only for "what uid does
-        // this path resolve to".
-        let p = tmp("owner_injected_ok");
-        write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        let got = security_load(&p, |_| Ok(0));
-        let _ = std::fs::remove_file(&p);
-        assert_eq!(got.unwrap(), SHIPPED_DEFAULT);
-    }
-
-    #[test]
-    fn security_load_propagates_owner_of_io_error() {
-        let p = tmp("owner_of_io_err");
-        write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        let got = security_load(&p, |_| Err(std::io::Error::other("boom")));
-        let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(AuthzError::Io(m)) if m.contains("boom")));
-    }
-
-    #[test]
-    fn real_owner_of_matches_symlink_metadata() {
-        let p = tmp("real_owner_of");
-        write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        use std::os::unix::fs::MetadataExt;
-        let want = std::fs::symlink_metadata(&p).unwrap().uid();
-        let got = real_owner_of(&p).unwrap();
-        let _ = std::fs::remove_file(&p);
-        assert_eq!(got, want);
     }
 
     // ---- glob matching: remaining state-machine edges ----

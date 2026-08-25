@@ -176,5 +176,88 @@ expect_reject "coverage-tiers/unclassified-file" \
   env COVERAGE_TIERS_JSON="$tmpE/cov.json" COVERAGE_TIERS_FILELIST="$tmpE/files.list" \
       "$here/coverage-tiers.sh" --root "$tmpE" --injection
 
+tmpF="$(mktemp -d)"
+mkdir -p "$tmpF/ci/gates" "$tmpF/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF/ci/gates/"
+: > "$tmpF/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn bad(p: &std::path::Path) { let _ = std::fs::read(p); }\n' > "$tmpF/crates/x/src/lib.rs"
+git -C "$tmpF" init -q
+git -C "$tmpF" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/production-call" "$tmpF/ci/gates/std-fs-drift.sh" "$tmpF"
+
+std_fs_reject() {
+  local label="$1" source="$2" fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
+  cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
+  : > "$fixture/ci/gates/std-fs-allowlist.txt"
+  printf '%b' "$source" > "$fixture/crates/x/src/lib.rs"
+  git -C "$fixture" init -q
+  git -C "$fixture" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+  expect_reject "std-fs-drift/$label" "$fixture/ci/gates/std-fs-drift.sh" "$fixture"
+}
+
+std_fs_reject "grouped-import" 'use std::{fs};\npub fn bad() { let _ = fs::copy("a", "b"); }\n'
+std_fs_reject "unlisted-operation" 'pub fn bad() { let _ = std::fs::copy("a", "b"); }\n'
+std_fs_reject "whitespace-qualified" 'pub fn bad() { let _ = std :: fs :: read("a"); }\n'
+std_fs_reject "production-after-test" '#[cfg(test)]\nmod tests {}\npub fn bad() { let _ = std::fs::read("a"); }\n'
+std_fs_reject "async-production-after-test" '#[cfg(test)]\nmod tests {}\npub async fn bad() { let _ = std::fs::read("a"); }\n'
+std_fs_reject "std-module-alias" 'use std as platform;\npub fn bad() { let _ = platform::fs::read("a"); }\n'
+std_fs_reject "absolute-std-module-alias" 'use ::std as platform;\npub fn bad() { let _ = platform::fs::read("a"); }\n'
+std_fs_reject "absolute-fs-module-alias" 'use ::std::fs as disk;\npub fn bad() { let _ = disk::read("a"); }\n'
+std_fs_reject "grouped-std-self-alias" 'use std::{self as platform};\npub fn bad() { let _ = platform::fs::read("a"); }\n'
+std_fs_reject "unqualified-import" 'use std::fs::read;\npub fn bad() { let _ = read("a"); }\n'
+std_fs_reject "commented-crate-test-attribute" '// #![cfg(test)]\npub fn bad() { let _ = std::fs::read("a"); }\n'
+std_fs_reject "string-crate-test-attribute" 'const S: &str = "#![cfg(test)]";\npub fn bad() { let _ = std::fs::read("a"); }\n'
+
+tmpF_alias="$(mktemp -d)"
+mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF_alias/ci/gates/"
+: > "$tmpF_alias/ci/gates/std-fs-allowlist.txt"
+printf 'use std::fs as disk;\npub fn bad(p: &std::path::Path) { let _ = disk::read(p); }\n' > "$tmpF_alias/crates/x/src/lib.rs"
+git -C "$tmpF_alias" init -q
+git -C "$tmpF_alias" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/module-alias" "$tmpF_alias/ci/gates/std-fs-drift.sh" "$tmpF_alias"
+
+tmpF_stale="$(mktemp -d)"
+mkdir -p "$tmpF_stale/ci/gates" "$tmpF_stale/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF_stale/ci/gates/"
+printf 'crates/x/src/lib.rs:1|use std::fs::File;\n' > "$tmpF_stale/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn clean() {}\n' > "$tmpF_stale/crates/x/src/lib.rs"
+git -C "$tmpF_stale" init -q
+git -C "$tmpF_stale" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/stale-exemption" "$tmpF_stale/ci/gates/std-fs-drift.sh" "$tmpF_stale"
+
+tmpF2="$(mktemp -d)"
+mkdir -p "$tmpF2/ci/gates" "$tmpF2/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF2/ci/gates/"
+: > "$tmpF2/ci/gates/std-fs-allowlist.txt"
+printf '#[cfg(test)]\nmod tests { fn fixture(p: &std::path::Path) { let _ = std::fs::read(p); } }\n' > "$tmpF2/crates/x/src/lib.rs"
+git -C "$tmpF2" init -q
+git -C "$tmpF2" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+if ! "$tmpF2/ci/gates/std-fs-drift.sh" "$tmpF2" >/dev/null; then
+  echo "NEG-FAIL: [std-fs-drift/test-only] test fixture was rejected"
+  exit 1
+fi
+echo "neg-ok: [std-fs-drift/test-only] test fixture permitted"
+
+tmpF3="$(mktemp -d)"
+mkdir -p "$tmpF3/ci/gates" "$tmpF3/crates/x/src/tests"
+cp "$here/std-fs-drift.sh" "$tmpF3/ci/gates/"
+: > "$tmpF3/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn bad() { let _ = std::fs::read("a"); }\n' > "$tmpF3/crates/x/src/tests/bad.rs"
+git -C "$tmpF3" init -q
+git -C "$tmpF3" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/tests/bad.rs
+expect_reject "std-fs-drift/src-tests-production" "$tmpF3/ci/gates/std-fs-drift.sh" "$tmpF3"
+
+tmpF4="$(mktemp -d)"
+mkdir -p "$tmpF4/ci/gates" "$tmpF4/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF4/ci/gates/"
+: > "$tmpF4/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn fixture() { let _ = std::fs::read("a"); }\n' > "$tmpF4/crates/x/src/transport_tests.rs"
+git -C "$tmpF4" init -q
+git -C "$tmpF4" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/transport_tests.rs
+expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drift.sh" "$tmpF4"
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]

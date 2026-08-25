@@ -1007,6 +1007,7 @@ dependencies = [
 name = "maknae-config"
 version = "0.0.0"
 dependencies = [
+ "maknae-io",
  "serde_json",
  "yaml-rust2",
 ]
@@ -1092,6 +1093,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "maknae-config",
+ "maknae-io",
  "nix",
  "rcgen",
  "rustify",

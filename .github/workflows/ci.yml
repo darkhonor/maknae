@@ -74,6 +74,8 @@ jobs:
         run: ci/gates/build-invocation-lint.sh
       - name: Negative-control (gates must fire)
         run: ci/gates/negative-control.sh
+      - name: Direct std::fs production drift is forbidden
+        run: ci/gates/std-fs-drift.sh .
       - name: Isolation-contract lint
         run: ci/gates/isolation-contract-lint.sh
       - name: Coverage tooling (llvm-tools + cargo-llvm-cov pinned)
