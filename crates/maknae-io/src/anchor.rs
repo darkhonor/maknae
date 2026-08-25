@@ -568,7 +568,10 @@ mod tests {
     #[test]
     fn read_absolute_refuses_relative_input() {
         let got = read_absolute(Path::new("relative"), t_req(), StrategyPref::Auto);
-        assert!(matches!(got, Err(IoError::RelativeAnchor { .. })));
+        assert!(matches!(
+            got,
+            Err(IoError::RelativeAnchor { path }) if path == Path::new("relative")
+        ));
     }
     /// Serialises publishing tests. The temp counter is process-global (two Anchors
     /// in one process would otherwise collide on the same name under O_EXCL with no
