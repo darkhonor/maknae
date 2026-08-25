@@ -26,17 +26,18 @@ mod maknae_io {
     }
 
     pub fn read_absolute(
-        _path: &std::path::Path,
+        path: &std::path::Path,
         target: TargetRequired,
         _pref: StrategyPref,
     ) -> Result<Outcome<Zeroizing<Vec<u8>>>, &'static str> {
-        let _ = (
-            target.owner,
-            target.mode_mask,
-            target.nlink_exactly_one,
-            target.regular_file,
-        );
-        Err("secure storage permission enforcement is unavailable on this platform")
+        if target.owner.is_some() || target.mode_mask.is_some() || target.nlink_exactly_one {
+            return Err("secure storage permission enforcement is unavailable on this platform");
+        }
+        let _ = target.regular_file;
+        std::fs::read(path)
+            .map(Zeroizing::new)
+            .map(|value| Outcome { value })
+            .map_err(|_| "storage read failed")
     }
 }
 

@@ -13,7 +13,7 @@ files = subprocess.check_output(
     ["git", "-C", str(root), "ls-files", "*.rs"], text=True
 ).splitlines()
 fs_pattern = re.compile(
-    r"\bstd\s*::\s*fs\b|use\s+std\s*::\s*\{[^}]{0,500}?\bfs\b|"
+    r"(?:::)?\bstd\s*::\s*fs\b|use\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\bfs\b|"
     r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+|"
     r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
@@ -100,11 +100,9 @@ def production_only(source):
 
 for rel in files:
     p = Path(rel)
-    if p.name == "build.rs":
-        continue
-    # Cargo's package-root integration-test/benchmark/example targets never enter
-    # a production library or binary. A `src/tests/` path is deliberately not covered.
-    if any(part in {"tests", "benches", "examples"} and "src" not in p.parts[:i]
+    # Cargo's package-root integration-test targets never enter a production library
+    # or binary. A `src/tests/` path is deliberately not covered.
+    if any(part == "tests" and "src" not in p.parts[:i]
            for i, part in enumerate(p.parts)):
         continue
     source = (root / rel).read_text()
@@ -116,9 +114,9 @@ for rel in files:
     fs_source = mask_noncode(scan_source)
     forbidden_import = re.compile(
         r"\b(?:use|extern\s+crate)\s+(?:::)?std\s+as\s+\w+|"
-        r"\buse\s+std\s*::\s*fs\s+as\s+\w+|"
-        r"\buse\s+std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
-        r"\buse\s+std\s*::\s*\{[^}]{0,500}?\bfs\b"
+        r"\buse\s+(?:::)?std\s*::\s*fs\s+as\s+\w+|"
+        r"\buse\s+(?:::)?std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
+        r"\buse\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\bfs\b"
     )
     match = forbidden_import.search(fs_source)
     if match:
