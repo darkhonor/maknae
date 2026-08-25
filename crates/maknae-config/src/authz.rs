@@ -263,8 +263,8 @@ pub enum AuthzError {
     BadPattern(String),
     /// A pattern used `~` but no principal is enrolled to resolve it against.
     TildeWithoutPrincipal(String),
-    /// `authz.yaml` carries world/other-accessible permission bits, OR is
-    /// group-writable (spec §4.6/§7: `authz.yaml` is `root:_maknae` and the
+    /// `authz.yaml` is writable by group/other (spec §4.6/§7: it is
+    /// `root:_maknae` and the
     /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
     /// group-writable file lets a compromised daemon rewrite its own DAC
     /// policy even though root ownership and a world-bit-only gate both pass.
@@ -295,10 +295,9 @@ impl std::fmt::Display for AuthzError {
                 f,
                 "pattern '{p}' uses '~' but no principal is enrolled to resolve it"
             ),
-            AuthzError::InsecurePermissions => write!(
-                f,
-                "authz.yaml has insecure (world/other-accessible) permissions"
-            ),
+            AuthzError::InsecurePermissions => {
+                write!(f, "authz.yaml has insecure group/other write permissions")
+            }
             AuthzError::Symlink => write!(f, "authz.yaml path is a symlink (refused)"),
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
             AuthzError::Io(m) => write!(f, "authz i/o error: {m}"),

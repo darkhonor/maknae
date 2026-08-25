@@ -201,6 +201,8 @@ std_fs_reject "grouped-import" 'use std::{fs};\npub fn bad() { let _ = fs::copy(
 std_fs_reject "unlisted-operation" 'pub fn bad() { let _ = std::fs::copy("a", "b"); }\n'
 std_fs_reject "whitespace-qualified" 'pub fn bad() { let _ = std :: fs :: read("a"); }\n'
 std_fs_reject "production-after-test" '#[cfg(test)]\nmod tests {}\npub fn bad() { let _ = std::fs::read("a"); }\n'
+std_fs_reject "async-production-after-test" '#[cfg(test)]\nmod tests {}\npub async fn bad() { let _ = std::fs::read("a"); }\n'
+std_fs_reject "std-module-alias" 'use std as platform;\npub fn bad() { let _ = platform::fs::read("a"); }\n'
 
 tmpF_alias="$(mktemp -d)"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"

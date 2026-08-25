@@ -6,6 +6,10 @@ bins/maknae/src/enroll/artifact_write.rs:130|std::fs::create_dir_all(&artifact.p
 bins/maknae/src/enroll/artifact_write.rs:140|std::fs::write(&artifact.path, bytes).map_err(|e| io_err(&artifact.path, e))?;
 bins/maknae/src/enroll/mod.rs:712|let _ = std::fs::remove_file(&out_path);
 bins/maknae/src/enroll/mod.rs:742|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
+
+# Enrollment input reads intentionally preserve their existing caller-selected symlink and
+# permission semantics. maknae-io has no follow-final-symlink read contract; migration would
+# be a behavior change and belongs to the enrollment I/O contract work, not this storage pass.
 bins/maknae/src/enroll/mod.rs:857|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
 bins/maknae/src/enroll/mod.rs:1205|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
 bins/maknae/src/enroll/mod.rs:1221|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {

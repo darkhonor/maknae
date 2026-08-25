@@ -15,13 +15,93 @@ files = subprocess.check_output(
 excluded_parts = {"tests", "benches", "examples"}
 fs_pattern = re.compile(
     r"std\s*::\s*fs|use\s+std\s*::\s*\{[\s\S]{0,500}?\bfs\b|"
-    r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+"
+    r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+|"
+    r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
 requirements_pattern = re.compile(r"owner:\s*None|mode_mask:\s*None")
 # This external module is compiled only by `#[cfg(test)] mod transport_tests;` in
 # maknae-vault/lib.rs. Keep the exemption exact rather than exempting src/*_tests.rs.
 test_only_files = {"crates/maknae-vault/src/transport_tests.rs"}
 found = set()
+
+def mask_noncode(source):
+    """Blank comments and literals while preserving byte offsets and newlines."""
+    out = list(source)
+    i, state, raw_hashes = 0, "code", 0
+    while i < len(source):
+        if state == "code":
+            if source.startswith("//", i):
+                out[i:i+2] = "  "; i += 2; state = "line"
+            elif source.startswith("/*", i):
+                out[i:i+2] = "  "; i += 2; state = "block"
+            elif source[i] == '"':
+                out[i] = " "; i += 1; state = "string"
+            elif source[i] == "'" and i + 2 < len(source) and source[i+2] == "'":
+                out[i:i+3] = "   "; i += 3
+            else:
+                raw = re.match(r'r(#+)?"', source[i:])
+                if raw:
+                    raw_hashes = len(raw.group(1) or "")
+                    width = raw.end(); out[i:i+width] = " " * width
+                    i += width; state = "raw"
+                else:
+                    i += 1
+        elif state == "line":
+            if source[i] == "\n": state = "code"
+            else: out[i] = " "
+            i += 1
+        elif state == "block":
+            if source.startswith("*/", i):
+                out[i:i+2] = "  "; i += 2; state = "code"
+            else:
+                if source[i] != "\n": out[i] = " "
+                i += 1
+        elif state == "string":
+            if source[i] == "\\":
+                out[i] = " "; i += 1
+                if i < len(source):
+                    if source[i] != "\n": out[i] = " "
+                    i += 1
+            else:
+                if source[i] == '"': state = "code"
+                if source[i] != "\n": out[i] = " "
+                i += 1
+        else:
+            end = '"' + ('#' * raw_hashes)
+            if source.startswith(end, i):
+                out[i:i+len(end)] = " " * len(end); i += len(end); state = "code"
+            else:
+                if source[i] != "\n": out[i] = " "
+                i += 1
+    return "".join(out)
+
+def production_only(source):
+    """Remove exactly items carrying cfg(test), retaining all later production items."""
+    code = mask_noncode(source)
+    removed = list(source)
+    attrs = list(re.finditer(r'(?m)^[ \t]*#\[cfg\((?:test|all\(test,[^\n]*\))\)\]', code))
+    for attr in reversed(attrs):
+        start, cursor = attr.start(), attr.end()
+        brace = code.find("{", cursor)
+        semi = code.find(";", cursor)
+        if semi != -1 and (brace == -1 or semi < brace):
+            end = semi + 1
+        elif brace != -1:
+            depth, end = 0, None
+            for pos in range(brace, len(code)):
+                if code[pos] == "{": depth += 1
+                elif code[pos] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = pos + 1; break
+            if end is None:
+                raise SystemExit(f"FAIL: unterminated cfg(test) item at offset {start}")
+        else:
+            raise SystemExit(f"FAIL: unrecognized cfg(test) item at offset {start}")
+        for pos in range(start, end):
+            if removed[pos] != "\n": removed[pos] = " "
+    return "".join(removed)
+
 for rel in files:
     p = Path(rel)
     if rel.startswith("crates/maknae-io/") or p.name == "build.rs" or rel in test_only_files:
@@ -32,39 +112,13 @@ for rel in files:
     lines = source.splitlines()
     if any("#![cfg(test)]" in line for line in lines[:5]):
         continue
-    marker = next((i for i, line in enumerate(lines) if line.startswith("#[cfg(test)]") or line.startswith("#[cfg(all(test,")), None)
-    if marker is not None:
-        depth = 0
-        started = False
-        item_end = marker
-        for j in range(marker + 1, len(lines)):
-            line = lines[j]
-            if not started and ";" in line:
-                item_end = j
-                break
-            opens, closes = line.count("{"), line.count("}")
-            if opens:
-                started = True
-            depth += opens - closes
-            if started and depth == 0:
-                item_end = j
-                break
-        production_item = re.compile(
-            r"^(?:pub(?:\([^)]*\))?\s+|fn\s+|impl\b|struct\s+|enum\s+|"
-            r"const\s+|static\s+|type\s+|use\s+|extern\s+|macro_rules!)"
-        )
-        for number, line in enumerate(lines[item_end + 1:], item_end + 2):
-            if production_item.match(line):
-                found.add(f"__VIOLATION__ {rel}:{number}: production code after cfg(test) marker")
-        scan_source = "\n".join(lines[:marker])
-    else:
-        scan_source = source
+    scan_source = production_only(source)
     scan_lines = ["" if line.lstrip().startswith("//") else line for line in scan_source.splitlines()]
     fs_source = "\n".join(scan_lines)
     for match in fs_pattern.finditer(fs_source):
         number = fs_source.count("\n", 0, match.start()) + 1
         found.add(f"{rel}:{number}|{lines[number - 1].strip()}")
-    for number, line in enumerate(lines[:marker] if marker is not None else lines, 1):
+    for number, line in enumerate(scan_source.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("//"):
             continue
@@ -73,12 +127,6 @@ for rel in files:
 if found:
     print("\n".join(sorted(found)))
 PY
-
-if grep -q '^__VIOLATION__' "$tmp"; then
-  echo "FAIL: cfg(test) module is not terminal; production scanning would be ambiguous"
-  grep '^__VIOLATION__' "$tmp"
-  exit 1
-fi
 
 reviewed="$(mktemp)"
 trap 'rm -f "$tmp" "$reviewed"' EXIT
