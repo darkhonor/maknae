@@ -108,11 +108,20 @@ pub struct PlaneClient {
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
-    std::fs::read_to_string(path)
+    let bytes = crate::read_storage(
+        path,
+        maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        },
+    )?;
+    std::str::from_utf8(&bytes)
         .map(|s| s.trim().to_string())
-        .map_err(|source| VaultError::Io {
+        .map_err(|e| VaultError::Io {
             path: path.to_path_buf(),
-            source,
+            source: std::io::Error::other(e.to_string()),
         })
 }
 
@@ -123,41 +132,47 @@ fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// gate (the sealed branches — `$CREDENTIALS_DIRECTORY`, SEP — do not, since
 /// systemd/SEP produce their own `0400` artifacts).
 pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
-    let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if meta.file_type().is_symlink() {
-        return Err(VaultError::InsecureCredential {
-            path: path.to_path_buf(),
-            detail: "is a symlink".to_string(),
-        });
-    }
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
     // a unix CI runner, hence no mutation/coverage obligation on the non-unix arm.
     #[cfg(not(unix))]
     {
-        let _ = &meta;
         Err(VaultError::PermissionsUnsupported)
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(VaultError::InsecureCredential {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "mode {mode:o} allows group/other access (require 0600 or stricter)"
-                ),
-            });
-        }
-        std::fs::read_to_string(path)
+        let target = maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o077),
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+            .map_err(|error| match error {
+                maknae_io::IoError::Symlink { .. } => VaultError::InsecureCredential {
+                    path: path.to_path_buf(),
+                    detail: "is a symlink".into(),
+                },
+                maknae_io::IoError::InsecurePermissions { mode, .. } => {
+                    VaultError::InsecureCredential {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "mode {:o} allows group/other access (require 0600 or stricter)",
+                            mode & 0o777
+                        ),
+                    }
+                }
+                other => VaultError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other(other.to_string()),
+                },
+            })?
+            .value;
+        std::str::from_utf8(&bytes)
             .map(|s| s.trim().to_string())
-            .map_err(|source| VaultError::Io {
+            .map_err(|e| VaultError::Io {
                 path: path.to_path_buf(),
-                source,
+                source: std::io::Error::other(e.to_string()),
             })
     }
 }

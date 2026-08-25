@@ -196,6 +196,35 @@ pub fn open_anchor(
     })
 }
 
+/// Read one absolute file through a pinned parent anchor. This is the adapter for
+/// callers that own a single configured path rather than a reusable subtree.
+pub fn read_absolute(
+    path: &Path,
+    target: TargetRequired,
+    pref: StrategyPref,
+) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
+    if !path.is_absolute() {
+        return Err(IoError::RelativeAnchor {
+            path: path.to_path_buf(),
+        });
+    }
+    let parent = path.parent().ok_or(IoError::RootAnchor)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| IoError::AnchorEndsInDotDot {
+            path: path.to_path_buf(),
+        })?;
+    let anchor = open_anchor(
+        parent,
+        AnchorRequired {
+            owner: None,
+            mode_mask: None,
+        },
+        pref,
+    )?;
+    anchor.read(Path::new(name), None, target)
+}
+
 impl Anchor {
     /// Read a file relative to the pinned anchor.
     ///
@@ -535,6 +564,12 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_absolute_refuses_relative_input() {
+        let got = read_absolute(Path::new("relative"), t_req(), StrategyPref::Auto);
+        assert!(matches!(got, Err(IoError::RelativeAnchor { .. })));
+    }
     /// Serialises publishing tests. The temp counter is process-global (two Anchors
     /// in one process would otherwise collide on the same name under O_EXCL with no
     /// retry), which trades away per-test determinism under the parallel harness.

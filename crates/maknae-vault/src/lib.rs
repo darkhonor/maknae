@@ -62,3 +62,15 @@ pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]
 pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
+
+fn read_storage(
+    path: &std::path::Path,
+    target: maknae_io::TargetRequired,
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, VaultError> {
+    maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .map(|out| out.value)
+        .map_err(|error| VaultError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(error.to_string()),
+        })
+}

@@ -10,10 +10,6 @@ bins/maknae/src/enroll/mod.rs|let vault_ca_bytes = std::fs::read(&vault_ca_path)
 crates/maknae-audit-append/src/sink.rs|fn open_options() -> std::fs::OpenOptions {
 crates/maknae-audit-append/src/sink.rs|let mut opts = std::fs::OpenOptions::new();
 crates/maknae-audit-append/src/sink.rs|use std::fs::File;
-crates/maknae-vault/src/ca.rs|let bytes = std::fs::read(path).map_err(|source| VaultError::Io {
-crates/maknae-vault/src/client.rs|let meta = std::fs::symlink_metadata(path).map_err(|source| VaultError::Io {
-crates/maknae-vault/src/client.rs|std::fs::read_to_string(path)
-crates/maknae-vault/src/secret_io.rs|std::fs::read_to_string(path)
 crates/maknae-vault/src/socket.rs|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {
 crates/maknae-vault/src/socket.rs|match std::fs::symlink_metadata(path) {
