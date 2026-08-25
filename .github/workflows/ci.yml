@@ -4,6 +4,25 @@ on:
   push:
     branches: [main]
 
+# Supersede-and-cancel, PR branches only: a new push to a PR's ref cancels that
+# ref's still-running CI. Without it every intermediate push runs to completion —
+# 8 runs x ~23 min of `build-and-gate` accumulated on a single branch on
+# 2026-08-22 and exhausted the monthly Actions budget.
+#
+# `main` pushes deliberately get a per-RUN group, not the shared per-ref one.
+# Corrected 2026-08-25: `cancel-in-progress: false` alone is NOT main-safe, which
+# is what an earlier revision of this block assumed. It only protects the run
+# already executing; Actions still permits exactly one PENDING run per group, so
+# a third `main` push arriving inside a ~23 min window displaces the second one's
+# queued run and that commit is never validated at all. Keying `push` runs by
+# `github.run_id` gives each its own group, so a `main` run can neither be
+# queued behind nor displaced by another: every commit that lands on the default
+# branch gets a complete run, which is what the branch-protection evidence chain
+# is relying on. PR supersession is unaffected — those still share a per-ref group.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # MUTANTS_PATHS: consumed by the mutation job's change gate AND verified by
 # ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
 # (drift = gate FAIL). Comma-separated repo-relative crate dirs. Do not add a
