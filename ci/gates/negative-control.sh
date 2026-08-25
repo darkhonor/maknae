@@ -176,5 +176,27 @@ expect_reject "coverage-tiers/unclassified-file" \
   env COVERAGE_TIERS_JSON="$tmpE/cov.json" COVERAGE_TIERS_FILELIST="$tmpE/files.list" \
       "$here/coverage-tiers.sh" --root "$tmpE" --injection
 
+tmpF="$(mktemp -d)"
+mkdir -p "$tmpF/ci/gates" "$tmpF/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF/ci/gates/"
+: > "$tmpF/ci/gates/std-fs-allowlist.txt"
+printf 'pub fn bad(p: &std::path::Path) { let _ = std::fs::read(p); }\n' > "$tmpF/crates/x/src/lib.rs"
+git -C "$tmpF" init -q
+git -C "$tmpF" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+expect_reject "std-fs-drift/production-call" "$tmpF/ci/gates/std-fs-drift.sh" "$tmpF"
+
+tmpF2="$(mktemp -d)"
+mkdir -p "$tmpF2/ci/gates" "$tmpF2/crates/x/src"
+cp "$here/std-fs-drift.sh" "$tmpF2/ci/gates/"
+: > "$tmpF2/ci/gates/std-fs-allowlist.txt"
+printf '#[cfg(test)]\nmod tests { fn fixture(p: &std::path::Path) { let _ = std::fs::read(p); } }\n' > "$tmpF2/crates/x/src/lib.rs"
+git -C "$tmpF2" init -q
+git -C "$tmpF2" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+if ! "$tmpF2/ci/gates/std-fs-drift.sh" "$tmpF2" >/dev/null; then
+  echo "NEG-FAIL: [std-fs-drift/test-only] test fixture was rejected"
+  exit 1
+fi
+echo "neg-ok: [std-fs-drift/test-only] test fixture permitted"
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]
