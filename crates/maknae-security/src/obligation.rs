@@ -27,7 +27,7 @@ pub fn merge_obligations(
     b: Vec<Obligation>,
 ) -> Result<Vec<Obligation>, ObligationConflict> {
     let mut out: Vec<Obligation> = Vec::new();
-    for o in a.into_iter().chain(b.into_iter()) {
+    for o in a.into_iter().chain(b) {
         if out.iter().any(|e| e.id == o.id && e.params == o.params) {
             continue; // identical duplicate
         }

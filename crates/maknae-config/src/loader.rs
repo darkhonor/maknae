@@ -20,48 +20,89 @@ pub(crate) fn io_err(e: impl std::fmt::Display) -> ConfigError {
     ConfigError::Io(e.to_string())
 }
 
-#[cfg(unix)]
-pub(crate) fn mode_is_secure(mode: u32) -> bool {
-    mode & 0o007 == 0
-}
-
 /// Secure read (spec §3): lstat screen (symlink + regular-file) → open → fstat mode
 /// on the open fd → read from that same fd. The checked inode and the read inode are
 /// one open fd — the read-reopen TOCTOU is closed. Symlink/type *detection* is a
 /// bounded lstat→open race within the trusted-group dir boundary (spec §3).
 #[cfg(unix)]
 pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
-    use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
+    read_secure_required(path, None, Some(0o007))
+}
 
-    let lst = std::fs::symlink_metadata(path).map_err(io_err)?; // missing → Io (cycle ① contract)
-    if lst.file_type().is_symlink() {
-        return Err(ConfigError::Symlink {
+#[cfg(unix)]
+pub(crate) fn read_secure_required(
+    path: &Path,
+    owner: Option<u32>,
+    mode_mask: Option<u32>,
+) -> Result<String, ConfigError> {
+    let absolute = std::path::absolute(path).map_err(io_err)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| io_err("file has no parent"))?;
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| io_err("file has no name"))?;
+    let anchor = maknae_io::open_anchor_resolved(
+        parent,
+        maknae_io::AnchorRequired {
+            owner: None,
+            mode_mask: None,
+        },
+        maknae_io::StrategyPref::Auto,
+    )
+    .map_err(map_io)?;
+    read_from_anchor_required(&anchor, Path::new(name), None, owner, mode_mask)
+}
+
+#[cfg(unix)]
+fn map_io(e: maknae_io::IoError) -> ConfigError {
+    match e {
+        maknae_io::IoError::Symlink { path } => ConfigError::Symlink {
             path: path.display().to_string(),
-        });
+        },
+        maknae_io::IoError::InsecurePermissions { path, mode } => {
+            ConfigError::InsecurePermissions {
+                path: path.display().to_string(),
+                mode,
+            }
+        }
+        other => ConfigError::Io(other.to_string()),
     }
-    if !lst.file_type().is_file() {
-        // Reject FIFOs/sockets/devices/dirs BEFORE the open: `File::open` on a FIFO
-        // (O_RDONLY) BLOCKS until a writer appears → startup hang (a config file named
-        // maknae.yaml that is a FIFO would wedge the process). The residual
-        // regular→FIFO lstat→open race is the same trusted-group-bounded race as the
-        // symlink one; O_NONBLOCK+libc would close it fully (deferred with O_NOFOLLOW).
-        return Err(ConfigError::Io(format!(
-            "not a regular file: {}",
-            path.display()
-        )));
-    }
-    let mut file = std::fs::File::open(path).map_err(io_err)?;
-    let meta = file.metadata().map_err(io_err)?;
-    if !mode_is_secure(meta.mode()) {
-        return Err(ConfigError::InsecurePermissions {
-            path: path.display().to_string(),
-            mode: meta.mode(),
-        });
-    }
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).map_err(io_err)?; // non-UTF-8 → InvalidData → Io
-    Ok(buf)
+}
+
+#[cfg(unix)]
+fn read_from_anchor(
+    anchor: &maknae_io::Anchor,
+    rel: &Path,
+    desc: Option<maknae_io::DescendantRequired>,
+) -> Result<String, ConfigError> {
+    read_from_anchor_required(anchor, rel, desc, None, Some(0o007))
+}
+
+#[cfg(unix)]
+fn read_from_anchor_required(
+    anchor: &maknae_io::Anchor,
+    rel: &Path,
+    desc: Option<maknae_io::DescendantRequired>,
+    owner: Option<u32>,
+    mode_mask: Option<u32>,
+) -> Result<String, ConfigError> {
+    let bytes = anchor
+        .read(
+            rel,
+            desc,
+            maknae_io::TargetRequired {
+                owner,
+                mode_mask,
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        )
+        .map_err(map_io)?
+        .value;
+    std::str::from_utf8(&bytes)
+        .map(str::to_owned)
+        .map_err(|e| ConfigError::Io(format!("invalid UTF-8: {e}")))
 }
 
 /// Validate the caller's specs before any file is read (spec §5): reject a
@@ -119,17 +160,16 @@ fn is_yaml_ext(name: &str) -> bool {
 /// read — so a world-writable `config.d/` is caught before a bad base is opened).
 #[cfg(unix)]
 pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError> {
-    use std::os::unix::fs::MetadataExt;
-
-    // Top-level dir MAY be a symlink → canonicalize, then perm-check the target.
-    let root = std::fs::canonicalize(dir).map_err(io_err)?;
-    let root_meta = std::fs::metadata(&root).map_err(io_err)?;
-    if !mode_is_secure(root_meta.mode()) {
-        return Err(ConfigError::InsecurePermissions {
-            path: root.display().to_string(),
-            mode: root_meta.mode(),
-        });
-    }
+    let root = std::path::absolute(dir).map_err(io_err)?;
+    let anchor = maknae_io::open_anchor_resolved(
+        &root,
+        maknae_io::AnchorRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        },
+        maknae_io::StrategyPref::Auto,
+    )
+    .map_err(map_io)?;
 
     // config.d/ (optional): permission/symlink-check the subdir and enumerate its
     // candidate files BEFORE any file content is read (spec §4(1)). Contents are
@@ -144,21 +184,19 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
     // the load, never silently degrades to base-only); a true absence just yields
     // base-only. (Avoids the `e.kind()==NotFound` guard, which would be an untestable
     // equivalent mutant.)
-    let mut cd_present = false;
-    for ent in std::fs::read_dir(&root).map_err(io_err)? {
-        if ent.map_err(io_err)?.file_name() == std::ffi::OsStr::new("config.d") {
-            cd_present = true;
-        }
-    }
+    let root_entries = anchor.enumerate(Path::new(""), None).map_err(map_io)?.value;
+    let cd_entry = root_entries
+        .iter()
+        .find(|e| e.name == std::ffi::OsStr::new("config.d"));
+    let cd_present = cd_entry.is_some();
 
     if cd_present {
-        let m = std::fs::symlink_metadata(&cd).map_err(io_err)?;
-        if m.file_type().is_symlink() {
+        if matches!(cd_entry.map(|e| e.kind), Some(maknae_io::Kind::Symlink)) {
             return Err(ConfigError::Symlink {
                 path: cd.display().to_string(),
             });
         }
-        if !m.is_dir() {
+        if !matches!(cd_entry.map(|e| e.kind), Some(maknae_io::Kind::Dir)) {
             // Synthesized Io (config.d exists but is the wrong kind of thing) rather
             // than a converted io::Error — io_err deliberately does NOT apply here.
             return Err(ConfigError::Io(format!(
@@ -166,37 +204,36 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
                 cd.display()
             )));
         }
-        if !mode_is_secure(m.mode()) {
-            return Err(ConfigError::InsecurePermissions {
-                path: cd.display().to_string(),
-                mode: m.mode(),
-            });
-        }
         // Enumerate immediate entries; classify by the §2 ordered sequence.
-        let rd = std::fs::read_dir(&cd).map_err(io_err)?;
+        let desc_req = maknae_io::DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        let rd = anchor
+            .enumerate(Path::new("config.d"), Some(desc_req.clone()))
+            .map_err(map_io)?
+            .value;
         for ent in rd {
-            let ent = ent.map_err(io_err)?;
-            let name = ent.file_name().to_string_lossy().into_owned();
+            let name = ent.name.to_string_lossy().into_owned();
             // (1) dotfile → skip
             if name.starts_with('.') {
                 continue;
             }
-            let ft = ent.file_type().map_err(io_err)?;
             // (2) symlink or subdirectory → error (checked before extension)
-            if ft.is_symlink() {
+            if ent.kind == maknae_io::Kind::Symlink {
                 return Err(ConfigError::Symlink {
-                    path: ent.path().display().to_string(),
+                    path: cd.join(&ent.name).display().to_string(),
                 });
             }
-            if ft.is_dir() {
+            if ent.kind == maknae_io::Kind::Dir {
                 return Err(ConfigError::Io(format!(
                     "config.d entry is a directory: {}",
-                    ent.path().display()
+                    cd.join(&ent.name).display()
                 )));
             }
             // (3) regular .yaml/.yml → load; (4) other regular → ignore
-            if ft.is_file() && is_yaml_ext(&name) {
-                cd_files.push(ent.path());
+            if ent.kind == maknae_io::Kind::File && is_yaml_ext(&name) {
+                cd_files.push(cd.join(&ent.name));
             }
         }
         cd_files.sort(); // lexical by full path (same parent → by filename)
@@ -205,9 +242,20 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
     // Now read contents in one buffer-before-parse pass: base (required — missing
     // → Io) first, then each config.d file in lexical order. First violation aborts.
     let mut out: Vec<(Source, String)> = Vec::new();
-    out.push((Source::Base, read_secure(&root.join("maknae.yaml"))?));
+    out.push((
+        Source::Base,
+        read_from_anchor(&anchor, Path::new("maknae.yaml"), None)?,
+    ));
     for p in cd_files {
-        let body = read_secure(&p)?;
+        let rel = p.strip_prefix(&root).map_err(io_err)?;
+        let body = read_from_anchor(
+            &anchor,
+            rel,
+            Some(maknae_io::DescendantRequired {
+                owner: None,
+                mode_mask: Some(0o007),
+            }),
+        )?;
         out.push((Source::ConfigD(p), body));
     }
     Ok(out)
@@ -610,13 +658,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn mode_mask_helper() {
-        assert!(mode_is_secure(0o640) && mode_is_secure(0o600));
-        assert!(!mode_is_secure(0o644) && !mode_is_secure(0o642) && !mode_is_secure(0o641));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn non_regular_file_rejected() {
         // A non-regular config path (here a directory; a FIFO is the motivating case
         // — File::open on a FIFO O_RDONLY would block until a writer appears) is
@@ -750,6 +791,20 @@ mod tests {
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o750)).unwrap();
         std::os::unix::fs::symlink(&real, d.0.join("config.d")).unwrap();
         assert!(matches!(scan_dir(&d.0), Err(ConfigError::Symlink { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_top_level_config_directory_is_resolved_once() {
+        let d = new_dir("top-symlink-target");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let link = d.0.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&d.0, &link).unwrap();
+        let got = scan_dir(&link).unwrap();
+        let _ = std::fs::remove_file(&link);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "core:\n  a: 1\n");
     }
 
     #[cfg(unix)]

@@ -6,6 +6,41 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+#[cfg(not(unix))]
+mod maknae_io {
+    pub use zeroize::Zeroizing;
+
+    pub struct TargetRequired {
+        pub owner: Option<u32>,
+        pub mode_mask: Option<u32>,
+        pub nlink_exactly_one: bool,
+        pub regular_file: bool,
+    }
+
+    pub enum StrategyPref {
+        Auto,
+    }
+
+    pub struct Outcome<T> {
+        pub value: T,
+    }
+
+    pub fn read_absolute(
+        path: &std::path::Path,
+        target: TargetRequired,
+        _pref: StrategyPref,
+    ) -> Result<Outcome<Zeroizing<Vec<u8>>>, &'static str> {
+        if target.owner.is_some() || target.mode_mask.is_some() || target.nlink_exactly_one {
+            return Err("secure storage permission enforcement is unavailable on this platform");
+        }
+        let _ = target.regular_file;
+        std::fs::read(path)
+            .map(Zeroizing::new)
+            .map(|value| Outcome { value })
+            .map_err(|_| "storage read failed")
+    }
+}
+
 mod auth;
 mod ca;
 mod client;
@@ -33,9 +68,6 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
-#[cfg(test)]
-mod transport_tests;
-
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity};
@@ -62,3 +94,32 @@ pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]
 pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
+
+fn read_storage(
+    path: &std::path::Path,
+    target: maknae_io::TargetRequired,
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, VaultError> {
+    let absolute = absolute_storage_path(path)?;
+    maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
+        .map(|out| out.value)
+        .map_err(|error| VaultError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(error.to_string()),
+        })
+}
+
+fn absolute_storage_path(path: &std::path::Path) -> Result<std::path::PathBuf, VaultError> {
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|source| VaultError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+    })
+}
+
+#[cfg(test)]
+mod transport_tests;

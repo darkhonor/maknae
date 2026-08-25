@@ -15,10 +15,15 @@ pub struct CaBundle {
 /// Parse the FIRST certificate from a PEM file into DER. Fail-closed on
 /// missing/malformed/empty (via `x509-parser`; rustls-pemfile is unmaintained).
 fn first_cert_der(path: &Path) -> Result<Vec<u8>, VaultError> {
-    let bytes = std::fs::read(path).map_err(|source| VaultError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bytes = crate::read_storage(
+        path,
+        maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        },
+    )?;
     let (_, pem) = x509_parser::pem::parse_x509_pem(&bytes)
         .map_err(|_| VaultError::Pem("malformed certificate PEM"))?;
     if pem.label != "CERTIFICATE" {

@@ -338,32 +338,6 @@ pub(crate) async fn finish_handshake_on(
     }
 }
 
-/// Compose the two halves into a single accept — used by the in-crate transport test (and
-/// any caller that does not need the anti-DoS split). A raw-accept / peer-cred failure maps
-/// to `RejectReason::Io` (no creds captured yet).
-#[cfg(test)]
-pub(crate) async fn accept_on(
-    listener: &tokio::net::UnixListener,
-    acceptor: &TlsAcceptor,
-    expect: Plane,
-    deployment_id: &str,
-    handshake_timeout: Duration,
-) -> Result<AuthenticatedStream, AcceptRejection> {
-    let (raw, peer_creds) = accept_raw_on(listener).await.map_err(|_| AcceptRejection {
-        peer_creds: None,
-        reason: RejectReason::Io,
-    })?;
-    finish_handshake_on(
-        acceptor,
-        expect,
-        deployment_id,
-        raw,
-        peer_creds,
-        handshake_timeout,
-    )
-    .await
-}
-
 /// CLI (client) side.
 pub struct PlaneConnector;
 
@@ -392,4 +366,30 @@ impl PlaneConnector {
             peer_creds,
         })
     }
+}
+
+/// Compose the two halves into a single accept — used by the in-crate transport test (and
+/// any caller that does not need the anti-DoS split). A raw-accept / peer-cred failure maps
+/// to `RejectReason::Io` (no creds captured yet).
+#[cfg(test)]
+pub(crate) async fn accept_on(
+    listener: &tokio::net::UnixListener,
+    acceptor: &TlsAcceptor,
+    expect: Plane,
+    deployment_id: &str,
+    handshake_timeout: Duration,
+) -> Result<AuthenticatedStream, AcceptRejection> {
+    let (raw, peer_creds) = accept_raw_on(listener).await.map_err(|_| AcceptRejection {
+        peer_creds: None,
+        reason: RejectReason::Io,
+    })?;
+    finish_handshake_on(
+        acceptor,
+        expect,
+        deployment_id,
+        raw,
+        peer_creds,
+        handshake_timeout,
+    )
+    .await
 }

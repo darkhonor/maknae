@@ -987,7 +987,11 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
 /// absence degrades the reported posture, it never blocks boot.
 fn read_posture_marker(config_dir: &Path) -> Option<crate::posture::PostureMarker> {
     let path = config_dir.join("private").join("posture.yaml");
-    let value = maknae_config::load_file(&path).ok()?;
+    let value = maknae_config::load_root_file(&path).ok()?;
+    parse_posture_marker(&value)
+}
+
+fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::PostureMarker> {
     let entries = match &value {
         maknae_config::Value::Map(entries) => entries,
         _ => return None,
@@ -1673,42 +1677,30 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     #[test]
     fn read_posture_marker_unparseable_yaml_is_none() {
-        let d = Dir::new("marker_unparseable");
-        put(&d.0, "private/posture.yaml", "x: [1, 2\n", 0o640); // unclosed flow seq
-        assert_eq!(read_posture_marker(&d.0), None);
+        assert!(maknae_config::load_str("x: [1, 2\n").is_err());
     }
 
     #[test]
     fn read_posture_marker_scalar_root_is_none() {
-        let d = Dir::new("marker_scalar_root");
-        put(&d.0, "private/posture.yaml", "just a scalar\n", 0o640);
-        assert_eq!(read_posture_marker(&d.0), None);
+        let value = maknae_config::load_str("just a scalar\n").unwrap();
+        assert_eq!(parse_posture_marker(&value), None);
     }
 
     #[test]
     fn read_posture_marker_missing_field_is_none() {
-        let d = Dir::new("marker_missing_field");
         // `timestamp` is absent — the whole marker must not be fabricated from a
         // partial record.
-        put(
-            &d.0,
-            "private/posture.yaml",
+        let value = maknae_config::load_str(
             "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\n",
-            0o640,
-        );
-        assert_eq!(read_posture_marker(&d.0), None);
+        )
+        .unwrap();
+        assert_eq!(parse_posture_marker(&value), None);
     }
 
     #[test]
     fn read_posture_marker_valid_parses() {
-        let d = Dir::new("marker_valid");
-        put(
-            &d.0,
-            "private/posture.yaml",
-            "mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: 2026-08-12T00:00:00.000Z\n",
-            0o640,
-        );
-        let m = read_posture_marker(&d.0).expect("valid marker parses");
+        let value = maknae_config::load_str("mechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: 2026-08-12T00:00:00.000Z\n").unwrap();
+        let m = parse_posture_marker(&value).expect("valid marker parses");
         assert_eq!(m.mechanism, "tpm2");
         assert_eq!(m.target, "/etc/maknae/private/maknaed-secret-id.cred");
         assert_eq!(m.timestamp, "2026-08-12T00:00:00.000Z");
@@ -1735,9 +1727,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // this, this test — not just the reader's own schema tests — must
         // be the one that catches it.
         let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_fixture");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0).expect("enroll's real writer output parses");
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value).expect("enroll's real writer output parses");
         assert_eq!(marker.mechanism, "tpm2");
         assert_eq!(marker.target, "/etc/maknae/private/maknaed-secret-id.cred");
         assert_eq!(marker.timestamp, "1786563711");
@@ -1751,9 +1742,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // `HrotSealed` — not `Unverified`, which is what the pre-fix key
         // mismatch produced on every real `maknae enroll` + boot.
         let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_hrot_sealed");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0);
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value);
         // The expected target matches enroll's ALWAYS-`/etc/maknae` write
         // target (bins/maknae's `artifact_table.rs` hardcodes `/etc/maknae`,
         // not the daemon's `config_dir` argument) — the real daemon's default
@@ -1779,9 +1769,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
         // determine HrotSealed for a SepSealed boot.
         let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_sep_hrot_sealed");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0);
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::SepSealed,
             marker.as_ref(),
@@ -1798,9 +1787,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         // credential path (e.g. a marker copied from another host) — must
         // yield Unverified, not HrotSealed.
         let fixture = "---\nmechanism: tpm2\ntarget: /etc/maknae/private/maknaed-secret-id.cred\ntimestamp: \"1786563711\"\n";
-        let d = Dir::new("marker_enroll_writer_foreign_target");
-        put(&d.0, "private/posture.yaml", fixture, 0o640);
-        let marker = read_posture_marker(&d.0);
+        let value = maknae_config::load_str(fixture).unwrap();
+        let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::CredentialsDirectory,
             marker.as_ref(),

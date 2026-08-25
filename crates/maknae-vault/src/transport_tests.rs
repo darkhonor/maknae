@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! In-process mTLS negative suite (Stage 2, CI). Unit-module so it can reach pub(crate)
 //! config/verifier constructors. Uses tokio duplex (no socket/peer-creds — those are unit
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is

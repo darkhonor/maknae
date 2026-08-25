@@ -86,10 +86,31 @@ pub fn load_str(input: &str) -> Result<Value, ConfigError> {
 
 /// Read a file and parse it. Invalid UTF-8 or an I/O failure → [`ConfigError::Io`].
 pub fn load_file(path: &std::path::Path) -> Result<Value, ConfigError> {
-    let bytes = std::fs::read(path).map_err(|e| ConfigError::Io(e.to_string()))?;
-    let text =
-        std::str::from_utf8(&bytes).map_err(|e| ConfigError::Io(format!("invalid UTF-8: {e}")))?;
-    load_str(text)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        let text = loader::read_secure(path)?;
+        load_str(&text)
+    }
+}
+
+/// Read and parse a root-controlled host artifact. The opened file must be regular,
+/// root-owned, and not writable by group or other users.
+pub fn load_root_file(path: &std::path::Path) -> Result<Value, ConfigError> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ConfigError::PermissionsUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
+        load_str(&text)
+    }
 }
 
 #[cfg(test)]
@@ -203,27 +224,92 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn root_file_loader_reaches_parsing_for_a_real_root_owned_host_file() {
+        #[cfg(target_os = "macos")]
+        let host_file = std::path::Path::new("/private/etc/hosts");
+        #[cfg(not(target_os = "macos"))]
+        let host_file = std::path::Path::new("/etc/hosts");
+        let got = load_root_file(host_file);
+        assert!(
+            !matches!(got, Err(ConfigError::Io(_))),
+            "root-owned /etc/hosts must pass I/O checks: {got:?}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn load_file_reads_and_parses() {
+        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join("maknae_config_ok.yaml");
         std::fs::write(&path, "x: 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let got = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_file_missing_is_io() {
         let path = std::path::Path::new("/nonexistent/maknae_config_nope.yaml");
         assert!(matches!(load_file(path), Err(ConfigError::Io(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_file_bad_utf8_is_io() {
+        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join("maknae_config_badutf8.yaml");
         std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let r = load_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(r, Err(ConfigError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_file_resolves_a_symlinked_parent_once() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = std::env::temp_dir().join("maknae_config_symlink_parent");
+        let real = base.join("real");
+        let link = base.join("current");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("config.yaml"), "x: 1\n").unwrap();
+        std::fs::set_permissions(
+            real.join("config.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        symlink(&real, &link).unwrap();
+        let got = load_file(&link.join("config.yaml"));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn filesystem_loaders_refuse_without_unix_permissions() {
+        let path = std::path::Path::new("config.yaml");
+        assert_eq!(load_file(path), Err(ConfigError::PermissionsUnsupported));
+        assert_eq!(
+            load_root_file(path),
+            Err(ConfigError::PermissionsUnsupported)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_root_file_refuses_non_root_owned_artifact() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join("maknae_config_nonroot.yaml");
+        std::fs::write(&path, "x: 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let got = load_root_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(got, Err(ConfigError::Io(message)) if message.contains("require 0")));
     }
 }
