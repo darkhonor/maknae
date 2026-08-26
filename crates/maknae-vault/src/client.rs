@@ -108,15 +108,7 @@ pub struct PlaneClient {
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
-    let bytes = crate::read_storage(
-        path,
-        maknae_io::TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-        },
-    )?;
+    let bytes = crate::read_storage(path)?;
     std::str::from_utf8(&bytes)
         .map(|s| s.trim().to_string())
         .map_err(|e| VaultError::Io {
@@ -147,8 +139,7 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
             nlink_exactly_one: false,
             regular_file: true,
         };
-        let absolute = crate::absolute_storage_path(path)?;
-        let bytes = maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
+        let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map_err(|error| match error {
                 maknae_io::IoError::Symlink { .. } => VaultError::InsecureCredential {
                     path: path.to_path_buf(),

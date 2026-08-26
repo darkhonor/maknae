@@ -176,8 +176,11 @@ mod unix {
     }
 
     #[test]
-    fn missing_base_is_io() {
+    fn missing_base_is_not_found() {
         let d = new_dir("nobase");
-        assert!(matches!(load_config(&d.0, &[]), Err(ConfigError::Io(_))));
+        assert!(matches!(
+            load_config(&d.0, &[]),
+            Err(ConfigError::NotFound { .. })
+        ));
     }
 }

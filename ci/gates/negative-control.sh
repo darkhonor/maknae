@@ -197,6 +197,37 @@ std_fs_reject() {
   expect_reject "std-fs-drift/$label" "$fixture/ci/gates/std-fs-drift.sh" "$fixture"
 }
 
+# Literal-source variants: the fixture text is read verbatim from stdin (heredoc), so char
+# literals and backslash escapes survive without printf %b or shell-quoting mangling.
+std_fs_reject_literal() { # <label> — fixture source on stdin
+  local label="$1" fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
+  cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
+  : > "$fixture/ci/gates/std-fs-allowlist.txt"
+  cat > "$fixture/crates/x/src/lib.rs"
+  git -C "$fixture" init -q
+  git -C "$fixture" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+  expect_reject "std-fs-drift/$label" "$fixture/ci/gates/std-fs-drift.sh" "$fixture"
+}
+
+std_fs_accept_literal() { # <label> — fixture source on stdin; gate must stay green
+  local label="$1" fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
+  cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
+  : > "$fixture/ci/gates/std-fs-allowlist.txt"
+  cat > "$fixture/crates/x/src/lib.rs"
+  git -C "$fixture" init -q
+  git -C "$fixture" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
+  total=$((total+1))
+  if "$fixture/ci/gates/std-fs-drift.sh" "$fixture" >/dev/null 2>&1; then
+    echo "neg-ok: [std-fs-drift/$label] clean fixture permitted"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [std-fs-drift/$label] clean fixture was rejected"
+  fi
+}
+
 std_fs_reject "grouped-import" 'use std::{fs};\npub fn bad() { let _ = fs::copy("a", "b"); }\n'
 std_fs_reject "unlisted-operation" 'pub fn bad() { let _ = std::fs::copy("a", "b"); }\n'
 std_fs_reject "whitespace-qualified" 'pub fn bad() { let _ = std :: fs :: read("a"); }\n'
@@ -209,6 +240,65 @@ std_fs_reject "grouped-std-self-alias" 'use std::{self as platform};\npub fn bad
 std_fs_reject "unqualified-import" 'use std::fs::read;\npub fn bad() { let _ = read("a"); }\n'
 std_fs_reject "commented-crate-test-attribute" '// #![cfg(test)]\npub fn bad() { let _ = std::fs::read("a"); }\n'
 std_fs_reject "string-crate-test-attribute" 'const S: &str = "#![cfg(test)]";\npub fn bad() { let _ = std::fs::read("a"); }\n'
+
+# Issue #130 — a glob import of std makes `fs::` resolvable with no `std::fs` token anywhere.
+std_fs_reject "glob-import" 'use std::*;\npub fn bad(p: &path::Path) { let _ = fs::read(p); }\n'
+std_fs_reject "absolute-glob-import" 'use ::std::*;\npub fn bad(p: &path::Path) { let _ = fs::read(p); }\n'
+std_fs_reject "grouped-glob-import" 'use std::{path, *};\npub fn bad(p: &path::Path) { let _ = fs::read(p); }\n'
+std_fs_reject "grouped-only-glob-import" 'use std::{*};\npub fn bad(p: &path::Path) { let _ = fs::read(p); }\n'
+std_fs_reject "fs-glob-import" 'use std::fs::*;\npub fn bad(p: &std::path::Path) { let _ = read(p); }\n'
+
+# Issue #131 — an escaped char literal must not desync the lexer into string state and mask
+# the production std::fs call that follows it.
+std_fs_reject_literal "char-escape-double-quote" <<'FIXTURE'
+pub fn q() -> char { '\"' }
+pub fn bad(p: &std::path::Path) { let _ = std::fs::read(p); }
+FIXTURE
+
+std_fs_reject_literal "char-escape-single-quote" <<'FIXTURE'
+pub fn q() -> char { '\'' }
+pub fn bad(p: &std::path::Path) { let _ = std::fs::read(p); }
+FIXTURE
+
+std_fs_reject_literal "char-escape-backslash" <<'FIXTURE'
+pub fn q() -> char { '\\' }
+pub fn bad(p: &std::path::Path) { let _ = std::fs::read(p); }
+FIXTURE
+
+# Positive control for the same lexer: lifetimes must never be mistaken for char literals, and a
+# plain 3-byte char literal must still mask, so a cfg(test)-only std::fs call stays permitted.
+std_fs_accept_literal "lifetimes-and-char-literals" <<'FIXTURE'
+pub struct Holder<'a> { pub name: &'a str }
+impl<'a> Holder<'a> {
+    pub fn name(&self) -> &'a str { self.name }
+}
+pub fn sep() -> char { 'x' }
+pub fn anon(h: &Holder<'_>) -> usize { h.name.len() }
+#[cfg(test)]
+mod tests {
+    fn fixture(p: &std::path::Path) { let _ = std::fs::read(p); }
+}
+FIXTURE
+
+# Issue #132 — the requirement-free-read inventory. The field-name arms (`owner: None`,
+# `mode_mask: None`) only ever saw the STRUCT-LITERAL spelling, so a requirement passed
+# positionally or through a variable slipped past — `read_secure_required(path, None,
+# Some(0o007))` was the live example. maknae-io now names those requirements
+# (`AnchorRequired::OS_DAC`, `DescendantRequired::OS_DAC`, `TargetRequired::OS_DAC_REGULAR`)
+# and the gate inventories the IDENTIFIER, so an unlisted requirement-free read is caught
+# whichever spelling it uses. Both spellings get a control; neither may go quiet.
+std_fs_reject "requirement-anchor-identifier" 'pub fn bad() -> R { open(AnchorRequired::OS_DAC) }\n'
+std_fs_reject "requirement-descendant-identifier" 'pub fn bad() -> R { scan(maknae_io::DescendantRequired::OS_DAC) }\n'
+std_fs_reject "requirement-target-identifier" 'pub fn bad() -> R { read(maknae_io::TargetRequired::OS_DAC_REGULAR) }\n'
+std_fs_reject "requirement-struct-literal-owner" 'pub fn bad() -> R { read(T { owner: None, mode_mask: Some(0o007) }) }\n'
+std_fs_reject "requirement-struct-literal-mode" 'pub fn bad() -> R { read(T { owner: Some(0), mode_mask: None }) }\n'
+
+# Positive control for the identifier arm: `\b` must not fire on an unrelated identifier
+# that merely CONTAINS the token, or every rename becomes an allowlist event.
+std_fs_accept_literal "requirement-identifier-substring" <<'FIXTURE'
+pub const OS_DAC_UNRELATED_SUFFIX: u32 = 1;
+pub fn fine() -> u32 { NOT_OS_DAC + OS_DAC_UNRELATED_SUFFIX }
+FIXTURE
 
 tmpF_alias="$(mktemp -d)"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"

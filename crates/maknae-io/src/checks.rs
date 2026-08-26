@@ -20,10 +20,46 @@ pub struct AnchorRequired {
     pub mode_mask: Option<u32>,
 }
 
+/// # The `OS_DAC` identifiers
+///
+/// Each of these names one decision: **"the operating system's own discretionary
+/// access control is sufficient at this scope"** — this caller adds no owner and no
+/// mode requirement of its own, and relies on the process's OS DAC rights (plus,
+/// where it matters, a stronger requirement named separately at another scope).
+///
+/// They exist to be **greppable and inventoried**, which is the whole point (AGENTS.md:
+/// `None` is a named value, never a silent absence; issue #132). The `std-fs-drift`
+/// gate's exact-inventory arm matched only the struct-literal spelling `owner: None` /
+/// `mode_mask: None`, so the same requirement handed over positionally or through a
+/// variable — `read_secure_required(path, None, Some(0o007))` was the live example —
+/// went uninventoried and could be added without review. The gate now inventories
+/// `OS_DAC` / `OS_DAC_REGULAR` as well, so every requirement-free read appears in
+/// `ci/gates/std-fs-allowlist.txt` beside the justification for it, whichever spelling
+/// it uses. Adding a use is therefore an allowlist edit, i.e. a reviewed decision.
+impl AnchorRequired {
+    /// OS DAC is sufficient for the anchor DIRECTORY: traversal and replacement
+    /// authority come from the process's own rights. Any requirement on the artifact
+    /// beneath it is named separately on the target.
+    pub const OS_DAC: AnchorRequired = AnchorRequired {
+        owner: None,
+        mode_mask: None,
+    };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DescendantRequired {
     pub owner: Option<u32>,
     pub mode_mask: Option<u32>,
+}
+
+impl DescendantRequired {
+    /// OS DAC is sufficient for an intermediate directory on the way to the target.
+    /// See [`AnchorRequired::OS_DAC`] for what the identifier means and why it is
+    /// named rather than spelled out.
+    pub const OS_DAC: DescendantRequired = DescendantRequired {
+        owner: None,
+        mode_mask: None,
+    };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +68,24 @@ pub struct TargetRequired {
     pub mode_mask: Option<u32>,
     pub nlink_exactly_one: bool,
     pub regular_file: bool,
+}
+
+impl TargetRequired {
+    /// OS DAC is sufficient for the target's OWNERSHIP and MODE — it must still be a
+    /// regular file, because a read that would otherwise block on a fifo or hand back
+    /// device bytes is never what a caller meant. `nlink_exactly_one: false`: a hard
+    /// link is only a threat where the artifact is privileged, and such callers name
+    /// their own requirement.
+    ///
+    /// This is the requirement of a caller reading a NON-SENSITIVE artifact (a CA pin,
+    /// a sealed-source blob) whose permission gate, if it has one, is applied by the
+    /// caller separately. See [`AnchorRequired::OS_DAC`] for why it is an identifier.
+    pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
+        owner: None,
+        mode_mask: None,
+        nlink_exactly_one: false,
+        regular_file: true,
+    };
 }
 
 /// Refuse when `st_mode & mask != 0` — `0o007` refuses any other-class bit.

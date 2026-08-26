@@ -5,8 +5,16 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConfigError {
-    /// File read / not-found / invalid UTF-8.
+    /// File read / invalid UTF-8 / any I/O failure that is not structurally
+    /// "the file does not exist" (that case is [`ConfigError::NotFound`]).
     Io(String),
+    /// The file (or a path component) does not exist. A DISTINCT variant —
+    /// not a rendering of [`ConfigError::Io`] — because callers that treat
+    /// absence as benign (the posture marker) must match the error KIND, never
+    /// substring-match a diagnostic string that also contains the path (PR
+    /// #139 review: a refused file under a path containing "NotFound" was
+    /// misclassified as absent).
+    NotFound { path: String },
     /// Malformed / rejected YAML (tags, aliases, multi-doc, depth, bad scalar…).
     Parse {
         message: String,
@@ -65,6 +73,7 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::Io(m) => write!(f, "config i/o error: {m}"),
+            ConfigError::NotFound { path } => write!(f, "config file not found: {path}"),
             ConfigError::Parse { message, line, col } => {
                 write!(f, "config parse error at {line}:{col}: {message}")
             }
