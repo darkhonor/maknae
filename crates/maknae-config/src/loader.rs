@@ -84,6 +84,12 @@ fn map_io(e: maknae_io::IoError) -> ConfigError {
                 mode,
             }
         }
+        maknae_io::IoError::Io {
+            kind: maknae_io::IoKind::NotFound,
+            path,
+        } => ConfigError::NotFound {
+            path: path.display().to_string(),
+        },
         other => ConfigError::Io(other.to_string()),
     }
 }
@@ -705,9 +711,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_file_is_io() {
+    fn missing_file_is_not_found() {
         let got = read_secure(&tmp("nope_never_created"));
-        assert!(matches!(got, Err(ConfigError::Io(_))));
+        // Structured NotFound (PR #139 review): absence is a distinct variant,
+        // never a rendered-string convention.
+        assert!(matches!(got, Err(ConfigError::NotFound { .. })));
     }
 
     #[cfg(unix)]
@@ -895,19 +903,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_base_is_io() {
+    fn missing_base_is_not_found() {
         let d = new_dir("nobase");
         // no maknae.yaml
-        assert!(matches!(scan_dir(&d.0), Err(ConfigError::Io(_))));
+        assert!(matches!(scan_dir(&d.0), Err(ConfigError::NotFound { .. })));
     }
 
     #[cfg(unix)]
     #[test]
-    fn nonexistent_dir_is_io() {
+    fn nonexistent_dir_is_not_found() {
         // canonicalize() fails on a non-existent path → Io (covers the canonicalize
         // error arm + io_err's body; root-safe, unlike a File::open EACCES test).
         let p = std::env::temp_dir().join(format!("maknae_2a_nope_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
-        assert!(matches!(scan_dir(&p), Err(ConfigError::Io(_))));
+        assert!(matches!(scan_dir(&p), Err(ConfigError::NotFound { .. })));
     }
 }

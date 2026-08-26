@@ -56,9 +56,9 @@ crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC
 # `read_secure_required(path, None, Some(0o007))` — the positional spelling issue #132
 # reported as invisible to this inventory.
 crates/maknae-config/src/loader.rs:34|owner: None,
-crates/maknae-config/src/loader.rs:174|owner: None,
-crates/maknae-config/src/loader.rs:216|owner: None,
-crates/maknae-config/src/loader.rs:262|owner: None,
+crates/maknae-config/src/loader.rs:180|owner: None,
+crates/maknae-config/src/loader.rs:222|owner: None,
+crates/maknae-config/src/loader.rs:268|owner: None,
 crates/maknae-vault/src/client.rs:137|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.

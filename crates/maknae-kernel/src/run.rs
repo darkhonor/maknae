@@ -1034,34 +1034,22 @@ enum MarkerOutcome {
 /// the check and `load_root_file`'s own open.
 ///
 /// `load_root_file` funnels a missing file through
-/// `maknae_io::checks::kind_of` (`Errno::ENOENT => IoKind::NotFound`, the
-/// *only* production site that constructs `IoKind::NotFound` —
-/// `crates/maknae-io/src/checks.rs`), and `maknae_config::loader::map_io`'s
-/// catch-all arm renders `IoError::Io { kind, .. }` via `Display` as
-/// `"io error {kind:?}: <path>"` — `IoKind::NotFound`'s `Debug` is exactly
-/// `NotFound` (a fieldless unit variant), so the rendered text always
-/// contains the literal substring `"NotFound"` for this one case
-/// (`crates/maknae-io/src/error.rs`, `crates/maknae-config/src/loader.rs`).
-///
-/// `ConfigError` has no `NotFound` variant of its own — `map_io`'s catch-all
-/// collapses `NotOwned`/`Io{NotFound}`/every other `IoError` arm alike into
-/// one `ConfigError::Io(String)` — so this crate has no structured signal to
-/// match on and the rendered message is the only one available. Matched as a
-/// *substring*, not an exact string, and matched conservatively: only this
-/// one specific, deterministically-produced rendering counts as `Absent`;
-/// every other `ConfigError` (including any other `Io(String)`, such as a
-/// `NotOwned` ownership refusal, whose rendering never contains this
-/// substring) classifies as `Refused`. A future wording change in either
-/// crate fails toward `Refused` (one extra, harmless log line) rather than
-/// toward silently reclassifying a real refusal as an ordinary absence.
+/// `maknae_io::checks::kind_of` (`Errno::ENOENT => IoKind::NotFound`), which
+/// `maknae_config::loader::map_io` maps to the STRUCTURED
+/// `ConfigError::NotFound` variant. Only that variant classifies as `Absent`;
+/// every other error — ownership/permission refusals, parse failures, any
+/// other I/O error — is a present-or-indeterminate marker and classifies as
+/// `Refused` (one log line, never silent). The earlier substring match on the
+/// rendered message was rejected in PR #139 review: the rendering includes
+/// the path, so a refused marker under a path containing "NotFound" was
+/// misclassified as absent — matching the error KIND makes that impossible
+/// by construction.
 fn classify_marker_load(
     result: Result<maknae_config::Value, maknae_config::ConfigError>,
 ) -> MarkerOutcome {
     match result {
         Ok(value) => MarkerOutcome::Loaded(value),
-        Err(maknae_config::ConfigError::Io(msg)) if msg.contains("NotFound") => {
-            MarkerOutcome::Absent
-        }
+        Err(maknae_config::ConfigError::NotFound { .. }) => MarkerOutcome::Absent,
         Err(e) => MarkerOutcome::Refused(e.to_string()),
     }
 }
@@ -1808,6 +1796,34 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                  collapsing it to Absent is exactly the issue #135 regression"
             ),
         }
+    }
+
+    #[test]
+    fn classify_marker_load_refused_marker_under_a_notfound_named_path_is_refused() {
+        // PR #139 review finding (Hobi): absence must be derived from the
+        // structured error kind, never from substring-matching the rendered
+        // message — the rendering includes the PATH, so a present-but-refused
+        // marker under a directory whose name contains "NotFound" would
+        // otherwise classify as Absent and skip the issue-#135 refusal log.
+        let d = Dir::new("NotFound-case");
+        put(
+            &d.0,
+            "private/posture.yaml",
+            "mechanism: tpm2\ntarget: /x\ntimestamp: \"1\"\n",
+            0o640,
+        );
+        let path = d.0.join("private").join("posture.yaml");
+        if nix::unistd::geteuid().as_raw() == 0 {
+            std::os::unix::fs::chown(&path, Some(65534), None)
+                .expect("root can chown the fixture to a non-root uid");
+        }
+        let result = maknae_config::load_root_file(&path);
+        assert!(result.is_err(), "non-root-owned fixture must be refused");
+        assert!(
+            matches!(classify_marker_load(result), MarkerOutcome::Refused(_)),
+            "a refused marker must classify as Refused even when its path \
+             contains the substring \"NotFound\""
+        );
     }
 
     #[test]

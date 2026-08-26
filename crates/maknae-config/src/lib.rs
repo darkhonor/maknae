@@ -260,9 +260,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn load_file_missing_is_io() {
+    fn load_file_missing_is_not_found() {
         let path = std::path::Path::new("/nonexistent/maknae_config_nope.yaml");
-        assert!(matches!(load_file(path), Err(ConfigError::Io(_))));
+        assert!(matches!(load_file(path), Err(ConfigError::NotFound { .. })));
     }
 
     #[cfg(unix)]
