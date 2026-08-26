@@ -29,6 +29,12 @@ use std::path::Path;
 pub struct AuthzPolicy {
     pub allow: Vec<Pattern>,
     pub deny: Vec<Pattern>,
+    /// Role → member-identity lists from the additive `bindings:` key (#85).
+    /// `None` = key ABSENT (defaults apply); `Some` — even empty — = key
+    /// PRESENT (defaults suppressed entirely; spec §3 precedence). Raw strings:
+    /// role-name semantics belong to `maknae-authz-basic`, never this crate
+    /// (grammar, not decision).
+    pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 /// A single request the (future) PDP asks the policy about.
@@ -381,6 +387,37 @@ fn parse_pattern(spec: &str, principal_home: Option<&Path>) -> Result<Pattern, A
     }
 }
 
+/// A `bindings:` member list: a sequence of strings, refused otherwise with a
+/// bindings-specific message (NOT `str_seq`'s "permissions list…" text — an
+/// operator debugging a bindings typo must not be sent to the wrong section).
+fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
+    match v {
+        Value::Seq(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(s) => Ok(s.clone()),
+                _ => Err(AuthzError::Yaml(
+                    "bindings member entries must be strings (quote every name; spec §3)".into(),
+                )),
+            })
+            .collect(),
+        _ => Err(AuthzError::Yaml(
+            "bindings member list must be a sequence (write `role: []` for empty)".into(),
+        )),
+    }
+}
+
+/// Public pure parse (#85, spec §6a.3): already-read authz YAML text →
+/// [`AuthzPolicy`], no file I/O and no ownership requirement — the hermetic
+/// door for the PDP backend's proofs. Production loading stays [`load_authz`]
+/// (root-owned, hardened path); this function never touches the filesystem.
+pub fn parse_authz(
+    body: &str,
+    principal_home: Option<&Path>,
+) -> Result<AuthzPolicy, AuthzError> {
+    parse_policy(body, principal_home)
+}
+
 /// Parse a `schema_version: 1 / permissions: {allow, deny}` document (spec
 /// §7) into an [`AuthzPolicy`]. Pure — takes already-read YAML text, no file
 /// I/O (that's [`load_authz`]'s job); factored out so the grammar/contract
@@ -391,7 +428,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
-    check_known_keys(&map, &["schema_version", "permissions"])?;
+    check_known_keys(&map, &["schema_version", "permissions", "bindings"])?;
 
     // Missing or non-integer schema_version is represented by the sentinel 0
     // (valid versions start at 1) so both cases refuse via the same variant.
@@ -429,7 +466,27 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         .map(|s| parse_pattern(s, principal_home))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(AuthzPolicy { allow, deny })
+    let bindings = match get(&map, "bindings") {
+        None => None,
+        Some(Value::Map(bm)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (role, members) in bm {
+                out.insert(role.clone(), bindings_member_list(members)?);
+            }
+            Some(out)
+        }
+        Some(_) => {
+            return Err(AuthzError::Yaml(
+                "bindings section must be a map of role to member list".into(),
+            ))
+        }
+    };
+
+    Ok(AuthzPolicy {
+        allow,
+        deny,
+        bindings,
+    })
 }
 
 // ============================================================================
@@ -1205,5 +1262,58 @@ mod tests {
         // instead — pins `pos += offset + frag.len()` in the middle branch.
         let glob = read_glob("~/abc*xy*ghi");
         assert!(glob.matches(Path::new("/home/operator/abcZZZZZxyghi")));
+    }
+
+    // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
+
+    #[test]
+    fn bindings_key_absent_is_none() {
+        // Absent vs present-empty is load-bearing (spec §3 defaults precedence):
+        // an absent key means defaults apply; a present key suppresses them.
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        assert!(p.bindings.is_none());
+    }
+
+    #[test]
+    fn bindings_parse_role_to_string_lists() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  guest: []\n";
+        let p = parse_authz(body, None).unwrap();
+        let b = p.bindings.unwrap();
+        assert_eq!(b["admin"], vec!["alex".to_string()]);
+        assert!(b["guest"].is_empty());
+    }
+
+    #[test]
+    fn bindings_present_but_empty_map_is_some_empty() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n";
+        let p = parse_authz(body, None).unwrap();
+        assert_eq!(p.bindings, Some(std::collections::BTreeMap::new()));
+    }
+
+    #[test]
+    fn bindings_non_string_member_refused_with_bindings_message() {
+        let body =
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [1001]\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")),
+            "error must name bindings, not permissions: {e:?}"
+        );
+    }
+
+    #[test]
+    fn bindings_null_member_list_refused_with_bindings_message() {
+        // A bare `guest:` parses as Null, not an empty sequence — refuse, do
+        // not silently treat as empty (fail-closed; spec §3 says write `[]`).
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
+    }
+
+    #[test]
+    fn bindings_non_map_refused() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
     }
 }
