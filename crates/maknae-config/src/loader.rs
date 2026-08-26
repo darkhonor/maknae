@@ -20,38 +20,56 @@ pub(crate) fn io_err(e: impl std::fmt::Display) -> ConfigError {
     ConfigError::Io(e.to_string())
 }
 
+/// The requirement a `maknae.yaml` / `config.d` member carries: a regular file with NO
+/// other-class access (`mode & 0o007 == 0`). Ownership is left to OS DAC — the config
+/// tree is the operator's own, and the root-controlled artifacts state their owner
+/// requirement in [`ROOT_ARTIFACT`] instead.
+///
+/// A named const, not a positional pair, per issue #132: `read_secure_required(path,
+/// None, Some(0o007))` passed a requirement the `std-fs-drift` inventory could not see,
+/// because a positional `None` carries no field name to match on. The requirement is
+/// now one reviewed line that the gate inventories.
+#[cfg(unix)]
+pub(crate) const CONFIG_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
+    owner: None,
+    mode_mask: Some(0o007),
+    nlink_exactly_one: false,
+    regular_file: true,
+};
+
+/// The requirement a root-controlled host artifact carries ([`crate::load_root_file`]):
+/// root-owned, regular, and not writable by group or other. Owner is named here rather
+/// than passed positionally for the same reason as [`CONFIG_ARTIFACT`].
+#[cfg(unix)]
+pub(crate) const ROOT_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
+    owner: Some(0),
+    mode_mask: Some(0o022),
+    nlink_exactly_one: false,
+    regular_file: true,
+};
+
 /// Secure read (spec §3): lstat screen (symlink + regular-file) → open → fstat mode
 /// on the open fd → read from that same fd. The checked inode and the read inode are
 /// one open fd — the read-reopen TOCTOU is closed. Symlink/type *detection* is a
 /// bounded lstat→open race within the trusted-group dir boundary (spec §3).
 #[cfg(unix)]
 pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
-    read_secure_required(path, None, Some(0o007))
+    read_secure_required(path, CONFIG_ARTIFACT)
 }
 
 #[cfg(unix)]
+/// Single-path read. Absolutization, parent pinning and the anchor-relative open all
+/// live in [`maknae_io::read_absolute`] (issue #137); this function is the crate's
+/// error mapping and UTF-8 decode, nothing more. The hand-rolled copy that stood here
+/// is exactly the duplication `maknae-io` exists to remove.
 pub(crate) fn read_secure_required(
     path: &Path,
-    owner: Option<u32>,
-    mode_mask: Option<u32>,
+    target: maknae_io::TargetRequired,
 ) -> Result<String, ConfigError> {
-    let absolute = std::path::absolute(path).map_err(io_err)?;
-    let parent = absolute
-        .parent()
-        .ok_or_else(|| io_err("file has no parent"))?;
-    let name = absolute
-        .file_name()
-        .ok_or_else(|| io_err("file has no name"))?;
-    let anchor = maknae_io::open_anchor_resolved(
-        parent,
-        maknae_io::AnchorRequired {
-            owner: None,
-            mode_mask: None,
-        },
-        maknae_io::StrategyPref::Auto,
-    )
-    .map_err(map_io)?;
-    read_from_anchor_required(&anchor, Path::new(name), None, owner, mode_mask)
+    let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .map_err(map_io)?
+        .value;
+    decode_utf8(&bytes)
 }
 
 #[cfg(unix)]
@@ -70,37 +88,26 @@ fn map_io(e: maknae_io::IoError) -> ConfigError {
     }
 }
 
+/// The reusable-anchor read: `scan_dir` opens the config directory ONCE and reads every
+/// member relative to that one pinned fd, so it cannot go through
+/// [`maknae_io::read_absolute`] (which pins a fresh parent per call). The single-path
+/// callers do, and the `_required` variant that used to bridge the two is gone with them.
 #[cfg(unix)]
 fn read_from_anchor(
     anchor: &maknae_io::Anchor,
     rel: &Path,
     desc: Option<maknae_io::DescendantRequired>,
 ) -> Result<String, ConfigError> {
-    read_from_anchor_required(anchor, rel, desc, None, Some(0o007))
+    let bytes = anchor
+        .read(rel, desc, CONFIG_ARTIFACT)
+        .map_err(map_io)?
+        .value;
+    decode_utf8(&bytes)
 }
 
 #[cfg(unix)]
-fn read_from_anchor_required(
-    anchor: &maknae_io::Anchor,
-    rel: &Path,
-    desc: Option<maknae_io::DescendantRequired>,
-    owner: Option<u32>,
-    mode_mask: Option<u32>,
-) -> Result<String, ConfigError> {
-    let bytes = anchor
-        .read(
-            rel,
-            desc,
-            maknae_io::TargetRequired {
-                owner,
-                mode_mask,
-                nlink_exactly_one: false,
-                regular_file: true,
-            },
-        )
-        .map_err(map_io)?
-        .value;
-    std::str::from_utf8(&bytes)
+fn decode_utf8(bytes: &[u8]) -> Result<String, ConfigError> {
+    std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|e| ConfigError::Io(format!("invalid UTF-8: {e}")))
 }
@@ -597,6 +604,67 @@ mod tests {
         let mut f = std::fs::File::create(path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// The OWNER-requirement success arm of `read_secure_required`, hermetically
+    /// (issue #138). `load_root_file` names `ROOT_ARTIFACT` — `owner: Some(0)` — which
+    /// an unprivileged test can never satisfy, so this arm used to be reached by
+    /// loading the host's real root-owned `/etc/hosts`. That made a security control
+    /// depend on host state: a runner whose `/etc/hosts` shipped a different owner or
+    /// mode failed the suite for a reason that says nothing about the loader, and one
+    /// that shipped a *more* permissive mode passed it without exercising the check.
+    ///
+    /// The requirement is caller-supplied, so the same production path takes a fixture
+    /// this test owns: require the CURRENT euid, which the just-created file genuinely
+    /// has. It is a real owner comparison against a real inode — no injected uid, no
+    /// stand-in — and it is the only positive owner case on this path.
+    #[cfg(unix)]
+    #[test]
+    fn owner_requirement_matching_the_real_owner_is_accepted() {
+        use std::os::unix::fs::MetadataExt;
+        let p = tmp("owned_by_me");
+        write_mode(&p, "x: 1\n", 0o640);
+        let me = std::fs::metadata(&p).unwrap().uid();
+        let got = read_secure_required(
+            &p,
+            maknae_io::TargetRequired {
+                owner: Some(me),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        );
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), "x: 1\n");
+    }
+
+    /// And the refusal arm of the same comparison, on the same shape: an owner the
+    /// fixture cannot have. Together these two kill the owner check's constant-return
+    /// mutants — a refusal test alone leaves "always refuse" alive.
+    #[cfg(unix)]
+    #[test]
+    fn owner_requirement_naming_another_uid_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let p = tmp("owned_by_someone_else");
+        write_mode(&p, "x: 1\n", 0o640);
+        let other = std::fs::metadata(&p).unwrap().uid() + 1;
+        let got = read_secure_required(
+            &p,
+            maknae_io::TargetRequired {
+                owner: Some(other),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        );
+        let _ = std::fs::remove_file(&p);
+        // The message names BOTH uids — the one required and the one found — so the
+        // assertion cannot pass on an unrelated I/O failure that merely errored.
+        assert!(
+            matches!(&got, Err(ConfigError::Io(m))
+                if m.contains(&format!("require {other}")) && m.contains(&format!("owned by {}", other - 1))),
+            "got {got:?}"
+        );
     }
 
     #[cfg(unix)]

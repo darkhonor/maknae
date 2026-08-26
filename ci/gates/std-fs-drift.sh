@@ -17,7 +17,17 @@ fs_pattern = re.compile(
     r"\bFile\s*::\s*\w+|\bOpenOptions\s*::\s*\w+|"
     r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
-requirements_pattern = re.compile(r"owner:\s*None|mode_mask:\s*None")
+# A requirement-free read is inventoried by BOTH spellings it can take (issue #132).
+# The field-name arms only ever saw a struct literal, so a requirement handed over
+# positionally or through a variable was invisible — `read_secure_required(path, None,
+# Some(0o007))` was the live example. maknae-io now NAMES those requirements
+# (`AnchorRequired::OS_DAC`, `DescendantRequired::OS_DAC`, `TargetRequired::OS_DAC_REGULAR`)
+# precisely so the absence is greppable, and the identifier arm inventories every use.
+# `\b` on both sides keeps unrelated identifiers that merely contain the token
+# (`NOT_OS_DAC`, `OS_DAC_UNRELATED`) out of the inventory.
+requirements_pattern = re.compile(
+    r"owner:\s*None|mode_mask:\s*None|\bOS_DAC(?:_REGULAR)?\b"
+)
 # A Rust char literal: `'` + (one non-escape char | a backslash escape) + `'`. Anchoring on the
 # closing quote is what keeps lifetimes out — `'a`, `'static`, `'_` and loop labels are never
 # followed by a closing quote, so they fall through and are left as code (issue #131).

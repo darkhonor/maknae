@@ -108,9 +108,31 @@ pub fn load_root_file(path: &std::path::Path) -> Result<Value, ConfigError> {
     }
     #[cfg(unix)]
     {
-        let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
-        load_str(&text)
+        load_required_file(path, loader::ROOT_ARTIFACT)
     }
+}
+
+/// [`load_root_file`] with the artifact requirement supplied by the caller rather than
+/// fixed at `ROOT_ARTIFACT`.
+///
+/// It is split out for a testability reason worth stating plainly (issue #138). The
+/// public entry point requires `owner: Some(0)`, which an unprivileged test process
+/// can never satisfy, so the read-succeeds-then-parse half of this path used to be
+/// covered by loading the host's real root-owned `/etc/hosts` — a security control
+/// whose result depended on host state. This helper lets a test name a requirement its
+/// own fixture genuinely meets (the current euid), so the SAME production code runs
+/// against a real inode with a real owner comparison.
+///
+/// It is deliberately NOT a seam that fakes the check: there is no injected uid and no
+/// stand-in. `load_root_file` still hardcodes `ROOT_ARTIFACT`, and nothing outside this
+/// crate can choose a weaker requirement.
+#[cfg(unix)]
+fn load_required_file(
+    path: &std::path::Path,
+    target: maknae_io::TargetRequired,
+) -> Result<Value, ConfigError> {
+    let text = loader::read_secure_required(path, target)?;
+    load_str(&text)
 }
 
 #[cfg(test)]
@@ -226,20 +248,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn root_file_loader_reaches_parsing_for_a_real_root_owned_host_file() {
-        #[cfg(target_os = "macos")]
-        let host_file = std::path::Path::new("/private/etc/hosts");
-        #[cfg(not(target_os = "macos"))]
-        let host_file = std::path::Path::new("/etc/hosts");
-        let got = load_root_file(host_file);
-        assert!(
-            !matches!(got, Err(ConfigError::Io(_))),
-            "root-owned /etc/hosts must pass I/O checks: {got:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn load_file_reads_and_parses() {
         use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join("maknae_config_ok.yaml");
@@ -299,6 +307,33 @@ mod tests {
             load_root_file(path),
             Err(ConfigError::PermissionsUnsupported)
         );
+    }
+
+    /// The root-artifact loader's SUCCESS path — read clears every requirement, then
+    /// the bytes are parsed (issue #138). Hermetic: the requirement names the current
+    /// euid, which the fixture this test just wrote genuinely has, so the real owner
+    /// comparison runs against a real inode. The `/etc/hosts` load that used to cover
+    /// this asserted on host state and told us nothing about the loader.
+    #[cfg(unix)]
+    #[test]
+    fn root_artifact_loader_parses_when_every_requirement_is_met() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let path =
+            std::env::temp_dir().join(format!("maknae_config_owned_{}.yaml", std::process::id()));
+        std::fs::write(&path, "x: 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let me = std::fs::metadata(&path).unwrap().uid();
+        let got = load_required_file(
+            &path,
+            maknae_io::TargetRequired {
+                owner: Some(me),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        );
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), Value::Map(vec![("x".into(), Value::Int(1))]));
     }
 
     #[cfg(unix)]
