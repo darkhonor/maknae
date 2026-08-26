@@ -37,17 +37,9 @@ crates/maknae-io/src/anchor.rs:244|mode_mask: None,
 crates/maknae-config/src/loader.rs:167|owner: None,
 crates/maknae-config/src/loader.rs:209|owner: None,
 crates/maknae-config/src/loader.rs:255|owner: None,
-crates/maknae-vault/src/ca.rs:21|owner: None,
-crates/maknae-vault/src/ca.rs:22|mode_mask: None,
-crates/maknae-vault/src/client.rs:114|owner: None,
-crates/maknae-vault/src/client.rs:115|mode_mask: None,
-crates/maknae-vault/src/client.rs:145|owner: None,
-
-# Non-Unix Stage-1 requirement-free CA/RoleID reads preserve the crate's documented
-# cross-platform behavior; reads naming owner/mode/nlink requirements refuse instead.
-crates/maknae-vault/src/lib.rs:37|std::fs::read(path)
-crates/maknae-vault/src/secret_io.rs:31|owner: None,
-crates/maknae-vault/src/secret_io.rs:32|mode_mask: None,
+crates/maknae-vault/src/client.rs:137|owner: None,
+crates/maknae-vault/src/lib.rs:87|owner: None,
+crates/maknae-vault/src/lib.rs:88|mode_mask: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
 crates/maknae-vault/src/socket.rs:16|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {

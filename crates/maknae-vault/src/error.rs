@@ -25,9 +25,11 @@ pub enum VaultError {
     /// A sensitive credential file has unsafe permissions (group/other access) or is a
     /// symlink — refused before reading (fail-closed).
     InsecureCredential { path: PathBuf, detail: String },
-    /// The Unix permission model is unavailable on this target, so a sensitive credential
-    /// file's owner-only permissions cannot be verified — refuse rather than read it
-    /// unchecked (fail-closed; mirrors `maknae-config`'s non-Unix refusal).
+    /// `maknae-io`'s anchor-relative, symlink-checked read is unavailable on this
+    /// (non-Unix) target — a sensitive credential file's owner-only permissions
+    /// cannot be verified, AND a plain storage read (CA pins, sealed-source
+    /// artifacts) cannot be safely resolved without it — refuse rather than read
+    /// either unchecked (fail-closed; mirrors `maknae-config`'s non-Unix refusal).
     PermissionsUnsupported,
     /// A PEM artifact (CA cert) was malformed.
     Pem(&'static str),
