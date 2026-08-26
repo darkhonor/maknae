@@ -32,8 +32,8 @@ crates/maknae-config/src/loader.rs:49|mode_mask: None,
 
 # read_absolute pins the configured path's parent; OS DAC is the named directory
 # requirement while the caller supplies the target artifact requirements.
-crates/maknae-io/src/anchor.rs:243|owner: None,
-crates/maknae-io/src/anchor.rs:244|mode_mask: None,
+crates/maknae-io/src/anchor.rs:253|owner: None,
+crates/maknae-io/src/anchor.rs:254|mode_mask: None,
 crates/maknae-config/src/loader.rs:167|owner: None,
 crates/maknae-config/src/loader.rs:209|owner: None,
 crates/maknae-config/src/loader.rs:255|owner: None,
