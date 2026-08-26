@@ -229,18 +229,34 @@ fn finish_anchor(
     })
 }
 
-/// Read one absolute file through a pinned parent anchor. This is the adapter for
+/// Read one configured file through a pinned parent anchor. This is the adapter for
 /// callers that own a single configured path rather than a reusable subtree.
+///
+/// **Absolutization is part of the adapter** (issue #137). It refused a relative input
+/// until 2026-08-26, and the consequence was three hand-rolled copies of this exact
+/// plumbing — `absolutize -> parent/file_name -> open_anchor_resolved -> read` — in
+/// `maknae-config::loader`, `maknae-config::authz` and `maknae-vault`, each free to
+/// drift in what it checked. That is the failure `maknae-io` exists to prevent, so the
+/// step lives here once and callers keep only their error mapping.
+///
+/// The resolution is [`std::path::absolute`]: **lexical**, against the process cwd,
+/// touching no filesystem and collapsing no `..`. It therefore grants nothing — the
+/// anchor open below still resolves and checks every real inode, refusing symlinked
+/// components exactly as before. A path with no `file_name` (`/`, `..`) is refused
+/// rather than read, because the anchor directory is not the artifact.
 pub fn read_absolute(
     path: &Path,
     target: TargetRequired,
     pref: StrategyPref,
 ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
-    if !path.is_absolute() {
-        return Err(IoError::RelativeAnchor {
-            path: path.to_path_buf(),
-        });
-    }
+    // `std::path::absolute` fails only on an empty path or an unreadable cwd; neither
+    // carries a raw errno on every platform, so the fallback keeps the error typed.
+    let path = &std::path::absolute(path).map_err(|e| IoError::Io {
+        path: path.to_path_buf(),
+        kind: crate::checks::kind_of_errno(nix::errno::Errno::from_raw(
+            e.raw_os_error().unwrap_or(nix::libc::EINVAL),
+        )),
+    })?;
     let parent = path.parent().ok_or(IoError::RootAnchor)?;
     let name = path
         .file_name()
@@ -598,13 +614,61 @@ impl Anchor {
 mod tests {
     use super::*;
 
+    /// The process cwd is global state; a test that moves it must not interleave with
+    /// another that reads it (env-lock pattern per `bins/maknae/src/cli.rs`'s ENV_LOCK).
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Absolutization lives HERE, not in each caller (issue #137). Three consumers
+    /// — `maknae-config::loader`, `maknae-config::authz`, `maknae-vault` — had each
+    /// hand-rolled `absolutize -> parent/file_name -> open_anchor_resolved -> read`
+    /// ahead of this adapter because it refused a relative input. Three copies of a
+    /// security-critical adapter is the failure `maknae-io` exists to prevent, so the
+    /// adapter absorbs the step and the callers keep only their error mapping.
+    ///
+    /// The resolution is `std::path::absolute` — LEXICAL, against the process cwd. It
+    /// does not collapse `..` and does not touch the filesystem, so the anchor open
+    /// below still performs every symlink and permission check on the real inodes.
     #[test]
-    fn read_absolute_refuses_relative_input() {
-        let got = read_absolute(Path::new("relative"), t_req(), StrategyPref::Auto);
-        assert!(matches!(
-            got,
-            Err(IoError::RelativeAnchor { path }) if path == Path::new("relative")
-        ));
+    fn read_absolute_absolutizes_a_relative_input_against_cwd() {
+        let d = dir(0o750);
+        let name = format!("rel-read-{}", std::process::id());
+        let file = d.path().join(&name);
+        std::fs::write(&file, b"relative-bytes").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        // cwd is process-global; serialize against any other cwd-mutating test.
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::current_dir().unwrap();
+        std::env::set_current_dir(d.path()).unwrap();
+        let got = read_absolute(Path::new(&name), t_req(), StrategyPref::Auto);
+        std::env::set_current_dir(&saved).unwrap();
+
+        assert_eq!(got.unwrap().value.as_slice(), b"relative-bytes");
+    }
+
+    /// The remaining degenerate input: `/` absolutizes to itself, has no `file_name`,
+    /// and must refuse rather than read the anchor directory.
+    #[test]
+    fn read_absolute_refuses_a_path_with_no_file_name() {
+        let got = read_absolute(Path::new("/"), t_req(), StrategyPref::Auto);
+        assert_eq!(got.unwrap_err(), IoError::RootAnchor);
+    }
+
+    /// `std::path::absolute` refuses an empty path with an `io::Error` carrying no
+    /// `raw_os_error`; the fallback must still produce an `IoError`, never a panic.
+    #[test]
+    fn read_absolute_refuses_an_empty_path() {
+        let got = read_absolute(Path::new(""), t_req(), StrategyPref::Auto);
+        assert!(
+            matches!(
+                got,
+                Err(IoError::Io {
+                    kind: crate::error::IoKind::Other { .. },
+                    ..
+                })
+            ),
+            "got {got:?}"
+        );
     }
 
     #[test]

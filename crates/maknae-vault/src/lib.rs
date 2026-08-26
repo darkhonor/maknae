@@ -74,6 +74,11 @@ pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
 /// regardless) and no portable equivalent of the anchor-relative, `O_NOFOLLOW`-checked
 /// read it performs, so this refuses rather than falling back to an unchecked
 /// `std::fs::read` (fail closed; mirrors `maknae-config::load_file`).
+///
+/// A relative `path` is absolutized by `read_absolute` itself (issue #137); the
+/// `absolute_storage_path` helper that used to do it here — one of three hand-rolled
+/// copies of the same plumbing — is gone, and with it this crate's only ambient
+/// `current_dir` read.
 fn read_storage(path: &std::path::Path) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
     #[cfg(not(unix))]
     {
@@ -82,43 +87,18 @@ fn read_storage(path: &std::path::Path) -> Result<zeroize::Zeroizing<Vec<u8>>, V
     }
     #[cfg(unix)]
     {
-        let absolute = absolute_storage_path(path)?;
         let target = maknae_io::TargetRequired {
             owner: None,
             mode_mask: None,
             nlink_exactly_one: false,
             regular_file: true,
         };
-        maknae_io::read_absolute(&absolute, target, maknae_io::StrategyPref::Auto)
+        maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map(|out| out.value)
             .map_err(|error| VaultError::Io {
                 path: path.to_path_buf(),
                 source: std::io::Error::other(error.to_string()),
             })
-    }
-}
-
-/// Resolve `path` to an absolute path for `maknae-io`'s anchor-relative read. Only
-/// meaningful ahead of a `cfg(unix)` `maknae_io::read_absolute` call, so the non-unix
-/// arm refuses up front rather than resolving a path nothing will securely read.
-fn absolute_storage_path(path: &std::path::Path) -> Result<std::path::PathBuf, VaultError> {
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(VaultError::PermissionsUnsupported)
-    }
-    #[cfg(unix)]
-    {
-        Ok(if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .map_err(|source| VaultError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?
-        })
     }
 }
 
@@ -130,7 +110,7 @@ mod storage_tests {
     use super::*;
 
     // Compiles/runs only with the real (unix) `maknae-io` lane wired through
-    // `read_storage`/`absolute_storage_path` — the regression this guards is #133:
+    // `read_storage` — the regression this guards is #133:
     // a `#[cfg(not(unix))] mod maknae_io` shim that referenced `maknae_io::` types
     // unqualified from sibling modules, which cannot compile on non-unix (E0433,
     // a crate-root module is not in the extern prelude) and was unreachable anyway
@@ -161,10 +141,6 @@ mod storage_tests {
         let path = std::path::Path::new("storage.bin");
         assert!(matches!(
             read_storage(path),
-            Err(VaultError::PermissionsUnsupported)
-        ));
-        assert!(matches!(
-            absolute_storage_path(path),
             Err(VaultError::PermissionsUnsupported)
         ));
     }

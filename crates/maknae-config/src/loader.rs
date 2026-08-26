@@ -30,28 +30,28 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
 }
 
 #[cfg(unix)]
+/// Single-path read. Absolutization, parent pinning and the anchor-relative open all
+/// live in [`maknae_io::read_absolute`] (issue #137); this function is the crate's
+/// error mapping and UTF-8 decode, nothing more. The hand-rolled copy that stood here
+/// is exactly the duplication `maknae-io` exists to remove.
 pub(crate) fn read_secure_required(
     path: &Path,
     owner: Option<u32>,
     mode_mask: Option<u32>,
 ) -> Result<String, ConfigError> {
-    let absolute = std::path::absolute(path).map_err(io_err)?;
-    let parent = absolute
-        .parent()
-        .ok_or_else(|| io_err("file has no parent"))?;
-    let name = absolute
-        .file_name()
-        .ok_or_else(|| io_err("file has no name"))?;
-    let anchor = maknae_io::open_anchor_resolved(
-        parent,
-        maknae_io::AnchorRequired {
-            owner: None,
-            mode_mask: None,
+    let bytes = maknae_io::read_absolute(
+        path,
+        maknae_io::TargetRequired {
+            owner,
+            mode_mask,
+            nlink_exactly_one: false,
+            regular_file: true,
         },
         maknae_io::StrategyPref::Auto,
     )
-    .map_err(map_io)?;
-    read_from_anchor_required(&anchor, Path::new(name), None, owner, mode_mask)
+    .map_err(map_io)?
+    .value;
+    decode_utf8(&bytes)
 }
 
 #[cfg(unix)]
@@ -70,37 +70,35 @@ fn map_io(e: maknae_io::IoError) -> ConfigError {
     }
 }
 
+/// The reusable-anchor read: `scan_dir` opens the config directory ONCE and reads every
+/// member relative to that one pinned fd, so it cannot go through
+/// [`maknae_io::read_absolute`] (which pins a fresh parent per call). The single-path
+/// callers do, and the `_required` variant that used to bridge the two is gone with them.
 #[cfg(unix)]
 fn read_from_anchor(
     anchor: &maknae_io::Anchor,
     rel: &Path,
     desc: Option<maknae_io::DescendantRequired>,
 ) -> Result<String, ConfigError> {
-    read_from_anchor_required(anchor, rel, desc, None, Some(0o007))
-}
-
-#[cfg(unix)]
-fn read_from_anchor_required(
-    anchor: &maknae_io::Anchor,
-    rel: &Path,
-    desc: Option<maknae_io::DescendantRequired>,
-    owner: Option<u32>,
-    mode_mask: Option<u32>,
-) -> Result<String, ConfigError> {
     let bytes = anchor
         .read(
             rel,
             desc,
             maknae_io::TargetRequired {
-                owner,
-                mode_mask,
+                owner: None,
+                mode_mask: Some(0o007),
                 nlink_exactly_one: false,
                 regular_file: true,
             },
         )
         .map_err(map_io)?
         .value;
-    std::str::from_utf8(&bytes)
+    decode_utf8(&bytes)
+}
+
+#[cfg(unix)]
+fn decode_utf8(bytes: &[u8]) -> Result<String, ConfigError> {
+    std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|e| ConfigError::Io(format!("invalid UTF-8: {e}")))
 }

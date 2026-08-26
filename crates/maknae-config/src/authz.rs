@@ -495,29 +495,17 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
     }
     #[cfg(unix)]
     {
-        let absolute = std::path::absolute(path).map_err(|e| AuthzError::Io(e.to_string()))?;
-        let parent = absolute
-            .parent()
-            .ok_or_else(|| AuthzError::Io("authz path has no parent".into()))?;
-        let name = absolute
-            .file_name()
-            .ok_or_else(|| AuthzError::Io("authz path has no name".into()))?;
-        let anchor = maknae_io::open_anchor_resolved(
-            parent,
-            maknae_io::AnchorRequired {
-                // Directory traversal and replacement authority come from the
-                // current process's OS DAC rights. The opened policy inode
-                // itself is separately required to remain root-owned.
-                owner: None,
-                mode_mask: None,
-            },
-            maknae_io::StrategyPref::Auto,
-        )
-        .map_err(map_authz_io)?;
-        let bytes = anchor
-            .read(Path::new(name), None, authz_target_required())
-            .map_err(map_authz_io)?
-            .value;
+        // Absolutization, parent pinning and the anchor-relative open all live in
+        // `maknae_io::read_absolute` (issue #137). The copy that stood here was one
+        // of three identical hand-rolled adapters; what remains is this module's
+        // error mapping and UTF-8 decode. Directory traversal and replacement
+        // authority come from the current process's OS DAC rights — named inside
+        // the adapter — while the opened policy inode is separately required to
+        // remain root-owned by `authz_target_required()`.
+        let bytes =
+            maknae_io::read_absolute(path, authz_target_required(), maknae_io::StrategyPref::Auto)
+                .map_err(map_authz_io)?
+                .value;
         decode_policy_utf8(&bytes)
     }
 }
