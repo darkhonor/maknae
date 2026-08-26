@@ -18,6 +18,12 @@ fs_pattern = re.compile(
     r"\b(?:use|extern\s+crate)\s+std\s+as\s+\w+"
 )
 requirements_pattern = re.compile(r"owner:\s*None|mode_mask:\s*None")
+# A Rust char literal: `'` + (one non-escape char | a backslash escape) + `'`. Anchoring on the
+# closing quote is what keeps lifetimes out — `'a`, `'static`, `'_` and loop labels are never
+# followed by a closing quote, so they fall through and are left as code (issue #131).
+char_literal_pattern = re.compile(
+    r"'(?:\\(?:u\{[0-9a-fA-F_]{1,6}\}|x[0-9a-fA-F]{2}|.)|[^\\'])'", re.DOTALL
+)
 found = set()
 
 def mask_noncode(source):
@@ -32,8 +38,12 @@ def mask_noncode(source):
                 out[i:i+2] = "  "; i += 2; state = "block"
             elif source[i] == '"':
                 out[i] = " "; i += 1; state = "string"
-            elif source[i] == "'" and i + 2 < len(source) and source[i+2] == "'":
-                out[i:i+3] = "   "; i += 3
+            elif source[i] == "'" and char_literal_pattern.match(source, i):
+                end = char_literal_pattern.match(source, i).end()
+                for pos in range(i, end):
+                    if source[pos] != "\n":
+                        out[pos] = " "
+                i = end
             else:
                 raw = re.match(r'r(#+)?"', source[i:])
                 if raw:
@@ -116,7 +126,12 @@ for rel in files:
         r"\b(?:use|extern\s+crate)\s+(?:::)?std\s+as\s+\w+|"
         r"\buse\s+(?:::)?std\s*::\s*fs\s+as\s+\w+|"
         r"\buse\s+(?:::)?std\s*::\s*fs\s*::\s*(?!File\s*;|OpenOptions\s*;)|"
-        r"\buse\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\b(?:fs\b|self\s+as\b)"
+        r"\buse\s+(?:::)?std\s*::\s*\{[^}]{0,500}?\b(?:fs\b|self\s+as\b)|"
+        # A glob import of std makes `fs::` resolvable with no `std::fs` token in the file
+        # (issue #130). Covers `use std::*;`, `use ::std::*;` and grouped forms whose list
+        # carries a top-level glob (`use std::{*}`, `use std::{path, *}`); a nested glob such
+        # as `use std::{io::*}` does not bring `fs` into scope and is deliberately not matched.
+        r"\buse\s+(?:::)?std\s*::\s*(?:\*|(?=\{)[^;]{0,500}?[{,]\s*\*\s*[,}])"
     )
     match = forbidden_import.search(fs_source)
     if match:
