@@ -9,7 +9,7 @@
 //! discharged here per `maknae-security/tests/golden.rs`'s deferral), never a
 //! silent non-match.
 
-use crate::binding::{Resolution, ResolvedBindings, AGENT_SUBJECT};
+use crate::binding::{Resolution, ResolvedBindings};
 use crate::role::Role;
 use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 
