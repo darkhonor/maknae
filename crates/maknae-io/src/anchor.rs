@@ -263,14 +263,7 @@ pub fn read_absolute(
         .ok_or_else(|| IoError::AnchorEndsInDotDot {
             path: path.to_path_buf(),
         })?;
-    let anchor = open_anchor_resolved(
-        parent,
-        AnchorRequired {
-            owner: None,
-            mode_mask: None,
-        },
-        pref,
-    )?;
+    let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
     anchor.read(Path::new(name), None, target)
 }
 

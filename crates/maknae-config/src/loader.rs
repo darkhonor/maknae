@@ -20,13 +20,41 @@ pub(crate) fn io_err(e: impl std::fmt::Display) -> ConfigError {
     ConfigError::Io(e.to_string())
 }
 
+/// The requirement a `maknae.yaml` / `config.d` member carries: a regular file with NO
+/// other-class access (`mode & 0o007 == 0`). Ownership is left to OS DAC — the config
+/// tree is the operator's own, and the root-controlled artifacts state their owner
+/// requirement in [`ROOT_ARTIFACT`] instead.
+///
+/// A named const, not a positional pair, per issue #132: `read_secure_required(path,
+/// None, Some(0o007))` passed a requirement the `std-fs-drift` inventory could not see,
+/// because a positional `None` carries no field name to match on. The requirement is
+/// now one reviewed line that the gate inventories.
+#[cfg(unix)]
+pub(crate) const CONFIG_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
+    owner: None,
+    mode_mask: Some(0o007),
+    nlink_exactly_one: false,
+    regular_file: true,
+};
+
+/// The requirement a root-controlled host artifact carries ([`crate::load_root_file`]):
+/// root-owned, regular, and not writable by group or other. Owner is named here rather
+/// than passed positionally for the same reason as [`CONFIG_ARTIFACT`].
+#[cfg(unix)]
+pub(crate) const ROOT_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetRequired {
+    owner: Some(0),
+    mode_mask: Some(0o022),
+    nlink_exactly_one: false,
+    regular_file: true,
+};
+
 /// Secure read (spec §3): lstat screen (symlink + regular-file) → open → fstat mode
 /// on the open fd → read from that same fd. The checked inode and the read inode are
 /// one open fd — the read-reopen TOCTOU is closed. Symlink/type *detection* is a
 /// bounded lstat→open race within the trusted-group dir boundary (spec §3).
 #[cfg(unix)]
 pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
-    read_secure_required(path, None, Some(0o007))
+    read_secure_required(path, CONFIG_ARTIFACT)
 }
 
 #[cfg(unix)]
@@ -36,21 +64,11 @@ pub(crate) fn read_secure(path: &Path) -> Result<String, ConfigError> {
 /// is exactly the duplication `maknae-io` exists to remove.
 pub(crate) fn read_secure_required(
     path: &Path,
-    owner: Option<u32>,
-    mode_mask: Option<u32>,
+    target: maknae_io::TargetRequired,
 ) -> Result<String, ConfigError> {
-    let bytes = maknae_io::read_absolute(
-        path,
-        maknae_io::TargetRequired {
-            owner,
-            mode_mask,
-            nlink_exactly_one: false,
-            regular_file: true,
-        },
-        maknae_io::StrategyPref::Auto,
-    )
-    .map_err(map_io)?
-    .value;
+    let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .map_err(map_io)?
+        .value;
     decode_utf8(&bytes)
 }
 
@@ -81,16 +99,7 @@ fn read_from_anchor(
     desc: Option<maknae_io::DescendantRequired>,
 ) -> Result<String, ConfigError> {
     let bytes = anchor
-        .read(
-            rel,
-            desc,
-            maknae_io::TargetRequired {
-                owner: None,
-                mode_mask: Some(0o007),
-                nlink_exactly_one: false,
-                regular_file: true,
-            },
-        )
+        .read(rel, desc, CONFIG_ARTIFACT)
         .map_err(map_io)?
         .value;
     decode_utf8(&bytes)

@@ -108,7 +108,7 @@ pub fn load_root_file(path: &std::path::Path) -> Result<Value, ConfigError> {
     }
     #[cfg(unix)]
     {
-        let text = loader::read_secure_required(path, Some(0), Some(0o022))?;
+        let text = loader::read_secure_required(path, loader::ROOT_ARTIFACT)?;
         load_str(&text)
     }
 }

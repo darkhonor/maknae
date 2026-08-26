@@ -23,29 +23,43 @@ crates/maknae-audit-append/src/sink.rs:21|let mut opts = std::fs::OpenOptions::n
 crates/maknae-audit-append/src/sink.rs:75|fn open_options() -> std::fs::OpenOptions {
 crates/maknae-audit-append/src/sink.rs:76|let mut opts = std::fs::OpenOptions::new();
 
+# The DEFINITIONS of the three named requirement-free identifiers (issue #132). Each
+# says "OS DAC is sufficient at this scope" once, in one reviewed place, so a caller
+# can no longer express that decision anonymously — the gate inventories the identifier
+# as well as the struct-literal fields, and the identifier is what a caller writes.
+crates/maknae-io/src/checks.rs:43|pub const OS_DAC: AnchorRequired = AnchorRequired {
+crates/maknae-io/src/checks.rs:44|owner: None,
+crates/maknae-io/src/checks.rs:45|mode_mask: None,
+crates/maknae-io/src/checks.rs:59|pub const OS_DAC: DescendantRequired = DescendantRequired {
+crates/maknae-io/src/checks.rs:60|owner: None,
+crates/maknae-io/src/checks.rs:61|mode_mask: None,
+crates/maknae-io/src/checks.rs:83|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
+crates/maknae-io/src/checks.rs:84|owner: None,
+crates/maknae-io/src/checks.rs:85|mode_mask: None,
+
 # read_absolute pins the configured path's parent; OS DAC is the named directory
 # requirement while the caller supplies the target artifact requirements. Named ONCE
 # here since issue #137 — maknae-config::loader, maknae-config::authz and maknae-vault
 # each carried their own copy of this anchor requirement until the adapter absorbed
 # absolutization and they were deleted.
-crates/maknae-io/src/anchor.rs:269|owner: None,
-crates/maknae-io/src/anchor.rs:270|mode_mask: None,
-
-# owner: None means OS DAC is sufficient for OWNERSHIP at that scope; the mode
-# requirement standing beside it is named explicitly, and stronger artifact
-# requirements are separately named on the target (authz/posture/plaintext credential
-# where applicable).
-crates/maknae-config/src/loader.rs:88|owner: None,
-crates/maknae-config/src/loader.rs:165|owner: None,
-crates/maknae-config/src/loader.rs:207|owner: None,
-crates/maknae-config/src/loader.rs:253|owner: None,
-crates/maknae-vault/src/client.rs:137|owner: None,
+crates/maknae-io/src/anchor.rs:266|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
 
 # read_storage carries no requirement of its own beyond regular-file: it reads
 # non-sensitive artifacts (CA pins, sealed-source blobs), and every caller needing a
 # permission gate applies it separately (client::read_secret_credential's 0o077 mask).
-crates/maknae-vault/src/lib.rs:91|owner: None,
-crates/maknae-vault/src/lib.rs:92|mode_mask: None,
+crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
+
+# owner: None means OS DAC is sufficient for OWNERSHIP at that scope; the mode
+# requirement standing beside it is named explicitly, and stronger artifact
+# requirements are separately named on the target (authz/posture/plaintext credential
+# where applicable). loader.rs:34 is CONFIG_ARTIFACT, the named const that replaced
+# `read_secure_required(path, None, Some(0o007))` — the positional spelling issue #132
+# reported as invisible to this inventory.
+crates/maknae-config/src/loader.rs:34|owner: None,
+crates/maknae-config/src/loader.rs:174|owner: None,
+crates/maknae-config/src/loader.rs:216|owner: None,
+crates/maknae-config/src/loader.rs:262|owner: None,
+crates/maknae-vault/src/client.rs:137|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
 crates/maknae-vault/src/socket.rs:16|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {

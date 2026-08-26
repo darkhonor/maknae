@@ -280,6 +280,26 @@ mod tests {
 }
 FIXTURE
 
+# Issue #132 — the requirement-free-read inventory. The field-name arms (`owner: None`,
+# `mode_mask: None`) only ever saw the STRUCT-LITERAL spelling, so a requirement passed
+# positionally or through a variable slipped past — `read_secure_required(path, None,
+# Some(0o007))` was the live example. maknae-io now names those requirements
+# (`AnchorRequired::OS_DAC`, `DescendantRequired::OS_DAC`, `TargetRequired::OS_DAC_REGULAR`)
+# and the gate inventories the IDENTIFIER, so an unlisted requirement-free read is caught
+# whichever spelling it uses. Both spellings get a control; neither may go quiet.
+std_fs_reject "requirement-anchor-identifier" 'pub fn bad() -> R { open(AnchorRequired::OS_DAC) }\n'
+std_fs_reject "requirement-descendant-identifier" 'pub fn bad() -> R { scan(maknae_io::DescendantRequired::OS_DAC) }\n'
+std_fs_reject "requirement-target-identifier" 'pub fn bad() -> R { read(maknae_io::TargetRequired::OS_DAC_REGULAR) }\n'
+std_fs_reject "requirement-struct-literal-owner" 'pub fn bad() -> R { read(T { owner: None, mode_mask: Some(0o007) }) }\n'
+std_fs_reject "requirement-struct-literal-mode" 'pub fn bad() -> R { read(T { owner: Some(0), mode_mask: None }) }\n'
+
+# Positive control for the identifier arm: `\b` must not fire on an unrelated identifier
+# that merely CONTAINS the token, or every rename becomes an allowlist event.
+std_fs_accept_literal "requirement-identifier-substring" <<'FIXTURE'
+pub const OS_DAC_UNRELATED_SUFFIX: u32 = 1;
+pub fn fine() -> u32 { NOT_OS_DAC + OS_DAC_UNRELATED_SUFFIX }
+FIXTURE
+
 tmpF_alias="$(mktemp -d)"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF_alias/ci/gates/"

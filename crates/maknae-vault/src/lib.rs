@@ -87,12 +87,7 @@ fn read_storage(path: &std::path::Path) -> Result<zeroize::Zeroizing<Vec<u8>>, V
     }
     #[cfg(unix)]
     {
-        let target = maknae_io::TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-        };
+        let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
         maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map(|out| out.value)
             .map_err(|error| VaultError::Io {
