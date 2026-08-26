@@ -263,11 +263,18 @@ pub enum AuthzError {
     BadPattern(String),
     /// A pattern used `~` but no principal is enrolled to resolve it against.
     TildeWithoutPrincipal(String),
-    /// `authz.yaml` is writable by group/other (spec §4.6/§7: it is
-    /// `root:_maknae` and the
+    /// `authz.yaml` is world/other-accessible OR writable by group/other
+    /// (spec §4.6/§7 — the refusal mask is `0o027`, both halves).
+    ///
+    /// World/other-accessible: ANY other-class bit (`0o007` — read, write, or
+    /// execute) exposes the DAC policy to every local account; the shipped
+    /// mode is `0640`, which grants nothing to `other`.
+    ///
+    /// Group/other-writable (`0o022`): `authz.yaml` is `root:_maknae` and the
     /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
     /// group-writable file lets a compromised daemon rewrite its own DAC
     /// policy even though root ownership and a world-bit-only gate both pass.
+    /// Group READ is deliberately permitted, so the daemon can read it.
     InsecurePermissions,
     /// `authz.yaml` (or a path component) is a symlink — refused.
     Symlink,
@@ -296,7 +303,10 @@ impl std::fmt::Display for AuthzError {
                 "pattern '{p}' uses '~' but no principal is enrolled to resolve it"
             ),
             AuthzError::InsecurePermissions => {
-                write!(f, "authz.yaml has insecure group/other write permissions")
+                write!(
+                    f,
+                    "authz.yaml has insecure permissions: world/other-accessible or group/other-writable"
+                )
             }
             AuthzError::Symlink => write!(f, "authz.yaml path is a symlink (refused)"),
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
@@ -433,19 +443,33 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
 fn authz_target_required() -> maknae_io::TargetRequired {
     maknae_io::TargetRequired {
         owner: Some(0),
-        mode_mask: Some(0o022),
+        // 0o027 = 0o007 (ANY other/world access: read, write, or execute)
+        // | 0o022 (group- or other-WRITE). Composed, not either alone.
+        //
+        // The failure that motivated restoring it (issue #129, review of PR
+        // #128): the pre-#128 loader refused on `mode & 0o007 != 0` AND on
+        // `mode & 0o022 != 0`, an effective 0o027. The maknae-io migration
+        // named only 0o022 here, dropping the world-any half — so a
+        // root-owned but world-READABLE `authz.yaml` (0644, 0604) loaded at
+        // boot where it had previously been refused, exposing the DAC policy
+        // to every local account. Group READ stays permitted on purpose:
+        // spec §4.6 ships `root:_maknae 0640` and the daemon must read it.
+        mode_mask: Some(0o027),
         nlink_exactly_one: false,
         regular_file: true,
     }
 }
 
 /// Read `authz.yaml` through a pinned [`maknae_io`] anchor with an explicit
-/// root-owner requirement and `mode & 0o022 == 0` target requirement. Root
+/// root-owner requirement and a `mode & 0o027 == 0` target requirement. Root
 /// ownership stops a compromised `_maknae` process from replacing its own
-/// policy; the mode mask separately rejects group- or world-writable policy.
+/// policy; the mode mask separately rejects world/other-accessible policy
+/// (`0o007`) and group- or other-writable policy (`0o022`).
 ///
-/// The group-write check closes a gap the two controls above leave open:
-/// `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
+/// The world-any half keeps the DAC policy unreadable to every local account
+/// — a root-owned `0644` is not writable by anyone but root, yet publishes
+/// the policy. The group-write half closes a gap the two controls above leave
+/// open: `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
 /// `_maknae`, whose primary group is `_maknae` — so `root:_maknae 0660` is
 /// root-owned but still writable by the daemon's group. Spec §4.6's shipped
 /// mode is `0640`, which deliberately permits group read. `maknae-io` checks
@@ -494,10 +518,24 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
             .read(Path::new(name), None, authz_target_required())
             .map_err(map_authz_io)?
             .value;
-        std::str::from_utf8(&bytes)
-            .map(str::to_owned)
-            .map_err(|e| AuthzError::Io(format!("invalid UTF-8: {e}")))
+        decode_policy_utf8(&bytes)
     }
+}
+
+/// Decode the bytes `maknae-io` returned for `authz.yaml` as UTF-8.
+///
+/// Split out of [`security_load`] as its own item because it is the only part
+/// of that function reachable without a genuinely root-owned fixture: the
+/// target requirement is `owner: Some(0)`, which an unprivileged test process
+/// cannot satisfy and must not be given a seam to fake (the injected-owner
+/// stand-in this module used before the `maknae-io` adoption is exactly what
+/// that adoption removed). As a free function it is the REAL decoder under
+/// test — both arms exercised directly — rather than a stubbed stand-in.
+#[cfg(unix)]
+fn decode_policy_utf8(bytes: &[u8]) -> Result<String, AuthzError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|e| AuthzError::Io(format!("invalid UTF-8: {e}")))
 }
 
 #[cfg(unix)]
@@ -922,12 +960,30 @@ mod tests {
     // ---- owner-check pure helper (no filesystem / root needed) ----
 
     #[test]
-    fn authz_target_contract_is_root_owned_and_not_group_writable() {
+    fn authz_target_contract_is_root_owned_not_world_accessible_not_group_writable() {
         let req = authz_target_required();
         assert_eq!(req.owner, Some(0));
-        assert_eq!(req.mode_mask, Some(0o022));
+        // 0o027 = 0o007 (ANY world/other access) | 0o022 (group/other write).
+        // PR #128 named only 0o022 here, which let a root-owned WORLD-READABLE
+        // authz.yaml (0644, 0604) load where it was refused at boot before.
+        assert_eq!(req.mode_mask, Some(0o027));
         assert!(req.regular_file);
         assert!(!req.nlink_exactly_one);
+    }
+
+    #[test]
+    fn authz_mask_admits_shipped_0640_and_refuses_world_readable_modes() {
+        // Shipped-mode compatibility (spec §4.6): `root:_maknae 0640` — group
+        // READ is required so the daemon (`_maknae`) can read its own policy —
+        // must still satisfy the mask, while every world-accessible and
+        // group/other-writable mode must violate it. Pinned against the mask
+        // itself because a root-owned fixture cannot be created unprivileged.
+        let mask = authz_target_required().mode_mask.unwrap();
+        assert_eq!(0o640 & mask, 0, "shipped 0640 must remain loadable");
+        assert_eq!(0o600 & mask, 0, "0600 must remain loadable");
+        for refused in [0o644, 0o604, 0o641, 0o660, 0o620, 0o666] {
+            assert_ne!(refused & mask, 0, "mode {refused:o} must be refused");
+        }
     }
 
     // ---- secure load (cfg(unix)): symlink / mode / owner / io ----
@@ -986,6 +1042,27 @@ mod tests {
     }
 
     #[test]
+    fn policy_bytes_decode_as_utf8() {
+        // The success arm of the real decoder — unreachable through
+        // `security_load` without a root-owned fixture, so exercised here
+        // directly rather than through a stand-in.
+        assert_eq!(
+            decode_policy_utf8(SHIPPED_DEFAULT.as_bytes()).unwrap(),
+            SHIPPED_DEFAULT
+        );
+    }
+
+    #[test]
+    fn non_utf8_policy_bytes_are_io_error() {
+        // A lone 0xFF is not valid UTF-8 in any position — a binary or
+        // mis-encoded authz.yaml must be refused, not lossily decoded.
+        assert!(matches!(
+            decode_policy_utf8(&[0x73, 0xff, 0x3a]),
+            Err(AuthzError::Io(_))
+        ));
+    }
+
+    #[test]
     fn missing_authz_file_is_io() {
         let got = load_authz(&tmp("nope_never_created"), Some(&home()));
         assert!(matches!(got, Err(AuthzError::Io(_))));
@@ -993,15 +1070,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn secure_loader_reads_a_real_root_owned_host_file() {
+    fn secure_loader_refuses_a_real_world_readable_root_owned_host_file() {
+        // Issue #129 reproduced against a REAL root-owned file, not a temp
+        // fixture the test user owns. `/etc/hosts` ships root-owned `0644` on
+        // both macOS and Linux: root-owned, regular, and NOT writable by
+        // group or other — so it satisfied every check the 0o022-only mask
+        // PR #128 shipped, and the test that stood here asserted it LOADED.
+        // That is precisely the regression: a root-owned world-READABLE
+        // policy file being accepted. Under the restored 0o027 mask the
+        // other-read bit refuses it.
+        use std::os::unix::fs::MetadataExt;
         #[cfg(target_os = "macos")]
         let host_file = Path::new("/private/etc/hosts");
         #[cfg(not(target_os = "macos"))]
         let host_file = Path::new("/etc/hosts");
+
+        // Assert the fixture's real properties rather than assume them, so a
+        // host shipping a different mode explains itself instead of silently
+        // passing for the wrong reason.
+        let md = std::fs::metadata(host_file).unwrap();
+        assert_eq!(
+            md.uid(),
+            0,
+            "{host_file:?} must be root-owned to be a fixture"
+        );
+        assert_ne!(
+            md.mode() & 0o007,
+            0,
+            "{host_file:?} must be world-accessible to be this fixture"
+        );
+        assert_eq!(
+            md.mode() & 0o022,
+            0,
+            "{host_file:?} must NOT be group/other-writable — the point of this \
+             fixture is that only the world-any half of the mask can refuse it"
+        );
+
         let got = security_load(host_file);
         assert!(
-            got.is_ok(),
-            "root-owned /etc/hosts must pass I/O checks: {got:?}"
+            matches!(got, Err(AuthzError::InsecurePermissions)),
+            "world-readable root-owned {host_file:?} must be refused: {got:?}"
+        );
+    }
+
+    #[test]
+    fn shipped_0640_mode_passes_the_mask_and_is_refused_only_for_ownership() {
+        // End-to-end shipped-mode compatibility (spec §4.6 `root:_maknae
+        // 0640`): an unprivileged test cannot create a root-owned fixture, so
+        // the strongest available pin is that a 0640 file gets PAST the mode
+        // gate and is refused by the OWNER check instead. `maknae-io`'s
+        // `check_target` runs mode BEFORE owner (checks.rs), so `NotRootOwned`
+        // here proves the mask admitted 0640 — a mask that wrongly refused
+        // group-read (e.g. 0o077, or 0o027|0o040) would surface
+        // `InsecurePermissions` and fail this test, which is how the daemon
+        // keeps being able to read its own policy.
+        let p = tmp("shipped_0640");
+        write_mode(&p, SHIPPED_DEFAULT, 0o640);
+        let _ = std::os::unix::fs::chown(&p, Some(65_534), None); // no-op unless root
+        let got = security_load(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(
+            matches!(got, Err(AuthzError::NotRootOwned)),
+            "0640 must clear the mode mask and stop at the owner check, got {got:?}"
         );
     }
 
@@ -1015,6 +1145,26 @@ mod tests {
         let got = security_load(&p);
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
+    }
+
+    #[test]
+    fn world_readable_non_writable_authz_refused() {
+        // Issue #129: `0644` is NOT group/other-writable, so a 0o022-only mask
+        // admits it — a world-readable DAC policy loaded at boot where the
+        // pre-PR-#128 gate (world-any + group/other-write) refused it. The
+        // fixture is owned by the test user, not root, so this test can only
+        // discriminate because `maknae-io`'s `check_target` pins the order
+        // symlink -> regular-file -> MODE -> owner -> nlink (checks.rs): mode
+        // fires before ownership, so a too-permissive mask surfaces as
+        // `NotRootOwned` and a correct 0o027 mask as `InsecurePermissions`.
+        let p = tmp("world_readable");
+        write_mode(&p, SHIPPED_DEFAULT, 0o644);
+        let got = security_load(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(
+            matches!(got, Err(AuthzError::InsecurePermissions)),
+            "0644 authz.yaml must be refused for insecure permissions, got {got:?}"
+        );
     }
 
     // ---- glob matching: remaining state-machine edges ----
