@@ -21,7 +21,7 @@ for p in "${PRIVILEGED_CRATES[@]}"; do
 done
 # BEST-EFFORT defense-in-depth: a symbol scan. NOT load-bearing — release optimization can strip a
 # linked crate's marker string, so absence is not proof of absence; presence is proof of a leak.
-for m in PRIVILEGED_MAKNAE_KERNEL PRIVILEGED_MAKNAE_SUBJECT_CTX_MINT PRIVILEGED_MAKNAE_AUDIT_APPEND PRIVILEGED_MAKNAE_SPIF_COMPILE; do
+for m in PRIVILEGED_MAKNAE_KERNEL PRIVILEGED_MAKNAE_SUBJECT_CTX_MINT PRIVILEGED_MAKNAE_AUDIT_APPEND PRIVILEGED_MAKNAE_SPIF_COMPILE PRIVILEGED_MAKNAE_AUTHZ_BASIC; do
   strings -a "$bin" | grep -q "$m" && { echo "FAIL: privileged marker '$m' in $UNTRUSTED_BIN binary"; fail=1; }
 done
 [ "$fail" -eq 0 ] && echo "p2-artifact-witness: ok"

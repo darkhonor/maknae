@@ -29,6 +29,30 @@ use std::path::Path;
 pub struct AuthzPolicy {
     pub allow: Vec<Pattern>,
     pub deny: Vec<Pattern>,
+    /// Role → member-identity lists from the additive `bindings:` key (#85).
+    /// `None` = key ABSENT (defaults apply); `Some` — even empty — = key
+    /// PRESENT (defaults suppressed entirely; spec §3 precedence). Raw strings:
+    /// role-name semantics belong to `maknae-authz-basic`, never this crate
+    /// (grammar, not decision).
+    pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Original entry text for each `allow`/`deny` pattern, index-aligned
+    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
+    /// the audit record. Private — provenance is not a matching input, and
+    /// keeping it un-constructible outside the parser means the pair can
+    /// never drift out of alignment.
+    allow_sources: Vec<String>,
+    deny_sources: Vec<String>,
+}
+
+/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued where
+/// [`Decision`] is two-valued — the PDP backend maps `NoMatch` to
+/// `NotApplicable` (deny-by-default happens at `finalize`, with the reason
+/// "no grant" distinguishable from "explicit deny").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Match3 {
+    AllowMatch,
+    DenyMatch { source: String },
+    NoMatch,
 }
 
 /// A single request the (future) PDP asks the policy about.
@@ -57,6 +81,28 @@ impl AuthzPolicy {
             return Decision::Allow;
         }
         Decision::Deny
+    }
+
+    /// Three-valued evaluation with deny provenance (#85, spec §6a.1). Deny
+    /// checked first (deny-overrides within the operand, same order as
+    /// [`AuthzPolicy::evaluate`]); the matched deny entry's ORIGINAL text
+    /// rides in `source` for the audit record (audit-only — never onto the
+    /// wire, spec §4.4). Reuses the same private matcher as `evaluate` — no
+    /// second matching implementation exists to drift.
+    pub fn evaluate3(&self, req: &Request<'_>) -> Match3 {
+        if let Some(i) = self.deny.iter().position(|p| p.matches_req(req)) {
+            return Match3::DenyMatch {
+                source: self
+                    .deny_sources
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "<unknown deny entry>".into()),
+            };
+        }
+        if self.allow.iter().any(|p| p.matches_req(req)) {
+            return Match3::AllowMatch;
+        }
+        Match3::NoMatch
     }
 }
 
@@ -381,6 +427,34 @@ fn parse_pattern(spec: &str, principal_home: Option<&Path>) -> Result<Pattern, A
     }
 }
 
+/// A `bindings:` member list: a sequence of strings, refused otherwise with a
+/// bindings-specific message (NOT `str_seq`'s "permissions list…" text — an
+/// operator debugging a bindings typo must not be sent to the wrong section).
+fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
+    match v {
+        Value::Seq(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(s) => Ok(s.clone()),
+                _ => Err(AuthzError::Yaml(
+                    "bindings member entries must be strings (quote every name; spec §3)".into(),
+                )),
+            })
+            .collect(),
+        _ => Err(AuthzError::Yaml(
+            "bindings member list must be a sequence (write `role: []` for empty)".into(),
+        )),
+    }
+}
+
+/// Public pure parse (#85, spec §6a.3): already-read authz YAML text →
+/// [`AuthzPolicy`], no file I/O and no ownership requirement — the hermetic
+/// door for the PDP backend's proofs. Production loading stays [`load_authz`]
+/// (root-owned, hardened path); this function never touches the filesystem.
+pub fn parse_authz(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
+    parse_policy(body, principal_home)
+}
+
 /// Parse a `schema_version: 1 / permissions: {allow, deny}` document (spec
 /// §7) into an [`AuthzPolicy`]. Pure — takes already-read YAML text, no file
 /// I/O (that's [`load_authz`]'s job); factored out so the grammar/contract
@@ -391,7 +465,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
-    check_known_keys(&map, &["schema_version", "permissions"])?;
+    check_known_keys(&map, &["schema_version", "permissions", "bindings"])?;
 
     // Missing or non-integer schema_version is represented by the sentinel 0
     // (valid versions start at 1) so both cases refuse via the same variant.
@@ -429,7 +503,29 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         .map(|s| parse_pattern(s, principal_home))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(AuthzPolicy { allow, deny })
+    let bindings = match get(&map, "bindings") {
+        None => None,
+        Some(Value::Map(bm)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (role, members) in bm {
+                out.insert(role.clone(), bindings_member_list(members)?);
+            }
+            Some(out)
+        }
+        Some(_) => {
+            return Err(AuthzError::Yaml(
+                "bindings section must be a map of role to member list".into(),
+            ))
+        }
+    };
+
+    Ok(AuthzPolicy {
+        allow,
+        deny,
+        bindings,
+        allow_sources: allow_raw,
+        deny_sources: deny_raw,
+    })
 }
 
 // ============================================================================
@@ -502,12 +598,41 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
         // authority come from the current process's OS DAC rights — named inside
         // the adapter — while the opened policy inode is separately required to
         // remain root-owned by `authz_target_required()`.
-        let bytes =
-            maknae_io::read_absolute(path, authz_target_required(), maknae_io::StrategyPref::Auto)
-                .map_err(map_authz_io)?
-                .value;
-        decode_policy_utf8(&bytes)
+        security_load_required(path, authz_target_required())
     }
+}
+
+/// [`security_load`]'s unix body with the artifact requirement supplied by the
+/// caller instead of fixed at [`authz_target_required`]. Crate-private (the
+/// `load_required_file` property, issue #138/PR #139: nothing outside this
+/// crate can choose a weaker requirement) — the ONLY external door is the
+/// non-default `hermetic-test-seam` feature below, which production consumers
+/// never enable.
+#[cfg(unix)]
+fn security_load_required(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<String, AuthzError> {
+    let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .map_err(map_authz_io)?
+        .value;
+    decode_policy_utf8(&bytes)
+}
+
+/// Hermetic-test seam (#85 spec §6a.4): [`load_authz`] with a caller-supplied
+/// artifact requirement, so a PDP-backend test can drive the IDENTICAL
+/// load→parse path against a fixture its own euid genuinely owns. Exists only
+/// under the non-default `hermetic-test-seam` feature; `load_authz` itself
+/// still hardcodes the root-owned requirement and a CI check pins the daemon's
+/// normal-dependency feature resolution to exclude this.
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub fn load_authz_with_requirement(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+    principal_home: Option<&Path>,
+) -> Result<AuthzPolicy, AuthzError> {
+    let body = security_load_required(path, target)?;
+    parse_policy(&body, principal_home)
 }
 
 /// Decode the bytes `maknae-io` returned for `authz.yaml` as UTF-8.
@@ -1205,5 +1330,128 @@ mod tests {
         // instead — pins `pos += offset + frag.len()` in the middle branch.
         let glob = read_glob("~/abc*xy*ghi");
         assert!(glob.matches(Path::new("/home/operator/abcZZZZZxyghi")));
+    }
+
+    // ---- hermetic-test seam (#85 §6a.4): feature-gated, door unweakened ----
+
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    #[test]
+    fn seam_loads_euid_owned_fixture_and_production_door_still_refuses_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("maknae_authz_seam_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let p = dir.join("authz.yaml");
+        std::fs::write(&p, SHIPPED_DEFAULT).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let relaxed = maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let via_seam = load_authz_with_requirement(&p, relaxed, Some(&home()));
+        let via_door = load_authz(&p, Some(&home()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let policy = via_seam.expect("seam loads a fixture the current euid owns");
+        assert_eq!(policy.allow.len(), 1);
+        // The PRODUCTION door on the same fixture must still demand root
+        // ownership — proves adding the seam weakened nothing.
+        assert!(
+            matches!(via_door, Err(AuthzError::NotRootOwned)),
+            "production load_authz must refuse a non-root fixture: {via_door:?}"
+        );
+    }
+
+    // ---- evaluate3 (#85): three-valued with pattern provenance ----
+
+    #[test]
+    fn evaluate3_deny_match_carries_full_source_text() {
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        match p.evaluate3(&Request::Read(Path::new("/home/operator/.ssh/id_rsa"))) {
+            Match3::DenyMatch { source } => assert_eq!(source, "Read(~/.ssh/**)"),
+            other => panic!("expected DenyMatch with source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate3_allow_and_nomatch_are_distinct() {
+        // The two-valued evaluate() collapses no-match into deny; the PDP
+        // backend needs the distinction (NoMatch → NotApplicable, spec §4.4).
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        assert!(matches!(
+            p.evaluate3(&Request::Read(Path::new("/home/operator/notes.txt"))),
+            Match3::AllowMatch
+        ));
+        assert!(matches!(
+            p.evaluate3(&Request::Read(Path::new("/etc/hosts"))),
+            Match3::NoMatch
+        ));
+    }
+
+    #[test]
+    fn evaluate3_deny_overrides_allow() {
+        // ~/.ssh/** is inside ~/** — both lists match; deny must win and
+        // report ITS source, mirroring evaluate()'s deny-wins contract.
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let r = Request::Read(Path::new("/home/operator/.ssh/config"));
+        assert_eq!(p.evaluate(&r), Decision::Deny);
+        assert!(matches!(p.evaluate3(&r), Match3::DenyMatch { .. }));
+    }
+
+    // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
+
+    #[test]
+    fn bindings_key_absent_is_none() {
+        // Absent vs present-empty is load-bearing (spec §3 defaults precedence):
+        // an absent key means defaults apply; a present key suppresses them.
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        assert!(p.bindings.is_none());
+    }
+
+    #[test]
+    fn bindings_parse_role_to_string_lists() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  guest: []\n";
+        let p = parse_authz(body, None).unwrap();
+        let b = p.bindings.unwrap();
+        assert_eq!(b["admin"], vec!["alex".to_string()]);
+        assert!(b["guest"].is_empty());
+    }
+
+    #[test]
+    fn bindings_present_but_empty_map_is_some_empty() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n";
+        let p = parse_authz(body, None).unwrap();
+        assert_eq!(p.bindings, Some(std::collections::BTreeMap::new()));
+    }
+
+    #[test]
+    fn bindings_non_string_member_refused_with_bindings_message() {
+        let body =
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [1001]\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")),
+            "error must name bindings, not permissions: {e:?}"
+        );
+    }
+
+    #[test]
+    fn bindings_null_member_list_refused_with_bindings_message() {
+        // A bare `guest:` parses as Null, not an empty sequence — refuse, do
+        // not silently treat as empty (fail-closed; spec §3 says write `[]`).
+        let body =
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
+    }
+
+    #[test]
+    fn bindings_non_map_refused() {
+        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
+        let e = parse_authz(body, None).unwrap_err();
+        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
     }
 }
