@@ -74,6 +74,19 @@ impl BasicAuthorizer {
     ) -> Result<Self, AuthzBasicError> {
         let policy = maknae_config::load_authz(&policy_path, Some(&principal.home))
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        Self::finish_new(policy_path, principal, policy)
+    }
+
+    /// The post-load half of [`BasicAuthorizer::new`]: uid resolution + eager
+    /// semantic validation + construction. Split out so it is hermetically
+    /// testable with a [`maknae_config::parse_authz`]-produced policy (the
+    /// load half's root-owned requirement is unconstructible off-root; the
+    /// pieces are the same production code either way).
+    fn finish_new(
+        policy_path: PathBuf,
+        principal: maknae_config::Principal,
+        policy: maknae_config::AuthzPolicy,
+    ) -> Result<Self, AuthzBasicError> {
         let uid_map = resolve_uid_map(&policy)?;
         // Eager semantic validation: the same checks every per-request load
         // repeats (the advesary-typo rule fails construction, not just
@@ -142,19 +155,25 @@ fn resolve_uid_map(policy: &maknae_config::AuthzPolicy) -> Result<UidMap, AuthzB
     Ok(map)
 }
 
-#[cfg(unix)]
+/// One function with an INLINE `#[cfg(unix)]`/`#[cfg(not(unix))]` split
+/// (the `security_load` idiom): a standalone `#[cfg(not(unix))] fn` would be
+/// its own mutation target whose body never compiles on a unix runner — a
+/// permanently-missed mutant for dead code.
 fn lookup_uid(name: &str) -> Option<u32> {
-    match nix::unistd::User::from_name(name) {
-        Ok(Some(user)) => Some(user.uid.as_raw()),
-        _ => None,
+    #[cfg(not(unix))]
+    {
+        // Unreachable in practice: `load_authz` refuses off-unix before any
+        // lookup. Fail closed regardless.
+        let _ = name;
+        None
     }
-}
-
-#[cfg(not(unix))]
-fn lookup_uid(_name: &str) -> Option<u32> {
-    // Unreachable in practice: `load_authz` refuses off-unix before any
-    // lookup. Fail closed regardless.
-    None
+    #[cfg(unix)]
+    {
+        match nix::unistd::User::from_name(name) {
+            Ok(Some(user)) => Some(user.uid.as_raw()),
+            _ => None,
+        }
+    }
 }
 
 impl maknae_security::Authorizer for BasicAuthorizer {
@@ -323,6 +342,81 @@ mod tests {
         let new_name = auth.decide_with_loader(&liveness_req(Some("agent"), None), seam_loader);
         assert_eq!(new_name, Verdict::Indeterminate);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// finish_new (the post-load half of `new`) hermetically: eager
+    /// validation + uid resolution over host-independent identities
+    /// (`root` — uid 0 exists everywhere; the reserved `agent` token).
+    #[test]
+    fn finish_new_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
+        let ok_policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n  user: [\"agent\"]\n",
+            None,
+        )
+        .unwrap();
+        let auth =
+            BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ok_policy).unwrap();
+        assert_eq!(auth.uid_map.get("root"), Some(&0), "root resolves to uid 0");
+        assert!(
+            !auth.uid_map.contains_key("agent"),
+            "reserved token never looked up"
+        );
+
+        // The advesary-typo rule fails CONSTRUCTION, not just requests.
+        let typo = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n",
+            None,
+        )
+        .unwrap();
+        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), typo);
+        assert!(matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("advesary")));
+
+        // An unresolvable username refuses construction.
+        let ghost = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n",
+            None,
+        )
+        .unwrap();
+        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ghost);
+        assert!(
+            matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
+        );
+    }
+
+    #[test]
+    fn finish_new_without_bindings_needs_no_lookups_and_defaults_apply() {
+        let policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            None,
+        )
+        .unwrap();
+        let auth = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), policy).unwrap();
+        assert!(
+            auth.uid_map.is_empty(),
+            "no bindings → no NSS resolution at all"
+        );
+    }
+
+    #[test]
+    fn error_displays_name_their_cause() {
+        assert!(AuthzBasicError::Load("boom".into())
+            .to_string()
+            .contains("load refused"));
+        assert!(AuthzBasicError::Bindings("b".into())
+            .to_string()
+            .contains("bindings invalid"));
+        use crate::binding::BindingError;
+        for (e, needle) in [
+            (BindingError::UnknownRole("r".into()), "unknown role"),
+            (
+                BindingError::DualMembership("n".into()),
+                "more than one role",
+            ),
+            (BindingError::Duplicate("n".into()), "twice"),
+            (BindingError::Unresolvable("n".into()), "no resolved uid"),
+        ] {
+            assert!(e.to_string().contains(needle), "{e:?}");
+        }
     }
 
     /// The production `Authorizer::decide` path on an euid-owned fixture:

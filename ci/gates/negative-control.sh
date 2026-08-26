@@ -98,6 +98,35 @@ EOF
 echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$tmpB/bins/maknae/src/main.rs"
 expect_reject "p2/cli-links-privileged" "$here/p2-invert-tree.sh" "$tmpB"
 
+# Fixture B2 — CLI links the PDP backend (#85: maknae-authz-basic is privileged;
+# the untrusted client must never carry the decision engine) → must trip p2.
+tmpB2="$(mktemp -d)"; mkdir -p "$tmpB2/crates/maknae-authz-basic/src" "$tmpB2/bins/maknae/src"
+cat > "$tmpB2/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "3"
+members = ["crates/maknae-authz-basic", "bins/maknae"]
+EOF
+cat > "$tmpB2/crates/maknae-authz-basic/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-authz-basic"
+version = "0.0.0"
+edition = "2021"
+EOF
+echo 'pub const M: &str = "x";' > "$tmpB2/crates/maknae-authz-basic/src/lib.rs"
+cat > "$tmpB2/bins/maknae/Cargo.toml" <<'EOF'
+[package]
+name = "maknae"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "maknae"
+path = "src/main.rs"
+[dependencies]
+maknae-authz-basic = { path = "../../crates/maknae-authz-basic" }
+EOF
+echo 'fn main(){ println!("{}", maknae_authz_basic::M); }' > "$tmpB2/bins/maknae/src/main.rs"
+expect_reject "p2/cli-links-authz-basic" "$here/p2-invert-tree.sh" "$tmpB2"
+
 # Fixture C — bare workspace build in a workflow → must trip build-invocation-lint.sh
 tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC/.github/workflows/bad.yml"

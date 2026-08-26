@@ -30,7 +30,7 @@ concurrency:
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
 env:
-  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs"
+  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic"
 
 jobs:
   build-and-gate:
