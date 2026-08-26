@@ -137,6 +137,13 @@ impl Anchor {
 
 /// Open the anchor once and hold it.
 ///
+/// Contract precondition (ADR-0021): the anchor directory is opened
+/// `O_RDONLY|O_DIRECTORY` to pin its inode, so the calling principal needs READ
+/// permission on it — not merely search (`x`), which a plain `open(2)` of a file
+/// inside would have needed. A `0710`-style traverse-only directory fails the
+/// anchor open with EACCES; directories holding maknae-managed artifacts must
+/// grant read to the reading principal.
+///
 /// The parent/basename split has three degenerate forms and the set is closed:
 /// non-absolute, `parent()==None` (`/`, `/.`), and `file_name()==None` with a `Some`
 /// parent (`/etc/maknae/..`, `/..`). Absoluteness is tested first, so a bare `..` is
@@ -187,6 +194,9 @@ pub fn open_anchor(
 
 /// Open an absolute directory path once, following a symlink in the anchor path and
 /// pinning the resolved directory inode. Descendant resolution remains symlink-refusing.
+///
+/// Same read-permission precondition as [`open_anchor`] (ADR-0021): the resolved
+/// directory is opened `O_RDONLY|O_DIRECTORY`, so search-only (`--x`) anchors fail.
 pub fn open_anchor_resolved(
     path: &Path,
     req: AnchorRequired,
