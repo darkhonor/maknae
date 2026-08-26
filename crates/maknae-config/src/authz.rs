@@ -35,6 +35,24 @@ pub struct AuthzPolicy {
     /// role-name semantics belong to `maknae-authz-basic`, never this crate
     /// (grammar, not decision).
     pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Original entry text for each `allow`/`deny` pattern, index-aligned
+    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
+    /// the audit record. Private — provenance is not a matching input, and
+    /// keeping it un-constructible outside the parser means the pair can
+    /// never drift out of alignment.
+    allow_sources: Vec<String>,
+    deny_sources: Vec<String>,
+}
+
+/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued where
+/// [`Decision`] is two-valued — the PDP backend maps `NoMatch` to
+/// `NotApplicable` (deny-by-default happens at `finalize`, with the reason
+/// "no grant" distinguishable from "explicit deny").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Match3 {
+    AllowMatch,
+    DenyMatch { source: String },
+    NoMatch,
 }
 
 /// A single request the (future) PDP asks the policy about.
@@ -63,6 +81,28 @@ impl AuthzPolicy {
             return Decision::Allow;
         }
         Decision::Deny
+    }
+
+    /// Three-valued evaluation with deny provenance (#85, spec §6a.1). Deny
+    /// checked first (deny-overrides within the operand, same order as
+    /// [`AuthzPolicy::evaluate`]); the matched deny entry's ORIGINAL text
+    /// rides in `source` for the audit record (audit-only — never onto the
+    /// wire, spec §4.4). Reuses the same private matcher as `evaluate` — no
+    /// second matching implementation exists to drift.
+    pub fn evaluate3(&self, req: &Request<'_>) -> Match3 {
+        if let Some(i) = self.deny.iter().position(|p| p.matches_req(req)) {
+            return Match3::DenyMatch {
+                source: self
+                    .deny_sources
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "<unknown deny entry>".into()),
+            };
+        }
+        if self.allow.iter().any(|p| p.matches_req(req)) {
+            return Match3::AllowMatch;
+        }
+        Match3::NoMatch
     }
 }
 
@@ -411,10 +451,7 @@ fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
 /// [`AuthzPolicy`], no file I/O and no ownership requirement — the hermetic
 /// door for the PDP backend's proofs. Production loading stays [`load_authz`]
 /// (root-owned, hardened path); this function never touches the filesystem.
-pub fn parse_authz(
-    body: &str,
-    principal_home: Option<&Path>,
-) -> Result<AuthzPolicy, AuthzError> {
+pub fn parse_authz(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
     parse_policy(body, principal_home)
 }
 
@@ -486,6 +523,8 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         allow,
         deny,
         bindings,
+        allow_sources: allow_raw,
+        deny_sources: deny_raw,
     })
 }
 
@@ -1264,6 +1303,42 @@ mod tests {
         assert!(glob.matches(Path::new("/home/operator/abcZZZZZxyghi")));
     }
 
+    // ---- evaluate3 (#85): three-valued with pattern provenance ----
+
+    #[test]
+    fn evaluate3_deny_match_carries_full_source_text() {
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        match p.evaluate3(&Request::Read(Path::new("/home/operator/.ssh/id_rsa"))) {
+            Match3::DenyMatch { source } => assert_eq!(source, "Read(~/.ssh/**)"),
+            other => panic!("expected DenyMatch with source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate3_allow_and_nomatch_are_distinct() {
+        // The two-valued evaluate() collapses no-match into deny; the PDP
+        // backend needs the distinction (NoMatch → NotApplicable, spec §4.4).
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        assert!(matches!(
+            p.evaluate3(&Request::Read(Path::new("/home/operator/notes.txt"))),
+            Match3::AllowMatch
+        ));
+        assert!(matches!(
+            p.evaluate3(&Request::Read(Path::new("/etc/hosts"))),
+            Match3::NoMatch
+        ));
+    }
+
+    #[test]
+    fn evaluate3_deny_overrides_allow() {
+        // ~/.ssh/** is inside ~/** — both lists match; deny must win and
+        // report ITS source, mirroring evaluate()'s deny-wins contract.
+        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let r = Request::Read(Path::new("/home/operator/.ssh/config"));
+        assert_eq!(p.evaluate(&r), Decision::Deny);
+        assert!(matches!(p.evaluate3(&r), Match3::DenyMatch { .. }));
+    }
+
     // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
 
     #[test]
@@ -1305,7 +1380,8 @@ mod tests {
     fn bindings_null_member_list_refused_with_bindings_message() {
         // A bare `guest:` parses as Null, not an empty sequence — refuse, do
         // not silently treat as empty (fail-closed; spec §3 says write `[]`).
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
+        let body =
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
         let e = parse_authz(body, None).unwrap_err();
         assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
     }
