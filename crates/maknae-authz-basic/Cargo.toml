@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.94.1"
 publish = false
+license.workspace = true
 
 [lints]
 workspace = true
