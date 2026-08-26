@@ -1004,6 +1004,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-authz-basic"
+version = "0.0.0"
+dependencies = [
+ "maknae-config",
+ "maknae-io",
+ "maknae-security",
+ "nix",
+]
+
+[[package]]
 name = "maknae-config"
 version = "0.0.0"
 dependencies = [

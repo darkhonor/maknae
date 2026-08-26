@@ -1,7 +1,10 @@
 //! Language-neutral golden vectors for the composition + finalize surface
-//! (spec §15.4). The failed-`when` polarity rows and the missing-attribute≠false
-//! matcher invariant belong to the future `maknae-authz-basic` backend (they need
-//! a real matcher) and are asserted there, not here.
+//! (spec §15.4). The missing-attribute≠false matcher invariant is DISCHARGED
+//! in `maknae-authz-basic` (#85: absent/wrong-typed required attributes →
+//! `Indeterminate`, golden-vectored in its `decide.rs`). The failed-`when`
+//! polarity rows still await a backend with a `when:` matcher — deferred to
+//! the post-v1.0 custom-role increment per ADR-0004's 2026-08-26 amendment
+//! (v0.1 has no `when:` clauses to exercise).
 
 use maknae_security::*;
 

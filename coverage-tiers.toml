@@ -26,6 +26,13 @@ floor_production_region = 95
 # a deny — the exact T1 line-drawing rule. Re-populates the cohort emptied when
 # the DCS engine relocated (2026-08-08).
 files = [
+  # The RBAC PDP backend (#85): role vocabulary, uid-keyed binding resolution,
+  # and the pure decision core. Every line here is a verdict path — the exact
+  # T1 rule (a wrong branch returns Permit for a deny).
+  "crates/maknae-authz-basic/src/lib.rs",
+  "crates/maknae-authz-basic/src/role.rs",
+  "crates/maknae-authz-basic/src/binding.rs",
+  "crates/maknae-authz-basic/src/decide.rs",
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   "crates/maknae-io/src/normalize.rs",
@@ -141,7 +148,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic"]
 
 [t2]
 floor_production_region = 90

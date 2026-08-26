@@ -1,0 +1,25 @@
+[package]
+name = "maknae-authz-basic"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94.1"
+publish = false
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-security = { path = "../maknae-security" }
+maknae-config = { path = "../maknae-config" }
+
+[target.'cfg(unix)'.dependencies]
+# getpwnam at BasicAuthorizer construction ONLY — zero per-request NSS (spec §3:
+# a per-request lookup would reintroduce the SSSD/LDAP worker-stall class the
+# kernel bounds with spawn_blocking+timeout; resolution happens once, at boot,
+# over names root wrote into the policy file).
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+maknae-config = { path = "../maknae-config", features = ["hermetic-test-seam"] }
+maknae-io = { path = "../maknae-io" }

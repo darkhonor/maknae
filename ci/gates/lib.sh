@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared constants for the capability-separation gates (spec §3 P1/P2).
-PRIVILEGED_CRATES=(maknae-kernel maknae-subject-ctx-mint maknae-audit-append maknae-spif-compile)
+PRIVILEGED_CRATES=(maknae-kernel maknae-subject-ctx-mint maknae-audit-append maknae-spif-compile maknae-authz-basic)
 UNTRUSTED_BIN="maknae"
 # Per-consumer allowlist: which privileged crate each trust-plane binary may DIRECTLY depend on
 # (mirrors packaging/isolation-contract.md crate×binary matrix). maknaed gets the kernel (which
