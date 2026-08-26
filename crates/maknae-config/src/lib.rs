@@ -41,6 +41,8 @@ mod value;
 pub use loader::load_config;
 
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use authz::load_authz_with_requirement;
 pub use authz::{
     load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern, Request,
 };

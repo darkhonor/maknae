@@ -15,3 +15,10 @@ serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 maknae-io = { path = "../maknae-io" }
+
+[features]
+# Exports load_authz_with_requirement for hermetic tests ONLY (spec #85 §6a.4).
+# Never enabled by a production consumer; the gate pins maknaed's normal-dep
+# feature resolution. Default stays empty: nothing outside maknae-config can
+# choose a weaker artifact requirement in a production build.
+hermetic-test-seam = []

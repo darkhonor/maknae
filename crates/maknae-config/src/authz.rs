@@ -598,12 +598,41 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
         // authority come from the current process's OS DAC rights — named inside
         // the adapter — while the opened policy inode is separately required to
         // remain root-owned by `authz_target_required()`.
-        let bytes =
-            maknae_io::read_absolute(path, authz_target_required(), maknae_io::StrategyPref::Auto)
-                .map_err(map_authz_io)?
-                .value;
-        decode_policy_utf8(&bytes)
+        security_load_required(path, authz_target_required())
     }
+}
+
+/// [`security_load`]'s unix body with the artifact requirement supplied by the
+/// caller instead of fixed at [`authz_target_required`]. Crate-private (the
+/// `load_required_file` property, issue #138/PR #139: nothing outside this
+/// crate can choose a weaker requirement) — the ONLY external door is the
+/// non-default `hermetic-test-seam` feature below, which production consumers
+/// never enable.
+#[cfg(unix)]
+fn security_load_required(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<String, AuthzError> {
+    let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .map_err(map_authz_io)?
+        .value;
+    decode_policy_utf8(&bytes)
+}
+
+/// Hermetic-test seam (#85 spec §6a.4): [`load_authz`] with a caller-supplied
+/// artifact requirement, so a PDP-backend test can drive the IDENTICAL
+/// load→parse path against a fixture its own euid genuinely owns. Exists only
+/// under the non-default `hermetic-test-seam` feature; `load_authz` itself
+/// still hardcodes the root-owned requirement and a CI check pins the daemon's
+/// normal-dependency feature resolution to exclude this.
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub fn load_authz_with_requirement(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+    principal_home: Option<&Path>,
+) -> Result<AuthzPolicy, AuthzError> {
+    let body = security_load_required(path, target)?;
+    parse_policy(&body, principal_home)
 }
 
 /// Decode the bytes `maknae-io` returned for `authz.yaml` as UTF-8.
@@ -1301,6 +1330,39 @@ mod tests {
         // instead — pins `pos += offset + frag.len()` in the middle branch.
         let glob = read_glob("~/abc*xy*ghi");
         assert!(glob.matches(Path::new("/home/operator/abcZZZZZxyghi")));
+    }
+
+    // ---- hermetic-test seam (#85 §6a.4): feature-gated, door unweakened ----
+
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    #[test]
+    fn seam_loads_euid_owned_fixture_and_production_door_still_refuses_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("maknae_authz_seam_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let p = dir.join("authz.yaml");
+        std::fs::write(&p, SHIPPED_DEFAULT).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let relaxed = maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let via_seam = load_authz_with_requirement(&p, relaxed, Some(&home()));
+        let via_door = load_authz(&p, Some(&home()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let policy = via_seam.expect("seam loads a fixture the current euid owns");
+        assert_eq!(policy.allow.len(), 1);
+        // The PRODUCTION door on the same fixture must still demand root
+        // ownership — proves adding the seam weakened nothing.
+        assert!(
+            matches!(via_door, Err(AuthzError::NotRootOwned)),
+            "production load_authz must refuse a non-root fixture: {via_door:?}"
+        );
     }
 
     // ---- evaluate3 (#85): three-valued with pattern provenance ----
