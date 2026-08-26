@@ -21,19 +21,14 @@ use crate::VaultError;
 use std::path::Path;
 use zeroize::Zeroizing;
 
-/// Read a sealed artifact verbatim (trimmed) with NO permission gate — the sealing
-/// mechanism (systemd credentials dir) is the trust boundary, not this process's
-/// view of the file mode.
+/// Read a sealed artifact verbatim (trimmed) with NO owner/mode gate — the sealing
+/// mechanism (systemd credentials dir) is the trust boundary for the file's CONTENT,
+/// so no permission bits are required. Inode IDENTITY is still enforced (ADR-0021):
+/// the read goes through `maknae-io`, which refuses a symlinked final component and
+/// requires a regular file — systemd materializes credentials as regular files, and
+/// symlink-farm layouts (e.g. Kubernetes projected volumes) are out of scope, #134.
 fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
-    let bytes = crate::read_storage(
-        path,
-        maknae_io::TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-        },
-    )?;
+    let bytes = crate::read_storage(path)?;
     let text = std::str::from_utf8(&bytes).map_err(|e| VaultError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other(e.to_string()),

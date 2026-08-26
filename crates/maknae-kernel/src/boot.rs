@@ -305,9 +305,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_base_is_io() {
+    fn missing_base_is_not_found() {
         let d = new_dir("nobase"); // no maknae.yaml
-        assert!(matches!(boot(&d.0), Err(maknae_config::ConfigError::Io(_))));
+        assert!(matches!(
+            boot(&d.0),
+            Err(maknae_config::ConfigError::NotFound { .. })
+        ));
     }
 
     #[cfg(unix)]
