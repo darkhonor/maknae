@@ -985,10 +985,85 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
 /// read is deliberately fail-SOFT (`None`, not a hard boot error) because the
 /// marker is provisioning-time EVIDENCE, not a load-bearing config section; its
 /// absence degrades the reported posture, it never blocks boot.
+///
+/// A file that EXISTS but is *refused* (wrong owner/permissions per
+/// `load_root_file`'s root-owned requirement — e.g. `_maknae:_maknae 0640`
+/// from config management — or unparseable/malformed content once opened) is
+/// a distinct, loggable condition from a file that was simply never
+/// provisioned (issue #135): both still degrade posture to `Unverified`
+/// (fail-soft, boot never blocks on this path), but only the refused case
+/// emits one `eprintln!` naming the path and the reason, so an operator can
+/// tell "never enrolled" from "enrolled but broken" instead of both looking
+/// identical in the boot posture record.
 fn read_posture_marker(config_dir: &Path) -> Option<crate::posture::PostureMarker> {
     let path = config_dir.join("private").join("posture.yaml");
-    let value = maknae_config::load_root_file(&path).ok()?;
-    parse_posture_marker(&value)
+    match classify_marker_load(maknae_config::load_root_file(&path)) {
+        MarkerOutcome::Absent => None,
+        MarkerOutcome::Refused(reason) => {
+            eprintln!(
+                "maknaed: posture marker present but refused at {}: {reason}",
+                path.display()
+            );
+            None
+        }
+        MarkerOutcome::Loaded(value) => parse_posture_marker(&value),
+    }
+}
+
+/// The three outcomes a `load_root_file` attempt on the posture marker path
+/// classifies into — split out as a pure function (no I/O, no logging) so it
+/// is unit-testable independent of `eprintln!`, which is not capturable from
+/// a test.
+#[derive(Debug)]
+enum MarkerOutcome {
+    /// The file does not exist. Quiet — never provisioned is the common,
+    /// expected case (e.g. a host that has not run `maknae enroll`).
+    Absent,
+    /// The file exists but `load_root_file` would not hand back its content:
+    /// wrong owner, insecure permissions, a symlink, or content that failed
+    /// to parse. `String` is the `ConfigError`'s `Display` text.
+    Refused(String),
+    /// The file was read and parsed into a generic YAML `Value`; still needs
+    /// `parse_posture_marker` to confirm the marker shape.
+    Loaded(maknae_config::Value),
+}
+
+/// Classify a `load_root_file` result for the posture marker. Absence is
+/// derived from the error itself — never from a separate `Path::exists()` (or
+/// similar) stat, which would re-introduce a TOCTOU-shaped decision between
+/// the check and `load_root_file`'s own open.
+///
+/// `load_root_file` funnels a missing file through
+/// `maknae_io::checks::kind_of` (`Errno::ENOENT => IoKind::NotFound`, the
+/// *only* production site that constructs `IoKind::NotFound` —
+/// `crates/maknae-io/src/checks.rs`), and `maknae_config::loader::map_io`'s
+/// catch-all arm renders `IoError::Io { kind, .. }` via `Display` as
+/// `"io error {kind:?}: <path>"` — `IoKind::NotFound`'s `Debug` is exactly
+/// `NotFound` (a fieldless unit variant), so the rendered text always
+/// contains the literal substring `"NotFound"` for this one case
+/// (`crates/maknae-io/src/error.rs`, `crates/maknae-config/src/loader.rs`).
+///
+/// `ConfigError` has no `NotFound` variant of its own — `map_io`'s catch-all
+/// collapses `NotOwned`/`Io{NotFound}`/every other `IoError` arm alike into
+/// one `ConfigError::Io(String)` — so this crate has no structured signal to
+/// match on and the rendered message is the only one available. Matched as a
+/// *substring*, not an exact string, and matched conservatively: only this
+/// one specific, deterministically-produced rendering counts as `Absent`;
+/// every other `ConfigError` (including any other `Io(String)`, such as a
+/// `NotOwned` ownership refusal, whose rendering never contains this
+/// substring) classifies as `Refused`. A future wording change in either
+/// crate fails toward `Refused` (one extra, harmless log line) rather than
+/// toward silently reclassifying a real refusal as an ordinary absence.
+fn classify_marker_load(
+    result: Result<maknae_config::Value, maknae_config::ConfigError>,
+) -> MarkerOutcome {
+    match result {
+        Ok(value) => MarkerOutcome::Loaded(value),
+        Err(maknae_config::ConfigError::Io(msg)) if msg.contains("NotFound") => {
+            MarkerOutcome::Absent
+        }
+        Err(e) => MarkerOutcome::Refused(e.to_string()),
+    }
 }
 
 fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::PostureMarker> {
@@ -1672,6 +1747,110 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn read_posture_marker_missing_file_is_none() {
         let d = Dir::new("marker_missing");
+        assert_eq!(read_posture_marker(&d.0), None);
+    }
+
+    // ---- issue #135: a present-but-refused marker must classify distinctly
+    // from a genuinely absent one, so boot can log the refusal instead of
+    // silently collapsing both into the same `Unverified` degrade. ----
+
+    #[test]
+    fn classify_marker_load_missing_file_is_absent() {
+        // Drive the REAL `load_root_file` over a path that was never created —
+        // the actual error shape `classify_marker_load` must recognize as
+        // absence, not a hand-built stand-in `ConfigError`.
+        let d = Dir::new("classify_absent");
+        let path = d.0.join("private").join("posture.yaml");
+        let result = maknae_config::load_root_file(&path);
+        assert!(
+            matches!(classify_marker_load(result), MarkerOutcome::Absent),
+            "a never-created posture.yaml must classify as Absent"
+        );
+    }
+
+    #[test]
+    fn classify_marker_load_present_non_root_owned_file_is_refused_not_absent() {
+        // The exact regression from issue #135: a posture.yaml that EXISTS but
+        // fails `load_root_file`'s root-owned requirement (e.g. `_maknae:_maknae
+        // 0640` from config management, or — as here — this test process's own
+        // uid on any unprivileged dev box/CI runner) must classify as Refused,
+        // never silently as Absent.
+        let d = Dir::new("classify_refused");
+        put(
+            &d.0,
+            "private/posture.yaml",
+            "mechanism: tpm2\ntarget: /x\ntimestamp: \"1\"\n",
+            0o640,
+        );
+        let path = d.0.join("private").join("posture.yaml");
+        if nix::unistd::geteuid().as_raw() == 0 {
+            // If this test process itself runs as root (rare, but possible —
+            // e.g. `sudo cargo test`), the fixture above is root-owned by
+            // construction and would NOT trigger the ownership refusal this
+            // test targets. Force a non-root owner so the refusal path is
+            // exercised deterministically regardless of the runner's privilege
+            // (mirrors the root/non-root split in
+            // `valid_authz_and_principal_reaches_posture_record` above).
+            std::os::unix::fs::chown(&path, Some(65534), None)
+                .expect("root can chown the fixture to a non-root uid");
+        }
+        let result = maknae_config::load_root_file(&path);
+        assert!(
+            matches!(result, Err(maknae_config::ConfigError::Io(_))),
+            "expected load_root_file to refuse a non-root-owned file, got {result:?}"
+        );
+        match classify_marker_load(result) {
+            MarkerOutcome::Refused(reason) => {
+                assert!(!reason.is_empty(), "refusal reason must not be empty");
+            }
+            other => panic!(
+                "a present-but-refused marker must classify as Refused, not {other:?} — \
+                 collapsing it to Absent is exactly the issue #135 regression"
+            ),
+        }
+    }
+
+    #[test]
+    fn classify_marker_load_non_io_error_is_refused() {
+        // A `Parse`/`DuplicateKey`/etc. error (content read fine, past the
+        // owner/permission check, but malformed YAML) is also a present file
+        // that failed — Refused, not Absent.
+        let err = maknae_config::load_str("x: [1, 2\n").unwrap_err();
+        assert!(matches!(err, maknae_config::ConfigError::Parse { .. }));
+        assert!(matches!(
+            classify_marker_load(Err(err)),
+            MarkerOutcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn classify_marker_load_ok_is_loaded() {
+        let value = maknae_config::load_str("x: 1\n").unwrap();
+        assert!(matches!(
+            classify_marker_load(Ok(value)),
+            MarkerOutcome::Loaded(_)
+        ));
+    }
+
+    #[test]
+    fn read_posture_marker_refused_non_root_owned_file_is_none() {
+        // End-to-end: `read_posture_marker` still degrades to `None` on a
+        // refused marker (fail-soft, boot never blocks on this path) — the
+        // fix only adds a log line at the call site, it does not change this
+        // return value. The distinguishing behavior (Refused vs Absent) is
+        // pinned above at the `classify_marker_load` level, since the
+        // `eprintln!` emitted here is not capturable from a test.
+        let d = Dir::new("read_marker_refused");
+        put(
+            &d.0,
+            "private/posture.yaml",
+            "mechanism: tpm2\ntarget: /x\ntimestamp: \"1\"\n",
+            0o640,
+        );
+        if nix::unistd::geteuid().as_raw() == 0 {
+            std::os::unix::fs::chown(d.0.join("private").join("posture.yaml"), Some(65534), None)
+                .expect("root can chown the fixture to a non-root uid");
+        }
         assert_eq!(read_posture_marker(&d.0), None);
     }
 
