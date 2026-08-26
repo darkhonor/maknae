@@ -1056,51 +1056,6 @@ mod tests {
         assert!(matches!(got, Err(AuthzError::Io(_))));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn secure_loader_refuses_a_real_world_readable_root_owned_host_file() {
-        // Issue #129 reproduced against a REAL root-owned file, not a temp
-        // fixture the test user owns. `/etc/hosts` ships root-owned `0644` on
-        // both macOS and Linux: root-owned, regular, and NOT writable by
-        // group or other — so it satisfied every check the 0o022-only mask
-        // PR #128 shipped, and the test that stood here asserted it LOADED.
-        // That is precisely the regression: a root-owned world-READABLE
-        // policy file being accepted. Under the restored 0o027 mask the
-        // other-read bit refuses it.
-        use std::os::unix::fs::MetadataExt;
-        #[cfg(target_os = "macos")]
-        let host_file = Path::new("/private/etc/hosts");
-        #[cfg(not(target_os = "macos"))]
-        let host_file = Path::new("/etc/hosts");
-
-        // Assert the fixture's real properties rather than assume them, so a
-        // host shipping a different mode explains itself instead of silently
-        // passing for the wrong reason.
-        let md = std::fs::metadata(host_file).unwrap();
-        assert_eq!(
-            md.uid(),
-            0,
-            "{host_file:?} must be root-owned to be a fixture"
-        );
-        assert_ne!(
-            md.mode() & 0o007,
-            0,
-            "{host_file:?} must be world-accessible to be this fixture"
-        );
-        assert_eq!(
-            md.mode() & 0o022,
-            0,
-            "{host_file:?} must NOT be group/other-writable — the point of this \
-             fixture is that only the world-any half of the mask can refuse it"
-        );
-
-        let got = security_load(host_file);
-        assert!(
-            matches!(got, Err(AuthzError::InsecurePermissions)),
-            "world-readable root-owned {host_file:?} must be refused: {got:?}"
-        );
-    }
-
     #[test]
     fn shipped_0640_mode_passes_the_mask_and_is_refused_only_for_ownership() {
         // End-to-end shipped-mode compatibility (spec §4.6 `root:_maknae
@@ -1137,6 +1092,16 @@ mod tests {
 
     #[test]
     fn world_readable_non_writable_authz_refused() {
+        // THIS is the hermetic form of the issue-#129 regression pin, and since
+        // issue #138 it is the only one. A sibling test reproduced the same verdict
+        // against a real `/etc/hosts` — root-owned `0644` on a stock host — which
+        // made a security control depend on host state: a runner shipping a
+        // different mode or owner (a hardened image, a container with a rewritten
+        // hosts file) either failed for a reason unrelated to the control or passed
+        // without exercising it. Neither outcome says anything about the mask. The
+        // fixture below refuses for exactly the same reason, from bytes this test
+        // wrote itself.
+        //
         // Issue #129: `0644` is NOT group/other-writable, so a 0o022-only mask
         // admits it — a world-readable DAC policy loaded at boot where the
         // pre-PR-#128 gate (world-any + group/other-write) refused it. The

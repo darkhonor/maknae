@@ -606,6 +606,67 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// The OWNER-requirement success arm of `read_secure_required`, hermetically
+    /// (issue #138). `load_root_file` names `ROOT_ARTIFACT` — `owner: Some(0)` — which
+    /// an unprivileged test can never satisfy, so this arm used to be reached by
+    /// loading the host's real root-owned `/etc/hosts`. That made a security control
+    /// depend on host state: a runner whose `/etc/hosts` shipped a different owner or
+    /// mode failed the suite for a reason that says nothing about the loader, and one
+    /// that shipped a *more* permissive mode passed it without exercising the check.
+    ///
+    /// The requirement is caller-supplied, so the same production path takes a fixture
+    /// this test owns: require the CURRENT euid, which the just-created file genuinely
+    /// has. It is a real owner comparison against a real inode — no injected uid, no
+    /// stand-in — and it is the only positive owner case on this path.
+    #[cfg(unix)]
+    #[test]
+    fn owner_requirement_matching_the_real_owner_is_accepted() {
+        use std::os::unix::fs::MetadataExt;
+        let p = tmp("owned_by_me");
+        write_mode(&p, "x: 1\n", 0o640);
+        let me = std::fs::metadata(&p).unwrap().uid();
+        let got = read_secure_required(
+            &p,
+            maknae_io::TargetRequired {
+                owner: Some(me),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        );
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(got.unwrap(), "x: 1\n");
+    }
+
+    /// And the refusal arm of the same comparison, on the same shape: an owner the
+    /// fixture cannot have. Together these two kill the owner check's constant-return
+    /// mutants — a refusal test alone leaves "always refuse" alive.
+    #[cfg(unix)]
+    #[test]
+    fn owner_requirement_naming_another_uid_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let p = tmp("owned_by_someone_else");
+        write_mode(&p, "x: 1\n", 0o640);
+        let other = std::fs::metadata(&p).unwrap().uid() + 1;
+        let got = read_secure_required(
+            &p,
+            maknae_io::TargetRequired {
+                owner: Some(other),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+            },
+        );
+        let _ = std::fs::remove_file(&p);
+        // The message names BOTH uids — the one required and the one found — so the
+        // assertion cannot pass on an unrelated I/O failure that merely errored.
+        assert!(
+            matches!(&got, Err(ConfigError::Io(m))
+                if m.contains(&format!("require {other}")) && m.contains(&format!("owned by {}", other - 1))),
+            "got {got:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn secure_read_ok_640() {

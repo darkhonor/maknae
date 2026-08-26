@@ -664,6 +664,68 @@ mod tests {
         );
     }
 
+    /// Owner requirement on the READ path, refusal arm (issue #138).
+    ///
+    /// The verdict this pins used to be asserted against `/etc/hosts` in
+    /// `maknae-config`, which made a security control depend on host state: a runner
+    /// whose `/etc/hosts` shipped a different owner or mode either failed the suite
+    /// for the wrong reason or passed it for the wrong reason, and neither outcome
+    /// says anything about `check_target`. The fixture here is synthetic and the
+    /// verdict is the same one.
+    ///
+    /// `euid + 1` is an owner the fixture can never have: an unprivileged process
+    /// cannot `chown` a file away from itself (EPERM), so requiring a DIFFERENT uid is
+    /// the only way to observe this arm without root.
+    #[test]
+    fn read_absolute_refuses_a_target_owned_by_another_uid() {
+        assert_ne!(
+            nix::unistd::geteuid().as_raw(),
+            0,
+            "fixture requires a non-root test user"
+        );
+        let d = dir(0o750);
+        let f = d.path().join("owned.yaml");
+        std::fs::write(&f, b"core:\n  a: 1\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let other = nix::unistd::geteuid().as_raw() + 1;
+        let req = TargetRequired {
+            owner: Some(other),
+            mode_mask: None,
+            nlink_exactly_one: false,
+            regular_file: true,
+        };
+        let e = read_absolute(&f, req, StrategyPref::Auto).unwrap_err();
+        assert!(
+            matches!(e, IoError::NotOwned { uid, want, .. }
+                if want == other && uid == nix::unistd::geteuid().as_raw()),
+            "got {e:?}"
+        );
+    }
+
+    /// Owner requirement on the READ path, SUCCESS arm (issue #138) — the half that
+    /// cannot be reached by any refusal test, and the reason the deleted host-state
+    /// tests existed at all: they needed a file whose owner genuinely matched the
+    /// requirement. Requiring the CURRENT euid gets that hermetically, because the
+    /// fixture is owned by the process that just created it.
+    ///
+    /// Without this, `check_owner_mode`'s owner comparison has no passing case on the
+    /// read path and "always refuse" mutants of it survive.
+    #[test]
+    fn read_absolute_accepts_a_target_owned_by_the_current_euid() {
+        let d = dir(0o750);
+        let f = d.path().join("mine.yaml");
+        std::fs::write(&f, b"core:\n  a: 1\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let req = TargetRequired {
+            owner: Some(nix::unistd::geteuid().as_raw()),
+            mode_mask: Some(0o007),
+            nlink_exactly_one: true,
+            regular_file: true,
+        };
+        let out = read_absolute(&f, req, StrategyPref::Auto).expect("every requirement is met");
+        assert_eq!(out.value.as_slice(), b"core:\n  a: 1\n");
+    }
+
     #[test]
     fn resolved_anchor_accepts_filesystem_root() {
         let anchor = open_anchor_resolved(
