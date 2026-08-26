@@ -177,7 +177,7 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binding::{resolve, UidMap};
+    use crate::binding::{resolve, UidMap, AGENT_SUBJECT};
     use maknae_security::{Action, Context, Resource, Subject};
     use std::collections::BTreeMap;
 
