@@ -25,15 +25,7 @@ use zeroize::Zeroizing;
 /// mechanism (systemd credentials dir) is the trust boundary, not this process's
 /// view of the file mode.
 fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
-    let bytes = crate::read_storage(
-        path,
-        maknae_io::TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-        },
-    )?;
+    let bytes = crate::read_storage(path)?;
     let text = std::str::from_utf8(&bytes).map_err(|e| VaultError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other(e.to_string()),

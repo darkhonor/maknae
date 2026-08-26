@@ -108,15 +108,7 @@ pub struct PlaneClient {
 }
 
 fn read_trimmed(path: &Path) -> Result<String, VaultError> {
-    let bytes = crate::read_storage(
-        path,
-        maknae_io::TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-        },
-    )?;
+    let bytes = crate::read_storage(path)?;
     std::str::from_utf8(&bytes)
         .map(|s| s.trim().to_string())
         .map_err(|e| VaultError::Io {
