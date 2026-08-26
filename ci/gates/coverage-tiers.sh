@@ -340,7 +340,17 @@ if [ "$mutants_mode" != "" ]; then
       fi
       continue
     fi
-    if ! (cd "$root" && cargo mutants --package "$cname"); then
+    # maknae-config carries the feature-gated `hermetic-test-seam` fn (#85):
+    # under default features it is compiled OUT, so its mutants land in dead
+    # code and are UNKILLABLE MISSED (the 2026-08-27 main-red). Enabling the
+    # feature makes the seam test the killer — prove-it-can-go-red, never an
+    # exclusion. Additive-only feature: every default-feature mutant/test is
+    # unchanged by it.
+    extra_mutants_flags=()
+    if [ "$cname" = "maknae-config" ]; then
+      extra_mutants_flags=(--features hermetic-test-seam)
+    fi
+    if ! (cd "$root" && cargo mutants --package "$cname" "${extra_mutants_flags[@]}"); then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
     fi
   done
