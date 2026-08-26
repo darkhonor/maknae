@@ -64,8 +64,8 @@ crates/maknae-vault/src/client.rs:137|owner: None,
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
 crates/maknae-vault/src/socket.rs:16|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {
 crates/maknae-vault/src/socket.rs:56|match std::fs::symlink_metadata(path) {
-crates/maknae-vault/src/socket.rs:70|std::fs::remove_file(path)
-crates/maknae-vault/src/socket.rs:102|let _ = std::fs::remove_file(path);
-crates/maknae-vault/src/socket.rs:114|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+crates/maknae-vault/src/socket.rs:75|std::fs::remove_file(path)
+crates/maknae-vault/src/socket.rs:107|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
 crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);

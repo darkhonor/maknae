@@ -55,22 +55,27 @@ pub(crate) fn bind_listener(
     verify_parent_dir(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
-            // Probe liveness before unlinking: a successful connect means a daemon is
-            // already serving this path → refuse (do NOT steal it out from under a live
-            // listener). Only `ConnectionRefused` (no listener accepting) proves the socket
-            // is stale and safe to remove; any other probe error fails closed.
-            match std::os::unix::net::UnixStream::connect(path) {
-                Ok(_) => {
+            // Probe liveness before unlinking: a STABLE successful connect means a daemon
+            // is already serving this path → refuse (do NOT steal it out from under a
+            // live listener). `ConnectionRefused` proves the socket is stale and safe to
+            // remove; any other probe error fails closed. See `classify_stale_probe` for
+            // why a single successful connect is NOT trusted (#125).
+            let verdict = classify_stale_probe(
+                || std::os::unix::net::UnixStream::connect(path).map(drop),
+                || std::thread::sleep(PROBE_SETTLE),
+            );
+            match verdict {
+                ProbeVerdict::Live => {
                     return Err(VaultError::SocketBind(format!(
                         "{} is already served by a live listener",
                         path.display()
                     )));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                ProbeVerdict::Stale => {
                     std::fs::remove_file(path)
                         .map_err(|e| VaultError::SocketBind(format!("stale socket unlink: {e}")))?;
                 }
-                Err(e) => {
+                ProbeVerdict::FailClosed(e) => {
                     return Err(VaultError::SocketBind(format!(
                         "probing {}: {e}",
                         path.display()
@@ -116,6 +121,53 @@ pub(crate) fn bind_listener(
     Ok(listener)
 }
 
+/// How long a first successful probe must remain answerable before it counts as a live
+/// listener. The #125 window (below) was measured self-healing within single-digit
+/// milliseconds on a loaded machine; 100ms gives >20× margin. Startup-only cost, and
+/// only paid on the anomalous Ok path — the common cases (absent path, refused probe)
+/// never sleep.
+const PROBE_SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The stale-socket probe verdict (issue #125).
+///
+/// A SINGLE successful `connect()` is not proof of a live listener: on macOS, `close()`
+/// of a listening UDS can return before the kernel fully disassociates the listening
+/// pcb from the socket's vnode, and under heavy multi-process unix-socket load a
+/// `connect()` landing in that window returns `Ok` against a socket that is already
+/// dead — instrumented on #125: the probe's `Ok` was followed, milliseconds later, by
+/// unbroken `ECONNREFUSED` (3/3), with the binding process's own fd table clean and no
+/// other holder of the socket. A daemon restarting after an unclean shutdown could hit
+/// its own stale socket in that window and refuse to start — an availability failure.
+///
+/// So: an `Ok` first probe is confirmed by a settle delay + re-probe. A live daemon
+/// answers both probes (→ `Live`, refuse to bind); the transient window has died by the
+/// re-probe (→ `Stale`, reclaim). The asymmetry is deliberate and fail-closed both
+/// ways: we never reclaim a path that ANSWERED the second probe, and any error other
+/// than `ConnectionRefused` on either probe is `FailClosed`, never `Stale`.
+enum ProbeVerdict {
+    Live,
+    Stale,
+    FailClosed(String),
+}
+
+fn classify_stale_probe(
+    mut probe: impl FnMut() -> std::io::Result<()>,
+    settle: impl Fn(),
+) -> ProbeVerdict {
+    match probe() {
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => ProbeVerdict::Stale,
+        Err(e) => ProbeVerdict::FailClosed(e.to_string()),
+        Ok(()) => {
+            settle();
+            match probe() {
+                Ok(()) => ProbeVerdict::Live,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => ProbeVerdict::Stale,
+                Err(e) => ProbeVerdict::FailClosed(e.to_string()),
+            }
+        }
+    }
+}
+
 /// Connect to a plane socket.
 pub(crate) async fn connect(path: &Path) -> Result<tokio::net::UnixStream, VaultError> {
     tokio::net::UnixStream::connect(path)
@@ -134,6 +186,99 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         p
+    }
+
+    // ---- #125: the stale-probe classifier over an injected prober ----
+    //
+    // The macOS kernel window (a listening UDS answers connect() for a few
+    // hundred µs–ms after close() under multi-process unix-socket load) cannot
+    // be summoned deterministically, so the classifier is tested through the
+    // prober seam with scripted sequences. The real-connect paths are covered
+    // by `refuses_binding_over_a_live_listener` / `removes_a_stale_socket_and_binds`.
+
+    fn scripted(
+        seq: Vec<std::io::Result<()>>,
+    ) -> (
+        impl FnMut() -> std::io::Result<()>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let c = calls.clone();
+        let mut it = seq.into_iter();
+        (
+            move || {
+                c.set(c.get() + 1);
+                it.next().expect("prober called more times than scripted")
+            },
+            calls,
+        )
+    }
+
+    fn refused() -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+    }
+
+    #[test]
+    fn probe_ok_then_refused_is_stale_the_125_window() {
+        // The #125 flake shape: first connect lands in the post-close kernel
+        // window (Ok), the settle delay outlives the window, re-probe refuses.
+        let (probe, calls) = scripted(vec![Ok(()), refused()]);
+        assert!(matches!(
+            classify_stale_probe(probe, || ()),
+            ProbeVerdict::Stale
+        ));
+        assert_eq!(
+            calls.get(),
+            2,
+            "an Ok probe must be confirmed by a re-probe"
+        );
+    }
+
+    #[test]
+    fn probe_ok_twice_is_live() {
+        let (probe, calls) = scripted(vec![Ok(()), Ok(())]);
+        assert!(matches!(
+            classify_stale_probe(probe, || ()),
+            ProbeVerdict::Live
+        ));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn probe_refused_is_stale_without_a_second_probe() {
+        let (probe, calls) = scripted(vec![refused()]);
+        assert!(matches!(
+            classify_stale_probe(probe, || ()),
+            ProbeVerdict::Stale
+        ));
+        assert_eq!(
+            calls.get(),
+            1,
+            "a refused first probe needs no settle/re-probe"
+        );
+    }
+
+    #[test]
+    fn probe_other_error_fails_closed() {
+        let (probe, _) = scripted(vec![Err(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ))]);
+        assert!(matches!(
+            classify_stale_probe(probe, || ()),
+            ProbeVerdict::FailClosed(_)
+        ));
+    }
+
+    #[test]
+    fn probe_ok_then_other_error_fails_closed() {
+        let (probe, _) = scripted(vec![
+            Ok(()),
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        ]);
+        assert!(matches!(
+            classify_stale_probe(probe, || ()),
+            ProbeVerdict::FailClosed(_)
+        ));
     }
 
     #[test]
