@@ -33,9 +33,9 @@ crates/maknae-io/src/checks.rs:45|mode_mask: None,
 crates/maknae-io/src/checks.rs:59|pub const OS_DAC: DescendantRequired = DescendantRequired {
 crates/maknae-io/src/checks.rs:60|owner: None,
 crates/maknae-io/src/checks.rs:61|mode_mask: None,
-crates/maknae-io/src/checks.rs:83|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
-crates/maknae-io/src/checks.rs:84|owner: None,
-crates/maknae-io/src/checks.rs:85|mode_mask: None,
+crates/maknae-io/src/checks.rs:87|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
+crates/maknae-io/src/checks.rs:88|owner: None,
+crates/maknae-io/src/checks.rs:89|mode_mask: None,
 
 # read_absolute pins the configured path's parent; OS DAC is the named directory
 # requirement while the caller supplies the target artifact requirements. Named ONCE
@@ -56,9 +56,9 @@ crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC
 # `read_secure_required(path, None, Some(0o007))` — the positional spelling issue #132
 # reported as invisible to this inventory.
 crates/maknae-config/src/loader.rs:34|owner: None,
-crates/maknae-config/src/loader.rs:180|owner: None,
-crates/maknae-config/src/loader.rs:222|owner: None,
-crates/maknae-config/src/loader.rs:268|owner: None,
+crates/maknae-config/src/loader.rs:182|owner: None,
+crates/maknae-config/src/loader.rs:224|owner: None,
+crates/maknae-config/src/loader.rs:270|owner: None,
 crates/maknae-vault/src/client.rs:137|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.

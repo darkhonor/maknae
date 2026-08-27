@@ -310,6 +310,7 @@ mod tests {
                     mode_mask: Some(0o022),
                     nlink_exactly_one: false,
                     regular_file: true,
+                    max_bytes: None,
                 },
                 Some(std::path::Path::new("/home/operator")),
             )

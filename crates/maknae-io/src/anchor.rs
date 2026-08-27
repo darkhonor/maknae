@@ -693,6 +693,7 @@ mod tests {
             mode_mask: None,
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         let e = read_absolute(&f, req, StrategyPref::Auto).unwrap_err();
         assert!(
@@ -721,6 +722,7 @@ mod tests {
             mode_mask: Some(0o007),
             nlink_exactly_one: true,
             regular_file: true,
+            max_bytes: None,
         };
         let out = read_absolute(&f, req, StrategyPref::Auto).expect("every requirement is met");
         assert_eq!(out.value.as_slice(), b"core:\n  a: 1\n");
@@ -938,6 +940,7 @@ mod tests {
             mode_mask: None,
             nlink_exactly_one: false,
             regular_file: false,
+            max_bytes: None,
         }
     }
 
@@ -1401,6 +1404,7 @@ mod tests {
                 mode_mask: None,
                 nlink_exactly_one: false,
                 regular_file: true,
+                max_bytes: None,
             };
             let _ = tx.send(
                 a.read(Path::new("config.d/pipe"), None, req)
@@ -1470,6 +1474,7 @@ mod tests {
             mode_mask: None,
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         let e = a
             .append(Path::new("new.jsonl"), None, req, b"x", m(0o640))
@@ -1555,6 +1560,7 @@ mod tests {
                     mode_mask: Some(0o007),
                     nlink_exactly_one: true,
                     regular_file: true,
+                    max_bytes: None,
                 },
                 b"RECORD\n",
                 m(0o640),
@@ -2187,6 +2193,7 @@ mod tests {
             mode_mask: Some(0o007),
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         let e = a.read(Path::new("loose.yaml"), None, req).unwrap_err();
         assert!(
@@ -2211,6 +2218,7 @@ mod tests {
             mode_mask: None,
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         // BOUNDED WAIT, like the other FIFO tests. This test is what holds
         // `open_read_target`'s O_NONBLOCK, and it holds it by HANGING if the flag goes
@@ -2439,6 +2447,7 @@ mod tests {
             mode_mask: Some(0o007),
             nlink_exactly_one: true,
             regular_file: true,
+            max_bytes: None,
         }
     }
 
