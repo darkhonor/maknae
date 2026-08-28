@@ -902,6 +902,30 @@ mod tests {
         }
     }
 
+    /// Claim: a parameterless `[N]` term supplies NO resource attribute, so
+    /// `decide_fs` cannot reach the capability grammar with a path and an
+    /// unbuilt `fs.*` term can never match `Read(~/**)`. That safety is
+    /// STRUCTURAL, and this is what makes it provable: it was previously
+    /// asserted in a PR body with `Whoami` as its only test case.
+    #[test]
+    fn only_read_carries_a_resource_attribute() {
+        for v in all_verbs() {
+            let r = build_authz_request(&v, 501);
+            if matches!(v, Verb::Read { .. }) {
+                assert!(
+                    r.resource.0.str("path").is_some(),
+                    "fs.read must carry its path"
+                );
+            } else {
+                assert!(
+                    r.resource.0.str("path").is_none(),
+                    "{} must carry NO path — the fs safety argument rests on it",
+                    verb_to_action(&v)
+                );
+            }
+        }
+    }
+
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
     fn the_vocabulary_is_fifty_seven_client_reachable_terms() {

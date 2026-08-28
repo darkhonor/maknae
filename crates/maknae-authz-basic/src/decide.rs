@@ -154,7 +154,16 @@ pub(crate) fn decide_loaded(
             // decidability for the rest is D3's implementation obligation.
             Some(Class::Admin) if req.action.0 == "admin.whoami" => permit_with_audit(),
             Some(Class::Admin) => Verdict::NotApplicable,
-            Some(Class::Fs) => decide_fs(lp, req),
+            // Keyed like the admin arm above, and for the same reason. Without
+            // it, safety rests on a remote `if let Verb::Read` in another crate:
+            // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
+            // an unbuilt fs term reaching it with a path would match `Read(~/**)`.
+            // Keying here makes the property provable in the file that decides,
+            // and makes unbuilt fs terms abstain (NotApplicable) rather than
+            // report Indeterminate — which is a PDP-malfunction signal, not a
+            // "this term has no behaviour yet" signal.
+            Some(Class::Fs) if req.action.0 == "fs.read" => decide_fs(lp, req),
+            Some(Class::Fs) => Verdict::NotApplicable,
             Some(Class::Session)
             | Some(Class::Terminal)
             | Some(Class::Mcp)
@@ -528,6 +537,8 @@ mod tests {
             ("session.prompt", Class::Session),
             ("terminal.create", Class::Terminal),
             ("mcp.tool.call", Class::Mcp),
+            ("fs.write", Class::Fs),
+            ("fs.delete", Class::Fs),
             ("kernel.contain", Class::Kernel),
         ] {
             assert_eq!(class_of(action), Some(expect), "{action} must resolve");

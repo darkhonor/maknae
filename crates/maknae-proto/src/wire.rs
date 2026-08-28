@@ -34,9 +34,9 @@ pub enum Verb {
     /// without restart. Not a policy re-read: the policy file is already re-read
     /// on every request (the Zero Trust ruling). The genuinely stale state is the
     /// uid map built once at construction — a username edited in afterwards is
-    /// unresolvable until this lands. Permitting it lets the holder make a newly-
-    /// added host principal effective without a restart — lifting the restart-
-    /// scoped boundary #85 §3 relies on — and un-wedge a policy whose
+    /// unresolvable until this lands. Permitting it lets the holder make a
+    /// newly-added host principal effective without a restart — lifting the
+    /// restart-scoped boundary #85 §3 relies on — and un-wedge a policy whose
     /// unresolvable name is denying every subject on every term. The file itself
     /// is root-owned, so this term confers no ability to write it.
     AdminPolicyReload,
@@ -52,11 +52,11 @@ pub enum Verb {
     AdminSubjectBind,
     /// Remove a subject's role binding. A policy mutation, and the sharper edge:
     /// unbinding the last admin locks out the WIRE until an out-of-band root edit
-    /// of the root-owned policy file — picked up on the next request when the re-
-    /// bound identity was resolved at daemon construction. A name new to the uid
-    /// map instead fails the whole policy closed until restart (#85 §3), so the
-    /// edit can deepen the cliff before it lifts it. A serviceability cliff, not
-    /// an unrecoverable one; recovery is local and always available precisely
+    /// of the root-owned policy file — picked up on the next request when the
+    /// re-bound identity was resolved at daemon construction. A name new to the
+    /// uid map instead fails the whole policy closed until restart (#85 §3), so
+    /// the edit can deepen the cliff before it lifts it. A serviceability cliff,
+    /// not an unrecoverable one; recovery is local and always available precisely
     /// because it needs no request. MUST refuse the `adversary` role — otherwise
     /// it becomes an unconstrained `admin.release`.
     AdminSubjectUnbind,
@@ -128,9 +128,9 @@ pub enum Verb {
     /// reference did not read payload shapes, so this cannot be settled from
     /// artifacts on disk. Until settled, treat it as egress.
     SessionSetconfigoption,
-    /// Change the agent's operating mode. ACP v1 only. Open, and authority-
-    /// relevant: a mode may gate what the agent may attempt. Until its domain is
-    /// pinned, treat it as.
+    /// Change the agent's operating mode. ACP v1 only. Open, and
+    /// authority-relevant: a mode may gate what the agent may attempt. Until its
+    /// domain is pinned, treat it as egress.
     SessionSetmode,
     /// Rehydrate a stored conversation, restoring its content and the provenance
     /// that came with it. ACP v1 only.
@@ -162,8 +162,8 @@ pub enum Verb {
     /// Create or replace file content. Maknae writes bytes; ACP v1's counterpart
     /// is text-only — the same divergence `fs.read` carries.
     FsWrite,
-    /// Destroy file content. Irreversible, and the strongest argument for two-
-    /// phase audit.
+    /// Destroy file content. Irreversible, and the strongest argument for
+    /// two-phase audit.
     FsDelete,
     /// Relocate content to a new path. A mutation, and a laundering route if
     /// decided against the source alone: deny matching is lexical over paths, so
@@ -232,8 +232,8 @@ pub enum Verb {
     /// (server, tool, arguments), and the tool's own consequence model is never a
     /// substitute for the verdict.
     McpToolCall,
-    /// Read a resource a server exposes. A disclosure, and the content is server-
-    /// authored — provenance travels with it.
+    /// Read a resource a server exposes. A disclosure, and the content is
+    /// server-authored — provenance travels with it.
     McpResourceRead,
     /// Retrieve a server-supplied prompt. Server-authored content entering the
     /// agent's context — inform-but-not-authorize applies (#8).

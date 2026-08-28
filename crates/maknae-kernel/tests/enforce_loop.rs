@@ -16,7 +16,7 @@ use maknae_authz_basic::HermeticAuthorizer;
 use maknae_proto::{Payload, ProtoErrCode, RespResult};
 
 mod common;
-use common::{FailNthEmit, HostileObligation, SleepAuthorizer};
+use common::{AlwaysPermit, FailNthEmit, HostileObligation, SleepAuthorizer};
 
 // Reuse run_loop's recording emitter shape locally (each tests/*.rs is its
 // own crate; RecEmit is tiny and its semantics — record synchronously, then
@@ -787,4 +787,101 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
     assert!(req.outcome.reason.contains("pre-gate"));
+}
+
+// ---- #67: the NOOP contract, end to end ----------------------------------
+// The path this PR exists to introduce. `run.rs` is T3 and mutation-excluded,
+// so without these three tests the ordering claim cannot go red at all.
+
+/// THE security property of the NOOP contract: a subject not entitled to a term
+/// must receive `Unauthorized` and learn NOTHING about whether it is built.
+/// Short-circuiting to `NotImplemented` ahead of the decision would let any
+/// caller enumerate the whole verb surface for free.
+#[tokio::test]
+async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
+    let fx = Fixture::new("noop-unauth");
+    fx.write_policy(BINDINGS_ROOT_USER); // root -> user: liveness only
+    for verb in [
+        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::SessionNew,
+        maknae_proto::Verb::FsWrite,
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.principal,
+            fx.authorizer(),
+            emit,
+            0,
+            verb.clone(),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(
+                e.code,
+                ProtoErrCode::Unauthorized,
+                "{verb:?} must deny without leaking implementation state"
+            ),
+            other => panic!("expected Unauthorized for {verb:?}, got {other:?}"),
+        }
+    }
+}
+
+/// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
+/// and only then refused. Driven with a permissive authorizer because the real
+/// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's
+/// ordering, not a decision.
+#[tokio::test]
+async fn a_permitted_unbuilt_term_is_audited_then_refused() {
+    let fx = Fixture::new("noop-permit");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
+        other => panic!("expected NotImplemented, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.status");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(
+        req.outcome.posture, "not-implemented",
+        "a Permit-then-NOOP must never read as a completed action"
+    );
+}
+
+/// The audit-then-respond invariant holds on the NOOP path too: no frame leaves
+/// without a durable record. n=2 fails the REQUEST record while the admission
+/// record succeeds — n=1 would trip the connection-admission gate before the
+/// NOOP path is ever reached, and the test would pass for the wrong reason.
+#[tokio::test]
+async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
+    let fx = Fixture::new("noop-withhold");
+    let emit = FailNthEmit::new(2);
+    let out = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        out.is_none(),
+        "no frame may be released when its record could not append"
+    );
+    assert!(
+        emit.records().iter().any(|r| r.action == "admin.status"),
+        "the record must have been OFFERED before the frame was withheld"
+    );
 }
