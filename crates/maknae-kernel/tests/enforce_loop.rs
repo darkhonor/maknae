@@ -411,8 +411,10 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert_eq!(req.outcome.result, "deny");
     assert_eq!(req.object.as_deref(), Some(target.as_str()), "AU-3 object");
     assert!(
-        req.outcome.reason.contains(".ssh"),
-        "the matched deny pattern source is audit-only: {}",
+        req.outcome
+            .reason
+            .contains("denied by policy entry Read(~/.ssh/**)"),
+        "only a real DenyMatch renders the policy-entry source (and proves the ~ expansion round-trip): {}",
         req.outcome.reason
     );
     // And the pattern source never leaks onto the wire either.
@@ -451,6 +453,17 @@ async fn a_permitted_read_returns_the_file_bytes() {
         RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
         other => panic!("expected content, got {other:?}"),
     }
+    // Wire-level byte-string proof (spec test obligation): the raw frame must
+    // contain the CBOR definite-length BYTE STRING header (0x40 | len for
+    // len<24) followed by the content verbatim — the derive's ARRAY form
+    // encodes each byte >= 0x18 as two wire bytes and cannot contain this
+    // sequence.
+    let mut expected = vec![0x40u8 | content.len() as u8];
+    expected.extend_from_slice(content);
+    assert!(
+        frame.windows(expected.len()).any(|w| w == expected),
+        "read content must ride as a CBOR byte string on the wire"
+    );
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.object.as_deref(), Some(target.as_str()));
@@ -487,7 +500,13 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     }
     let needle = b"SECRET";
     assert!(!frame.windows(needle.len()).any(|w| w == needle));
-    assert_eq!(request_record(&emit.records()).outcome.result, "deny");
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome.reason.to_lowercase().contains("symlink"),
+        "the STRUCTURAL symlink refusal is the reason, not e.g. ENOENT: {}",
+        req.outcome.reason
+    );
 }
 
 #[tokio::test]

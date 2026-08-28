@@ -60,7 +60,7 @@ use crate::handler::{
 };
 use maknae_config::Principal;
 use maknae_io::{
-    open_anchor_resolved, AnchorRequired, IoError, StrategyPref, TargetRequired, Zeroizing,
+    open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing,
 };
 use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
@@ -637,7 +637,7 @@ pub async fn handle<S, E, P>(
         Dispatch::ReadRequested(path) => {
             // The read PEP (spec D5): per-request anchor at the enrolled home,
             // named requirements, bounded on the blocking pool like the decide.
-            let budget = (cfg.frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN);
+            let budget = crate::handler::read_budget(cfg.frame_max_bytes);
             let outcome = {
                 let home = principal.home.clone();
                 let owner = principal.uid;
@@ -655,6 +655,7 @@ pub async fn handle<S, E, P>(
             };
             match read_result {
                 Ok(content) => {
+                    let content_len = content.len();
                     let appended = emit_request_outcome(
                         &emit,
                         &host,
@@ -683,8 +684,10 @@ pub async fn handle<S, E, P>(
                     };
                     // Zeroizing, pre-sized encode (spec D5): no realloc, no
                     // un-zeroized partial copies; buffer zeroizes after write.
-                    if let Ok(bytes) = encode_response_zeroizing(&response, budget as usize + 1024)
-                    {
+                    if let Ok(bytes) = encode_response_zeroizing(
+                        &response,
+                        content_len + crate::handler::FRAME_ENVELOPE_MARGIN as usize,
+                    ) {
                         let _ = tokio::time::timeout(
                             Duration::from_millis(cfg.read_timeout_ms),
                             write_frame(&mut stream, &bytes),
@@ -720,56 +723,23 @@ pub async fn handle<S, E, P>(
     close_bounded(&mut stream).await;
 }
 
-/// CBOR + response-envelope headroom subtracted from the daemon's own frame
-/// budget before a read is sized (spec D5). Degenerate-but-legal configs
-/// (frame_max_bytes as low as 1) make the budget 0 and every non-empty read
-/// refuses TooLarge — fail-closed by design, not a bug.
-const FRAME_ENVELOPE_MARGIN: u64 = 512;
-
-/// The blocking half of the read PEP: open the home anchor (per request — the
-/// same Zero-Trust cadence as the policy re-read; also shrinks the
-/// stale-inode window), strip the home prefix COMPONENT-WISE, and read under
-/// the named requirements. Pure-ish (all outcomes typed); no audit here —
-/// the caller owns record + wire.
+/// The blocking half of the read PEP: THIN orchestration over the T1
+/// decision logic (`handler::read_plan` names every requirement;
+/// `handler::map_read_error` types every refusal) — this fn only performs
+/// the two maknae-io calls the plan prescribes. Per-request anchor open:
+/// the same Zero-Trust cadence as the policy re-read.
 fn read_pep(
     home: &std::path::Path,
     owner_uid: u32,
     path: &str,
     budget: u64,
 ) -> Result<Zeroizing<Vec<u8>>, ReadRefusal> {
-    // THE alias-planting boundary (spec D5): owner + no group/other write on
-    // the home. A home any non-principal can write is refused outright.
-    let anchor = open_anchor_resolved(
-        home,
-        AnchorRequired {
-            owner: Some(owner_uid),
-            mode_mask: Some(0o022),
-        },
-        StrategyPref::Auto,
-    )
-    .map_err(|e| ReadRefusal::Unavailable(e.to_string()))?;
-    // Component-wise, never str::strip_prefix (`/home/opx` is a string-prefix
-    // of `/home/op` and must NOT match).
-    let rel = match std::path::Path::new(path).strip_prefix(home) {
-        Ok(rel) => rel,
-        Err(_) => return Err(ReadRefusal::OutsideRoot),
-    };
-    match anchor.read(
-        rel,
-        None,
-        TargetRequired {
-            // OS DAC at the target: the boundary requirement lives on the
-            // ANCHOR (owner+0o022 above); nlink/regular/max_bytes ARE named.
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: true,
-            regular_file: true,
-            max_bytes: Some(budget),
-        },
-    ) {
+    let (rel, anchor_req, target_req) = crate::handler::read_plan(home, owner_uid, path, budget)?;
+    let anchor = open_anchor_resolved(home, anchor_req, StrategyPref::Auto)
+        .map_err(|e| ReadRefusal::Unavailable(e.to_string()))?;
+    match anchor.read(&rel, None, target_req) {
         Ok(outcome) => Ok(outcome.value),
-        Err(IoError::TargetTooLarge { .. }) => Err(ReadRefusal::TooLarge),
-        Err(e) => Err(ReadRefusal::Refused(e.to_string())),
+        Err(e) => Err(crate::handler::map_read_error(e)),
     }
 }
 
@@ -1999,23 +1969,30 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(rec.seq, 1);
     }
 
-    // (b) A shipped `authz.yaml` using `~` with NO enrolled principal refuses —
-    // `~` cannot be resolved without `principal.home` (spec §5.5/§7).
+    // (b) NO enrolled principal refuses at the boot gate (#77, ruling 2: a
+    // daemon that can authorize no one does not boot). Renamed from
+    // `tilde_pattern_without_principal_refuses` — the `~`-resolution refusal
+    // it once named is now structurally unreachable (the principal gate fires
+    // before authz.yaml is ever opened), and off-root it had already been
+    // passing on `NotRootOwned` rather than `~` anyway.
     #[test]
-    fn tilde_pattern_without_principal_refuses() {
+    fn config_without_principal_refuses_boot() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CREDENTIALS_DIRECTORY");
-        let d = Dir::new("tilde_no_principal");
+        let d = Dir::new("no_principal_gate");
         write_common_fixture(&d, ""); // no `principal:` section at all
         put(
             &d.0,
             "authz.yaml",
-            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
             0o640,
         );
 
         match block_on_run_inner(&d.0) {
-            Err(RunError::Authz(_)) => {}
+            Err(RunError::Authz(msg)) => assert!(
+                msg.to_string().contains("principal"),
+                "the refusal must name the missing section: {msg}"
+            ),
             other => panic!("expected Err(RunError::Authz), got {other:?}"),
         }
     }

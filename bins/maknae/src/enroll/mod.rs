@@ -1161,6 +1161,11 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
 ///     AppArmor is absent). SELinux needs no per-home step (type-based
 ///     vectors ship in the .te).
 ///
+/// Side effect, recorded: a POSIX ACL raises the st_mode GROUP bits to the
+/// ACL mask, so a 0700 home stats ~0750 afterward — still within the
+/// anchor's `0o022` no-write mask (group READ is fine); noted so the mode
+/// change is never mistaken for drift.
+///
 /// Direct fs write + Command usage below carry std-fs-allowlist entries.
 fn grant_read_path_access(home: &Path, verbose: bool) {
     // 1. DAC ACL (needs the `acl` package — a warn, not a failure, without it).
@@ -1185,10 +1190,24 @@ fn grant_read_path_access(home: &Path, verbose: bool) {
         ),
     }
 
-    // 2. AppArmor local include (Debian-family only; the dir's absence means
-    // AppArmor isn't managing this host — silently skip).
+    // 2. AppArmor local include (Debian-family only; /etc/apparmor.d absent
+    // means AppArmor isn't managing this host — skip; the local/ SUBDIR is
+    // created if missing, root context). The home path is interpolated into
+    // profile syntax: refuse metacharacters outright (fail closed to
+    // reads-unavailable) rather than risk a silently WIDENED rule.
+    let home_str = home.display().to_string();
+    let home_is_profile_safe = home_str
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
     let local_dir = Path::new("/etc/apparmor.d/local");
-    if local_dir.is_dir() {
+    if Path::new("/etc/apparmor.d").is_dir() && !home_is_profile_safe {
+        eprintln!(
+            "maknae enroll: home path {home_str:?} contains AppArmor metacharacters; refusing to write the local include — reads fail closed under AppArmor"
+        );
+    } else if Path::new("/etc/apparmor.d").is_dir() {
+        if !local_dir.is_dir() {
+            let _ = std::fs::create_dir_all(local_dir);
+        }
         let snippet = format!(
             "# Written by `maknae enroll` (#77): narrow the daemon's home read to the
 # ENROLLED home only. Read-only; regenerate by re-running enroll.

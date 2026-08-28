@@ -811,8 +811,17 @@ inject_mutants_features "$r" 'mutants_features = { "no-such-crate" = ["some-feat
 expect "mutants_features unknown crate refused" "FAIL: mutants_features names 'no-such-crate'" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
 
 r="$(newroot)"; mk_base "$r"
+# The crate IS in mutants_crates, so ONLY the non-list branch can fire — the
+# expected substring is that branch's own text (deleting the isinstance check
+# must turn this fixture red; the unknown-crate branch cannot satisfy it).
 inject_mutants_features "$r" 'mutants_features = { "fixture-crate" = "not-a-list" }'
-expect "mutants_features non-list value refused" "FAIL: mutants_features" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
+python3 - "$r/coverage-tiers.toml" <<'PYEOF2'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace('mutants_crates = []', 'mutants_crates = ["fixture-crate"]', 1)
+open(p, "w").write(s)
+PYEOF2
+expect "mutants_features non-list value refused" "must be a list of strings" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
 
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"

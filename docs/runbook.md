@@ -348,7 +348,7 @@ deny-listed path) looks like this — the REASON and the OBJECT live only here, 
 on the wire (the client sees the generic `not authorized`):
 
 ```json
-{"action":"acp.fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"deny pattern matched: Read(~/.ssh/**)","result":"deny"},...}
+{"action":"acp.fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"denied by policy entry Read(~/.ssh/**)","result":"deny"},...}
 ```
 
 (seq 1 is the connection-admission record emitted by `handle` on cert-verified

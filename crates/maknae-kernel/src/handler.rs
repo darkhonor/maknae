@@ -191,6 +191,73 @@ pub enum ReadRefusal {
     JoinFailed,
 }
 
+/// CBOR + response-envelope headroom subtracted from the daemon's own frame
+/// budget before a read is sized (spec D5). Degenerate-but-legal configs
+/// (frame_max_bytes as low as 1) make the budget 0 and every non-empty read
+/// refuses TooLarge — fail-closed by design, not a bug. T1-pinned here; the
+/// binding in run.rs is thin orchestration.
+pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
+
+/// The read budget for one response frame.
+pub fn read_budget(frame_max_bytes: usize) -> u64 {
+    (frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN)
+}
+
+/// The read PEP's DECISION half (T1 — spec D5's "read-path decision logic
+/// incl. the size bound and TargetRequired naming"): given the enrolled home,
+/// its owner, the canonical client path and the budget, produce the
+/// home-relative remainder plus the NAMED requirements the anchored open and
+/// read must enforce — or the refusal. Pure; the two maknae-io calls stay in
+/// run.rs as orchestration.
+#[allow(clippy::type_complexity)]
+pub fn read_plan(
+    home: &std::path::Path,
+    owner_uid: u32,
+    path: &str,
+    budget: u64,
+) -> Result<
+    (
+        std::path::PathBuf,
+        maknae_io::AnchorRequired,
+        maknae_io::TargetRequired,
+    ),
+    ReadRefusal,
+> {
+    // Component-wise, never str::strip_prefix (`/home/opx` is a string-prefix
+    // of `/home/op` and must NOT match).
+    let rel = match std::path::Path::new(path).strip_prefix(home) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => return Err(ReadRefusal::OutsideRoot),
+    };
+    Ok((
+        rel,
+        // THE alias-planting boundary (spec D5): owner + no group/other write
+        // on the home. A home any non-principal can write is refused outright.
+        maknae_io::AnchorRequired {
+            owner: Some(owner_uid),
+            mode_mask: Some(0o022),
+        },
+        maknae_io::TargetRequired {
+            // OS DAC at the target: the boundary requirement lives on the
+            // ANCHOR above; nlink/regular/max_bytes ARE named (std-fs
+            // allowlist carries the justified entry).
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: true,
+            regular_file: true,
+            max_bytes: Some(budget),
+        },
+    ))
+}
+
+/// The read PEP's error mapping (T1): io refusal → typed [`ReadRefusal`].
+pub fn map_read_error(e: maknae_io::IoError) -> ReadRefusal {
+    match e {
+        maknae_io::IoError::TargetTooLarge { .. } => ReadRefusal::TooLarge,
+        other => ReadRefusal::Refused(other.to_string()),
+    }
+}
+
 /// The audit/wire disposition of one refusal: (outcome.result,
 /// outcome.reason, outcome.posture, wire code, wire message). Reasons are
 /// audit-only; every wire message here is a fixed generic string.
@@ -555,5 +622,80 @@ mod tests {
             read_refusal_disposition(&ReadRefusal::Refused("x".into())).3,
             read_refusal_disposition(&ReadRefusal::Unavailable("y".into())).3
         );
+    }
+    // ---- read_plan / map_read_error / read_budget (T1: spec D5's decision
+    //      logic — the alias boundary, the named requirements, the bound) ----
+
+    #[test]
+    fn read_budget_subtracts_the_margin_and_saturates() {
+        assert_eq!(read_budget(65536), 65536 - 512);
+        assert_eq!(read_budget(512), 0);
+        assert_eq!(
+            read_budget(1),
+            0,
+            "degenerate config is fail-closed, not a bug"
+        );
+    }
+
+    #[test]
+    fn read_plan_names_the_boundary_and_target_requirements_exactly() {
+        let (rel, anchor_req, target_req) = read_plan(
+            std::path::Path::new("/home/op"),
+            501,
+            "/home/op/docs/notes.txt",
+            1000,
+        )
+        .expect("in-home path plans");
+        assert_eq!(rel, std::path::Path::new("docs/notes.txt"));
+        assert_eq!(
+            anchor_req.owner,
+            Some(501),
+            "anchor owner = the enrolled principal"
+        );
+        assert_eq!(
+            anchor_req.mode_mask,
+            Some(0o022),
+            "no group/other write on home"
+        );
+        assert!(target_req.nlink_exactly_one, "hardlink aliases refused");
+        assert!(target_req.regular_file, "no fifo/device");
+        assert_eq!(
+            target_req.max_bytes,
+            Some(1000),
+            "the budget is the named bound"
+        );
+        assert_eq!(target_req.owner, None);
+        assert_eq!(target_req.mode_mask, None);
+    }
+
+    #[test]
+    fn read_plan_refuses_outside_root_component_wise() {
+        // String-prefix must NOT match: /home/opx is not under /home/op.
+        assert_eq!(
+            read_plan(std::path::Path::new("/home/op"), 501, "/home/opx/f", 10),
+            Err(ReadRefusal::OutsideRoot)
+        );
+        assert_eq!(
+            read_plan(std::path::Path::new("/home/op"), 501, "/etc/hostname", 10),
+            Err(ReadRefusal::OutsideRoot)
+        );
+    }
+
+    #[test]
+    fn map_read_error_types_oversize_and_everything_else() {
+        let too_large = maknae_io::IoError::TargetTooLarge {
+            path: "/x".into(),
+            limit: 10,
+            actual: 20,
+        };
+        assert_eq!(map_read_error(too_large), ReadRefusal::TooLarge);
+        let other = maknae_io::IoError::MultiplyLinked {
+            path: "/x".into(),
+            nlink: 2,
+        };
+        match map_read_error(other) {
+            ReadRefusal::Refused(m) => assert!(m.contains("hard-linked"), "{m}"),
+            r => panic!("expected Refused, got {r:?}"),
+        }
     }
 }
