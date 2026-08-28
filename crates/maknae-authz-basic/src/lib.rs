@@ -4,9 +4,10 @@
 //! key), per request, deny-by-default, fail-closed. Spec:
 //! `~/claude-memory/maknae/specs/2026-08-26-maknae-authz-basic-design.md`.
 //!
-//! Composition: `maknaed` constructs [`BasicAuthorizer`] and hands it to the
-//! seam (#77 wires the boot gate and the per-request call site; bindings are
-//! inert until then). The seam stays policy-agnostic (ADR-0004).
+//! Composition: `maknaed` constructs [`BasicAuthorizer`] at boot (#77,
+//! `maknae-kernel::boot_gate`) and decides every request through the seam —
+//! bindings are LIVE, re-read per request. The seam stays policy-agnostic
+//! (ADR-0004).
 #![forbid(unsafe_code)]
 
 mod binding;

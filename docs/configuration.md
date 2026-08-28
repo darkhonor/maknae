@@ -288,7 +288,7 @@ lands; until then, registering one and providing its content is not yet supporte
 
 | Section | Owner | Status |
 |---|---|---|
-| `authz` | authorization policy | Forthcoming |
+| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request as of #77 — see the runbook)* | Forthcoming |
 | `llm` | LLM-provider authentication | Forthcoming |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
 | `dcs` | optional DCS classification backend | Forthcoming |

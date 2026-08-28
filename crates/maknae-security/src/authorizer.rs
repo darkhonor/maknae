@@ -1,7 +1,9 @@
 //! The seam itself: the object-safe `Authorizer` trait (spec §13).
 //!
 //! Object-safe by construction (no generic methods, no `Self`-returning
-//! methods), so the kernel holds `Box<dyn Authorizer>` uniformly across builds.
+//! methods). The kernel today threads a concrete `Arc<P: Authorizer>` through
+//! its generic call path (#77); object safety keeps `Box<dyn Authorizer>`
+//! available for the composed multi-backend (DCS) build.
 
 use crate::request::Request;
 use crate::verdict::Verdict;

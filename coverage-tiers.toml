@@ -110,13 +110,13 @@ files = [
   "crates/maknae-config/src/transport.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
-  # enroll` writes into maknae.yaml). A later task's DAC authz policy resolves
+  # enroll` writes into maknae.yaml). The authorization policy resolves
   # `~` against this — a malformed section that silently collapsed to "absent"
   # would leave `~` unresolved instead of refused. Fail-closed decision logic,
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
-  # PR-J1 Task 6: the DAC authz policy schema v1 (spec §7) — the
+  # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read/Bash patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink
   # refusal + mode gate + root-ownership assertion, spec §4.6). A durable

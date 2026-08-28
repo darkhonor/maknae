@@ -60,7 +60,7 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     // minimal-config boot tests — and any pre-Jackrabbit deployment written before
     // `maknae enroll` started emitting a `principal` block — still load. The daemon's
     // actual dependence on a vault block fails closed later at `from_document`/`mint`
-    // (MissingKey); the DAC authz layer's dependence on a principal (`~` resolution,
+    // (MissingKey); the authorization layer's dependence on a principal (`~` resolution,
     // Task 6) fails closed there, not here.
     let specs = [
         SectionSpec {
@@ -209,7 +209,10 @@ mod tests {
 
     // A pre-Jackrabbit config WITHOUT a `principal` block still LOADS — the
     // optional-registration / upgrade property (spec §5.5), scoped to the loader.
-    // (The daemon still won't *start* without a principal once DAC authz uses `~`
+    // (Discharged 2026-08-28, #77: the boot gate now REQUIRES the principal —
+    // see boot_gate.rs. The loader half here legitimately still loads a
+    // principal-less document; the refusal is the kernel gate's, downstream.
+    // Historical note: the daemon wouldn't *start* without a principal once authz used `~`
     // — Task 6 covers that; this only pins that the loader doesn't reject it.)
     #[cfg(unix)]
     #[test]

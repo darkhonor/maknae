@@ -46,7 +46,7 @@ Maknae is a security-first, local AI-agent platform. This package installs the
 privileged trust-plane daemon (maknaed) and the non-privileged operator CLI
 (maknae), a hardened systemd unit with TPM2-sealed credential loading, an
 SELinux Type Enforcement policy, a fapolicyd trust fragment, and the shipped
-DAC authorization policy — for deployment on hardened RHEL/Rocky systems.
+RBAC authorization policy — for deployment on hardened RHEL/Rocky systems.
 
 A fresh install is not runnable until `sudo maknae enroll` provisions the
 daemon credential and the operator principal (the shipped authz.yaml fail-closes

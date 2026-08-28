@@ -77,3 +77,12 @@ This ADR covers audit **content, sinks, and compliance posture** for Stage 3a. I
 
 - NIST SP 800-53r5 (AU-2/AU-3/AU-3(1)/AU-8/AU-9/AU-10/AU-12) and SP 800-53B (HIGH baseline) — public. CNSSI 1253 (2022) and the Classified Information Overlay — public. **CNSSI No. 1015 — CUI, deliberately not ingested.**
 - ADR-0005 (negative-suite audit requirement); ADR-0007 (audit signing / hash-chain); ADR-0018 (the authorization decisions recorded).
+
+## Amendment (2026-08-28, #77 — the read verb, the object element, the disclosure invariant, the action vocabulary)
+
+Dated as-built amendment; one statement, four coupled deltas (rides the #77 PR):
+
+1. **The record gains an optional `object` element** (AU-3 "objects involved"): the canonical decided resource path for resource-bearing verbs (`acp.fs.read`); absent for resource-free verbs — additive for them. Without it, two denied paths under one deny pattern were indistinguishable in the trail.
+2. **The `action` field's value domain changes** (NOT additive): it now carries the PDP action-class name — `liveness.ping`, `admin.whoami`, `acp.fs.read` — instead of the bare verb (`ping`/`whoami`). Decision and record share one vocabulary; the AU-3(1) reason/action pairing follows it.
+3. **The ordering invariant generalizes: no DISCLOSURE without a durable record.** The verb enumeration above ("read-only (`whoami`/`ping`)") is superseded: `Read` joins Stage 3a's read-only set, and its dispatch (an anchored open + bounded read — an observable access) happens BEFORE the record, because the outcome (content/oversize/refusal) is only knowable after the open. The frame still gates on the durable append: content read into daemon memory whose record cannot append is dropped (zeroized) undisclosed. Internal access before the record is accepted; **audit-before-MUTATE (two-phase, write-ahead) remains #84's obligation exactly as stated above** — this amendment deliberately does not claim it.
+4. **Deny reasons are audit-only** (restating #85's spec §4.4 as record contract): the PDP's reason (including matched deny-pattern source text) appears in `outcome.reason` and never on the wire; the wire carries fixed generic strings.

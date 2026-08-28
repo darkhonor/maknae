@@ -1145,10 +1145,11 @@ where
 /// remain generically `Other`.
 #[derive(Debug)]
 enum RunError {
-    /// The boot-time DAC authz-config gate (spec §5.4) refused to start: the
-    /// `principal` section could not be resolved, or `authz.yaml` was
-    /// missing/malformed/insecure. An AU-3 refusal record has already been
-    /// emitted (peer-less mapping, spec §5.3) before this is constructed.
+    /// The boot-time authz gate (#77, boot_gate.rs) refused to start: the
+    /// `principal` section is absent or malformed, or the PDP refused
+    /// construction (hardened policy load / bindings semantics). An AU-3
+    /// refusal record has already been emitted (peer-less mapping) before
+    /// this is constructed.
     Authz(String),
     /// Any other startup failure.
     Other(String),
@@ -1164,13 +1165,13 @@ impl std::fmt::Display for RunError {
 
 /// The distinct process exit code for [`RunError::Authz`] (spec §5.4: "distinct
 /// non-zero exit"). Deliberately not [`ExitCode::FAILURE`] (1) — an operator or
-/// process-supervision script can tell "refused: unauthorized/unresolvable DAC
+/// process-supervision script can tell "refused: unauthorized/unresolvable authz
 /// policy" apart from every other startup failure without parsing stderr.
 const AUTHZ_REFUSAL_EXIT_CODE: u8 = 3;
 
 /// The `maknaed` entrypoint. Builds a Tokio runtime and drives the async orchestration;
 /// any boot/config/credential failure fails closed to a non-zero `ExitCode` (the daemon
-/// refuses to start rather than serve without audit, an authorized DAC policy, or a
+/// refuses to start rather than serve without audit, a constructed PDP, or a
 /// plane credential). `bins/maknaed` stays a plain `fn main` that returns this `ExitCode`.
 pub fn run(config_dir: &Path) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
