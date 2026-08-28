@@ -24,6 +24,7 @@ Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the li
 | Runtime-plane credentials (CLI SecretID + cert/key) | operator-uid; SecretID file `0o400`; CLI-generated key, memory-only cert; CLI's Vault policy signs **only** `plane/cli` ✓perms + per-plane policy-scope test (CLI SecretID cannot sign `plane/kernel`) | same ✓same | per-container identity ✓same | `deferred` |
 | Audit protection | kernel-owned `0700`; `chattr +a` **on the audit directory; the daemon appends to a single open fd it holds across the session** (rotation owed, ADR-0007) ✓`lsattr` assertion | `chflags sappnd` where securelevel permits ✓`ls -lO` | kernel-only volume ✓volume lint | `deferred` |
 | Config protection | kernel-owned `0600` (no append attr — upgrades edit) ✓perms check | same ✓same | kernel-only volume ✓lint | `deferred` |
+| Home read (#77 read path; READ-ONLY relaxation, spec D5a 2026-08-28) | `ProtectHome=read-only`; SELinux read-only `user_home_t`/`home_root_t` vectors (type-wide — recorded); AppArmor narrowed to the enrolled home via enroll-written local include; DAC via single non-recursive `u:_maknae:rx` home ACL; write forbidden at every layer ✓enforce-clean home-read/home-write-refused acceptance on the Linux hosts | `deferred (#76)` | `deferred` | `deferred` |
 | Tokki packaging (MAC/trust install lifecycle) | deb/rpm (checksummed; signing #96) install the hardened unit + MAC policy + shipped DAC default. **SELinux** enforce-clean PROVEN (Rocky 10) ✓`getenforce` + scoped denial-clean run + fapolicyd-clean run. **AppArmor** profiles load ✓`aa-status`; serve-time enforce-clean pending #94 | `deferred (#76)` | `deferred` | `deferred (#81)` |
 
 ## Crate × binary matrix
@@ -36,9 +37,10 @@ The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the 
 | maknae-kernel (priv) | linked | forbidden | — |
 | maknae-subject-ctx-mint (priv) | via kernel | forbidden | — |
 | maknae-audit-append (priv) | via kernel | forbidden | — |
-| maknae-io | — | — | — |
+| maknae-io | via kernel, maknae-config, maknae-vault | via maknae-config, maknae-vault | — |
 | maknae-spif-compile (priv) | — | forbidden | linked |
-| maknae-authz-basic (priv) | linked (#77) | forbidden | — |
+| maknae-authz-basic (priv) | via kernel | forbidden | — |
+| maknae-security | via kernel | — | — |
 | maknae-proto | via kernel | linked | — |
 | maknae-spif | via kernel | — | — |
 | maknae-subject-ctx | via kernel | — | — |

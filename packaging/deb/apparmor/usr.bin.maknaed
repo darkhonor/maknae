@@ -18,6 +18,19 @@ profile maknaed /usr/bin/maknaed {
   # Binary — map + read.
   /usr/bin/maknaed                       mr,
 
+  # #77 read path (spec D5a): /home itself for the anchor's parent-by-path
+  # traversal; the ENROLLED home's read rules are NARROWED BY PATH via the
+  # enroll-written local include below (AppArmor can scope by path where
+  # SELinux cannot) — no blanket @{HOME} grant here.
+  /home/                                 r,
+
+  # Enroll writes /etc/apparmor.d/local/usr.bin.maknaed with
+  #   <enrolled-home>/ r,
+  #   <enrolled-home>/** r,
+  # and runs apparmor_parser -r; absent the include, reads fail closed and
+  # ping/whoami are unaffected (spec D1).
+  include if exists <local/usr.bin.maknaed>
+
   # Configuration + private tree (posture marker, CA pins, approle-id, degraded
   # path) — READ ONLY. The daemon traverses /etc/maknae but never writes it
   # (Jackrabbit §4.6 makes it root-owned; a compromised daemon cannot widen its

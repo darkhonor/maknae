@@ -33,6 +33,8 @@ Requires:       systemd
 Requires:       tpm2-tss
 Requires:       policycoreutils-python-utils
 Requires:       selinux-policy-targeted
+# #77 read path: enroll sets the _maknae home ACL with setfacl (spec D5a).
+Requires:       acl
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted

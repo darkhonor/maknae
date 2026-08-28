@@ -68,6 +68,24 @@ allow maknaed_t maknae_etc_t:file { read open getattr };
 allow maknaed_t maknae_private_t:dir { open read search getattr };
 allow maknaed_t maknae_private_t:file { read open getattr };
 
+# #77 read path (spec D5a, 2026-08-28): READ-ONLY vectors over user homes so
+# the PEP's anchored read can open the enrolled home and traverse to targets.
+# ADR-0021 D3: the anchored reader opens directories O_RDONLY|O_DIRECTORY, so
+# dirs need read, not merely search; /home itself is home_root_t and the
+# anchor's parent is opened by path. HONESTY: these are TYPES, not per-user
+# labels — the MAC grant is host-wide over confined users' homes; the
+# per-user scoping layers are the enroll-set DAC ACL (enrolled home only) and
+# the PDP grammar. No write vector exists here at any scope.
+gen_require(`
+    type home_root_t;
+    type user_home_dir_t;
+    type user_home_t;
+')
+allow maknaed_t home_root_t:dir { open read getattr search };
+allow maknaed_t user_home_dir_t:dir { open read getattr search };
+allow maknaed_t user_home_t:dir { open read getattr search };
+allow maknaed_t user_home_t:file { read open getattr };
+
 # CRITICAL (maknae-specific; Microkosmos has no analog — it uses EnvironmentFile=):
 # LoadCredentialEncrypted= makes systemd DECRYPT the SecretID into a per-service
 # ramfs at $CREDENTIALS_DIRECTORY (/run/credentials/maknaed.service/). maknaed_t
