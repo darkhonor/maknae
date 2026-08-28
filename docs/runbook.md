@@ -373,8 +373,12 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
   decided by the PDP (`maknae-authz-basic` behind the `maknae-security` seam), policy
   re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`;
   `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
-  `not authorized`, the trail says which pattern and which object. Editing
-  `/etc/maknae/authz.yaml` bindings flips behavior on the NEXT request, no restart.
+  `not authorized`, the trail says which pattern and which object. Re-roling or
+  removing an identity ALREADY KNOWN at boot bites on the NEXT request, no
+  restart (containment). Introducing a brand-NEW username is restart-scoped by
+  design (#85 §3, zero per-request NSS): until the restart, a policy naming an
+  unresolvable identity makes every decision Indeterminate → deny — fail
+  closed, recover by restarting (or reverting the edit); #84's reload lifts this.
 - **AU-3 audit lines** — every connection and every request produces a durable,
   canonically-ordered JSONL record (§6 above) BEFORE the daemon released a response —
   the fail-closed audit-then-respond ordering is not just a code comment, it's
