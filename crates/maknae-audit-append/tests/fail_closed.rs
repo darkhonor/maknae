@@ -24,6 +24,7 @@ fn sample_record() -> AuditRecord {
             plane_uri_san: Some("urn:maknae:plane:cli".into()),
         },
         action: "connect".into(),
+        object: None,
         outcome: Outcome {
             result: "permit".into(),
             reason: "group membership: maknae-ops".into(),

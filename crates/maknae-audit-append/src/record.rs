@@ -66,6 +66,11 @@ pub struct AuditRecord {
     pub source: Source,
     pub subject: Subject,
     pub action: String,
+    /// AU-3 "objects involved" (#77 / ADR-0019 amendment): the canonical
+    /// decided resource path for resource-bearing verbs (`acp.fs.read`);
+    /// absent for resource-free verbs (Ping/Whoami) — additive for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -156,6 +161,7 @@ mod tests {
                 plane_uri_san: Some("urn:maknae:plane:cli".into()),
             },
             action: "connect".into(),
+            object: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -297,5 +303,39 @@ mod tests {
         cloned.event = "different".into();
         assert_eq!(rec.event, "connection.accept");
         assert_eq!(cloned.event, "different");
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+
+    fn rec(object: Option<String>) -> AuditRecord {
+        AuditRecord {
+            ts: "2026-08-28T00:00:00Z".into(),
+            event: "request".into(),
+            where_: Where { host: "h".into(), component: "maknaed".into(), socket: "/run/s".into() },
+            source: Source { uid: 0, gid: None, pid: None, plane_uri_san: None },
+            subject: Subject { user: None, plane_uri_san: None },
+            action: "acp.fs.read".into(),
+            object,
+            outcome: Outcome { result: "deny".into(), reason: "r".into(), posture: "unauthorized".into() },
+            session_id: 1,
+            seq: 2,
+            au3_1: serde_json::Value::Null,
+            integrity: Integrity { prev_hash: None, sig: None },
+        }
+    }
+
+    #[test]
+    fn object_present_serializes_the_key() {
+        let j = canonical_json(&rec(Some("/home/op/.ssh/id_rsa".into()))).unwrap();
+        assert!(j.contains("\"object\":\"/home/op/.ssh/id_rsa\""), "{j}");
+    }
+
+    #[test]
+    fn object_absent_omits_the_key_entirely() {
+        let j = canonical_json(&rec(None)).unwrap();
+        assert!(!j.contains("\"object\""), "resource-free verbs stay additive: {j}");
     }
 }
