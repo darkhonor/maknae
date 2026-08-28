@@ -82,6 +82,8 @@ jobs:
         run: ci/gates/std-fs-drift.sh .
       - name: Isolation-contract lint
         run: ci/gates/isolation-contract-lint.sh
+      - name: Gate — verb-vocabulary drift (#67)
+        run: ci/gates/verb-vocabulary-drift.sh
       - name: Coverage tooling (llvm-tools + cargo-llvm-cov pinned)
         run: |
           rustup component add llvm-tools

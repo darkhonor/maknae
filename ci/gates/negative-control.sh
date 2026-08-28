@@ -421,5 +421,60 @@ maknae-config = { path = "../../crates/maknae-config", features = ["hermetic-tes
 EOF_G
 expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-resolution-pin.sh" "$tmpG"
 
+
+# ---- verb-vocabulary-drift (#67): the action vocabulary vs its manifest ----
+# Durable fixtures, not a one-off manual proof: a gate is only trusted once it
+# has been OBSERVED failing, and that observation must be re-run on every PR.
+vocab_fixture() { # <manifest-body> — builds a minimal repo the gate can read
+  local fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-kernel/src" "$fixture/crates/maknae-config/src"
+  cp "$here/verb-vocabulary-drift.sh" "$fixture/ci/gates/"
+  cat > "$fixture/crates/maknae-kernel/src/handler.rs" <<'FIX'
+pub const KERNEL_ACTIONS: [&str; 1] = ["kernel.contain"];
+pub fn verb_to_action(verb: &Verb) -> &'static str {
+    match verb {
+        Verb::Ping => "liveness.ping",
+        Verb::AdminStatus => "admin.status",
+    }
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/authz.rs" <<'FIX'
+fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
+    match capability {
+        "Read" => Ok(Pattern::Read(g)),
+        _ => Err(bad()),
+    }
+}
+FIX
+  printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
+  echo "$fixture"
+}
+
+# REJECT: admin.status exists in the code but has no recorded disposition.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only capability
+')"
+expect_reject "verb-vocabulary-drift/term-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT: a stale manifest entry for a term the code no longer has.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+action	admin.status	not-granted	enumerated
+action	admin.retired	not-granted	STALE — no such term
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only capability
+')"
+expect_reject "verb-vocabulary-drift/stale-manifest-entry" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT: a grammar capability with no recorded disposition — R7 covers BOTH
+# closed vocabularies, so a capability added to the grammar must be inventoried.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+action	admin.status	not-granted	enumerated
+kernel-action	kernel.contain	not-granted	no Verb variant
+')"
+expect_reject "verb-vocabulary-drift/capability-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]

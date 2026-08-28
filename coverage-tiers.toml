@@ -117,7 +117,7 @@ files = [
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
   # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
-  # Claude-Code/Codex-style permission grammar (Read/Bash patterns) a future
+  # Claude-Code/Codex-style permission grammar (Read patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink
   # refusal + mode gate + root-ownership assertion, spec §4.6). A durable
   # contract: a mis-parsed glob/argv rule, a swapped deny/allow precedence, or

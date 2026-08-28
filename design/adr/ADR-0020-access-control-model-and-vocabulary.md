@@ -8,7 +8,7 @@
 
 ## Context
 
-Maknae's documentation and code have used the terms *DAC*, *MAC*, *RBAC*, *ABAC*, and *DCS* loosely and inconsistently. The cost has been real and recurring: the README described a "Data-Centric Security" design extension the code had already externalized; a refresh over-corrected to "a generic **DAC** access policy," conflating the code's operand name (`DAC`, the `Read`/`Bash` capability grammar in `maknae-config/authz.rs`) with traditional OS file-permission DAC; and reviewers repeatedly flagged apparent contradictions that were really vocabulary drift. A single authoritative vocabulary is needed before the docs harden around the wrong words.
+Maknae's documentation and code have used the terms *DAC*, *MAC*, *RBAC*, *ABAC*, and *DCS* loosely and inconsistently. The cost has been real and recurring: the README described a "Data-Centric Security" design extension the code had already externalized; a refresh over-corrected to "a generic **DAC** access policy," conflating the code's operand name (`DAC`, the `Read` capability grammar in `maknae-config/authz.rs`) with traditional OS file-permission DAC; and reviewers repeatedly flagged apparent contradictions that were really vocabulary drift. A single authoritative vocabulary is needed before the docs harden around the wrong words.
 
 Maknae targets **NSS Classified Information Overlay** accreditation (CNSSI 1253), so the authoritative glossary is **CNSSI 4009**. Per the registry's authority rule (ADR-0001; operator doctrine 2026-08-04), an external glossary is **provenance, not authority**: we cite CNSSI 4009 and NIST, and we **decide the model here**.
 
@@ -33,7 +33,7 @@ These axes are independent: a control can be role-based *and* discretionary, or 
 
    | Control | Axis | Locus | Code / ADR |
    |---|---|---|---|
-   | Capability policy (`Read`/`Bash` grants) | **DAC**, decided by **RBAC** default | trust plane (PDP) | `maknae-config/authz.rs` operand `DAC`; `maknae-authz-basic` |
+   | Capability policy (`Read` grants) | **DAC**, decided by **RBAC** default | trust plane (PDP) | `maknae-config/authz.rs` operand `DAC`; `maknae-authz-basic` |
    | Classification / clearance | **MAC**, decided by **ABAC** | trust plane (PDP), external engine | `DCS_MAC`; `maknae-authz-dcs` (external, ADR-0008/0017 relocated) |
    | SELinux type enforcement | **MAC** | OS | `OS_MAC` |
    | File permissions / ownership | **DAC** | OS | OS-enforced (not an `Authorizer` operand) |

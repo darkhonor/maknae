@@ -26,7 +26,7 @@ pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
 /// client-settable (spec §3b/§6).
 pub const SUBJECT_NAME_KEY: &str = decide::SUBJECT_NAME;
 /// Resource attribute key carrying the (already-resolved) filesystem path for
-/// `acp.fs.*` actions (spec §4.4).
+/// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
 
 /// Why [`BasicAuthorizer::new`] refused (all fail-closed; §3a). The daemon's
@@ -318,7 +318,7 @@ mod tests {
         });
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         let mut fs_req = liveness_req(None, Some(501));
-        fs_req.action = Action("acp.fs.read".into());
+        fs_req.action = Action("fs.read".into());
         fs_req.resource.0.insert(
             RESOURCE_PATH_KEY,
             AttrValue::Str("/home/operator/.ssh/id_rsa".into()),
