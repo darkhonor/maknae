@@ -51,8 +51,17 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{authorize_connection, ConnDecision};
+use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
-use crate::handler::{build_whoami, dispatch_verb, may_respond, Dispatch, ServeOutcome};
+use crate::handler::{
+    build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate,
+    may_respond, read_refusal_disposition, verb_to_action, Dispatch, ReadRefusal, ServeOutcome,
+    AUTHZ_DECIDE_TIMEOUT,
+};
+use maknae_config::Principal;
+use maknae_io::{open_anchor_resolved, AnchorRequired, IoError, StrategyPref, TargetRequired, Zeroizing};
+use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
+use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
 
 // ---------------------------------------------------------------------------
 // Audit-record construction (AU-3, ADR-0019). These stamp the run-loop's own
@@ -194,6 +203,7 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn make_record(
     event: &str,
     host: &str,
@@ -205,6 +215,7 @@ fn make_record(
     session_id: u64,
     seq: u64,
     action: &str,
+    object: Option<&str>,
     result: &str,
     reason: &str,
     posture: &str,
@@ -229,6 +240,7 @@ fn make_record(
             plane_uri_san: peer_uri.map(str::to_string),
         },
         action: action.to_string(),
+        object: object.map(str::to_string),
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -258,13 +270,6 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
     }
 }
 
-fn verb_action(verb: &Verb) -> &'static str {
-    match verb {
-        Verb::Ping => "ping",
-        Verb::Whoami => "whoami",
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Layer 1: serve one connection.
 // ---------------------------------------------------------------------------
@@ -290,7 +295,7 @@ fn verb_action(verb: &Verb) -> &'static str {
 ///    admission record (step 2) and the request record (step 4) must be durably
 ///    appended before any response frame is written.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle<S, E>(
+pub async fn handle<S, E, P>(
     mut stream: S,
     peer_uri: String,
     peer_uid: u32,
@@ -299,9 +304,13 @@ pub async fn handle<S, E>(
     session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
+    authorizer: Arc<P>,
+    principal: Arc<Principal>,
+    authz_decide_timeout: Duration,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
 {
     let seq = Seq::new();
     let host = hostname();
@@ -326,6 +335,7 @@ pub async fn handle<S, E>(
                 session_id,
                 seq.next(),
                 "connect",
+                None,
                 "deny",
                 &reason,
                 "unauthorized",
@@ -359,6 +369,7 @@ pub async fn handle<S, E>(
                 session_id,
                 seq.next(),
                 "connect",
+                None,
                 "permit",
                 "admitted",
                 "authorized",
@@ -442,57 +453,313 @@ pub async fn handle<S, E>(
         }
     };
 
-    // 3. Audit-then-respond: append the request record, then gate the response on it.
-    let rec = make_record(
-        "request",
-        &host,
-        &socket,
-        peer_uid,
-        None,
-        None,
-        Some(&peer_uri),
-        session_id,
-        seq.next(),
-        verb_action(&request.verb),
-        "permit",
-        // "authorized", NOT "served": this record is appended BEFORE the response write
-        // (audit-then-respond), so it must claim only the authorization + audit-gate
-        // facts that are true at append time — a later response-write failure (peer
-        // vanished mid-reply) must not leave a durable record over-claiming delivery
-        // (codex round-11 P2). Delivery success is observable to the CLIENT, not the trail.
-        "authorized",
-        "authorized",
-        &au3_1,
-    );
-    let audit_ok = emit.emit(&rec).await.is_ok();
-    if !may_respond(audit_ok) {
-        // The audit trail does not durably contain this request — withhold the response.
+    // 2½. THE PDP (spec D2, #77): every request is decided through the seam
+    // before the audit-then-respond step. For a Read, the lexical pre-gate
+    // runs FIRST — a malformed path is the BadRequest class (like a decode
+    // failure), and the PDP is never consulted for it.
+    if let Verb::Read { path } = &request.verb {
+        if let Err(why) = lexical_pregate(path) {
+            let appended = emit_request_outcome(
+                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+                verb_to_action(&request.verb), Some(path),
+                "deny", &format!("path fails canonical pre-gate: {why}"), "unauthorized",
+                &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(&mut stream, &cfg, ProtoErrCode::BadRequest, "malformed path")
+                    .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
+    }
+
+    // Decide on the BLOCKING pool (the per-request policy re-read is sync file
+    // I/O; a stalled /etc/maknae must not pin async workers — the same offload
+    // discipline as accept_loop's group lookup), bounded, composed per the
+    // parent contract: combine([guarded_decide]) + finalize. Timeout or join
+    // failure converts AT THE CALL SITE to a Deny with its own reason
+    // (finalize(Indeterminate) would hardcode a different string).
+    let sec_req = build_authz_request(&request.verb, peer_uid);
+    let decided = {
+        let a = Arc::clone(&authorizer);
+        tokio::time::timeout(
+            authz_decide_timeout,
+            tokio::task::spawn_blocking(move || combine(vec![guarded_decide(&*a, &sec_req)])),
+        )
+        .await
+    };
+    let verdict = match decided {
+        Ok(Ok(v)) => v,
+        Ok(Err(_join)) => maknae_security::Verdict::Deny {
+            reason: "authorization decision failed (join)".into(),
+        },
+        Err(_elapsed) => maknae_security::Verdict::Deny {
+            reason: "authorization decision timed out".into(),
+        },
+    };
+    let object_path = match &request.verb {
+        Verb::Read { path } => Some(path.clone()),
+        _ => None,
+    };
+    let obligations = match finalize(verdict) {
+        Decision::Deny { reason } => {
+            // Deny: the reason goes to the TRAIL, never the wire (spec D3);
+            // the generic Unauthorized frame is released only after the deny
+            // record is durably appended — no frame without a record of the
+            // decision that produced it.
+            let appended = emit_request_outcome(
+                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+                verb_to_action(&request.verb), object_path.as_deref(),
+                "deny", &reason, "unauthorized", &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(&mut stream, &cfg, ProtoErrCode::Unauthorized, "not authorized")
+                    .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
+        Decision::Permit { obligations } => obligations,
+    };
+
+    // Obligation discharge (spec D3): the registered handler set is exactly
+    // {"audit"} — honored by the audit-then-respond gate below. Anything else
+    // fails closed to the same deny path.
+    if let Err(unhonorable) = discharge_plan(&obligations) {
+        let appended = emit_request_outcome(
+            &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+            verb_to_action(&request.verb), object_path.as_deref(),
+            "deny", &format!("unhonorable obligation: {}", unhonorable.0), "unauthorized",
+            &au3_1,
+        )
+        .await;
+        if may_respond(appended) {
+            write_error_bounded(&mut stream, &cfg, ProtoErrCode::Unauthorized, "not authorized")
+                .await;
+        }
         close_bounded(&mut stream).await;
         return;
     }
 
-    let payload = match dispatch_verb(&request.verb) {
-        Dispatch::Pong => Payload::Pong,
-        Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
+    // 3. Dispatch + audit-then-respond. The request record is appended BEFORE
+    // the response write and claims only authorization facts true at append
+    // time; for reads the record additionally carries the outcome the PEP
+    // actually produced (the invariant gates DISCLOSURE — content read into
+    // daemon memory whose record cannot append is dropped undisclosed).
+    match dispatch_verb(&request.verb) {
+        Dispatch::Pong | Dispatch::WhoamiRequested => {
+            let appended = emit_request_outcome(
+                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+                verb_to_action(&request.verb), None,
+                "permit", "authorized", "authorized", &au3_1,
+            )
+            .await;
+            if !may_respond(appended) {
+                close_bounded(&mut stream).await;
+                return;
+            }
+            let payload = match dispatch_verb(&request.verb) {
+                Dispatch::Pong => Payload::Pong,
+                Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
+                Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
+            };
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(payload),
+            };
+            // Bound the response write by read_timeout_ms (it doubles as the
+            // write bound — both cap how long one peer may hold this permit).
+            if let Ok(bytes) = encode_response(&response) {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(cfg.read_timeout_ms),
+                    write_frame(&mut stream, &bytes),
+                )
+                .await;
+            }
+        }
+        Dispatch::ReadRequested(path) => {
+            // The read PEP (spec D5): per-request anchor at the enrolled home,
+            // named requirements, bounded on the blocking pool like the decide.
+            let budget = (cfg.frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN);
+            let outcome = {
+                let home = principal.home.clone();
+                let owner = principal.uid;
+                let p = path.clone();
+                tokio::time::timeout(
+                    authz_decide_timeout,
+                    tokio::task::spawn_blocking(move || read_pep(&home, owner, &p, budget)),
+                )
+                .await
+            };
+            let read_result = match outcome {
+                Ok(Ok(r)) => r,
+                Ok(Err(_join)) => Err(ReadRefusal::JoinFailed),
+                Err(_elapsed) => Err(ReadRefusal::TimedOut),
+            };
+            match read_result {
+                Ok(content) => {
+                    let appended = emit_request_outcome(
+                        &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+                        verb_to_action(&request.verb), Some(&path),
+                        "permit", "authorized", "authorized", &au3_1,
+                    )
+                    .await;
+                    if !may_respond(appended) {
+                        // Content stays in daemon memory and is dropped
+                        // (zeroized) undisclosed — the invariant holds.
+                        close_bounded(&mut stream).await;
+                        return;
+                    }
+                    let response = Response {
+                        protocol_version: PROTOCOL_VERSION,
+                        result: RespResult::Ok(Payload::ReadContent(Bytes::new(content))),
+                    };
+                    // Zeroizing, pre-sized encode (spec D5): no realloc, no
+                    // un-zeroized partial copies; buffer zeroizes after write.
+                    if let Ok(bytes) =
+                        encode_response_zeroizing(&response, budget as usize + 1024)
+                    {
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(cfg.read_timeout_ms),
+                            write_frame(&mut stream, &bytes),
+                        )
+                        .await;
+                    }
+                }
+                Err(refusal) => {
+                    let (result, reason, posture, code, msg) =
+                        read_refusal_disposition(&refusal);
+                    let appended = emit_request_outcome(
+                        &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
+                        verb_to_action(&request.verb), Some(&path),
+                        result, &reason, posture, &au3_1,
+                    )
+                    .await;
+                    if may_respond(appended) {
+                        write_error_bounded(&mut stream, &cfg, code, msg).await;
+                    }
+                }
+            }
+        }
+    }
+    close_bounded(&mut stream).await;
+}
+
+/// CBOR + response-envelope headroom subtracted from the daemon's own frame
+/// budget before a read is sized (spec D5). Degenerate-but-legal configs
+/// (frame_max_bytes as low as 1) make the budget 0 and every non-empty read
+/// refuses TooLarge — fail-closed by design, not a bug.
+const FRAME_ENVELOPE_MARGIN: u64 = 512;
+
+/// The blocking half of the read PEP: open the home anchor (per request — the
+/// same Zero-Trust cadence as the policy re-read; also shrinks the
+/// stale-inode window), strip the home prefix COMPONENT-WISE, and read under
+/// the named requirements. Pure-ish (all outcomes typed); no audit here —
+/// the caller owns record + wire.
+fn read_pep(
+    home: &std::path::Path,
+    owner_uid: u32,
+    path: &str,
+    budget: u64,
+) -> Result<Zeroizing<Vec<u8>>, ReadRefusal> {
+    // THE alias-planting boundary (spec D5): owner + no group/other write on
+    // the home. A home any non-principal can write is refused outright.
+    let anchor = open_anchor_resolved(
+        home,
+        AnchorRequired {
+            owner: Some(owner_uid),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
+    )
+    .map_err(|e| ReadRefusal::Unavailable(e.to_string()))?;
+    // Component-wise, never str::strip_prefix (`/home/opx` is a string-prefix
+    // of `/home/op` and must NOT match).
+    let rel = match std::path::Path::new(path).strip_prefix(home) {
+        Ok(rel) => rel,
+        Err(_) => return Err(ReadRefusal::OutsideRoot),
     };
+    match anchor.read(
+        rel,
+        None,
+        TargetRequired {
+            // OS DAC at the target: the boundary requirement lives on the
+            // ANCHOR (owner+0o022 above); nlink/regular/max_bytes ARE named.
+            owner: None,
+            mode_mask: None,
+            nlink_exactly_one: true,
+            regular_file: true,
+            max_bytes: Some(budget),
+        },
+    ) {
+        Ok(outcome) => Ok(outcome.value),
+        Err(IoError::TargetTooLarge { .. }) => Err(ReadRefusal::TooLarge),
+        Err(e) => Err(ReadRefusal::Refused(e.to_string())),
+    }
+}
+
+/// Write one generic error frame, bounded like every response write. The
+/// message is ALWAYS a fixed generic string — reasons live in the trail.
+async fn write_error_bounded<S>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    code: ProtoErrCode,
+    msg: &str,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let response = Response {
         protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Ok(payload),
+        result: RespResult::Err(ProtoError {
+            code,
+            message: msg.to_string(),
+        }),
     };
-    // Bound the response write by read_timeout_ms (it doubles as the write bound —
-    // both cap "how long one peer may hold this connection's permit"): a peer that
-    // sends a request and then never reads would otherwise block this write on a full
-    // socket buffer forever — a slow-drip permit exhaustion (same DoS class as the
-    // inline-handshake and inline-fsync findings). On elapse the connection is simply
-    // closed; the request record above already (accurately) says "authorized".
     if let Ok(bytes) = encode_response(&response) {
         let _ = tokio::time::timeout(
             Duration::from_millis(cfg.read_timeout_ms),
-            write_frame(&mut stream, &bytes),
+            write_frame(stream, &bytes),
         )
         .await;
     }
-    close_bounded(&mut stream).await;
+}
+
+/// The RESULT-RETURNING request-record emitter the decision paths gate on
+/// (spec D3): unlike `emit_request_deny` (deliberately fire-and-forget for
+/// the pre-decision paths, where nothing is served), every caller here has a
+/// frame to release and must know the append landed. Returns append success.
+#[allow(clippy::too_many_arguments)]
+async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
+    emit: &Arc<E>,
+    host: &str,
+    socket: &str,
+    uid: u32,
+    peer_uri: &str,
+    session_id: u64,
+    seq: u64,
+    action: &str,
+    object: Option<&str>,
+    result: &str,
+    reason: &str,
+    posture: &str,
+    au3_1: &serde_json::Value,
+) -> bool {
+    let rec = make_record(
+        "request", host, socket, uid, None, None, Some(peer_uri), session_id, seq,
+        action, object, result, reason, posture, au3_1,
+    );
+    match emit.emit(&rec).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "maknaed: AUDIT WRITE FAILED on request outcome ({action}/{result}) for peer_uid={uid} peer_uri={peer_uri} session_id={session_id} — withholding the frame: {e}"
+            );
+            false
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -519,6 +786,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
         session_id,
         seq,
         action,
+        None,
         "deny",
         reason,
         "unauthorized",
@@ -627,7 +895,8 @@ fn supervisor_exit_reason(
 /// — `GracefulShutdown` when `shutdown` resolved first, `SupervisorExited` when the
 /// supervisor resolved first — AFTER EITHER WAY draining in-flight handlers (this is
 /// itself the graceful-shutdown drain; the caller does not additionally distinguish).
-pub async fn accept_loop<A, E>(
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_loop<A, E, P>(
     acceptor: A,
     emit: Arc<E>,
     session_ids: Arc<SessionIds>,
@@ -635,10 +904,13 @@ pub async fn accept_loop<A, E>(
     wctx: WhereCtx,
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+    authorizer: Arc<P>,
+    principal: Arc<Principal>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
     E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
 {
     let sem = Arc::new(Semaphore::new(cfg.max_connections as usize));
     let handshake_timeout = Duration::from_millis(cfg.handshake_timeout_ms);
@@ -714,7 +986,7 @@ where
                                 let rec = make_record(
                                     "connection", &wctx.host, &wctx.socket, peer_creds.uid,
                                     peer_creds.gid, peer_creds.pid, None, session_id, 1,
-                                    "connect", "deny", "at capacity", "unauthorized", &wctx.au3_1,
+                                    "connect", None, "deny", "at capacity", "unauthorized", &wctx.au3_1,
                                 );
                                 if let Err(err) = atcap_audit_tx.try_send(rec) {
                                     atcap_audit_dropped = atcap_audit_dropped.saturating_add(1);
@@ -730,6 +1002,8 @@ where
                                 let emit = Arc::clone(&emit);
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
+                                let authorizer = Arc::clone(&authorizer);
+                                let principal = Arc::clone(&principal);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -775,9 +1049,15 @@ where
                                                     false
                                                 }
                                             };
+                                            // The one production binding of the
+                                            // T1-pinned decide-timeout const —
+                                            // accepted-documented as ungated T3
+                                            // (value pinned in handler.rs, behavior
+                                            // proven in the handle() suite).
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
+                                                authorizer, principal, AUTHZ_DECIDE_TIMEOUT,
                                             )
                                             .await;
                                         }
@@ -789,7 +1069,7 @@ where
                                             let pid = rej.peer_creds.and_then(|c| c.pid);
                                             let rec = make_record(
                                                 "connection", &wctx.host, &wctx.socket, uid, gid,
-                                                pid, None, session_id, 1, "connect", "deny",
+                                                pid, None, session_id, 1, "connect", None, "deny",
                                                 reject_reason_str(&rej.reason), "unauthorized",
                                                 &wctx.au3_1,
                                             );
@@ -960,6 +1240,7 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
         session_id,
         seq,
         "authz",
+        None,
         "deny",
         &reason,
         "unauthorized",
@@ -1107,13 +1388,14 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let socket = transport.socket_path.display().to_string();
     let euid = nix::unistd::geteuid().as_raw();
 
-    // --- AUTHZ GATE (spec §5.4): fail-closed boot gate over authz.yaml. Ordering:
-    // audit sink first (above), so the refusal below is itself auditable. ANY
-    // failure here — a malformed `principal` section (needed to resolve `~`) or a
-    // rejected/missing/insecure authz.yaml — refuses to start: emit a peer-less AU-3
-    // boot-refusal record, then return `RunError::Authz` so `run()` maps it to its
-    // own distinct non-zero exit code.
-    let principal = match maknae_config::principal_from_section(boot.section("principal")) {
+    // --- AUTHZ GATE (#77, spec D1): the daemon constructs its PDP at boot or
+    // refuses to start. Ordering: audit sink first (above), so the refusal is
+    // itself auditable. Refusal triggers (exactly two — boot_gate.rs is the
+    // T1 authority): a malformed OR ABSENT `principal` section (a daemon with
+    // no principal can authorize no one — operator ruling 2026-08-28), or any
+    // PDP construction refusal (hardened policy load, bindings semantics).
+    // Each → peer-less AU-3 refusal record → RunError::Authz → exit code 3.
+    let principal_opt = match maknae_config::principal_from_section(boot.section("principal")) {
         Ok(p) => p,
         Err(e) => {
             return Err(refuse_authz_boot(
@@ -1129,21 +1411,41 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             .await);
         }
     };
-    if let Err(e) = maknae_config::load_authz(
-        &config_dir.join("authz.yaml"),
-        principal.as_ref().map(|p| p.home.as_path()),
+    let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Err(refuse_authz_boot(
+                sink.as_ref(),
+                &host,
+                &socket,
+                euid,
+                boot_session_id(&session_ids),
+                Seq::new().next(),
+                &audit_cfg.au3_1,
+                e.to_string(),
+            )
+            .await);
+        }
+    };
+    let authorizer = Arc::new(authorizer);
+    let principal = Arc::new(principal);
+
+    // Read-path anchor PROBE (spec D1/D5a): warn-only — an unreachable home
+    // (missing ACL, unmounted) degrades the READ VERB, it must never
+    // crash-loop the trust plane; ping/whoami keep serving and the anchor is
+    // re-opened per request anyway (reads deny until the condition clears).
+    if let Err(e) = open_anchor_resolved(
+        &principal.home,
+        AnchorRequired {
+            owner: Some(principal.uid),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
     ) {
-        return Err(refuse_authz_boot(
-            sink.as_ref(),
-            &host,
-            &socket,
-            euid,
-            boot_session_id(&session_ids),
-            Seq::new().next(),
-            &audit_cfg.au3_1,
-            e.to_string(),
-        )
-        .await);
+        eprintln!(
+            "maknaed: read verb unavailable — home anchor probe failed for {}: {e} (ping/whoami unaffected; fix the home ACL/mode and reads recover without restart)",
+            principal.home.display()
+        );
     }
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -1200,6 +1502,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         boot_session_id(&session_ids),
         Seq::new().next(),
         "posture",
+        None,
         "permit",
         "boot credential posture recorded",
         posture.as_str(),
@@ -1244,6 +1547,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         &audit_cfg,
         Arc::clone(&session_ids),
         supervisor,
+        Arc::clone(&authorizer),
+        Arc::clone(&principal),
     )
     .await;
 
@@ -1260,6 +1565,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
 /// propagating — a `?` return from this function still runs the caller's
 /// unconditional `client.shutdown().await`. Returns the [`ServeOutcome`] the accept
 /// loop stopped on so [`run`] can map it to the process `ExitCode`.
+#[allow(clippy::too_many_arguments)]
 async fn serve_after_mint(
     client: &maknae_vault::PlaneClient,
     ca: &maknae_vault::CaBundle,
@@ -1268,6 +1574,8 @@ async fn serve_after_mint(
     audit_cfg: &maknae_config::AuditConfig,
     session_ids: Arc<SessionIds>,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
+    authorizer: Arc<maknae_authz_basic::BasicAuthorizer>,
+    principal: Arc<Principal>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -1301,6 +1609,8 @@ async fn serve_after_mint(
         wctx,
         shutdown,
         supervisor,
+        authorizer,
+        principal,
     )
     .await;
     Ok(outcome)
@@ -1403,12 +1713,6 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), labels.len(), "reject labels must be distinct");
-    }
-
-    #[test]
-    fn verb_action_labels() {
-        assert_eq!(verb_action(&Verb::Ping), "ping");
-        assert_eq!(verb_action(&Verb::Whoami), "whoami");
     }
 
     // codex round-10 P1: `await_drain_with_timeout` must bound the wait on a stalled

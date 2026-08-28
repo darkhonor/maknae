@@ -4,12 +4,14 @@
 //! ADR-0005/0007/0008; [`boot`] (config boot) is the first landed piece.
 mod authz;
 mod boot;
+mod boot_gate;
 mod groupres;
 mod handler;
 mod posture;
 mod run;
 pub use authz::*;
 pub use boot::{boot, BootConfig};
+pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
 pub use groupres::*;
 pub use handler::{
     build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
