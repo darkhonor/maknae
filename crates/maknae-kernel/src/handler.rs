@@ -137,6 +137,13 @@ use std::time::Duration;
 /// Verb → PDP action-class name (#85 spec §5; the audit record's `action`
 /// field carries the same vocabulary — decision and record share one).
 /// `Whoami → admin.whoami` is the ruled deliberate narrowing.
+/// The actions the KERNEL initiates on its own behalf, which have no client
+/// request and therefore no `Verb` variant (#67 D2). They are still PDP-decided
+/// and audited, so they need action strings — and the drift gate needs a source
+/// to diff the manifest against, or two of the vocabulary's 59 terms would carry
+/// no recorded disposition (spec R7).
+pub const KERNEL_ACTIONS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
+
 pub fn verb_to_action(verb: &Verb) -> &'static str {
     match verb {
         Verb::Ping => "liveness.ping",
@@ -874,6 +881,25 @@ mod tests {
             Verb::McpPromptGet,
             Verb::McpSamplingCreate,
         ]
+    }
+
+    /// The kernel actions have no `Verb` variant (#67 D2) but are still
+    /// PDP-decided, so they must resolve to the `kernel` class like any other
+    /// term — and must never collide with a client-reachable action string.
+    #[test]
+    fn kernel_actions_resolve_to_the_kernel_class_and_collide_with_nothing() {
+        let client: Vec<&str> = all_verbs().iter().map(verb_to_action).collect();
+        for a in KERNEL_ACTIONS {
+            assert_eq!(
+                a.split('.').next(),
+                Some("kernel"),
+                "{a} must be a kernel action"
+            );
+            assert!(
+                !client.contains(&a),
+                "{a} collides with a client-reachable term"
+            );
+        }
     }
 
     /// #67 D4: the vocabulary is the size the spec says.

@@ -84,5 +84,5 @@ crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
 # regular_file + max_bytes. A target owner/mode requirement would refuse
 # legitimately-shared home files the operator's own modes expose; the PDP is
 # the authorization control (spec D5).
-crates/maknae-kernel/src/handler.rs:356|owner: None,
-crates/maknae-kernel/src/handler.rs:357|mode_mask: None,
+crates/maknae-kernel/src/handler.rs:363|owner: None,
+crates/maknae-kernel/src/handler.rs:364|mode_mask: None,
