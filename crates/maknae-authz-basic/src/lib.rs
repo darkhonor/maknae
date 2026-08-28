@@ -214,14 +214,30 @@ impl HermeticAuthorizer {
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
     ) -> Result<Self, AuthzBasicError> {
-        let policy = maknae_config::load_authz_with_requirement(
-            &policy_path,
-            req.clone(),
-            Some(&principal.home),
-        )
-        .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let inner = BasicAuthorizer::finish_new(policy_path, principal, policy)?;
+        let inner = BasicAuthorizer::new_hermetic(policy_path, principal, req.clone())?;
         Ok(Self { inner, req })
+    }
+}
+
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+impl BasicAuthorizer {
+    /// The construction half of the hermetic door: a REAL `BasicAuthorizer`
+    /// (production `finish_new` sequence) whose load requirement is the
+    /// caller's — so consumers whose success paths are unconstructible
+    /// off-root (the kernel boot gate) can exercise them with nothing
+    /// stubbed. Feature-gated; the feature-resolution-pin gate keeps it out
+    /// of production resolution. NOTE: the instance's own trait `decide()`
+    /// still uses the PRODUCTION loader (root-owned door) — only
+    /// [`HermeticAuthorizer`] parameterizes decide-time.
+    pub fn new_hermetic(
+        policy_path: PathBuf,
+        principal: maknae_config::Principal,
+        req: maknae_config::TargetRequired,
+    ) -> Result<Self, AuthzBasicError> {
+        let policy =
+            maknae_config::load_authz_with_requirement(&policy_path, req, Some(&principal.home))
+                .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        BasicAuthorizer::finish_new(policy_path, principal, policy)
     }
 }
 
@@ -533,137 +549,136 @@ mod tests {
             );
         }
     }
-}
+    /// In-crate killers for the feature-gated wrapper (`cargo mutants -p` runs
+    /// only in-package tests, so these — not the kernel e2e — are what kill the
+    /// wrapper's mutants when the mutation lane enables the feature).
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    mod hermetic {
+        use super::super::*;
+        use maknae_security::{
+            Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
+        };
+        use std::os::unix::fs::PermissionsExt;
 
-/// In-crate killers for the feature-gated wrapper (`cargo mutants -p` runs
-/// only in-package tests, so these — not the kernel e2e — are what kill the
-/// wrapper's mutants when the mutation lane enables the feature).
-#[cfg(all(test, unix, feature = "hermetic-test-seam"))]
-mod hermetic_tests {
-    use super::*;
-    use maknae_security::{
-        Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
-    };
-    use std::os::unix::fs::PermissionsExt;
-
-    fn fixture_req() -> maknae_config::TargetRequired {
-        maknae_config::TargetRequired {
-            owner: None,
-            mode_mask: Some(0o022),
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: None,
-        }
-    }
-
-    fn principal() -> maknae_config::Principal {
-        maknae_config::Principal {
-            name: "operator".into(),
-            uid: 501,
-            home: "/home/operator".into(),
-        }
-    }
-
-    fn write_policy(p: &std::path::Path, bindings_role: &str) {
-        std::fs::write(
-            p,
-            format!(
-                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o640)).unwrap();
-    }
-
-    fn whoami_req(uid: i64) -> maknae_security::Request {
-        let mut s = Attributes::new();
-        s.insert("uid", AttrValue::Int(uid));
-        maknae_security::Request {
-            subject: Subject(s),
-            resource: Resource(Attributes::new()),
-            action: Action("admin.whoami".into()),
-            context: Context(Attributes::new()),
-        }
-    }
-
-    fn fixture_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mab_herm_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        d
-    }
-
-    /// Constructor refuses an unresolvable binding, naming the identity —
-    /// proving `new` really runs the eager `finish_new` validation.
-    #[test]
-    fn constructor_refuses_unresolvable_binding() {
-        let d = fixture_dir("bindfail");
-        let p = d.join("authz.yaml");
-        std::fs::write(
-            &p,
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let got = HermeticAuthorizer::new(p, principal(), fixture_req());
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(
-            matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
-            "{got:?}"
-        );
-    }
-
-    /// Trait-path permit → containment flip: the wrapper's `decide` rides the
-    /// real per-request re-read (the Zero Trust property) end to end.
-    #[test]
-    fn trait_path_permits_then_flips_to_deny_on_file_edit() {
-        let d = fixture_dir("flip");
-        let p = d.join("authz.yaml");
-        write_policy(&p, "admin");
-        let auth = HermeticAuthorizer::new(p.clone(), principal(), fixture_req()).unwrap();
-        let before = auth.decide(&whoami_req(0));
-        assert!(matches!(before, Verdict::Permit { .. }), "{before:?}");
-
-        write_policy(&p, "adversary");
-        let after = auth.decide(&whoami_req(0));
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(
-            matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
-            "{after:?}"
-        );
-    }
-
-    /// Every Permit through the wrapper carries exactly the audit obligation —
-    /// the PEP-side discharge contract depends on it.
-    #[test]
-    fn wrapper_permit_carries_exactly_audit_obligation() {
-        let d = fixture_dir("oblig");
-        let p = d.join("authz.yaml");
-        write_policy(&p, "admin");
-        let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
-        let v = auth.decide(&whoami_req(0));
-        let _ = std::fs::remove_dir_all(&d);
-        match v {
-            Verdict::Permit { obligations } => {
-                assert_eq!(obligations.len(), 1);
-                assert_eq!(obligations[0].id, "audit");
-                assert!(obligations[0].params.is_empty());
+        fn fixture_req() -> maknae_config::TargetRequired {
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
             }
-            other => panic!("expected Permit, got {other:?}"),
         }
-    }
 
-    /// The wrapper honors ITS requirement: a fixture violating the declared
-    /// mode requirement is refused at construction (the checks are real).
-    #[test]
-    fn constructor_honors_the_declared_requirement() {
-        let d = fixture_dir("mode");
-        let p = d.join("authz.yaml");
-        write_policy(&p, "admin");
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let got = HermeticAuthorizer::new(p, principal(), fixture_req());
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(matches!(got, Err(AuthzBasicError::Load(_))), "{got:?}");
+        fn principal() -> maknae_config::Principal {
+            maknae_config::Principal {
+                name: "operator".into(),
+                uid: 501,
+                home: "/home/operator".into(),
+            }
+        }
+
+        fn write_policy(p: &std::path::Path, bindings_role: &str) {
+            std::fs::write(
+                p,
+                format!(
+                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        fn whoami_req(uid: i64) -> maknae_security::Request {
+            let mut s = Attributes::new();
+            s.insert("uid", AttrValue::Int(uid));
+            maknae_security::Request {
+                subject: Subject(s),
+                resource: Resource(Attributes::new()),
+                action: Action("admin.whoami".into()),
+                context: Context(Attributes::new()),
+            }
+        }
+
+        fn fixture_dir(tag: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("mab_herm_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+            d
+        }
+
+        /// Constructor refuses an unresolvable binding, naming the identity —
+        /// proving `new` really runs the eager `finish_new` validation.
+        #[test]
+        fn constructor_refuses_unresolvable_binding() {
+            let d = fixture_dir("bindfail");
+            let p = d.join("authz.yaml");
+            std::fs::write(
+                &p,
+                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+            let got = HermeticAuthorizer::new(p, principal(), fixture_req());
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(
+                matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
+                "{got:?}"
+            );
+        }
+
+        /// Trait-path permit → containment flip: the wrapper's `decide` rides the
+        /// real per-request re-read (the Zero Trust property) end to end.
+        #[test]
+        fn trait_path_permits_then_flips_to_deny_on_file_edit() {
+            let d = fixture_dir("flip");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p.clone(), principal(), fixture_req()).unwrap();
+            let before = auth.decide(&whoami_req(0));
+            assert!(matches!(before, Verdict::Permit { .. }), "{before:?}");
+
+            write_policy(&p, "adversary");
+            let after = auth.decide(&whoami_req(0));
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(
+                matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
+                "{after:?}"
+            );
+        }
+
+        /// Every Permit through the wrapper carries exactly the audit obligation —
+        /// the PEP-side discharge contract depends on it.
+        #[test]
+        fn wrapper_permit_carries_exactly_audit_obligation() {
+            let d = fixture_dir("oblig");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+            let v = auth.decide(&whoami_req(0));
+            let _ = std::fs::remove_dir_all(&d);
+            match v {
+                Verdict::Permit { obligations } => {
+                    assert_eq!(obligations.len(), 1);
+                    assert_eq!(obligations[0].id, "audit");
+                    assert!(obligations[0].params.is_empty());
+                }
+                other => panic!("expected Permit, got {other:?}"),
+            }
+        }
+
+        /// The wrapper honors ITS requirement: a fixture violating the declared
+        /// mode requirement is refused at construction (the checks are real).
+        #[test]
+        fn constructor_honors_the_declared_requirement() {
+            let d = fixture_dir("mode");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
+            let got = HermeticAuthorizer::new(p, principal(), fixture_req());
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(matches!(got, Err(AuthzBasicError::Load(_))), "{got:?}");
+        }
     }
 }

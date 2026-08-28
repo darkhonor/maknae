@@ -50,8 +50,21 @@ pub fn authz_boot_gate(
     config_dir: &Path,
     principal: Option<Principal>,
 ) -> Result<(BasicAuthorizer, Principal), AuthzBootRefusal> {
+    authz_boot_gate_with(config_dir, principal, BasicAuthorizer::new)
+}
+
+/// The gate with its constructor injected — the production caller passes
+/// [`BasicAuthorizer::new`] (root-owned door); the success arm is otherwise
+/// unconstructible off-root, and an untestable success arm on a fail-closed
+/// gate is exactly what T1 forbids. The injected fn is the ONLY variable:
+/// ordering, mapping, and the returned pair are this fn's own, tested logic.
+fn authz_boot_gate_with(
+    config_dir: &Path,
+    principal: Option<Principal>,
+    construct: impl FnOnce(std::path::PathBuf, Principal) -> Result<BasicAuthorizer, AuthzBasicError>,
+) -> Result<(BasicAuthorizer, Principal), AuthzBootRefusal> {
     let principal = principal.ok_or(AuthzBootRefusal::MissingPrincipal)?;
-    let authorizer = BasicAuthorizer::new(config_dir.join("authz.yaml"), principal.clone())?;
+    let authorizer = construct(config_dir.join("authz.yaml"), principal.clone())?;
     Ok((authorizer, principal))
 }
 
@@ -122,6 +135,43 @@ mod tests {
                 other => panic!("expected Construct(Load), got {other:?}"),
             }
         }
+    }
+
+    /// The SUCCESS arm, off-root, nothing stubbed: the hermetic construction
+    /// door (feature-gated, dev-enabled) builds a real `BasicAuthorizer` over
+    /// a fixture policy, and the gate's own logic — principal threading,
+    /// `authz.yaml` join, the returned pair — is exercised end to end.
+    #[test]
+    fn gate_success_returns_the_authorizer_and_the_principal() {
+        let d = std::env::temp_dir().join(format!("bg_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            d.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        let seam = |path: std::path::PathBuf, pr: Principal| {
+            maknae_authz_basic::BasicAuthorizer::new_hermetic(
+                path,
+                pr,
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+            )
+        };
+        let got = authz_boot_gate_with(&d, Some(principal()), seam);
+        let _ = std::fs::remove_dir_all(&d);
+        let (_authorizer, pr) = got.expect("gate success arm");
+        assert_eq!(pr.uid, 501, "the principal is returned alongside");
+        assert_eq!(pr.name, "operator");
     }
 
     /// Trigger 2, bindings half — the filesystem-free mapping killer that

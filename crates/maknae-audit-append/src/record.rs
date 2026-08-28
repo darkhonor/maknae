@@ -304,60 +304,58 @@ mod tests {
         assert_eq!(rec.event, "connection.accept");
         assert_eq!(cloned.event, "different");
     }
-}
+    mod object_tests {
+        use super::super::*;
 
-#[cfg(test)]
-mod object_tests {
-    use super::*;
-
-    fn rec(object: Option<String>) -> AuditRecord {
-        AuditRecord {
-            ts: "2026-08-28T00:00:00Z".into(),
-            event: "request".into(),
-            where_: Where {
-                host: "h".into(),
-                component: "maknaed".into(),
-                socket: "/run/s".into(),
-            },
-            source: Source {
-                uid: 0,
-                gid: None,
-                pid: None,
-                plane_uri_san: None,
-            },
-            subject: Subject {
-                user: None,
-                plane_uri_san: None,
-            },
-            action: "acp.fs.read".into(),
-            object,
-            outcome: Outcome {
-                result: "deny".into(),
-                reason: "r".into(),
-                posture: "unauthorized".into(),
-            },
-            session_id: 1,
-            seq: 2,
-            au3_1: serde_json::Value::Null,
-            integrity: Integrity {
-                prev_hash: None,
-                sig: None,
-            },
+        fn rec(object: Option<String>) -> AuditRecord {
+            AuditRecord {
+                ts: "2026-08-28T00:00:00Z".into(),
+                event: "request".into(),
+                where_: Where {
+                    host: "h".into(),
+                    component: "maknaed".into(),
+                    socket: "/run/s".into(),
+                },
+                source: Source {
+                    uid: 0,
+                    gid: None,
+                    pid: None,
+                    plane_uri_san: None,
+                },
+                subject: Subject {
+                    user: None,
+                    plane_uri_san: None,
+                },
+                action: "acp.fs.read".into(),
+                object,
+                outcome: Outcome {
+                    result: "deny".into(),
+                    reason: "r".into(),
+                    posture: "unauthorized".into(),
+                },
+                session_id: 1,
+                seq: 2,
+                au3_1: serde_json::Value::Null,
+                integrity: Integrity {
+                    prev_hash: None,
+                    sig: None,
+                },
+            }
         }
-    }
 
-    #[test]
-    fn object_present_serializes_the_key() {
-        let j = canonical_json(&rec(Some("/home/op/.ssh/id_rsa".into()))).unwrap();
-        assert!(j.contains("\"object\":\"/home/op/.ssh/id_rsa\""), "{j}");
-    }
+        #[test]
+        fn object_present_serializes_the_key() {
+            let j = canonical_json(&rec(Some("/home/op/.ssh/id_rsa".into()))).unwrap();
+            assert!(j.contains("\"object\":\"/home/op/.ssh/id_rsa\""), "{j}");
+        }
 
-    #[test]
-    fn object_absent_omits_the_key_entirely() {
-        let j = canonical_json(&rec(None)).unwrap();
-        assert!(
-            !j.contains("\"object\""),
-            "resource-free verbs stay additive: {j}"
-        );
+        #[test]
+        fn object_absent_omits_the_key_entirely() {
+            let j = canonical_json(&rec(None)).unwrap();
+            assert!(
+                !j.contains("\"object\""),
+                "resource-free verbs stay additive: {j}"
+            );
+        }
     }
 }
