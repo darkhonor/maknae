@@ -1037,9 +1037,12 @@ version = "0.0.0"
 dependencies = [
  "maknae-audit",
  "maknae-audit-append",
+ "maknae-authz-basic",
  "maknae-config",
+ "maknae-io",
  "maknae-msgs",
  "maknae-proto",
+ "maknae-security",
  "maknae-spif",
  "maknae-subject-ctx",
  "maknae-subject-ctx-mint",
@@ -1068,6 +1071,7 @@ dependencies = [
  "ciborium",
  "serde",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

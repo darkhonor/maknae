@@ -10,6 +10,9 @@
 //! carries_peer_creds`; this suite proves what the KERNEL does with those outcomes:
 //! audit them and keep serving. Real peer-creds are synthesised via `PeerCreds`'s public
 //! fields (the same struct the transport attaches).
+mod common;
+use common::fixture_principal;
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -195,6 +198,8 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
             wctx(),
             shutdown,
             pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
         )
         .await;
     });
@@ -329,6 +334,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
         )
         .await;
     });
@@ -419,6 +426,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             wctx(),
             std::future::pending::<()>(),
             pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
         )
         .await;
     });
@@ -472,6 +481,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             wctx(),
             std::future::pending::<()>(), // shutdown never fires in this test
             supervisor,
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
         ),
     )
     .await
@@ -517,6 +528,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         wctx(),
         shutdown,
         pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)
