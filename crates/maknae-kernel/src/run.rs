@@ -59,9 +59,7 @@ use crate::handler::{
     AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_config::Principal;
-use maknae_io::{
-    open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing,
-};
+use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing};
 use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
 
