@@ -2,14 +2,13 @@
 use crate::error::ProtoCodecError;
 use serde::{Deserialize, Serialize};
 
-// v2 (#77): Verb::Read + Payload::ReadContent + ProtoErrCode::TooLarge. A verb
-// addition is a compatibility event (AGENTS.md protocol discipline); both
-// directions check strict equality, so the bump is a hard mutual break —
-// accepted for v1 deployments (client+daemon ship in one package). Known
-// asymmetry: a v2 client's Verb::Read fails enum-variant DESERIALIZATION on a
-// v1 daemon (ProtoCodecError::Decode) before the version check — still a
-// clean typed refusal, just not UnsupportedVersion.
-pub const PROTOCOL_VERSION: u16 = 2;
+// PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/`Payload::ReadContent`/
+// `ProtoErrCode::TooLarge` are ADDITIVE CBOR enum variants — no version bump.
+// A pre-#77 CLI never sends `Read`, so it keeps interoperating with a #77
+// daemon for `ping`/`whoami` (same wire version); only the new read verb
+// needs the new CLI. A version bump would be an irreversible hard mutual
+// break (strict-equality check both directions) and was NOT authorized.
+pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verb {
@@ -268,29 +267,49 @@ mod tests {
         }
 
         #[test]
-        fn v1_frames_refused_by_both_decoders_as_unsupported_version() {
-            // The interop obligation: a version mismatch is a clean TYPED error in
-            // both directions — never garbage, never a panic.
-            let req = Request {
+        fn adding_read_is_additive_no_version_bump() {
+            // #77 stays on wire version 1: PROTOCOL_VERSION is 1, so a pre-#77
+            // CLI's Ping (version 1, the unchanged verbs) still decodes on a
+            // #77 daemon — no hard break — and the NEW Read verb round-trips at
+            // the SAME version.
+            assert_eq!(PROTOCOL_VERSION, 1, "no unauthorized wire bump");
+            let ping = Request {
                 protocol_version: 1,
+                verb: Verb::Ping,
+            };
+            let mut b = Vec::new();
+            ciborium::into_writer(&ping, &mut b).unwrap();
+            assert_eq!(decode_request(&b).unwrap().verb, Verb::Ping);
+
+            let read = Request {
+                protocol_version: 1,
+                verb: Verb::Read {
+                    path: "/home/op/x".into(),
+                },
+            };
+            let mut b = Vec::new();
+            ciborium::into_writer(&read, &mut b).unwrap();
+            assert_eq!(
+                decode_request(&b).unwrap().verb,
+                Verb::Read {
+                    path: "/home/op/x".into()
+                }
+            );
+        }
+
+        #[test]
+        fn a_genuinely_wrong_version_still_refuses_cleanly() {
+            // The version guard still exists for a real mismatch (a future
+            // deliberate bump, or garbage) — typed, never a panic.
+            let req = Request {
+                protocol_version: 999,
                 verb: Verb::Ping,
             };
             let mut b = Vec::new();
             ciborium::into_writer(&req, &mut b).unwrap();
             assert!(matches!(
                 decode_request(&b),
-                Err(ProtoCodecError::UnsupportedVersion(1))
-            ));
-
-            let resp = Response {
-                protocol_version: 1,
-                result: RespResult::Ok(Payload::Pong),
-            };
-            let mut b = Vec::new();
-            ciborium::into_writer(&resp, &mut b).unwrap();
-            assert!(matches!(
-                decode_response(&b),
-                Err(ProtoCodecError::UnsupportedVersion(1))
+                Err(ProtoCodecError::UnsupportedVersion(999))
             ));
         }
 
