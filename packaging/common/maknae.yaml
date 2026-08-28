@@ -3,8 +3,8 @@
 #
 # `sudo maknae enroll` REWRITES this file with your real deployment values and
 # adds the `principal` section (operator uid/home). Until then the daemon
-# fail-closes: the shipped authz.yaml uses `~` patterns, and the DAC gate
-# refuses to start without a `principal` (spec §5.5) — this is deliberate.
+# fail-closes: the boot gate refuses to start without a `principal` (#77 —
+# a daemon that can authorize no one is a failed system) — this is deliberate.
 #
 # Ownership (do not change): root:_maknae 0640 (Jackrabbit §4.6).
 

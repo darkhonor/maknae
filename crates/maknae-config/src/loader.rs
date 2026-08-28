@@ -35,6 +35,7 @@ pub(crate) const CONFIG_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetR
     mode_mask: Some(0o007),
     nlink_exactly_one: false,
     regular_file: true,
+    max_bytes: None,
 };
 
 /// The requirement a root-controlled host artifact carries ([`crate::load_root_file`]):
@@ -46,6 +47,7 @@ pub(crate) const ROOT_ARTIFACT: maknae_io::TargetRequired = maknae_io::TargetReq
     mode_mask: Some(0o022),
     nlink_exactly_one: false,
     regular_file: true,
+    max_bytes: None,
 };
 
 /// Secure read (spec §3): lstat screen (symlink + regular-file) → open → fstat mode
@@ -638,6 +640,7 @@ mod tests {
                 mode_mask: Some(0o022),
                 nlink_exactly_one: false,
                 regular_file: true,
+                max_bytes: None,
             },
         );
         let _ = std::fs::remove_file(&p);
@@ -661,6 +664,7 @@ mod tests {
                 mode_mask: Some(0o022),
                 nlink_exactly_one: false,
                 regular_file: true,
+                max_bytes: None,
             },
         );
         let _ = std::fs::remove_file(&p);

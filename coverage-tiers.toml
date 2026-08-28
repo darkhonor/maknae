@@ -33,6 +33,13 @@ files = [
   "crates/maknae-authz-basic/src/role.rs",
   "crates/maknae-authz-basic/src/binding.rs",
   "crates/maknae-authz-basic/src/decide.rs",
+  # The fail-closed authz boot gate (#77): principal-required + PDP
+  # construction refusal mapping — a wrong arm is a daemon serving without a
+  # decider.
+  "crates/maknae-kernel/src/boot_gate.rs",
+  # The CBOR byte-string content codec (#77): a wrong major type halves the
+  # read ceiling and mis-routes oversize; the visitor is a refusal surface.
+  "crates/maknae-proto/src/bytes.rs",
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   "crates/maknae-io/src/normalize.rs",
@@ -103,13 +110,13 @@ files = [
   "crates/maknae-config/src/transport.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
-  # enroll` writes into maknae.yaml). A later task's DAC authz policy resolves
+  # enroll` writes into maknae.yaml). The authorization policy resolves
   # `~` against this — a malformed section that silently collapsed to "absent"
   # would leave `~` unresolved instead of refused. Fail-closed decision logic,
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",
-  # PR-J1 Task 6: the DAC authz policy schema v1 (spec §7) — the
+  # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read/Bash patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink
   # refusal + mode gate + root-ownership assertion, spec §4.6). A durable
@@ -149,6 +156,13 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic"]
+# Crates whose mutation run needs a non-default feature so feature-gated seam
+# code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
+# 2026-08-27 main-red class; #77 generalized the maknae-config special case).
+# Contract: every key MUST appear in mutants_crates; every value MUST be a
+# list of strings; an absent table is legal. Validated in coverage-tiers.sh's
+# prologue (BOTH lanes).
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"] }
 
 [t2]
 floor_production_region = 90
@@ -342,7 +356,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/posture.rs (T1). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. #77's read_plan/map_read_error/read_budget; read_pep here is thin orchestration over them). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"

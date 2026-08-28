@@ -43,12 +43,17 @@ pub use loader::load_config;
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use authz::load_authz_with_requirement;
+// Re-exported so downstream seam constructors (maknae-authz-basic's
+// HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
+// dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
     load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern, Request,
 };
 pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
 pub use error::ConfigError;
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use maknae_io::TargetRequired;
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
 pub use value::Value;
@@ -334,6 +339,7 @@ mod tests {
                 mode_mask: Some(0o022),
                 nlink_exactly_one: false,
                 regular_file: true,
+                max_bytes: None,
             },
         );
         let _ = std::fs::remove_file(&path);

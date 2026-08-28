@@ -378,5 +378,48 @@ git -C "$tmpF4" init -q
 git -C "$tmpF4" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/transport_tests.rs
 expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drift.sh" "$tmpF4"
 
+# --- Fixture G: feature-resolution-pin (#77) — a production binary whose
+# NORMAL dependency enables hermetic-test-seam must be rejected. Synthetic
+# path-deps-only workspace (the pin needs a full cargo resolve, unlike p1's
+# --no-deps metadata): "maknaed" normally-depends on a "maknae-config" that
+# declares the feature, WITH the feature enabled.
+tmpG="$(mktemp -d)"
+mkdir -p "$tmpG/crates/maknae-config/src" "$tmpG/bins/maknaed/src" "$tmpG/bins/maknae/src" "$tmpG/bins/maknae-spifc/src"
+cat > "$tmpG/Cargo.toml" <<'EOF_G'
+[workspace]
+resolver = "3"
+members = ["crates/maknae-config", "bins/maknaed", "bins/maknae", "bins/maknae-spifc"]
+EOF_G
+cat > "$tmpG/crates/maknae-config/Cargo.toml" <<'EOF_G'
+[package]
+name = "maknae-config"
+version = "0.0.0"
+edition = "2021"
+[features]
+hermetic-test-seam = []
+EOF_G
+echo '' > "$tmpG/crates/maknae-config/src/lib.rs"
+for b in maknaed maknae maknae-spifc; do
+  cat > "$tmpG/bins/$b/Cargo.toml" <<EOF_G
+[package]
+name = "$b"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+maknae-config = { path = "../../crates/maknae-config" }
+EOF_G
+  echo 'fn main() {}' > "$tmpG/bins/$b/src/main.rs"
+done
+# The violation: maknaed's NORMAL dep enables the seam feature.
+cat > "$tmpG/bins/maknaed/Cargo.toml" <<'EOF_G'
+[package]
+name = "maknaed"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+maknae-config = { path = "../../crates/maknae-config", features = ["hermetic-test-seam"] }
+EOF_G
+expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-resolution-pin.sh" "$tmpG"
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]

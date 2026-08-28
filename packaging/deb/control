@@ -5,15 +5,16 @@ Priority: optional
 Architecture: amd64
 Maintainer: Alex Ackerman <developer@maknae.io>
 Homepage: https://github.com/darkhonor/maknae
-Depends: libc6, systemd, apparmor, apparmor-utils
+Depends: libc6, systemd, apparmor, apparmor-utils, acl
 Description: trust-plane daemon and operator CLI for a local AI-agent platform
  Maknae is a security-first, local AI-agent platform. This package installs
  the privileged trust-plane daemon (maknaed) and the non-privileged operator
  CLI (maknae), a hardened systemd unit with TPM2-sealed credential loading
  (LoadCredentialEncrypted), an AppArmor confinement profile, and the shipped
- DAC authorization policy — for deployment on hardened Debian systems.
+ RBAC authorization policy — for deployment on hardened Debian systems.
  .
  A fresh install is not runnable until `sudo maknae enroll` provisions the
- daemon credential and the operator principal; the shipped authz.yaml uses
- `~` patterns and fail-closes until enrollment writes the principal. The
+ daemon credential and the operator principal; the daemon's
+ boot gate requires the `principal` section (a daemon that can authorize no
+ one refuses to start, #77). The
  daemon MUST be enrolled before it is started (install -> enroll -> start).

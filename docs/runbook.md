@@ -194,7 +194,10 @@ when the process exits; both tokens are revoked on `shutdown`.
 Prove the daemon actually serves a request end-to-end: `maknaed` boots, binds the
 group-gated plane socket, and a real `ssh`-in operator session running `maknae ping`
 and `maknae whoami` gets a real answer — authorized by mTLS + peer-creds + group
-membership, with every request landing an AU-3 line in the audit log. This is the third
+membership AND, since #77, a per-request PDP verdict (the enrolled principal
+resolves `admin` via the policy defaults; a non-enrolled in-group peer is DENIED
+per request — see the deny record below), with every request landing an AU-3
+line in the audit log. This is the third
 live milestone; Chapters 1–2 proved the credential and the transport in isolation, this
 chapter proves the whole daemon.
 
@@ -223,9 +226,11 @@ sudo dscl . -append /Groups/maknae GroupMembership "$(whoami)"
 ```
 
 > Group membership is the **outer fence only** (`authorize_connection`, `maknae-kernel/src/authz.rs`)
-> — a peer uid outside `maknae` is denied before a request is even read, but a cert-valid,
-> in-group peer still only gets what the daemon's read-only verbs expose. It is not a
-> substitute for the mTLS half.
+> — a peer uid outside `maknae` is denied before a request is even read. Since #77 a
+> cert-valid, in-group peer is then decided PER REQUEST by the PDP: with the shipped
+> (bindings-absent) policy the ENROLLED principal's uid resolves `admin` and is served;
+> every other in-group uid has no role and is denied everything, including `ping` —
+> deny-by-default made operational. It is not a substitute for the mTLS half.
 
 ### 2. Seed the daemon's standing SecretID
 
@@ -313,9 +318,11 @@ $ maknae whoami
 maknae://<deployment_id>/plane/cli uid=<your uid>
 ```
 
-Exit code `0` on both. A non-`maknae`-group uid, an expired/wrong-plane cert, or the
-daemon not running each produce a non-zero exit with a `maknae: <reason>` line on stderr
-instead — the CLI never prints a placeholder or partial answer on failure (`bins/maknae/src/cli.rs`
+Exit code `0` on both **when run as the enrolled principal**. A non-`maknae`-group
+uid, an in-group-but-NOT-enrolled uid (per-request deny since #77 — the CLI prints
+`maknae: daemon refused: Unauthorized: not authorized`), an expired/wrong-plane cert,
+or the daemon not running each produce a non-zero exit with a `maknae: <reason>` line
+on stderr instead — the CLI never prints a placeholder or partial answer on failure (`bins/maknae/src/cli.rs`
 `execute`'s single `Result<bool, String>` return: `Ok(true)` on a real verb response,
 `Err` for everything else).
 
@@ -333,10 +340,18 @@ Each `ping`/`whoami` call lands (at least) one line — audit-then-respond order
 **only because** this record durably landed first:
 
 ```json
-{"action":"ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","user":null},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
+{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","user":null},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
 ```
 
-(seq 1 is the connection-admission record emitted by `accept_loop` on cert-verified
+A **deny** record (a non-enrolled in-group uid running any verb, or a read of a
+deny-listed path) looks like this — the REASON and the OBJECT live only here, never
+on the wire (the client sees the generic `not authorized`):
+
+```json
+{"action":"acp.fs.read","au3_1":{},"event":"request","object":"/home/<user>/.ssh/id_rsa","outcome":{"posture":"unauthorized","reason":"denied by policy entry Read(~/.ssh/**)","result":"deny"},...}
+```
+
+(seq 1 is the connection-admission record emitted by `handle` on cert-verified
 accept; seq 2+ are the per-request records above. Exact key order is
 canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration order.)
 
@@ -349,11 +364,21 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 - **Peer-creds** — the daemon captured your real connecting uid off the kernel
   (`SO_PEERCRED`/`LOCAL_PEERCRED`) and it is exactly what `maknae whoami` echoes back —
   proof the kernel-verified fact, not a client-asserted one, is what's in the response.
-- **Group authz** — you are in `maknae` (step 1); `authorize_connection` permits the
+- **Group ADMISSION** — you are in `maknae` (step 1); `authorize_connection` permits the
   connection on `(cert_verified=true, uid_in_group=true)`. Removing yourself from the
   group (and starting a fresh `ssh` session so group membership re-resolves) turns the
   same commands into a denied connection — an audited `deny`/`unauthorized` record, no
-  response, non-zero CLI exit.
+  response, non-zero CLI exit. Admission is the TRANSPORT half.
+- **Per-request AUTHORIZATION (#77)** — the DECISION half: every admitted request is
+  decided by the PDP (`maknae-authz-basic` behind the `maknae-security` seam), policy
+  re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`;
+  `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
+  `not authorized`, the trail says which pattern and which object. Re-roling or
+  removing an identity ALREADY KNOWN at boot bites on the NEXT request, no
+  restart (containment). Introducing a brand-NEW username is restart-scoped by
+  design (#85 §3, zero per-request NSS): until the restart, a policy naming an
+  unresolvable identity makes every decision Indeterminate → deny — fail
+  closed, recover by restarting (or reverting the edit); #84's reload lifts this.
 - **AU-3 audit lines** — every connection and every request produces a durable,
   canonically-ordered JSONL record (§6 above) BEFORE the daemon released a response —
   the fail-closed audit-then-respond ordering is not just a code comment, it's

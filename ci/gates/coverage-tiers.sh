@@ -232,6 +232,54 @@ for name in mc:
 PYEOF
 }
 
+# mutants_features contract validation (#77) — in the PROLOGUE deliberately:
+# the default and --mutants-all lanes are mutually exclusive, and each lane's
+# other checks are lane-local, so this is the one region BOTH execute. Oracle
+# is toml-self-contained (no cargo metadata — the synthetic fixtures in
+# ci/gates/tests/coverage-tiers/ carry no crate map): every key must appear in
+# [t1].mutants_crates; every value must be a list of strings; absent is legal.
+if ! python3 - "$toml" <<'PYEOF'
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        c = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError):
+    # Parse validity is owned by each lane's own reader (with its own
+    # message); this contract check only speaks about a PARSEABLE table.
+    sys.exit(0)
+t1 = c.get("t1", {})
+mf = t1.get("mutants_features")
+if mf is None:
+    sys.exit(0)
+if not isinstance(mf, dict):
+    print("FAIL: [t1].mutants_features must be a table of crate -> feature list")
+    sys.exit(1)
+mc = set(t1.get("mutants_crates") or [])
+rc = 0
+for k, v in mf.items():
+    if k not in mc:
+        print(f"FAIL: mutants_features names '{k}', which is not in [t1].mutants_crates")
+        rc = 1
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        print(f"FAIL: mutants_features['{k}'] must be a list of strings")
+        rc = 1
+sys.exit(rc)
+PYEOF
+then
+  fail "mutants_features contract violated (see FAIL lines above)"
+  exit 1
+fi
+
+toml_mutants_features_for() { # crate-name -> newline-separated features (may be empty)
+  python3 - "$toml" "$1" <<'PYEOF'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    c = tomllib.load(f)
+for feat in (c.get("t1", {}).get("mutants_features") or {}).get(sys.argv[2], []):
+    print(feat)
+PYEOF
+}
+
 # ---- default stages ---------------------------------------------------------
 if [ "$need_default" -eq 1 ]; then
   # universe
@@ -340,16 +388,15 @@ if [ "$mutants_mode" != "" ]; then
       fi
       continue
     fi
-    # maknae-config carries the feature-gated `hermetic-test-seam` fn (#85):
-    # under default features it is compiled OUT, so its mutants land in dead
-    # code and are UNKILLABLE MISSED (the 2026-08-27 main-red). Enabling the
-    # feature makes the seam test the killer — prove-it-can-go-red, never an
-    # exclusion. Additive-only feature: every default-feature mutant/test is
-    # unchanged by it.
+    # Crates carrying feature-gated seam code (#85/#77): under default
+    # features it is compiled OUT, so its mutants land in dead code and are
+    # UNKILLABLE MISSED (the 2026-08-27 main-red). The per-crate feature list
+    # is DECLARED in [t1].mutants_features (validated in the prologue) — the
+    # in-crate tests are the killers; prove-it-can-go-red, never an exclusion.
     extra_mutants_flags=()
-    if [ "$cname" = "maknae-config" ]; then
-      extra_mutants_flags=(--features hermetic-test-seam)
-    fi
+    while IFS= read -r feat; do
+      [ -n "$feat" ] && extra_mutants_flags+=(--features "$feat")
+    done < <(toml_mutants_features_for "$cname")
     if ! (cd "$root" && cargo mutants --package "$cname" "${extra_mutants_flags[@]}"); then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
     fi

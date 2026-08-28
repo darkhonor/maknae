@@ -18,6 +18,9 @@ maknae-vault = { path = "../maknae-vault" }
 maknae-config = { path = "../maknae-config" }
 maknae-subject-ctx-mint = { path = "../maknae-subject-ctx-mint" }
 maknae-audit-append = { path = "../maknae-audit-append" }
+maknae-security = { path = "../maknae-security" }
+maknae-authz-basic = { path = "../maknae-authz-basic" }
+maknae-io = { path = "../maknae-io" }
 maknae-msgs = { path = "../maknae-msgs" }
 nix = { version = "0.31", default-features = false, features = ["user"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util"] }
@@ -25,3 +28,7 @@ serde_json = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+# The enforcement e2e constructs the REAL PDP over fixture policy files via the
+# requirement-parameterized seam (nothing stubbed); dev-only — the
+# feature-resolution-pin gate proves production resolution stays featureless.
+maknae-authz-basic = { path = "../maknae-authz-basic", features = ["hermetic-test-seam"] }

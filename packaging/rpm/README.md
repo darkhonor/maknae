@@ -36,8 +36,8 @@ sudo dnf install ./maknae-<ver>-1.el10.x86_64.rpm
 ## Install → enroll → start rule
 
 The package installs the software fail-closed; it does not start the daemon. The
-shipped `authz.yaml` uses `~` patterns that are inert until an operator principal
-exists, so the daemon refuses to serve until `enroll` writes it. Run, **in order**:
+boot gate requires the `principal` section (#77: a daemon that can authorize no
+one refuses to start), so the daemon refuses to serve until `enroll` writes it. Run, **in order**:
 
 ```bash
 # SELinux hosts: label the Vault port (else name_connect to Vault is denied).

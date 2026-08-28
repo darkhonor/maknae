@@ -20,6 +20,12 @@ maknae-config = { path = "../maknae-config" }
 # over names root wrote into the policy file).
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
+[features]
+# Test-only door over the production decide sequence (#77): exports
+# HermeticAuthorizer, whose loader is requirement-parameterized. Non-default;
+# production resolution is pinned featureless by ci/gates/feature-resolution-pin.sh.
+hermetic-test-seam = ["maknae-config/hermetic-test-seam"]
+
 [dev-dependencies]
 maknae-config = { path = "../maknae-config", features = ["hermetic-test-seam"] }
 maknae-io = { path = "../maknae-io" }

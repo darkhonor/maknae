@@ -791,6 +791,38 @@ glob_pair "crates/*/build.rs"  "crates/x/build.rs"        "crates/x/src/build.rs
 glob_pair "bins/*/build.rs"    "bins/y/build.rs"          "bins/y/src/build.rs"
 glob_pair "build.rs"           "build.rs"                 "sub/build.rs"
 
+# ---------- mutants_features contract (#77) ----------------------------------
+# The prologue validation must fire in the DEFAULT lane (this is fixture E's
+# invocation shape — no --mutants), for both violation classes; a conforming
+# table and an absent table must stay green (mk_base carries no table = the
+# absent-legal proof rides every other fixture).
+inject_mutants_features() { # <root> <inline-table-text> — INSIDE [t1], after mutants_crates
+  python3 - "$1/coverage-tiers.toml" "$2" <<'PYEOF'
+import sys
+p, table = sys.argv[1], sys.argv[2]
+s = open(p).read()
+s = s.replace("mutants_crates = []", "mutants_crates = []\n" + table, 1)
+open(p, "w").write(s)
+PYEOF
+}
+
+r="$(newroot)"; mk_base "$r"
+inject_mutants_features "$r" 'mutants_features = { "no-such-crate" = ["some-feature"] }'
+expect "mutants_features unknown crate refused" "FAIL: mutants_features names 'no-such-crate'" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
+
+r="$(newroot)"; mk_base "$r"
+# The crate IS in mutants_crates, so ONLY the non-list branch can fire — the
+# expected substring is that branch's own text (deleting the isinstance check
+# must turn this fixture red; the unknown-crate branch cannot satisfy it).
+inject_mutants_features "$r" 'mutants_features = { "fixture-crate" = "not-a-list" }'
+python3 - "$r/coverage-tiers.toml" <<'PYEOF2'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace('mutants_crates = []', 'mutants_crates = ["fixture-crate"]', 1)
+open(p, "w").write(s)
+PYEOF2
+expect "mutants_features non-list value refused" "must be a list of strings" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
+
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"
 expect "ambient GIT_DIR immunity (pass path unaffected)" "PASS: coverage-tiers gate" 0 -- \

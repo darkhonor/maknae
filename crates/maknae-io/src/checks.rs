@@ -68,6 +68,10 @@ pub struct TargetRequired {
     pub mode_mask: Option<u32>,
     pub nlink_exactly_one: bool,
     pub regular_file: bool,
+    /// Refuse a target whose size exceeds this many bytes, BEFORE any buffer
+    /// is allocated (#77 read path: a permitted 20 GiB file must not OOM the
+    /// TCB). `None` = no size requirement — a named absence, like the others.
+    pub max_bytes: Option<u64>,
 }
 
 impl TargetRequired {
@@ -85,6 +89,7 @@ impl TargetRequired {
         mode_mask: None,
         nlink_exactly_one: false,
         regular_file: true,
+        max_bytes: None,
     };
 }
 
@@ -122,14 +127,17 @@ pub(crate) fn check_owner_mode(
 }
 
 /// The fused target check, in the PINNED order:
-///   symlink -> regular-file -> mode -> owner -> nlink
+///   symlink -> regular-file -> mode -> owner -> nlink -> max_bytes
 ///
 /// The order is observable through the error variant, so it is contract, not an
 /// implementation detail. `maknae-config`'s world_accessible_authz_refused fixtures a
 /// 0o666 file owned by the test user: mode-before-owner yields InsecurePermissions
 /// (today's behaviour), owner-before-mode yields NotOwned. `symlink` is not an fstat
 /// predicate at all — it is O_NOFOLLOW at open time, structurally before any fstat —
-/// so only three of the four adjacent pairs are reorderable.
+/// so only three of the four fstat-predicate adjacent pairs are reorderable.
+/// `max_bytes` is deliberately LAST (#77): every integrity/identity predicate
+/// wins over the size bound, so an oversize refusal (`TargetTooLarge`) is only
+/// ever reported for a target that would otherwise have been readable.
 pub(crate) fn check_target(
     st: &FileStat,
     path: &Path,
@@ -149,6 +157,18 @@ pub(crate) fn check_target(
             path: path.to_path_buf(),
             nlink: nlink_count(st.st_nlink),
         });
+    }
+    if let Some(limit) = req.max_bytes {
+        // st_size is i64; a negative size is nonsensical for a regular file
+        // and normalizes to 0 (the crate's normalizing idiom, cf. anchor.rs).
+        let actual = st.st_size.max(0) as u64;
+        if actual > limit {
+            return Err(IoError::TargetTooLarge {
+                path: path.to_path_buf(),
+                limit,
+                actual,
+            });
+        }
     }
     Ok(())
 }
@@ -391,6 +411,7 @@ mod tests {
             mode_mask,
             nlink_exactly_one: nlink,
             regular_file: reg,
+            max_bytes: None,
         }
     }
 
@@ -475,6 +496,54 @@ mod tests {
         assert!(
             matches!(e, IoError::MultiplyLinked { nlink, .. } if nlink == 2),
             "got {e:?}"
+        );
+    }
+
+    /// max_bytes boundary — exact limit passes, limit+1 refuses (kills > vs >=
+    /// mutants); None is unbounded; and nlink precedes max_bytes (order pair 4).
+    #[test]
+    fn max_bytes_exact_limit_passes_and_one_over_refuses() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s");
+        std::fs::write(&f, vec![0u8; 100]).unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let st = stat_of(&f);
+        let mut req = target(Some(0o007), None, false, true);
+        req.max_bytes = Some(100);
+        assert!(check_target(&st, &f, &req).is_ok(), "exact limit must pass");
+        req.max_bytes = Some(99);
+        let e = check_target(&st, &f, &req).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                IoError::TargetTooLarge {
+                    limit: 99,
+                    actual: 100,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+        assert!(e.to_string().contains("too large"), "{e}");
+        req.max_bytes = None;
+        assert!(check_target(&st, &f, &req).is_ok(), "None is unbounded");
+    }
+
+    /// Order pair 4 — (nlink, max_bytes): both violated, nlink must win.
+    #[test]
+    fn nlink_precedes_max_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("h");
+        std::fs::write(&f, vec![0u8; 100]).unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&f, d.path().join("h2")).unwrap();
+        let st = stat_of(&f);
+        let mut req = target(Some(0o007), None, true, true);
+        req.max_bytes = Some(1);
+        let e = check_target(&st, &f, &req).unwrap_err();
+        assert!(
+            matches!(e, IoError::MultiplyLinked { .. }),
+            "order: got {e:?}"
         );
     }
 

@@ -110,8 +110,8 @@ applied to **new** login sessions. Without re-login your current shell is not ye
 
 Upgrade with the same tool (`dnf upgrade` / `apt install ./…deb`). **The ordering
 rule is identical to a fresh install: enroll (if not already enrolled) before you
-restart the daemon.** The shipped `authz.yaml` still carries the `~` patterns, and
-the daemon still fail-closes without a `principal`, so a daemon restarted before a
+restart the daemon.** The daemon's boot gate still
+requires the `principal` section (#77), so a daemon restarted before a
 principal exists refuses to serve. The accumulated audit trail in
 `/var/log/maknae/audit.jsonl` is preserved across upgrades (it is never replaced by
 the package).
@@ -150,7 +150,7 @@ key; see `sign.sh --help`.
 `maknae enroll` cannot complete.** The operator CLI seal uses `systemd-creds --user`,
 which requires systemd ≥ 256; RHEL 9 ships systemd 252. RHEL 9 is therefore
 **packaging + daemon-seal only this release — operator enroll is deferred to #73.**
-The rpm installs cleanly, the SELinux policy loads and runs enforce-clean, and the
+The rpm installs cleanly, the SELinux policy loads and runs enforce-clean (re-validation after #77's home-read vectors: operator pre-merge checklist), and the
 daemon's own TPM2 seal works; what is *not* available on el9 is the operator
 enroll → serve round-trip. **RHEL 10 supports the full enroll flow (proven live,
 enforcing).** Debian 13's `--user` CLI seal works (systemd 257), but its full
@@ -163,8 +163,11 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
 - **SELinux tool domain (bin_t):** the tool-exec domain is keyed on `bin_t`, which
   the kernel cannot use to distinguish *which* binary is being executed (`gh` looks
   like any other `bin_t` file). MAC therefore gates only *that* a tool ran, not
-  *which* — the DAC layer (`authz.yaml`) is what decides which tool is permitted.
-  Per-binary MAC separation is a future tool-exec increment.
+  *which* — the discretionary policy layer (`authz.yaml`, decided by the RBAC PDP)
+  will decide which tool is permitted when the tool-exec increment lands (#84);
+  today it governs the read path (#77). Per-binary MAC separation is a future
+  tool-exec increment.
+- **#77 home-read relaxation is syntax-validated, not yet serve-time-validated** — four MAC/isolation artifacts changed (`maknaed.service` ProtectHome, `maknae.te` home vectors, the AppArmor profile + local include, the enroll ACL). The .te builds clean under el9 refpolicy and the profile parses clean on trixie; the enforce-clean home-read/home-write-refused acceptance is the operator's pre-merge checklist item.
 - **RHEL 9 operator enroll** — deferred to #73 (see above).
 - **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
   both AppArmor profiles load, but the daemon has not been run under the AppArmor

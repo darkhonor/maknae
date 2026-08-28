@@ -67,9 +67,9 @@ enforce-clean run is owed on the Debian 13 host (spec §9).
 A fresh install is **not runnable**, so `postinst` neither enables nor starts the
 unit — it only runs `systemctl daemon-reload` (and, on upgrade, `try-restart`s a
 daemon the operator had already started). **You** enable and start it in the
-`systemctl enable --now` step below, *after* `maknae enroll`: the shipped
-`authz.yaml` uses `~` patterns and the DAC gate fail-closes until enroll writes
-the `principal`. The order is load-bearing:
+`systemctl enable --now` step below, *after* `maknae enroll`: the boot
+gate requires the `principal` section (#77 — a daemon that can authorize no one
+refuses to start) until enroll writes it. The order is load-bearing:
 
 ```bash
 sudo apt install -y ./dist/maknae_0.1.0-1_amd64.deb   # pulls apparmor, apparmor-utils

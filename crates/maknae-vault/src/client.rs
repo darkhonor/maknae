@@ -138,6 +138,7 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
             mode_mask: Some(0o077),
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map_err(|error| match error {
