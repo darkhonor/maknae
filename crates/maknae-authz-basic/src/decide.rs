@@ -18,7 +18,7 @@ use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, 
 /// stamped by the daemon door, never client-settable.
 pub(crate) const SUBJECT_UID: &str = "uid";
 pub(crate) const SUBJECT_NAME: &str = "name";
-/// Resource attribute key for `acp.fs.*` (spec §4.4).
+/// Resource attribute key for `fs.*` (spec §4.4).
 pub(crate) const RESOURCE_PATH: &str = "path";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
@@ -32,9 +32,11 @@ pub(crate) struct LoadedPolicy {
 pub(crate) enum Class {
     Liveness,
     Admin,
-    AcpSession,
-    AcpFs,
-    AcpTerminal,
+    Session,
+    Fs,
+    Terminal,
+    Mcp,
+    Kernel,
 }
 
 /// Exact-segment class match (spec §5): `a == c` or `a.starts_with(c + ".")`,
@@ -44,17 +46,22 @@ pub(crate) fn class_of(action: &str) -> Option<Class> {
     fn in_class(a: &str, c: &str) -> bool {
         a == c || (a.len() > c.len() && a.as_bytes()[c.len()] == b'.' && a.starts_with(c))
     }
-    // Longest-prefix classes first so `acp.session.x` never tests bare `acp`.
-    if in_class(action, "acp.session") {
-        Some(Class::AcpSession)
-    } else if in_class(action, "acp.fs") {
-        Some(Class::AcpFs)
-    } else if in_class(action, "acp.terminal") {
-        Some(Class::AcpTerminal)
-    } else if in_class(action, "liveness") {
+    // Flat namespace after the `acp.` rename: no class name is a prefix of
+    // another, so ordering is no longer load-bearing. Kept explicit for reading.
+    if in_class(action, "liveness") {
         Some(Class::Liveness)
     } else if in_class(action, "admin") {
         Some(Class::Admin)
+    } else if in_class(action, "session") {
+        Some(Class::Session)
+    } else if in_class(action, "fs") {
+        Some(Class::Fs)
+    } else if in_class(action, "terminal") {
+        Some(Class::Terminal)
+    } else if in_class(action, "mcp") {
+        Some(Class::Mcp)
+    } else if in_class(action, "kernel") {
+        Some(Class::Kernel)
     } else {
         None
     }
@@ -139,14 +146,34 @@ pub(crate) fn decide_loaded(
             _ => Verdict::NotApplicable,
         },
         Role::Admin => match class {
-            Some(Class::Admin) | Some(Class::Liveness) => permit_with_audit(),
-            Some(Class::AcpFs) => decide_fs(lp, req),
-            Some(Class::AcpSession) | Some(Class::AcpTerminal) | None => Verdict::NotApplicable,
+            Some(Class::Liveness) => permit_with_audit(),
+            // Keyed to the ONE built admin term. A class-granular permit here
+            // would grant admin.contain / admin.credential.broker /
+            // admin.policy.reload off an arm that keys nothing — the outcome
+            // #67's spec D3 names as the thing that must not land. Individual
+            // decidability for the rest is D3's implementation obligation.
+            Some(Class::Admin) if req.action.0 == "admin.whoami" => permit_with_audit(),
+            Some(Class::Admin) => Verdict::NotApplicable,
+            // Keyed like the admin arm above, and for the same reason. Without
+            // it, safety rests on a remote `if let Verb::Read` in another crate:
+            // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
+            // an unbuilt fs term reaching it with a path would match `Read(~/**)`.
+            // Keying here makes the property provable in the file that decides,
+            // and makes unbuilt fs terms abstain (NotApplicable) rather than
+            // report Indeterminate — which is a PDP-malfunction signal, not a
+            // "this term has no behaviour yet" signal.
+            Some(Class::Fs) if req.action.0 == "fs.read" => decide_fs(lp, req),
+            Some(Class::Fs) => Verdict::NotApplicable,
+            Some(Class::Session)
+            | Some(Class::Terminal)
+            | Some(Class::Mcp)
+            | Some(Class::Kernel)
+            | None => Verdict::NotApplicable,
         },
     }
 }
 
-/// Step 4 — the capability grammar, admin-only, `acp.fs.*`-only (spec §4.4).
+/// Step 4 — the capability grammar, admin-only, `fs.*`-only (spec §4.4).
 fn decide_fs(lp: &LoadedPolicy, req: &SecRequest) -> Verdict {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
@@ -244,9 +271,9 @@ mod tests {
     const ALL_ACTIONS: &[&str] = &[
         "liveness.ping",
         "admin.whoami",
-        "acp.session.prompt",
-        "acp.fs.read",
-        "acp.terminal.exec",
+        "session.prompt",
+        "fs.read",
+        "terminal.create",
         "unknown.thing",
     ];
 
@@ -294,14 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn user_not_applicable_where_admin_is_permitted_on_acp_fs() {
+    fn user_not_applicable_where_admin_is_permitted_on_fs() {
         // The C2 discriminator (spec §7): the untrusted runtime's default role
         // never inherits the capability grammar.
         let lp = lp_with(
             Some(&[("admin", &["alex"]), ("user", &["usery"])]),
             &[("alex", OPERATOR_UID), ("usery", 701)],
         );
-        let action = "acp.fs.read";
+        let action = "fs.read";
         let path = Some("/home/operator/notes.txt");
         let admin_v = decide_loaded(
             &lp,
@@ -322,7 +349,7 @@ mod tests {
             &request(
                 None,
                 Some(OPERATOR_UID as i64),
-                "acp.fs.read",
+                "fs.read",
                 Some("/home/operator/.ssh/id_rsa"),
             ),
         );
@@ -343,7 +370,7 @@ mod tests {
             &request(
                 None,
                 Some(OPERATOR_UID as i64),
-                "acp.fs.read",
+                "fs.read",
                 Some("/home/operator/docs/../.ssh/id_rsa"),
             ),
         );
@@ -354,13 +381,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_acp_fs_nomatch_is_not_applicable_and_bare_root_passes_pregate() {
+    fn admin_fs_nomatch_is_not_applicable_and_bare_root_passes_pregate() {
         let lp = lp_with(None, &[]);
         for path in ["/etc/hosts", "/"] {
             let v = decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(OPERATOR_UID as i64), "acp.fs.read", Some(path)),
+                &request(None, Some(OPERATOR_UID as i64), "fs.read", Some(path)),
             );
             assert_eq!(v, Verdict::NotApplicable, "{path}");
         }
@@ -369,7 +396,7 @@ mod tests {
     #[test]
     fn admin_reserved_classes_are_not_applicable() {
         let lp = lp_with(None, &[]);
-        for action in ["acp.session.prompt", "acp.terminal.exec", "unknown.thing"] {
+        for action in ["session.prompt", "terminal.create", "unknown.thing"] {
             let v = decide_loaded(
                 &lp,
                 &principal(),
@@ -453,7 +480,7 @@ mod tests {
         let v = decide_loaded(
             &lp,
             &principal(),
-            &request(None, Some(OPERATOR_UID as i64), "acp.fs.read", None),
+            &request(None, Some(OPERATOR_UID as i64), "fs.read", None),
         );
         assert_eq!(v, Verdict::Indeterminate);
         // But for a role that never reaches the grammar, absent path is
@@ -463,12 +490,83 @@ mod tests {
         let v2 = decide_loaded(
             &lp2,
             &principal(),
-            &request(None, Some(700), "acp.fs.read", None),
+            &request(None, Some(700), "fs.read", None),
         );
         assert_eq!(v2, Verdict::NotApplicable);
     }
 
     // ---- class-match rule pins (spec §5) ----
+
+    /// The admin class is NOT a blanket grant. A class-granular permit here
+    /// would grant every future admin term — containment, credential
+    /// brokering, policy reload — off an arm that keys nothing.
+    #[test]
+    fn admin_class_permits_only_whoami() {
+        let lp = lp_with(None, &[]); // shipped default: enrolled uid → admin
+        let req = |a: &str| request(None, Some(OPERATOR_UID as i64), a, None);
+        assert!(
+            matches!(
+                decide_loaded(&lp, &principal(), &req("admin.whoami")),
+                Verdict::Permit { .. }
+            ),
+            "the one built admin term must still permit"
+        );
+        for action in [
+            "admin.status",
+            "admin.contain",
+            "admin.release",
+            "admin.credential.broker",
+            "admin.policy.reload",
+            "admin.subject.bind",
+        ] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req(action)),
+                Verdict::NotApplicable,
+                "{action} must NOT permit off the admin class arm"
+            );
+        }
+    }
+
+    /// Each new class RESOLVES (so this cannot pass merely because `class_of`
+    /// returns None, as it would have before the rename) and ABSTAINS. Adding
+    /// a permissive arm for any of them turns this red.
+    #[test]
+    fn every_new_class_resolves_and_abstains() {
+        let lp = lp_with(None, &[]);
+        for (action, expect) in [
+            ("session.prompt", Class::Session),
+            ("terminal.create", Class::Terminal),
+            ("mcp.tool.call", Class::Mcp),
+            ("fs.write", Class::Fs),
+            ("fs.delete", Class::Fs),
+            ("kernel.contain", Class::Kernel),
+        ] {
+            assert_eq!(class_of(action), Some(expect), "{action} must resolve");
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &request(
+                        None,
+                        Some(OPERATOR_UID as i64),
+                        action,
+                        Some("/home/operator/x")
+                    ),
+                ),
+                Verdict::NotApplicable,
+                "{action} must abstain"
+            );
+        }
+    }
+
+    /// The old prefix is GONE, not aliased — a stale caller resolves to no
+    /// class and is denied, rather than silently hitting the fs grammar.
+    #[test]
+    fn the_acp_prefix_no_longer_resolves() {
+        for stale in ["acp.fs.read", "acp.session.prompt", "acp.terminal.exec"] {
+            assert_eq!(class_of(stale), None, "{stale} must not resolve");
+        }
+    }
 
     #[test]
     fn liveness_bypass_prefix_is_not_liveness() {
@@ -476,10 +574,10 @@ mod tests {
         assert_eq!(class_of("liveness.ping"), Some(Class::Liveness));
         assert_eq!(class_of("liveness"), Some(Class::Liveness));
         assert_eq!(class_of("admindeed"), None);
-        assert_eq!(class_of("acp.session"), Some(Class::AcpSession));
-        assert_eq!(class_of("acp.sessionX"), None);
-        assert_eq!(class_of("acp.fs.read"), Some(Class::AcpFs));
-        assert_eq!(class_of("acp.terminal.exec"), Some(Class::AcpTerminal));
+        assert_eq!(class_of("session"), Some(Class::Session));
+        assert_eq!(class_of("sessionX"), None);
+        assert_eq!(class_of("fs.read"), Some(Class::Fs));
+        assert_eq!(class_of("terminal.create"), Some(Class::Terminal));
         assert_eq!(class_of(""), None);
     }
 
@@ -489,7 +587,7 @@ mod tests {
         for (action, path) in [
             ("liveness.ping", None),
             ("admin.whoami", None),
-            ("acp.fs.read", Some("/home/operator/x")),
+            ("fs.read", Some("/home/operator/x")),
         ] {
             let v = decide_loaded(
                 &lp,
@@ -515,7 +613,7 @@ mod tests {
             &request(
                 Some(AGENT_SUBJECT),
                 Some(OPERATOR_UID as i64),
-                "acp.fs.read",
+                "fs.read",
                 Some("/home/operator/x"),
             ),
         );

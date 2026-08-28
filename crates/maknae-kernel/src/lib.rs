@@ -16,6 +16,7 @@ pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
 pub use groupres::*;
 pub use handler::{
     build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
+    KERNEL_ACTIONS,
 };
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,

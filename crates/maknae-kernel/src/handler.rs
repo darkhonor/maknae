@@ -13,6 +13,8 @@ use maknae_vault::VaultError;
 /// peer facts (`build_whoami`) so this decision stays a pure function of the verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
+    /// An enumerated term with no behaviour. Reached only after a Permit.
+    NoBehaviour,
     Pong,
     WhoamiRequested,
     /// The peer asked to read a file; the path is the VERB's own datum
@@ -26,6 +28,62 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::Ping => Dispatch::Pong,
         Verb::Whoami => Dispatch::WhoamiRequested,
         Verb::Read { path } => Dispatch::ReadRequested(path.clone()),
+        // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
+        // compile error until someone decides what it dispatches to.
+        Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain
+        | Verb::AdminRelease
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminCredentialBroker
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew
+        | Verb::SessionResume
+        | Verb::SessionClose
+        | Verb::SessionDelete
+        | Verb::SessionList
+        | Verb::SessionFork
+        | Verb::SessionPrompt
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::FsWrite
+        | Verb::FsDelete
+        | Verb::FsMove
+        | Verb::FsList
+        | Verb::FsStat
+        | Verb::FsMkdir
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
     }
 }
 
@@ -79,11 +137,72 @@ use std::time::Duration;
 /// Verb → PDP action-class name (#85 spec §5; the audit record's `action`
 /// field carries the same vocabulary — decision and record share one).
 /// `Whoami → admin.whoami` is the ruled deliberate narrowing.
+/// The actions the KERNEL initiates on its own behalf, which have no client
+/// request and therefore no `Verb` variant (#67 D2). They are still PDP-decided
+/// and audited, so they need action strings — and the drift gate needs a source
+/// to diff the manifest against, or two of the vocabulary's 59 terms would carry
+/// no recorded disposition (spec R7).
+pub const KERNEL_ACTIONS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
+
 pub fn verb_to_action(verb: &Verb) -> &'static str {
     match verb {
         Verb::Ping => "liveness.ping",
         Verb::Whoami => "admin.whoami",
-        Verb::Read { .. } => "acp.fs.read",
+        Verb::AdminStatus => "admin.status",
+        Verb::AdminConfigShow => "admin.config.show",
+        Verb::AdminAuditTail => "admin.audit.tail",
+        Verb::AdminPolicyReload => "admin.policy.reload",
+        Verb::AdminSubjectList => "admin.subject.list",
+        Verb::AdminSubjectBind => "admin.subject.bind",
+        Verb::AdminSubjectUnbind => "admin.subject.unbind",
+        Verb::AdminContain => "admin.contain",
+        Verb::AdminRelease => "admin.release",
+        Verb::AdminCredentialRotate => "admin.credential.rotate",
+        Verb::AdminProviderList => "admin.provider.list",
+        Verb::AdminProviderSet => "admin.provider.set",
+        Verb::AdminProviderDisable => "admin.provider.disable",
+        Verb::AdminCredentialBroker => "admin.credential.broker",
+        Verb::AdminSessionList => "admin.session.list",
+        Verb::AdminSessionTerminate => "admin.session.terminate",
+        Verb::SessionNew => "session.new",
+        Verb::SessionResume => "session.resume",
+        Verb::SessionClose => "session.close",
+        Verb::SessionDelete => "session.delete",
+        Verb::SessionList => "session.list",
+        Verb::SessionFork => "session.fork",
+        Verb::SessionPrompt => "session.prompt",
+        Verb::SessionCancel => "session.cancel",
+        Verb::SessionSetconfigoption => "session.set_config_option",
+        Verb::SessionSetmode => "session.set_mode",
+        Verb::SessionLoad => "session.load",
+        Verb::SessionUpdate => "session.update",
+        Verb::SessionRequestpermission => "session.request_permission",
+        Verb::SessionElicitCreate => "session.elicit.create",
+        Verb::SessionElicitComplete => "session.elicit.complete",
+        Verb::SessionCompact => "session.compact",
+        Verb::Read { .. } => "fs.read",
+        Verb::FsWrite => "fs.write",
+        Verb::FsDelete => "fs.delete",
+        Verb::FsMove => "fs.move",
+        Verb::FsList => "fs.list",
+        Verb::FsStat => "fs.stat",
+        Verb::FsMkdir => "fs.mkdir",
+        Verb::FsLink => "fs.link",
+        Verb::FsChmod => "fs.chmod",
+        Verb::FsChown => "fs.chown",
+        Verb::TerminalCreate => "terminal.create",
+        Verb::TerminalOutput => "terminal.output",
+        Verb::TerminalWaitforexit => "terminal.wait_for_exit",
+        Verb::TerminalKill => "terminal.kill",
+        Verb::TerminalRelease => "terminal.release",
+        Verb::TerminalInput => "terminal.input",
+        Verb::McpConnect => "mcp.connect",
+        Verb::McpDisconnect => "mcp.disconnect",
+        Verb::McpMessage => "mcp.message",
+        Verb::McpToolCall => "mcp.tool.call",
+        Verb::McpResourceRead => "mcp.resource.read",
+        Verb::McpPromptGet => "mcp.prompt.get",
+        Verb::McpSamplingCreate => "mcp.sampling.create",
     }
 }
 
@@ -397,10 +516,7 @@ mod tests {
     fn verb_action_names_are_the_taxonomy() {
         assert_eq!(verb_to_action(&Verb::Ping), "liveness.ping");
         assert_eq!(verb_to_action(&Verb::Whoami), "admin.whoami");
-        assert_eq!(
-            verb_to_action(&Verb::Read { path: "/x".into() }),
-            "acp.fs.read"
-        );
+        assert_eq!(verb_to_action(&Verb::Read { path: "/x".into() }), "fs.read");
     }
 
     #[test]
@@ -471,7 +587,7 @@ mod tests {
             },
             501,
         );
-        assert_eq!(r.action.0, "acp.fs.read");
+        assert_eq!(r.action.0, "fs.read");
         assert_eq!(
             r.resource.0.get("path"),
             Some(&maknae_security::AttrValue::Str("/home/op/n".into()))
@@ -696,6 +812,187 @@ mod tests {
         match map_read_error(other) {
             ReadRefusal::Refused(m) => assert!(m.contains("hard-linked"), "{m}"),
             r => panic!("expected Refused, got {r:?}"),
+        }
+    }
+
+    /// Every term in the vocabulary, for the exhaustiveness properties below.
+    /// The wildcard-free matches in `verb_to_action`/`dispatch_verb` are the
+    /// real completeness control — the compiler refuses a variant with no arm.
+    /// This list is what lets the properties be *asserted* rather than assumed.
+    fn all_verbs() -> Vec<Verb> {
+        vec![
+            Verb::Ping,
+            Verb::Whoami,
+            Verb::AdminStatus,
+            Verb::AdminConfigShow,
+            Verb::AdminAuditTail,
+            Verb::AdminPolicyReload,
+            Verb::AdminSubjectList,
+            Verb::AdminSubjectBind,
+            Verb::AdminSubjectUnbind,
+            Verb::AdminContain,
+            Verb::AdminRelease,
+            Verb::AdminCredentialRotate,
+            Verb::AdminProviderList,
+            Verb::AdminProviderSet,
+            Verb::AdminProviderDisable,
+            Verb::AdminCredentialBroker,
+            Verb::AdminSessionList,
+            Verb::AdminSessionTerminate,
+            Verb::SessionNew,
+            Verb::SessionResume,
+            Verb::SessionClose,
+            Verb::SessionDelete,
+            Verb::SessionList,
+            Verb::SessionFork,
+            Verb::SessionPrompt,
+            Verb::SessionCancel,
+            Verb::SessionSetconfigoption,
+            Verb::SessionSetmode,
+            Verb::SessionLoad,
+            Verb::SessionUpdate,
+            Verb::SessionRequestpermission,
+            Verb::SessionElicitCreate,
+            Verb::SessionElicitComplete,
+            Verb::SessionCompact,
+            Verb::Read {
+                path: String::new(),
+            },
+            Verb::FsWrite,
+            Verb::FsDelete,
+            Verb::FsMove,
+            Verb::FsList,
+            Verb::FsStat,
+            Verb::FsMkdir,
+            Verb::FsLink,
+            Verb::FsChmod,
+            Verb::FsChown,
+            Verb::TerminalCreate,
+            Verb::TerminalOutput,
+            Verb::TerminalWaitforexit,
+            Verb::TerminalKill,
+            Verb::TerminalRelease,
+            Verb::TerminalInput,
+            Verb::McpConnect,
+            Verb::McpDisconnect,
+            Verb::McpMessage,
+            Verb::McpToolCall,
+            Verb::McpResourceRead,
+            Verb::McpPromptGet,
+            Verb::McpSamplingCreate,
+        ]
+    }
+
+    /// The kernel actions have no `Verb` variant (#67 D2) but are still
+    /// PDP-decided, so they must resolve to the `kernel` class like any other
+    /// term — and must never collide with a client-reachable action string.
+    #[test]
+    fn kernel_actions_resolve_to_the_kernel_class_and_collide_with_nothing() {
+        let client: Vec<&str> = all_verbs().iter().map(verb_to_action).collect();
+        for a in KERNEL_ACTIONS {
+            assert_eq!(
+                a.split('.').next(),
+                Some("kernel"),
+                "{a} must be a kernel action"
+            );
+            assert!(
+                !client.contains(&a),
+                "{a} collides with a client-reachable term"
+            );
+        }
+    }
+
+    /// Claim: a parameterless `[N]` term supplies NO resource attribute, so
+    /// `decide_fs` cannot reach the capability grammar with a path and an
+    /// unbuilt `fs.*` term can never match `Read(~/**)`. That safety is
+    /// STRUCTURAL, and this is what makes it provable: it was previously
+    /// asserted in a PR body with `Whoami` as its only test case.
+    #[test]
+    fn only_read_carries_a_resource_attribute() {
+        for v in all_verbs() {
+            let r = build_authz_request(&v, 501);
+            if matches!(v, Verb::Read { .. }) {
+                assert!(
+                    r.resource.0.str("path").is_some(),
+                    "fs.read must carry its path"
+                );
+            } else {
+                assert!(
+                    r.resource.0.str("path").is_none(),
+                    "{} must carry NO path — the fs safety argument rests on it",
+                    verb_to_action(&v)
+                );
+            }
+        }
+    }
+
+    /// #67 D4: the vocabulary is the size the spec says.
+    #[test]
+    fn the_vocabulary_is_fifty_seven_client_reachable_terms() {
+        assert_eq!(all_verbs().len(), 57);
+    }
+
+    /// Two terms sharing an action string would be decided as one another —
+    /// a typo'd class prefix in any arm is invisible without this.
+    #[test]
+    fn every_action_string_is_distinct() {
+        let actions: Vec<&str> = all_verbs().iter().map(verb_to_action).collect();
+        let uniq: std::collections::BTreeSet<&&str> = actions.iter().collect();
+        assert_eq!(
+            uniq.len(),
+            actions.len(),
+            "action strings must be pairwise distinct"
+        );
+    }
+
+    /// #67 D1: nothing structural prevents this collision now the `acp.`
+    /// prefix is gone, so it is a test obligation.
+    #[test]
+    fn no_action_string_equals_an_adr0019_pseudo_action() {
+        for v in all_verbs() {
+            let a = verb_to_action(&v);
+            assert!(
+                !["connect", "read", "decode", "authz", "posture"].contains(&a),
+                "{a} collides with an ADR-0019 transport/boot pseudo-action"
+            );
+        }
+    }
+
+    /// Every term resolves to one of the seven closed classes. A term whose
+    /// class prefix is wrong would fall to `None` -> Deny at runtime and be
+    /// invisible; this fails the suite instead.
+    #[test]
+    fn every_term_resolves_to_a_closed_class() {
+        const CLASSES: [&str; 7] = [
+            "liveness", "admin", "session", "fs", "terminal", "mcp", "kernel",
+        ];
+        for v in all_verbs() {
+            let a = verb_to_action(&v);
+            let head = a.split('.').next().unwrap();
+            assert!(CLASSES.contains(&head), "{a} resolves to no closed class");
+        }
+    }
+
+    /// The shipped variants keep their identifiers because serde encodes
+    /// externally-tagged variants BY NAME — the identifier IS the CBOR key.
+    /// Renaming one is a silent hard wire break with no version bump.
+    #[test]
+    fn the_shipped_variants_keep_their_wire_keys() {
+        for (verb, key) in [
+            (Verb::Ping, "Ping"),
+            (Verb::Whoami, "Whoami"),
+            (Verb::Read { path: "/x".into() }, "Read"),
+        ] {
+            let bytes = maknae_proto::encode_request(&maknae_proto::Request {
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                verb,
+            })
+            .expect("encodes");
+            let hdr = [&[0x60 | key.len() as u8][..], key.as_bytes()].concat();
+            assert!(
+                bytes.windows(hdr.len()).any(|wnd| wnd == hdr.as_slice()),
+                "{key} must appear as a CBOR text key of its exact length"
+            );
         }
     }
 }

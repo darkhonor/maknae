@@ -1,5 +1,5 @@
 //! DAC authz policy schema v1 (spec §7, PR-J1 Task 6) — the Claude-Code/Codex-
-//! style capability grammar (`Read(...)`, `Bash(...)`) that a FUTURE per-request
+//! style capability grammar (`Read(...)`) that a FUTURE per-request
 //! PDP evaluates. This module ships and VALIDATES the contract (parse +
 //! fail-closed validation + the matching grammar as an executable pin) — it
 //! does not wire evaluation into any request path yet.
@@ -59,7 +59,6 @@ pub enum Match3 {
 #[derive(Clone, Copy, Debug)]
 pub enum Request<'a> {
     Read(&'a Path),
-    Bash(&'a [String]),
 }
 
 /// The policy's answer for a [`Request`] (spec §7): there is no `ask`.
@@ -107,31 +106,22 @@ impl AuthzPolicy {
 }
 
 /// One `Capability(specifier)` entry (spec §7). v1 capabilities: `Read`,
-/// `Bash` only — any other capability name is `AuthzError::BadPattern`.
+/// `Read` only — any other capability name is `AuthzError::BadPattern`.
+/// `Bash` was RETIRED by #67 in favour of the `terminal.*` action class: it was a
+/// second way to express execution authority, and argv matching is a
+/// categorically harder problem than the path globs this grammar was built for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
     Read(PathGlob),
-    Bash { tokens: Vec<String>, any_args: bool },
 }
 
 impl Pattern {
     fn matches_req(&self, req: &Request<'_>) -> bool {
-        match (self, req) {
-            (Pattern::Read(glob), Request::Read(path)) => glob.matches(path),
-            (Pattern::Bash { tokens, any_args }, Request::Bash(argv)) => {
-                if argv.len() < tokens.len() {
-                    return false;
-                }
-                if argv[..tokens.len()] != tokens[..] {
-                    return false;
-                }
-                if argv.len() == tokens.len() {
-                    return true; // exact-length prefix match — always accepted
-                }
-                *any_args // argv has EXTRA tokens beyond the pattern — only ":*" allows this
-            }
-            _ => false,
-        }
+        // Both enums are single-variant since `Bash` was retired (#67), so this
+        // destructure is irrefutable. It regains a `match` the moment the
+        // non-resource capability form D3 requires lands.
+        let (Pattern::Read(glob), Request::Read(path)) = (self, req);
+        glob.matches(path)
     }
 }
 
@@ -305,7 +295,7 @@ pub enum AuthzError {
     /// A key not defined by the grammar appeared at some level of the document.
     UnknownKey(String),
     /// A pattern specifier failed to parse (bad shape, unknown capability,
-    /// empty `Bash` tokens, non-absolute `Read` glob, …).
+    /// non-absolute `Read` glob, unknown capability name, …).
     BadPattern(String),
     /// A pattern used `~` but no principal is enrolled to resolve it against.
     TildeWithoutPrincipal(String),
@@ -412,17 +402,6 @@ fn parse_pattern(spec: &str, principal_home: Option<&Path>) -> Result<Pattern, A
     let inner = &spec[open + 1..spec.len() - 1];
     match capability {
         "Read" => Ok(Pattern::Read(PathGlob::parse(inner, principal_home)?)),
-        "Bash" => {
-            let (body, any_args) = match inner.strip_suffix(":*") {
-                Some(b) => (b, true),
-                None => (inner, false),
-            };
-            let tokens: Vec<String> = body.split_whitespace().map(String::from).collect();
-            if tokens.is_empty() {
-                return Err(bad());
-            }
-            Ok(Pattern::Bash { tokens, any_args })
-        }
         _ => Err(bad()),
     }
 }
@@ -785,10 +764,11 @@ mod tests {
     fn read_absolute_pattern_parses() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/etc/passwd)\"\n";
         let policy = parse_policy(yaml, Some(&home())).unwrap();
-        match &policy.allow[0] {
-            Pattern::Read(glob) => assert!(glob.matches(Path::new("/etc/passwd"))),
-            other => panic!("expected Pattern::Read, got {other:?}"),
-        }
+        // `Pattern` is single-variant since `Bash` was retired (#67), so this
+        // destructure is irrefutable; it regains a `match` when the
+        // non-resource capability form D3 requires lands.
+        let Pattern::Read(glob) = &policy.allow[0];
+        assert!(glob.matches(Path::new("/etc/passwd")));
     }
 
     #[test]
@@ -809,13 +789,22 @@ mod tests {
         ));
     }
 
+    /// `Bash` was RETIRED by #67 in favour of the `terminal.*` action class. A
+    /// policy still carrying it is a fail-closed BOOT REFUSAL, not a silently
+    /// ignored line — nothing shipped uses it, so the break costs nothing now
+    /// and prevents a second execution-authority vocabulary later.
     #[test]
-    fn bash_empty_tokens_is_bad_pattern() {
-        let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Bash()\"\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::BadPattern(_))
-        ));
+    fn the_retired_bash_capability_is_refused_at_parse() {
+        for spec in ["Bash(ls)", "Bash(git status:*)", "Bash()"] {
+            let yaml = format!("schema_version: 1\npermissions:\n  allow:\n    - \"{spec}\"\n");
+            assert!(
+                matches!(
+                    parse_policy(&yaml, Some(&home())),
+                    Err(AuthzError::BadPattern(_))
+                ),
+                "{spec} must be refused as an unknown capability"
+            );
+        }
     }
 
     #[test]
@@ -871,10 +860,8 @@ mod tests {
     // ---- glob matching semantics (spec §7) ----
 
     fn read_glob(pattern: &str) -> PathGlob {
-        match parse_pattern(&format!("Read({pattern})"), Some(&home())).unwrap() {
-            Pattern::Read(g) => g,
-            other => panic!("expected Read, got {other:?}"),
-        }
+        let Pattern::Read(g) = parse_pattern(&format!("Read({pattern})"), Some(&home())).unwrap();
+        g
     }
 
     #[test]
@@ -957,69 +944,6 @@ mod tests {
             PathGlob::parse("~/x", Some(Path::new(bad_home))),
             Err(AuthzError::BadPattern(_))
         ));
-    }
-
-    // ---- Bash argv matching (spec §7) ----
-
-    #[test]
-    fn bash_exact_vs_any_args() {
-        let exact = Pattern::Bash {
-            tokens: vec!["git".into(), "status".into()],
-            any_args: false,
-        };
-        let any = Pattern::Bash {
-            tokens: vec!["git".into(), "status".into()],
-            any_args: true,
-        };
-        let argv = vec!["git".to_string(), "status".to_string(), "-v".to_string()];
-        assert!(!exact.matches_req(&Request::Bash(&argv)));
-        assert!(any.matches_req(&Request::Bash(&argv)));
-    }
-
-    #[test]
-    fn bash_shorter_argv_is_denied_default() {
-        let exact = Pattern::Bash {
-            tokens: vec!["git".into(), "status".into()],
-            any_args: false,
-        };
-        let argv = vec!["git".to_string()];
-        assert!(!exact.matches_req(&Request::Bash(&argv)));
-    }
-
-    #[test]
-    fn bash_exact_length_match_succeeds() {
-        // Pins the `<` boundary in matches_req (argv.len() < tokens.len()):
-        // argv EXACTLY as long as tokens, with every token equal, must match
-        // even without `:*` — an off-by-one (`<=`) would wrongly reject this.
-        let exact = Pattern::Bash {
-            tokens: vec!["git".into(), "status".into()],
-            any_args: false,
-        };
-        let argv = vec!["git".to_string(), "status".to_string()];
-        assert!(exact.matches_req(&Request::Bash(&argv)));
-    }
-
-    #[test]
-    fn bash_colon_star_parses_any_args() {
-        match parse_pattern("Bash(git status:*)", None).unwrap() {
-            Pattern::Bash { tokens, any_args } => {
-                assert_eq!(tokens, vec!["git".to_string(), "status".to_string()]);
-                assert!(any_args);
-            }
-            other => panic!("expected Bash, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pattern_type_mismatch_never_matches() {
-        let read = Pattern::Read(read_glob("~/**"));
-        let bash = Pattern::Bash {
-            tokens: vec!["git".into()],
-            any_args: true,
-        };
-        let argv = vec!["git".to_string()];
-        assert!(!read.matches_req(&Request::Bash(&argv)));
-        assert!(!bash.matches_req(&Request::Read(Path::new("/home/operator/x"))));
     }
 
     // ---- evaluate: deny-wins, default-deny (spec §7) ----

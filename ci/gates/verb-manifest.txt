@@ -1,0 +1,64 @@
+# Verb-vocabulary drift manifest (#67, spec R7).
+# kind<TAB>name<TAB>disposition<TAB>rationale
+# The gate asserts a DECISION was RECORDED for every term — never that a
+# grant exists. 'not-granted' is valid and is correct for most terms.
+action	liveness.ping	granted	shipped; permitted to every bound role
+action	admin.whoami	granted	shipped; the ONE admin term the class arm keys on
+action	admin.status	not-granted	enumerated, decided, answers NotImplemented
+action	admin.config.show	not-granted	enumerated, decided, answers NotImplemented
+action	admin.audit.tail	not-granted	enumerated, decided, answers NotImplemented
+action	admin.policy.reload	not-granted	enumerated, decided, answers NotImplemented
+action	admin.subject.list	not-granted	enumerated, decided, answers NotImplemented
+action	admin.subject.bind	not-granted	enumerated, decided, answers NotImplemented
+action	admin.subject.unbind	not-granted	enumerated, decided, answers NotImplemented
+action	admin.contain	not-granted	enumerated, decided, answers NotImplemented
+action	admin.release	not-granted	enumerated, decided, answers NotImplemented
+action	admin.credential.rotate	not-granted	enumerated, decided, answers NotImplemented
+action	admin.provider.list	not-granted	enumerated, decided, answers NotImplemented
+action	admin.provider.set	not-granted	enumerated, decided, answers NotImplemented
+action	admin.provider.disable	not-granted	enumerated, decided, answers NotImplemented
+action	admin.credential.broker	not-granted	enumerated, decided, answers NotImplemented
+action	admin.session.list	not-granted	enumerated, decided, answers NotImplemented
+action	admin.session.terminate	not-granted	enumerated, decided, answers NotImplemented
+action	session.new	not-granted	enumerated, decided, answers NotImplemented
+action	session.resume	not-granted	enumerated, decided, answers NotImplemented
+action	session.close	not-granted	enumerated, decided, answers NotImplemented
+action	session.delete	not-granted	enumerated, decided, answers NotImplemented
+action	session.list	not-granted	enumerated, decided, answers NotImplemented
+action	session.fork	not-granted	enumerated, decided, answers NotImplemented
+action	session.prompt	not-granted	enumerated, decided, answers NotImplemented
+action	session.cancel	not-granted	enumerated, decided, answers NotImplemented
+action	session.set_config_option	not-granted	enumerated, decided, answers NotImplemented
+action	session.set_mode	not-granted	enumerated, decided, answers NotImplemented
+action	session.load	not-granted	enumerated, decided, answers NotImplemented
+action	session.update	not-granted	enumerated, decided, answers NotImplemented
+action	session.request_permission	not-granted	enumerated, decided, answers NotImplemented
+action	session.elicit.create	not-granted	enumerated, decided, answers NotImplemented
+action	session.elicit.complete	not-granted	enumerated, decided, answers NotImplemented
+action	session.compact	not-granted	enumerated, decided, answers NotImplemented
+action	fs.read	granted	shipped; decided through the capability grammar
+action	fs.write	not-granted	enumerated, decided, answers NotImplemented
+action	fs.delete	not-granted	enumerated, decided, answers NotImplemented
+action	fs.move	not-granted	enumerated, decided, answers NotImplemented
+action	fs.list	not-granted	enumerated, decided, answers NotImplemented
+action	fs.stat	not-granted	enumerated, decided, answers NotImplemented
+action	fs.mkdir	not-granted	enumerated, decided, answers NotImplemented
+action	fs.link	not-granted	enumerated, decided, answers NotImplemented
+action	fs.chmod	not-granted	enumerated, decided, answers NotImplemented
+action	fs.chown	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.create	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.output	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.wait_for_exit	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.kill	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.release	not-granted	enumerated, decided, answers NotImplemented
+action	terminal.input	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.connect	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.disconnect	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.message	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.tool.call	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.resource.read	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.prompt.get	not-granted	enumerated, decided, answers NotImplemented
+action	mcp.sampling.create	not-granted	enumerated, decided, answers NotImplemented
+kernel-action	kernel.contain	not-granted	no Verb variant (D2); reachable by no client
+kernel-action	kernel.session.terminate	not-granted	no Verb variant (D2); reachable by no client
+capability	Read	granted	the only grammar capability; Bash retired by #67

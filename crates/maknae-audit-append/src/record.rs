@@ -67,7 +67,7 @@ pub struct AuditRecord {
     pub subject: Subject,
     pub action: String,
     /// AU-3 "objects involved" (#77 / ADR-0019 amendment): the canonical
-    /// decided resource path for resource-bearing verbs (`acp.fs.read`);
+    /// decided resource path for resource-bearing verbs (`fs.read`);
     /// absent for resource-free verbs (Ping/Whoami) — additive for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
@@ -326,7 +326,7 @@ mod tests {
                     user: None,
                     plane_uri_san: None,
                 },
-                action: "acp.fs.read".into(),
+                action: "fs.read".into(),
                 object,
                 outcome: Outcome {
                     result: "deny".into(),
