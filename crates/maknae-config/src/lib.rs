@@ -43,6 +43,11 @@ pub use loader::load_config;
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use authz::load_authz_with_requirement;
+// Re-exported so downstream seam constructors (maknae-authz-basic's
+// HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
+// dependency of their own; unix-gated like the fn whose signature carries it.
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use maknae_io::TargetRequired;
 pub use authz::{
     load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern, Request,
 };
