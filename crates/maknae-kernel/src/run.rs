@@ -592,6 +592,38 @@ pub async fn handle<S, E, P>(
     // actually produced (the invariant gates DISCLOSURE — content read into
     // daemon memory whose record cannot append is dropped undisclosed).
     match dispatch_verb(&request.verb) {
+        Dispatch::NoBehaviour => {
+            // Decided and PERMITTED above; the term simply has no behaviour.
+            // Same audit-then-respond gate as every sibling path — the record
+            // must be durable before any frame is released (ADR-0019).
+            let appended = emit_request_outcome(
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                object_path.as_deref(),
+                "permit",
+                "permitted; term not implemented",
+                "not-implemented",
+                &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::NotImplemented,
+                    "not implemented",
+                )
+                .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
         Dispatch::Pong | Dispatch::WhoamiRequested => {
             let appended = emit_request_outcome(
                 &emit,
@@ -617,6 +649,7 @@ pub async fn handle<S, E, P>(
                 Dispatch::Pong => Payload::Pong,
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
+                Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };
             let response = Response {
                 protocol_version: PROTOCOL_VERSION,
