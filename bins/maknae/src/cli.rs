@@ -79,6 +79,14 @@ enum Command {
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
+    /// Read a file under the enrolled home through the daemon's reference
+    /// monitor (the policy in /etc/maknae/authz.yaml decides; raw bytes to
+    /// stdout). Paths are sent lexically absolute; `..` is refused by the
+    /// daemon's canonical pre-gate.
+    Read {
+        /// File to read (absolute, or relative to the current directory).
+        path: std::path::PathBuf,
+    },
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(crate::enroll::EnrollArgs),
@@ -88,14 +96,16 @@ enum Command {
     EnrollHelper(crate::enroll::HelperArgs),
 }
 
-/// The read-only verbs the wire path can issue (mirrors `maknae_proto::Verb`).
-/// Plain `Copy` enum, no `clap` derive of its own — `Command::Ping`/`Whoami`
-/// above own the argument surface; this is purely the internal wire-path type
-/// `execute`/`round_trip`/`print_payload_for_verb` were already built around.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The verbs the wire path can issue (mirrors `maknae_proto::Verb`).
+/// `Clone` (no longer `Copy` — `Read` carries its path), no `clap` derive of
+/// its own — `Command::*` above own the argument surface; this is purely the
+/// internal wire-path type `execute`/`round_trip`/`print_payload_for_verb`
+/// were already built around.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Verb {
     Ping,
     Whoami,
+    Read { path: String },
 }
 
 impl From<Verb> for maknae_proto::Verb {
@@ -103,6 +113,7 @@ impl From<Verb> for maknae_proto::Verb {
         match v {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
+            Verb::Read { path } => maknae_proto::Verb::Read { path },
         }
     }
 }
@@ -179,7 +190,7 @@ async fn round_trip(
 
     let request = Request {
         protocol_version: PROTOCOL_VERSION,
-        verb: verb.into(),
+        verb: verb.clone().into(),
     };
     let body = encode_request(&request).map_err(|e| e.to_string())?;
     // Bound the request write like the handshake and read: a daemon that accepted but
@@ -250,6 +261,15 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
             Ok(())
         }
+        (Verb::Read { .. }, Payload::ReadContent(content)) => {
+            // Raw bytes, no trailing newline, no lossy conversion — a
+            // non-UTF-8 file is legal content.
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&content.0)
+                .map_err(|e| format!("writing content to stdout: {e}"))?;
+            Ok(())
+        }
         (v, p) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
@@ -264,6 +284,24 @@ pub async fn run_cli() -> ExitCode {
     match cli.command {
         Command::Ping => wire_exit_code(execute(Verb::Ping).await),
         Command::Whoami => wire_exit_code(execute(Verb::Whoami).await),
+        Command::Read { path } => {
+            // Lexically absolutize client-side (std::path::absolute keeps `..`
+            // on Unix — the daemon's canonical pre-gate refuses those as
+            // BadRequest, a stated consequence); `~` is the shell's business.
+            match std::path::absolute(&path) {
+                Ok(abs) => match abs.into_os_string().into_string() {
+                    Ok(p) => wire_exit_code(execute(Verb::Read { path: p }).await),
+                    Err(_) => {
+                        eprintln!("maknae: path is not valid UTF-8 (recorded v1 limit)");
+                        ExitCode::FAILURE
+                    }
+                },
+                Err(e) => {
+                    eprintln!("maknae: cannot absolutize path: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Enroll(args) => crate::enroll::run_enroll(args).await,
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
@@ -632,5 +670,47 @@ mod tests {
             load_config(&d.0, &cli_config_specs()),
             Err(maknae_config::ConfigError::UnknownSection { .. })
         ));
+    }
+    // ---- read verb surface (#77) ----
+
+    #[test]
+    fn read_parses_with_a_path() {
+        let cli = Cli::try_parse_from(["maknae", "read", "/home/op/notes.txt"]).unwrap();
+        assert!(matches!(cli.command, Command::Read { .. }));
+    }
+
+    #[test]
+    fn read_verb_converts_to_proto_with_its_path() {
+        let v: maknae_proto::Verb = Verb::Read {
+            path: "/a/b".into(),
+        }
+        .into();
+        assert_eq!(
+            v,
+            maknae_proto::Verb::Read {
+                path: "/a/b".into()
+            }
+        );
+    }
+
+    #[test]
+    fn read_payload_arm_accepts_content_and_refuses_mismatch() {
+        use maknae_proto::Bytes;
+        let ok = print_payload_for_verb(
+            Verb::Read { path: "/a".into() },
+            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
+        );
+        assert!(ok.is_ok());
+        let mismatch = print_payload_for_verb(Verb::Read { path: "/a".into() }, Payload::Pong);
+        assert!(mismatch.is_err(), "a Pong for a read is a protocol error");
+        let mismatch2 = print_payload_for_verb(
+            Verb::Ping,
+            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
+        );
+        assert!(mismatch2.is_err(), "content for a ping is a protocol error");
+    }
+
+    fn maknae_io_zeroizing(v: Vec<u8>) -> zeroize::Zeroizing<Vec<u8>> {
+        zeroize::Zeroizing::new(v)
     }
 }

@@ -24,7 +24,10 @@ RuntimeDirectoryMode=0751
 # (which chowns/chmods at start, colliding with the chattr +a inode).
 ReadWritePaths=/var/log/maknae
 ProtectSystem=strict
-ProtectHome=yes
+# read-only since #77 (spec D5a, dated 2026-08-28): the read PEP reads the
+# enrolled home through a maknae-io anchor under PDP decision; write to any
+# home remains forbidden at this layer regardless of DAC/MAC.
+ProtectHome=read-only
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

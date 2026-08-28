@@ -71,6 +71,13 @@ pub enum IoError {
         path: PathBuf,
         nlink: u64,
     },
+    /// The target's size exceeds the caller's named `max_bytes` requirement —
+    /// refused before any allocation (#77: the read PEP's frame budget).
+    TargetTooLarge {
+        path: PathBuf,
+        limit: u64,
+        actual: u64,
+    },
     /// The file's length changed between the `fstat` that sized the buffer and the
     /// read that filled it. Returned rather than silently delivering the bytes we
     /// happened to get: on a policy file, a rule appended in that window would
@@ -128,6 +135,17 @@ impl std::fmt::Display for IoError {
             }
             Self::MultiplyLinked { path, nlink } => {
                 write!(f, "hard-linked (nlink={nlink}): {}", path.display())
+            }
+            Self::TargetTooLarge {
+                path,
+                limit,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "too large ({actual} bytes, limit {limit}): {}",
+                    path.display()
+                )
             }
             Self::SizeChanged {
                 path,

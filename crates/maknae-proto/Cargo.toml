@@ -12,6 +12,10 @@ workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 ciborium = "0.2"
+# Same pin form as maknae-io's: file content on the wire is secret-adjacent
+# (spec D5) and must not linger in freed heap; alloc-only, no default features.
+# Already in the workspace graph via maknae-io — no new supply-chain surface.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
 tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]

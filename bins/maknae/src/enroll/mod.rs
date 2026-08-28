@@ -1147,6 +1147,102 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
     }
 }
 
+/// #77 read-path access grants (spec D5a), Linux, root context:
+///  1. a SINGLE, NON-RECURSIVE ACL on the enrolled home — `u:_maknae:rx`
+///     (`r` because the anchored reader opens the home O_RDONLY|O_DIRECTORY
+///     per ADR-0021 D3; `x` for traversal). Deliberately NOT recursive and NO
+///     default ACL: the recursive form would hand the daemon DAC read over
+///     the very secrets the deny list protects AND, via the POSIX ACL mask's
+///     st_mode effect, make OpenSSH refuse the operator's own 0600 keys.
+///     Removable with one `setfacl -x u:_maknae ~` (reads degrade, daemon
+///     unaffected).
+///  2. the AppArmor local include narrowing the profile's home read to THIS
+///     home, plus `apparmor_parser -r` (Debian-family; both no-ops where
+///     AppArmor is absent). SELinux needs no per-home step (type-based
+///     vectors ship in the .te).
+///
+/// Side effect, recorded: a POSIX ACL raises the st_mode GROUP bits to the
+/// ACL mask, so a 0700 home stats ~0750 afterward — still within the
+/// anchor's `0o022` no-write mask (group READ is fine); noted so the mode
+/// change is never mistaken for drift.
+///
+/// Direct fs write + Command usage below carry std-fs-allowlist entries.
+fn grant_read_path_access(home: &Path, verbose: bool) {
+    // 1. DAC ACL (needs the `acl` package — a warn, not a failure, without it).
+    let acl = std::process::Command::new("setfacl")
+        .args(["-m", "u:_maknae:rx"])
+        .arg(home)
+        .output();
+    match acl {
+        Ok(o) if o.status.success() => {
+            if verbose {
+                eprintln!("exec: setfacl -m u:_maknae:rx {}", home.display());
+            }
+        }
+        Ok(o) => eprintln!(
+            "maknae enroll: setfacl failed ({}); reads will be unavailable until the home grants _maknae r-x: {}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!(
+            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or grant _maknae r-x on {} — reads fail closed until then",
+            home.display()
+        ),
+    }
+
+    // 2. AppArmor local include (Debian-family only; /etc/apparmor.d absent
+    // means AppArmor isn't managing this host — skip; the local/ SUBDIR is
+    // created if missing, root context). The home path is interpolated into
+    // profile syntax: refuse metacharacters outright (fail closed to
+    // reads-unavailable) rather than risk a silently WIDENED rule.
+    let home_str = home.display().to_string();
+    let home_is_profile_safe = home_str
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
+    let local_dir = Path::new("/etc/apparmor.d/local");
+    if Path::new("/etc/apparmor.d").is_dir() && !home_is_profile_safe {
+        eprintln!(
+            "maknae enroll: home path {home_str:?} contains AppArmor metacharacters; refusing to write the local include — reads fail closed under AppArmor"
+        );
+    } else if Path::new("/etc/apparmor.d").is_dir() {
+        if !local_dir.is_dir() {
+            let _ = std::fs::create_dir_all(local_dir);
+        }
+        let snippet = format!(
+            "# Written by `maknae enroll` (#77): narrow the daemon's home read to the
+# ENROLLED home only. Read-only; regenerate by re-running enroll.
+{}/ r,
+{}/** r,
+",
+            home.display(),
+            home.display()
+        );
+        let inc = local_dir.join("usr.bin.maknaed");
+        if let Err(e) = std::fs::write(&inc, snippet) {
+            eprintln!(
+                "maknae enroll: cannot write {} ({e}); reads fail closed under AppArmor until it exists",
+                inc.display()
+            );
+        } else {
+            let reload = std::process::Command::new("apparmor_parser")
+                .args(["-r", "/etc/apparmor.d/usr.bin.maknaed"])
+                .output();
+            match reload {
+                Ok(o) if o.status.success() => {
+                    if verbose {
+                        eprintln!("exec: apparmor_parser -r usr.bin.maknaed");
+                    }
+                }
+                Ok(o) => eprintln!(
+                    "maknae enroll: apparmor_parser reload failed ({}); reads fail closed until the profile reloads",
+                    o.status
+                ),
+                Err(e) => eprintln!("maknae enroll: apparmor_parser unavailable ({e}); skipping (non-AppArmor host?)"),
+            }
+        }
+    }
+}
+
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
@@ -1449,6 +1545,15 @@ async fn finish_enrollment(
             verb: "provision",
             detail: e.to_string(),
         })?;
+
+    // ---- Step 7b: read-path access (#77, spec D5a; Linux only, root context —
+    // enroll IS root under sudo) --------------------------------------------
+    // Both steps are WARN-on-failure: enrollment establishes identity and must
+    // not hinge on the optional read feature; absent either grant, reads fail
+    // closed (read-verb-unavailable) and ping/whoami are unaffected.
+    if !macos {
+        grant_read_path_access(&operator.home, args.verbose);
+    }
 
     // ---- Step 8: posture summary -------------------------------------------
     let summary = msg(locale, MsgId::EnrollPostureSummary)

@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
 
+mod common;
+use common::permissive_authz;
+
 /// A recording `AuditEmit`: appends every record synchronously (so ordering assertions
 /// see it before any response is written) and optionally forces the append future to err.
 struct RecEmit {
@@ -105,6 +108,7 @@ async fn audit_failure_withholds_response() {
     let emit = RecEmit::new(true); // audit append fails
     write_ping(&mut c).await;
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -114,6 +118,9 @@ async fn audit_failure_withholds_response() {
         1,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -148,6 +155,7 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
     let emit = FailFirstEmit::new();
     write_ping(&mut c).await;
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -157,6 +165,9 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         99,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -195,6 +206,7 @@ async fn deny_audits_then_closes() {
     // A client that is NOT in the maknae group: no verb is even read.
     write_ping(&mut c).await;
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -204,6 +216,9 @@ async fn deny_audits_then_closes() {
         7,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -239,6 +254,7 @@ async fn happy_ping_responds() {
     let emit = RecEmit::new(false);
     write_ping(&mut c).await;
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -248,6 +264,9 @@ async fn happy_ping_responds() {
         1,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -259,7 +278,7 @@ async fn happy_ping_responds() {
         .find(|r| r.event == "request")
         .expect("a request record must be emitted");
     assert_eq!(req.outcome.result, "permit");
-    assert_eq!(req.action, "ping");
+    assert_eq!(req.action, "liveness.ping");
 
     // ...and a readable Pong frame follows.
     let frame = maknae_proto::read_frame(&mut c, 65536).await.unwrap();
@@ -280,6 +299,7 @@ async fn permit_admission_precedes_request_record() {
     let emit = RecEmit::new(false);
     write_ping(&mut c).await;
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -289,6 +309,9 @@ async fn permit_admission_precedes_request_record() {
         42,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -308,7 +331,7 @@ async fn permit_admission_precedes_request_record() {
     assert_eq!(conn.session_id, 42);
     assert_eq!(conn.seq, 1, "admission must be seq 1");
     assert_eq!(req.outcome.result, "permit");
-    assert_eq!(req.action, "ping");
+    assert_eq!(req.action, "liveness.ping");
     assert_eq!(req.seq, 2, "the request record must follow at seq 2");
     // Ordering in the emitted stream: admission strictly before the request.
     let conn_idx = recs.iter().position(|r| r.event == "connection").unwrap();
@@ -330,6 +353,7 @@ async fn happy_whoami_carries_peer_facts() {
     .unwrap();
     maknae_proto::write_frame(&mut c, &whoami).await.unwrap();
 
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -339,6 +363,9 @@ async fn happy_whoami_carries_peer_facts() {
         1,
         default_cfg(),
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
 
@@ -361,6 +388,7 @@ async fn read_timeout_closes() {
     let emit = RecEmit::new(false);
 
     let start = std::time::Instant::now();
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -370,6 +398,9 @@ async fn read_timeout_closes() {
         1,
         cfg,
         serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
     let elapsed = start.elapsed();
@@ -410,6 +441,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     let (mut c, s) = tokio::io::duplex(4096);
     let emit = RecEmit::new(false);
     write_ping(&mut c).await;
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s,
         "maknae://d/plane/cli".to_string(),
@@ -419,6 +451,9 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         1,
         default_cfg(),
         au3_1.clone(),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
     let recs = emit.records();
@@ -435,6 +470,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     let (mut c2, s2) = tokio::io::duplex(4096);
     let emit2 = RecEmit::new(false);
     write_ping(&mut c2).await;
+    let authz = permissive_authz();
     maknae_kernel::handle(
         s2,
         "maknae://d/plane/cli".to_string(),
@@ -444,6 +480,9 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         1,
         default_cfg(),
         au3_1.clone(),
+        authz.0.clone(),
+        authz.1.clone(),
+        authz.2,
     )
     .await;
     let recs2 = emit2.records();
@@ -485,6 +524,7 @@ async fn unread_response_does_not_hang_the_handler() {
         drop(client);
     });
 
+    let authz = permissive_authz();
     let done = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         maknae_kernel::handle(
@@ -496,6 +536,9 @@ async fn unread_response_does_not_hang_the_handler() {
             7,
             cfg,
             serde_json::json!({}),
+            authz.0.clone(),
+            authz.1.clone(),
+            authz.2,
         ),
     )
     .await;

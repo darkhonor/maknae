@@ -553,6 +553,7 @@ fn authz_target_required() -> maknae_io::TargetRequired {
         mode_mask: Some(0o027),
         nlink_exactly_one: false,
         regular_file: true,
+        max_bytes: None,
     }
 }
 
@@ -1350,6 +1351,7 @@ mod tests {
             mode_mask: Some(0o022),
             nlink_exactly_one: false,
             regular_file: true,
+            max_bytes: None,
         };
         let via_seam = load_authz_with_requirement(&p, relaxed, Some(&home()));
         let via_door = load_authz(&p, Some(&home()));

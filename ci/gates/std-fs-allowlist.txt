@@ -7,13 +7,21 @@ bins/maknae/src/enroll/artifact_write.rs:140|std::fs::write(&artifact.path, byte
 bins/maknae/src/enroll/mod.rs:712|let _ = std::fs::remove_file(&out_path);
 bins/maknae/src/enroll/mod.rs:742|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
 
+# #77 read-path grant: the AppArmor local include is a root-context, warn-on-failure
+# provisioning write to /etc/apparmor.d/local (not a maknae-managed artifact tree);
+# maknae-io's anchored-write contract targets maknae artifact dirs and would add an
+# anchor for a foreign, distro-owned path — the same enrollment-transaction rationale
+# as artifact_write above.
+bins/maknae/src/enroll/mod.rs:1209|let _ = std::fs::create_dir_all(local_dir);
+bins/maknae/src/enroll/mod.rs:1221|if let Err(e) = std::fs::write(&inc, snippet) {
+
 # Enrollment input reads intentionally preserve their existing caller-selected symlink and
 # permission semantics. maknae-io has no follow-final-symlink read contract; migration would
 # be a behavior change and belongs to the enrollment I/O contract work, not this storage pass.
 bins/maknae/src/enroll/mod.rs:857|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1205|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1221|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1263|Some(root_path) => match std::fs::read_to_string(&root_path) {
+bins/maknae/src/enroll/mod.rs:1301|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs:1317|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs:1359|Some(root_path) => match std::fs::read_to_string(&root_path) {
 
 # Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
 # opens per call and intentionally has a different lifecycle/durability contract.
@@ -33,9 +41,9 @@ crates/maknae-io/src/checks.rs:45|mode_mask: None,
 crates/maknae-io/src/checks.rs:59|pub const OS_DAC: DescendantRequired = DescendantRequired {
 crates/maknae-io/src/checks.rs:60|owner: None,
 crates/maknae-io/src/checks.rs:61|mode_mask: None,
-crates/maknae-io/src/checks.rs:83|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
-crates/maknae-io/src/checks.rs:84|owner: None,
-crates/maknae-io/src/checks.rs:85|mode_mask: None,
+crates/maknae-io/src/checks.rs:87|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
+crates/maknae-io/src/checks.rs:88|owner: None,
+crates/maknae-io/src/checks.rs:89|mode_mask: None,
 
 # read_absolute pins the configured path's parent; OS DAC is the named directory
 # requirement while the caller supplies the target artifact requirements. Named ONCE
@@ -56,9 +64,9 @@ crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC
 # `read_secure_required(path, None, Some(0o007))` — the positional spelling issue #132
 # reported as invisible to this inventory.
 crates/maknae-config/src/loader.rs:34|owner: None,
-crates/maknae-config/src/loader.rs:180|owner: None,
-crates/maknae-config/src/loader.rs:222|owner: None,
-crates/maknae-config/src/loader.rs:268|owner: None,
+crates/maknae-config/src/loader.rs:182|owner: None,
+crates/maknae-config/src/loader.rs:224|owner: None,
+crates/maknae-config/src/loader.rs:270|owner: None,
 crates/maknae-vault/src/client.rs:137|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
@@ -69,3 +77,12 @@ crates/maknae-vault/src/socket.rs:107|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
 crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
+
+# #77 read PEP (handler.rs::read_plan — the T1 decision half): OS DAC at the
+# TARGET is deliberate — the alias-planting boundary lives on the ANCHOR
+# (AnchorRequired owner+0o022), and the target names nlink_exactly_one +
+# regular_file + max_bytes. A target owner/mode requirement would refuse
+# legitimately-shared home files the operator's own modes expose; the PDP is
+# the authorization control (spec D5).
+crates/maknae-kernel/src/handler.rs:244|owner: None,
+crates/maknae-kernel/src/handler.rs:245|mode_mask: None,
