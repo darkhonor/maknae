@@ -407,7 +407,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert!(!frame.windows(needle.len()).any(|w| w == needle));
 
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "acp.fs.read");
+    assert_eq!(req.action, "fs.read");
     assert_eq!(req.outcome.result, "deny");
     assert_eq!(req.object.as_deref(), Some(target.as_str()), "AU-3 object");
     assert!(

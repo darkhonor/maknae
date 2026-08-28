@@ -11,7 +11,7 @@
 
 ## 1. Why this record exists
 
-Maknae's action-class taxonomy is ACP-anchored by operator ruling (2026-08-14, issue #67): *evaluate the published standard; adopt no framework's implementation.* PR #141 shipped that taxonomy — `liveness` / `admin.*` / `acp.session` / `acp.fs` / `acp.terminal`, closed vocabulary, exact-segment matching (`crates/maknae-authz-basic/src/decide.rs`). **That anchoring is only sound if the anchor is known precisely and by version.** It was not: the design work of 2026-08-28 was proceeding on a recollection of ACP that predated a major-version draft.
+Maknae's action-class taxonomy is ACP-anchored by operator ruling (2026-08-14, issue #67): *evaluate the published standard; adopt no framework's implementation.* PR #141 shipped that taxonomy — `liveness` / `admin.*` / `acp.session` / `acp.fs` / `acp.terminal`, closed vocabulary *(renamed to `session` / `fs` / `terminal` by #67; the `acp.` prefix bound capability domains to a protocol version v2 removes)*, exact-segment matching (`crates/maknae-authz-basic/src/decide.rs`). **That anchoring is only sound if the anchor is known precisely and by version.** It was not: the design work of 2026-08-28 was proceeding on a recollection of ACP that predated a major-version draft.
 
 ## 2. Which role is Maknae? — read this before anything else
 
@@ -19,7 +19,7 @@ ACP defines two roles: the **Agent** (does the work) and the **Client** (the hos
 
 **Maknae is the Client.**
 
-That is precisely why the shipped taxonomy carries `Class::AcpFs` and `Class::AcpTerminal` and the live `acp.fs.read` action: Maknae implements the client-side capability surface, and every agent call into it is a reference-monitor decision. It maps exactly onto core principle 1 — *the agent runtime is untrusted by design*.
+That is precisely why the shipped taxonomy carries filesystem and terminal capability classes and a live filesystem-read action (`Class::AcpFs`/`acp.fs.read` at the time of this record; renamed to `Class::Fs`/`fs.read` by #67): Maknae implements the client-side capability surface, and every agent call into it is a reference-monitor decision. It maps exactly onto core principle 1 — *the agent runtime is untrusted by design*.
 
 **Consequence for positioning:** Maknae writes the **host side of an open protocol**. Any conforming ACP Agent interoperates — no vendor is a dependency, and no vendor SDK is on the critical path.
 

@@ -83,7 +83,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
     match verb {
         Verb::Ping => "liveness.ping",
         Verb::Whoami => "admin.whoami",
-        Verb::Read { .. } => "acp.fs.read",
+        Verb::Read { .. } => "fs.read",
     }
 }
 
@@ -397,10 +397,7 @@ mod tests {
     fn verb_action_names_are_the_taxonomy() {
         assert_eq!(verb_to_action(&Verb::Ping), "liveness.ping");
         assert_eq!(verb_to_action(&Verb::Whoami), "admin.whoami");
-        assert_eq!(
-            verb_to_action(&Verb::Read { path: "/x".into() }),
-            "acp.fs.read"
-        );
+        assert_eq!(verb_to_action(&Verb::Read { path: "/x".into() }), "fs.read");
     }
 
     #[test]
@@ -471,7 +468,7 @@ mod tests {
             },
             501,
         );
-        assert_eq!(r.action.0, "acp.fs.read");
+        assert_eq!(r.action.0, "fs.read");
         assert_eq!(
             r.resource.0.get("path"),
             Some(&maknae_security::AttrValue::Str("/home/op/n".into()))
