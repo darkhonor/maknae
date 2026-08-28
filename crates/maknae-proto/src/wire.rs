@@ -19,7 +19,9 @@ pub enum Verb {
     /// the client-supplied lexically-absolute path; the daemon re-runs its
     /// own canonical pre-gate and NEVER trusts client canonicalization. CBOR
     /// text (a byte-string path fails String's visitor at decode).
-    Read { path: String },
+    Read {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,19 +222,31 @@ mod v2_tests {
     fn read_verb_round_trips_with_path() {
         let r = Request {
             protocol_version: PROTOCOL_VERSION,
-            verb: Verb::Read { path: "/home/op/notes.txt".into() },
+            verb: Verb::Read {
+                path: "/home/op/notes.txt".into(),
+            },
         };
         let back = decode_request(&encode_request(&r).unwrap()).unwrap();
-        assert_eq!(back.verb, Verb::Read { path: "/home/op/notes.txt".into() });
+        assert_eq!(
+            back.verb,
+            Verb::Read {
+                path: "/home/op/notes.txt".into()
+            }
+        );
     }
 
     #[test]
     fn read_content_round_trips_bytes() {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(vec![0xff, 0x00])))),
+            result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(vec![
+                0xff, 0x00,
+            ])))),
         };
-        match decode_response(&encode_response(&r).unwrap()).unwrap().result {
+        match decode_response(&encode_response(&r).unwrap())
+            .unwrap()
+            .result
+        {
             RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(*b.0, vec![0xff, 0x00]),
             other => panic!("wrong variant: {other:?}"),
         }
@@ -242,9 +256,15 @@ mod v2_tests {
     fn too_large_code_round_trips() {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError { code: ProtoErrCode::TooLarge, message: "resource too large".into() }),
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::TooLarge,
+                message: "resource too large".into(),
+            }),
         };
-        match decode_response(&encode_response(&r).unwrap()).unwrap().result {
+        match decode_response(&encode_response(&r).unwrap())
+            .unwrap()
+            .result
+        {
             RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::TooLarge),
             other => panic!("wrong variant: {other:?}"),
         }
@@ -254,15 +274,27 @@ mod v2_tests {
     fn v1_frames_refused_by_both_decoders_as_unsupported_version() {
         // The interop obligation: a version mismatch is a clean TYPED error in
         // both directions — never garbage, never a panic.
-        let req = Request { protocol_version: 1, verb: Verb::Ping };
+        let req = Request {
+            protocol_version: 1,
+            verb: Verb::Ping,
+        };
         let mut b = Vec::new();
         ciborium::into_writer(&req, &mut b).unwrap();
-        assert!(matches!(decode_request(&b), Err(ProtoCodecError::UnsupportedVersion(1))));
+        assert!(matches!(
+            decode_request(&b),
+            Err(ProtoCodecError::UnsupportedVersion(1))
+        ));
 
-        let resp = Response { protocol_version: 1, result: RespResult::Ok(Payload::Pong) };
+        let resp = Response {
+            protocol_version: 1,
+            result: RespResult::Ok(Payload::Pong),
+        };
         let mut b = Vec::new();
         ciborium::into_writer(&resp, &mut b).unwrap();
-        assert!(matches!(decode_response(&b), Err(ProtoCodecError::UnsupportedVersion(1))));
+        assert!(matches!(
+            decode_response(&b),
+            Err(ProtoCodecError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]
@@ -270,12 +302,18 @@ mod v2_tests {
         let content = vec![0xabu8; 1000];
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(content.clone())))),
+            result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(
+                content.clone(),
+            )))),
         };
         let cap = 1000 + 1024;
         let buf = encode_response_zeroizing(&r, cap).unwrap();
         // Pre-sizing held: no realloc means capacity is exactly what we asked.
-        assert_eq!(buf.capacity(), cap, "encode grew the buffer — realloc leaves un-zeroized copies");
+        assert_eq!(
+            buf.capacity(),
+            cap,
+            "encode grew the buffer — realloc leaves un-zeroized copies"
+        );
         // And the content actually rides inside.
         let back = decode_response(&buf).unwrap();
         match back.result {

@@ -514,7 +514,14 @@ mod tests {
         req.max_bytes = Some(99);
         let e = check_target(&st, &f, &req).unwrap_err();
         assert!(
-            matches!(e, IoError::TargetTooLarge { limit: 99, actual: 100, .. }),
+            matches!(
+                e,
+                IoError::TargetTooLarge {
+                    limit: 99,
+                    actual: 100,
+                    ..
+                }
+            ),
             "got {e:?}"
         );
         assert!(e.to_string().contains("too large"), "{e}");
@@ -534,7 +541,10 @@ mod tests {
         let mut req = target(Some(0o007), None, true, true);
         req.max_bytes = Some(1);
         let e = check_target(&st, &f, &req).unwrap_err();
-        assert!(matches!(e, IoError::MultiplyLinked { .. }), "order: got {e:?}");
+        assert!(
+            matches!(e, IoError::MultiplyLinked { .. }),
+            "order: got {e:?}"
+        );
     }
 
     /// A compliant target passes every stage — without this, several predicates'

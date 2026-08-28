@@ -51,8 +51,7 @@ pub fn authz_boot_gate(
     principal: Option<Principal>,
 ) -> Result<(BasicAuthorizer, Principal), AuthzBootRefusal> {
     let principal = principal.ok_or(AuthzBootRefusal::MissingPrincipal)?;
-    let authorizer =
-        BasicAuthorizer::new(config_dir.join("authz.yaml"), principal.clone())?;
+    let authorizer = BasicAuthorizer::new(config_dir.join("authz.yaml"), principal.clone())?;
     Ok((authorizer, principal))
 }
 
@@ -106,11 +105,8 @@ mod tests {
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
         )
         .unwrap();
-        std::fs::set_permissions(
-            d.join("authz.yaml"),
-            std::fs::Permissions::from_mode(0o640),
-        )
-        .unwrap();
+        std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
         let got = authz_boot_gate(&d, Some(principal()));
         let _ = std::fs::remove_dir_all(&d);
         if nix::unistd::geteuid().is_root() {
@@ -118,7 +114,10 @@ mod tests {
         } else {
             match got {
                 Err(AuthzBootRefusal::Construct(AuthzBasicError::Load(ref m))) => {
-                    assert!(m.contains("root"), "load refusal must name the owner rule: {m}")
+                    assert!(
+                        m.contains("root"),
+                        "load refusal must name the owner rule: {m}"
+                    )
                 }
                 other => panic!("expected Construct(Load), got {other:?}"),
             }
@@ -140,7 +139,10 @@ mod tests {
             }
             other => panic!("expected Construct(Bindings), got {other:?}"),
         }
-        assert!(refusal.to_string().contains("ghost"), "rendering must pass through");
+        assert!(
+            refusal.to_string().contains("ghost"),
+            "rendering must pass through"
+        );
         assert!(
             refusal.to_string().contains("bindings invalid"),
             "AuthzBasicError's own prefix must survive: {refusal}"

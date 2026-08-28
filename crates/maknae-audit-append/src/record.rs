@@ -314,16 +314,35 @@ mod object_tests {
         AuditRecord {
             ts: "2026-08-28T00:00:00Z".into(),
             event: "request".into(),
-            where_: Where { host: "h".into(), component: "maknaed".into(), socket: "/run/s".into() },
-            source: Source { uid: 0, gid: None, pid: None, plane_uri_san: None },
-            subject: Subject { user: None, plane_uri_san: None },
+            where_: Where {
+                host: "h".into(),
+                component: "maknaed".into(),
+                socket: "/run/s".into(),
+            },
+            source: Source {
+                uid: 0,
+                gid: None,
+                pid: None,
+                plane_uri_san: None,
+            },
+            subject: Subject {
+                user: None,
+                plane_uri_san: None,
+            },
             action: "acp.fs.read".into(),
             object,
-            outcome: Outcome { result: "deny".into(), reason: "r".into(), posture: "unauthorized".into() },
+            outcome: Outcome {
+                result: "deny".into(),
+                reason: "r".into(),
+                posture: "unauthorized".into(),
+            },
             session_id: 1,
             seq: 2,
             au3_1: serde_json::Value::Null,
-            integrity: Integrity { prev_hash: None, sig: None },
+            integrity: Integrity {
+                prev_hash: None,
+                sig: None,
+            },
         }
     }
 
@@ -336,6 +355,9 @@ mod object_tests {
     #[test]
     fn object_absent_omits_the_key_entirely() {
         let j = canonical_json(&rec(None)).unwrap();
-        assert!(!j.contains("\"object\""), "resource-free verbs stay additive: {j}");
+        assert!(
+            !j.contains("\"object\""),
+            "resource-free verbs stay additive: {j}"
+        );
     }
 }

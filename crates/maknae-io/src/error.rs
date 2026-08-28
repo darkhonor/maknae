@@ -136,8 +136,16 @@ impl std::fmt::Display for IoError {
             Self::MultiplyLinked { path, nlink } => {
                 write!(f, "hard-linked (nlink={nlink}): {}", path.display())
             }
-            Self::TargetTooLarge { path, limit, actual } => {
-                write!(f, "too large ({actual} bytes, limit {limit}): {}", path.display())
+            Self::TargetTooLarge {
+                path,
+                limit,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "too large ({actual} bytes, limit {limit}): {}",
+                    path.display()
+                )
             }
             Self::SizeChanged {
                 path,

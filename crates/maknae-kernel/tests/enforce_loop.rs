@@ -30,7 +30,9 @@ struct RecEmit {
 
 impl RecEmit {
     fn new() -> Arc<Self> {
-        Arc::new(RecEmit { recs: Mutex::new(Vec::new()) })
+        Arc::new(RecEmit {
+            recs: Mutex::new(Vec::new()),
+        })
     }
     fn records(&self) -> Vec<AuditRecord> {
         self.recs.lock().unwrap().clone()
@@ -38,7 +40,10 @@ impl RecEmit {
 }
 
 impl AuditEmit for RecEmit {
-    fn emit(&self, rec: &AuditRecord) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+    fn emit(
+        &self,
+        rec: &AuditRecord,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
         self.recs.lock().unwrap().push(rec.clone());
         async move { Ok(()) }
     }
@@ -175,13 +180,20 @@ async fn admin_whoami_permits_with_both_records() {
     fx.write_policy(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), 0,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await
     .expect("a permitted whoami must answer");
     let resp = maknae_proto::decode_response(&frame).unwrap();
-    assert!(matches!(resp.result, RespResult::Ok(Payload::Whoami(_))), "{resp:?}");
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::Whoami(_))),
+        "{resp:?}"
+    );
 
     let recs = emit.records();
     assert_eq!(recs[0].event, "connection");
@@ -205,8 +217,12 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
 
     let emit1 = RecEmit::new();
     let first = drive(
-        &fx.principal, authorizer.clone(), emit1, 0,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        authorizer.clone(),
+        emit1,
+        0,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await
     .expect("first call permits");
@@ -219,8 +235,12 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
 
     let emit2 = RecEmit::new();
     let second = drive(
-        &fx.principal, authorizer, emit2.clone(), 0,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        authorizer,
+        emit2.clone(),
+        0,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await
     .expect("deny gets a frame too (Unauthorized)");
@@ -228,7 +248,10 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
     match resp.result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "wire message is the fixed generic string");
+            assert_eq!(
+                e.message, "not authorized",
+                "wire message is the fixed generic string"
+            );
         }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
@@ -256,8 +279,12 @@ async fn unbound_uid_is_denied_everything_including_ping() {
     fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings PRESENT, uid 42424 unbound
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), 42424,
-        maknae_proto::Verb::Ping, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        42424,
+        maknae_proto::Verb::Ping,
+        Duration::from_secs(5),
     )
     .await
     .expect("deny frame");
@@ -282,8 +309,12 @@ async fn user_role_pings_but_cannot_whoami() {
 
     let emit = RecEmit::new();
     let ping = drive(
-        &fx.principal, authorizer.clone(), emit.clone(), 0,
-        maknae_proto::Verb::Ping, Duration::from_secs(5),
+        &fx.principal,
+        authorizer.clone(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Ping,
+        Duration::from_secs(5),
     )
     .await
     .expect("user ping permits");
@@ -295,8 +326,12 @@ async fn user_role_pings_but_cannot_whoami() {
 
     let emit2 = RecEmit::new();
     let whoami = drive(
-        &fx.principal, authorizer, emit2.clone(), 0,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        authorizer,
+        emit2.clone(),
+        0,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await
     .expect("deny frame");
@@ -314,8 +349,12 @@ async fn defaults_branch_enrolled_uid_is_admin_with_zero_nss() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await
     .expect("enrolled uid whoami permits via defaults");
@@ -345,8 +384,14 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target.clone() }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
     )
     .await
     .expect("deny frame");
@@ -391,8 +436,14 @@ async fn a_permitted_read_returns_the_file_bytes() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target.clone() }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
     )
     .await
     .expect("permitted read answers");
@@ -421,8 +472,12 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read { path: target },
+        Duration::from_secs(5),
     )
     .await
     .expect("refusal frame");
@@ -452,8 +507,12 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read { path: target },
+        Duration::from_secs(5),
     )
     .await
     .expect("refusal frame");
@@ -481,8 +540,12 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read { path: target },
+        Duration::from_secs(5),
     )
     .await
     .expect("unavailable frame");
@@ -515,8 +578,12 @@ async fn an_oversize_file_is_refused_too_large_after_a_real_permit() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: target }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read { path: target },
+        Duration::from_secs(5),
     )
     .await
     .expect("TooLarge frame");
@@ -528,7 +595,10 @@ async fn an_oversize_file_is_refused_too_large_after_a_real_permit() {
         other => panic!("oversize must refuse TooLarge, never truncate: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.result, "permit", "a Permit was rendered; delivery was refused");
+    assert_eq!(
+        req.outcome.result, "permit",
+        "a Permit was rendered; delivery was refused"
+    );
     assert_eq!(req.outcome.posture, "refused-oversize");
 }
 
@@ -543,13 +613,24 @@ async fn a_failed_deny_record_append_withholds_the_error_frame() {
     fx.write_policy(BINDINGS_ROOT_USER); // whoami under user → deny path
     let emit = FailNthEmit::new(2); // admission (1) succeeds; the deny record (2) fails
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), 0,
-        maknae_proto::Verb::Whoami, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
     )
     .await;
-    assert!(frame.is_none(), "no frame may leave without a durable record of the decision");
+    assert!(
+        frame.is_none(),
+        "no frame may leave without a durable record of the decision"
+    );
     let recs = emit.records();
-    assert_eq!(recs.len(), 2, "admission + the offered-but-failed deny record");
+    assert_eq!(
+        recs.len(),
+        2,
+        "admission + the offered-but-failed deny record"
+    );
     assert_eq!(recs[1].event, "request");
 }
 
@@ -561,8 +642,10 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     let frame = drive(
         &fx.principal,
         Arc::new(SleepAuthorizer(Duration::from_millis(300))),
-        emit.clone(), 0,
-        maknae_proto::Verb::Ping, Duration::from_millis(100),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Ping,
+        Duration::from_millis(100),
     )
     .await
     .expect("timeout deny frame");
@@ -571,7 +654,10 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
         other => panic!("elapsed decide must deny: {other:?}"),
     }
     assert!(
-        request_record(&emit.records()).outcome.reason.contains("timed out"),
+        request_record(&emit.records())
+            .outcome
+            .reason
+            .contains("timed out"),
         "the timeout reason is in the trail"
     );
 
@@ -581,8 +667,10 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     let frame = drive(
         &fx.principal,
         Arc::new(SleepAuthorizer(Duration::from_millis(100))),
-        emit2, 0,
-        maknae_proto::Verb::Ping, Duration::from_millis(500),
+        emit2,
+        0,
+        maknae_proto::Verb::Ping,
+        Duration::from_millis(500),
     )
     .await
     .expect("fast decide is served");
@@ -602,8 +690,14 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: "/etc/hostname".into() }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: "/etc/hostname".into(),
+        },
+        Duration::from_secs(5),
     )
     .await
     .expect("outside-root frame");
@@ -627,8 +721,10 @@ async fn an_unhonorable_obligation_fails_closed() {
     let frame = drive(
         &fx.principal,
         Arc::new(HostileObligation),
-        emit.clone(), 0,
-        maknae_proto::Verb::Ping, Duration::from_secs(5),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Ping,
+        Duration::from_secs(5),
     )
     .await
     .expect("deny frame");
@@ -653,8 +749,12 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
     let me = nix::unistd::geteuid().as_raw();
     let evasive = format!("{}/../{}", fx.dir.display(), ".ssh/id_rsa");
     let frame = drive(
-        &fx.principal, fx.authorizer(), emit.clone(), me,
-        maknae_proto::Verb::Read { path: evasive }, Duration::from_secs(5),
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read { path: evasive },
+        Duration::from_secs(5),
     )
     .await
     .expect("BadRequest frame");

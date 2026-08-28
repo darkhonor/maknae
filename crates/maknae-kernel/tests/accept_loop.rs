@@ -528,8 +528,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         wctx(),
         shutdown,
         pending_supervisor(),
-            std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
+        std::sync::Arc::new(common::AlwaysPermit),
+        std::sync::Arc::new(fixture_principal()),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)

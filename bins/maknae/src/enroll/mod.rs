@@ -1160,6 +1160,7 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
 ///     home, plus `apparmor_parser -r` (Debian-family; both no-ops where
 ///     AppArmor is absent). SELinux needs no per-home step (type-based
 ///     vectors ship in the .te).
+///
 /// Direct fs write + Command usage below carry std-fs-allowlist entries.
 fn grant_read_path_access(home: &Path, verbose: bool) {
     // 1. DAC ACL (needs the `acl` package — a warn, not a failure, without it).

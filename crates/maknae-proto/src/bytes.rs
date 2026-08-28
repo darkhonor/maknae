@@ -75,7 +75,12 @@ mod tests {
         // CBOR major type 2 (byte string): high 3 bits of the initial byte
         // are 0b010. An array (major 4) would be 0b100.
         let buf = enc(&Bytes(Zeroizing::new(vec![0x41, 0x42, 0x43])));
-        assert_eq!(buf[0] & 0xe0, 0x40, "major type must be 2 (byte string), got {:#04x}", buf[0]);
+        assert_eq!(
+            buf[0] & 0xe0,
+            0x40,
+            "major type must be 2 (byte string), got {:#04x}",
+            buf[0]
+        );
         assert_ne!(buf[0] & 0xe0, 0x80, "must not be the derive's array form");
         // 3-byte definite-length byte string is exactly 0x43 then the bytes.
         assert_eq!(buf, vec![0x43, 0x41, 0x42, 0x43]);
@@ -104,7 +109,10 @@ mod tests {
         ciborium::into_writer(&vec![1u8, 2, 3], &mut arr).unwrap();
         let got: Result<Bytes, _> = ciborium::from_reader(arr.as_slice());
         let msg = got.expect_err("array form must refuse").to_string();
-        assert!(msg.contains("byte string"), "error must render the visitor's expecting text, got: {msg}");
+        assert!(
+            msg.contains("byte string"),
+            "error must render the visitor's expecting text, got: {msg}"
+        );
     }
 
     #[test]
@@ -115,7 +123,10 @@ mod tests {
         ciborium::into_writer(&"hello", &mut txt).unwrap();
         let got: Result<Bytes, _> = ciborium::from_reader(txt.as_slice());
         let msg = got.expect_err("text form must refuse").to_string();
-        assert!(msg.contains("byte") , "refusal must name the expected type, got: {msg}");
+        assert!(
+            msg.contains("byte"),
+            "refusal must name the expected type, got: {msg}"
+        );
     }
 
     #[test]
@@ -123,6 +134,9 @@ mod tests {
         let b = Bytes(Zeroizing::new(vec![0x53, 0x45, 0x43]));
         let s = format!("{b:?}");
         assert!(s.contains("<3 bytes>"), "{s}");
-        assert!(!s.contains("53") && !s.contains("SEC"), "content leaked into Debug: {s}");
+        assert!(
+            !s.contains("53") && !s.contains("SEC"),
+            "content leaked into Debug: {s}"
+        );
     }
 }

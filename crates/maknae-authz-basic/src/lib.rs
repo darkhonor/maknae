@@ -541,7 +541,9 @@ mod tests {
 #[cfg(all(test, unix, feature = "hermetic-test-seam"))]
 mod hermetic_tests {
     use super::*;
-    use maknae_security::{Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict};
+    use maknae_security::{
+        Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     fn fixture_req() -> maknae_config::TargetRequired {

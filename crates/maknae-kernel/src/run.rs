@@ -54,12 +54,14 @@ use crate::authz::{authorize_connection, ConnDecision};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
-    build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate,
-    may_respond, read_refusal_disposition, verb_to_action, Dispatch, ReadRefusal, ServeOutcome,
+    build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
+    read_refusal_disposition, verb_to_action, Dispatch, ReadRefusal, ServeOutcome,
     AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_config::Principal;
-use maknae_io::{open_anchor_resolved, AnchorRequired, IoError, StrategyPref, TargetRequired, Zeroizing};
+use maknae_io::{
+    open_anchor_resolved, AnchorRequired, IoError, StrategyPref, TargetRequired, Zeroizing,
+};
 use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
 
@@ -202,7 +204,6 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn make_record(
     event: &str,
@@ -460,15 +461,29 @@ pub async fn handle<S, E, P>(
     if let Verb::Read { path } = &request.verb {
         if let Err(why) = lexical_pregate(path) {
             let appended = emit_request_outcome(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                verb_to_action(&request.verb), Some(path),
-                "deny", &format!("path fails canonical pre-gate: {why}"), "unauthorized",
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                Some(path),
+                "deny",
+                &format!("path fails canonical pre-gate: {why}"),
+                "unauthorized",
                 &au3_1,
             )
             .await;
             if may_respond(appended) {
-                write_error_bounded(&mut stream, &cfg, ProtoErrCode::BadRequest, "malformed path")
-                    .await;
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::BadRequest,
+                    "malformed path",
+                )
+                .await;
             }
             close_bounded(&mut stream).await;
             return;
@@ -510,14 +525,29 @@ pub async fn handle<S, E, P>(
             // record is durably appended — no frame without a record of the
             // decision that produced it.
             let appended = emit_request_outcome(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                verb_to_action(&request.verb), object_path.as_deref(),
-                "deny", &reason, "unauthorized", &au3_1,
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                object_path.as_deref(),
+                "deny",
+                &reason,
+                "unauthorized",
+                &au3_1,
             )
             .await;
             if may_respond(appended) {
-                write_error_bounded(&mut stream, &cfg, ProtoErrCode::Unauthorized, "not authorized")
-                    .await;
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
+                )
+                .await;
             }
             close_bounded(&mut stream).await;
             return;
@@ -530,15 +560,29 @@ pub async fn handle<S, E, P>(
     // fails closed to the same deny path.
     if let Err(unhonorable) = discharge_plan(&obligations) {
         let appended = emit_request_outcome(
-            &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-            verb_to_action(&request.verb), object_path.as_deref(),
-            "deny", &format!("unhonorable obligation: {}", unhonorable.0), "unauthorized",
+            &emit,
+            &host,
+            &socket,
+            peer_uid,
+            &peer_uri,
+            session_id,
+            seq.next(),
+            verb_to_action(&request.verb),
+            object_path.as_deref(),
+            "deny",
+            &format!("unhonorable obligation: {}", unhonorable.0),
+            "unauthorized",
             &au3_1,
         )
         .await;
         if may_respond(appended) {
-            write_error_bounded(&mut stream, &cfg, ProtoErrCode::Unauthorized, "not authorized")
-                .await;
+            write_error_bounded(
+                &mut stream,
+                &cfg,
+                ProtoErrCode::Unauthorized,
+                "not authorized",
+            )
+            .await;
         }
         close_bounded(&mut stream).await;
         return;
@@ -552,9 +596,19 @@ pub async fn handle<S, E, P>(
     match dispatch_verb(&request.verb) {
         Dispatch::Pong | Dispatch::WhoamiRequested => {
             let appended = emit_request_outcome(
-                &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                verb_to_action(&request.verb), None,
-                "permit", "authorized", "authorized", &au3_1,
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                None,
+                "permit",
+                "authorized",
+                "authorized",
+                &au3_1,
             )
             .await;
             if !may_respond(appended) {
@@ -602,9 +656,19 @@ pub async fn handle<S, E, P>(
             match read_result {
                 Ok(content) => {
                     let appended = emit_request_outcome(
-                        &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                        verb_to_action(&request.verb), Some(&path),
-                        "permit", "authorized", "authorized", &au3_1,
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        session_id,
+                        seq.next(),
+                        verb_to_action(&request.verb),
+                        Some(&path),
+                        "permit",
+                        "authorized",
+                        "authorized",
+                        &au3_1,
                     )
                     .await;
                     if !may_respond(appended) {
@@ -619,8 +683,7 @@ pub async fn handle<S, E, P>(
                     };
                     // Zeroizing, pre-sized encode (spec D5): no realloc, no
                     // un-zeroized partial copies; buffer zeroizes after write.
-                    if let Ok(bytes) =
-                        encode_response_zeroizing(&response, budget as usize + 1024)
+                    if let Ok(bytes) = encode_response_zeroizing(&response, budget as usize + 1024)
                     {
                         let _ = tokio::time::timeout(
                             Duration::from_millis(cfg.read_timeout_ms),
@@ -630,12 +693,21 @@ pub async fn handle<S, E, P>(
                     }
                 }
                 Err(refusal) => {
-                    let (result, reason, posture, code, msg) =
-                        read_refusal_disposition(&refusal);
+                    let (result, reason, posture, code, msg) = read_refusal_disposition(&refusal);
                     let appended = emit_request_outcome(
-                        &emit, &host, &socket, peer_uid, &peer_uri, session_id, seq.next(),
-                        verb_to_action(&request.verb), Some(&path),
-                        result, &reason, posture, &au3_1,
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        session_id,
+                        seq.next(),
+                        verb_to_action(&request.verb),
+                        Some(&path),
+                        result,
+                        &reason,
+                        posture,
+                        &au3_1,
                     )
                     .await;
                     if may_respond(appended) {
@@ -748,8 +820,21 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     au3_1: &serde_json::Value,
 ) -> bool {
     let rec = make_record(
-        "request", host, socket, uid, None, None, Some(peer_uri), session_id, seq,
-        action, object, result, reason, posture, au3_1,
+        "request",
+        host,
+        socket,
+        uid,
+        None,
+        None,
+        Some(peer_uri),
+        session_id,
+        seq,
+        action,
+        object,
+        result,
+        reason,
+        posture,
+        au3_1,
     );
     match emit.emit(&rec).await {
         Ok(()) => true,

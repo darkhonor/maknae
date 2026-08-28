@@ -106,11 +106,7 @@ pub fn fixture_principal() -> maknae_config::Principal {
 }
 
 /// Standard extra args for `handle()` in transport-behavior tests.
-pub fn permissive_authz() -> (
-    Arc<AlwaysPermit>,
-    Arc<maknae_config::Principal>,
-    Duration,
-) {
+pub fn permissive_authz() -> (Arc<AlwaysPermit>, Arc<maknae_config::Principal>, Duration) {
     (
         Arc::new(AlwaysPermit),
         Arc::new(fixture_principal()),

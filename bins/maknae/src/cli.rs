@@ -681,8 +681,16 @@ mod tests {
 
     #[test]
     fn read_verb_converts_to_proto_with_its_path() {
-        let v: maknae_proto::Verb = Verb::Read { path: "/a/b".into() }.into();
-        assert_eq!(v, maknae_proto::Verb::Read { path: "/a/b".into() });
+        let v: maknae_proto::Verb = Verb::Read {
+            path: "/a/b".into(),
+        }
+        .into();
+        assert_eq!(
+            v,
+            maknae_proto::Verb::Read {
+                path: "/a/b".into()
+            }
+        );
     }
 
     #[test]

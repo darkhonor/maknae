@@ -196,7 +196,13 @@ pub enum ReadRefusal {
 /// audit-only; every wire message here is a fixed generic string.
 pub fn read_refusal_disposition(
     r: &ReadRefusal,
-) -> (&'static str, String, &'static str, maknae_proto::ProtoErrCode, &'static str) {
+) -> (
+    &'static str,
+    String,
+    &'static str,
+    maknae_proto::ProtoErrCode,
+    &'static str,
+) {
     use maknae_proto::ProtoErrCode as C;
     match r {
         ReadRefusal::TooLarge => (
@@ -220,7 +226,13 @@ pub fn read_refusal_disposition(
             C::Internal,
             "read unavailable",
         ),
-        ReadRefusal::Refused(e) => ("deny", e.clone(), "unauthorized", C::Unauthorized, "not authorized"),
+        ReadRefusal::Refused(e) => (
+            "deny",
+            e.clone(),
+            "unauthorized",
+            C::Unauthorized,
+            "not authorized",
+        ),
         ReadRefusal::TimedOut => (
             "deny",
             "read timed out".into(),
@@ -318,7 +330,10 @@ mod tests {
     fn verb_action_names_are_the_taxonomy() {
         assert_eq!(verb_to_action(&Verb::Ping), "liveness.ping");
         assert_eq!(verb_to_action(&Verb::Whoami), "admin.whoami");
-        assert_eq!(verb_to_action(&Verb::Read { path: "/x".into() }), "acp.fs.read");
+        assert_eq!(
+            verb_to_action(&Verb::Read { path: "/x".into() }),
+            "acp.fs.read"
+        );
     }
 
     #[test]
@@ -334,10 +349,15 @@ mod tests {
     #[test]
     fn read_dispatches_read_requested_with_its_path() {
         assert_eq!(
-            dispatch_verb(&Verb::Read { path: "/home/op/a".into() }),
+            dispatch_verb(&Verb::Read {
+                path: "/home/op/a".into()
+            }),
             Dispatch::ReadRequested("/home/op/a".into())
         );
-        assert_ne!(dispatch_verb(&Verb::Read { path: "/x".into() }), Dispatch::Pong);
+        assert_ne!(
+            dispatch_verb(&Verb::Read { path: "/x".into() }),
+            Dispatch::Pong
+        );
         assert_ne!(
             dispatch_verb(&Verb::Read { path: "/x".into() }),
             Dispatch::WhoamiRequested
@@ -357,7 +377,10 @@ mod tests {
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
         let r = build_authz_request(&Verb::Ping, 0);
-        assert_eq!(r.subject.0.get("uid"), Some(&maknae_security::AttrValue::Int(0)));
+        assert_eq!(
+            r.subject.0.get("uid"),
+            Some(&maknae_security::AttrValue::Int(0))
+        );
         let r = build_authz_request(&Verb::Whoami, u32::MAX);
         assert_eq!(
             r.subject.0.get("uid"),
@@ -375,7 +398,12 @@ mod tests {
 
     #[test]
     fn read_request_carries_the_path_resource() {
-        let r = build_authz_request(&Verb::Read { path: "/home/op/n".into() }, 501);
+        let r = build_authz_request(
+            &Verb::Read {
+                path: "/home/op/n".into(),
+            },
+            501,
+        );
         assert_eq!(r.action.0, "acp.fs.read");
         assert_eq!(
             r.resource.0.get("path"),
@@ -386,20 +414,29 @@ mod tests {
     // ---- discharge_plan ----
 
     fn audit_ob() -> maknae_security::Obligation {
-        maknae_security::Obligation { id: "audit".into(), params: maknae_security::Attributes::new() }
+        maknae_security::Obligation {
+            id: "audit".into(),
+            params: maknae_security::Attributes::new(),
+        }
     }
 
     #[test]
     fn exactly_audit_discharges() {
         assert!(discharge_plan(&[audit_ob()]).is_ok());
-        assert!(discharge_plan(&[]).is_ok(), "no obligations is fine — audit is unconditional");
+        assert!(
+            discharge_plan(&[]).is_ok(),
+            "no obligations is fine — audit is unconditional"
+        );
     }
 
     #[test]
     fn unknown_obligation_is_unhonorable_regardless_of_order() {
-        let exfil = maknae_security::Obligation { id: "exfil".into(), params: maknae_security::Attributes::new() };
+        let exfil = maknae_security::Obligation {
+            id: "exfil".into(),
+            params: maknae_security::Attributes::new(),
+        };
         assert_eq!(
-            discharge_plan(&[exfil.clone()]),
+            discharge_plan(std::slice::from_ref(&exfil)),
             Err(UnhonorableObligation("exfil".into()))
         );
         assert_eq!(
@@ -416,8 +453,14 @@ mod tests {
     fn audit_with_params_is_unhonorable() {
         let mut params = maknae_security::Attributes::new();
         params.insert("scope", maknae_security::AttrValue::Str("x".into()));
-        let ob = maknae_security::Obligation { id: "audit".into(), params };
-        assert_eq!(discharge_plan(&[ob]), Err(UnhonorableObligation("audit".into())));
+        let ob = maknae_security::Obligation {
+            id: "audit".into(),
+            params,
+        };
+        assert_eq!(
+            discharge_plan(&[ob]),
+            Err(UnhonorableObligation("audit".into()))
+        );
     }
 
     // ---- lexical_pregate (vector table cross-referenced with
@@ -426,7 +469,10 @@ mod tests {
     #[test]
     fn pregate_accepts_canonical_absolute_paths() {
         assert!(lexical_pregate("/home/op/notes.txt").is_ok());
-        assert!(lexical_pregate("/").is_ok(), "bare / is vacuous — matches no glob");
+        assert!(
+            lexical_pregate("/").is_ok(),
+            "bare / is vacuous — matches no glob"
+        );
         assert!(lexical_pregate("/a").is_ok());
     }
 
@@ -438,7 +484,10 @@ mod tests {
         assert!(lexical_pregate("/a/./b").is_err());
         assert!(lexical_pregate("/a//b").is_err());
         assert!(lexical_pregate("/a/").is_err());
-        assert!(lexical_pregate("~/x").is_err(), "~ is client-side only, never wire");
+        assert!(
+            lexical_pregate("~/x").is_err(),
+            "~ is client-side only, never wire"
+        );
     }
     // ---- read_refusal_disposition (T1: the outcome table) ----
 
@@ -455,7 +504,10 @@ mod tests {
     #[test]
     fn outside_root_is_a_permit_with_internal_not_unauthorized() {
         let (result, _, posture, code, _) = read_refusal_disposition(&ReadRefusal::OutsideRoot);
-        assert_eq!(result, "permit", "a Permit was rendered — the record must say so");
+        assert_eq!(
+            result, "permit",
+            "a Permit was rendered — the record must say so"
+        );
         assert_eq!(posture, "refused-outside-root");
         assert_eq!(code, maknae_proto::ProtoErrCode::Internal);
         assert_ne!(code, maknae_proto::ProtoErrCode::Unauthorized);
@@ -466,7 +518,10 @@ mod tests {
         let (result, reason, posture, code, msg) =
             read_refusal_disposition(&ReadRefusal::Refused("hard-linked (nlink=2): /x".into()));
         assert_eq!(result, "deny");
-        assert!(reason.contains("nlink=2"), "reason is the io rendering, audit-only");
+        assert!(
+            reason.contains("nlink=2"),
+            "reason is the io rendering, audit-only"
+        );
         assert_eq!(posture, "unauthorized");
         assert_eq!(code, maknae_proto::ProtoErrCode::Unauthorized);
         assert_eq!(msg, "not authorized");
