@@ -56,7 +56,9 @@ jobs:
           fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          # The feature-gated seam code is invisible to the default pass; lint it too (-D warnings).
+          cargo clippy -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
@@ -72,6 +74,8 @@ jobs:
         run: ci/gates/p2-artifact-witness.sh
       - name: Build-invocation lint
         run: ci/gates/build-invocation-lint.sh
+      - name: Feature-resolution pin (production stays featureless on the authz door)
+        run: ci/gates/feature-resolution-pin.sh
       - name: Negative-control (gates must fire)
         run: ci/gates/negative-control.sh
       - name: Direct std::fs production drift is forbidden
