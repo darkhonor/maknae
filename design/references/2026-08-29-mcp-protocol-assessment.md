@@ -160,29 +160,34 @@ Read at the pin, quoted because #178 and #179 cite them:
 **Facts bearing on it:**
 
 1. **Dual-era is the only interoperable posture.** Modern-only fails against every server built before `2026-07-28`; legacy-only fails against modern servers and *"has no fall-forward mechanism."*
-2. **SDK and server adoption lags the spec.** Not measurable from this record — **an open question, and one worth measuring before choosing a support set.**
+2. **SDK and harness adoption lags the spec.** Measured in **§12** — modern-era support is uneven across the official SDKs and no handshake-era negotiation default has moved past `2025-11-25`.
 3. **A feature's presence is not evidence of persistence.** JSON-RPC batching lived one revision. Roots, Sampling, Logging and DCR are deprecated with an earliest removal of *the first revision released on or after 2027-07-28*.
 4. **Each supported revision is a distinct decision surface.** This is the Maknae-specific finding and the sharpest one in this record: a term decided under one revision's semantics may mean something materially different under another. Elicitation is the worked example — a **server-initiated request** in `2025-06-18`, gaining **URL mode** in `2025-11-25`, becoming **a result type plus a client retry** in `2026-07-28`. A policy written against one shape does not obviously hold against the others.
 
 **The consequence for a reference monitor:** supporting N revisions means the deny list must hold under N sets of semantics, and the PDP must know which set a given request is being interpreted under. **The cached era determination (§4) therefore becomes an input to authorization**, not merely to transport. A wrong or stale era cache is a wrong semantics selection.
 
-**Not decided here.** Which revisions Maknae supports is an operator decision with a real cost curve, and it should be made against measured adoption rather than against the spec's own recommendation.
+**Not decided here.** Which revisions Maknae supports is an operator decision with a real cost curve. **§12 supplies the measurement**; the choice remains the operator's.
 
-## 13. Ecosystem measurement — what is actually implemented
+## 12. Ecosystem measurement — what is actually implemented
 
-**Operator input (2026-08-29):** *"The SDKs implement most. The agent harnesses do not. I had a lot of issues with Codex compatibility when Claude Code worked fine."* Measured against the SDK and harness repositories on 2026-08-29. **This section is the answer to §11's item 2, which was previously an open question.**
+**Operator input (2026-08-29):** *"The SDKs implement most. The agent harnesses do not. I had a lot of issues with Codex compatibility when Claude Code worked fine."* Measured against the SDK and harness repositories on 2026-08-29. **This section supplies the measurement §11 item 2 defers to.**
 
-### The single most important number
+### Modern-era adoption is uneven, and no negotiation default has moved
 
-**Every official SDK's `LATEST` is `2025-11-25`. None defaults to the current spec revision `2026-07-28`.**
+**Corrected 2026-08-29 after review:** an earlier draft of this section claimed *"every official SDK's `LATEST` is `2025-11-25`."* **That is false for the Python SDK**, whose `LATEST_PROTOCOL_VERSION` is `2026-07-28`. The three SDKs sit at three different levels of modern-era adoption, and flattening them lost the distinction the support-set decision actually turns on.
 
-| SDK | Knows | `LATEST` | Notes |
+| SDK | Handshake-era support | Modern (`2026-07-28`) support | Negotiation default |
 |---|---|---|---|
-| **TypeScript** | `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`, **`2024-10-07`** | `2025-11-25` | **`DEFAULT_NEGOTIATED_PROTOCOL_VERSION = '2025-03-26'`** |
-| **Rust (`rmcp`)** | all five released revisions | `2025-11-25` | separate `STANDARD_HEADERS = 2026-07-28` const |
-| **Python** | all five released revisions | — | explicit `HANDSHAKE_PROTOCOL_VERSIONS` vs `MODERN_PROTOCOL_VERSIONS` split |
+| **TypeScript** | `2024-10-07` … `2025-11-25` | **absent** from `SUPPORTED_PROTOCOL_VERSIONS` | `DEFAULT_NEGOTIATED_PROTOCOL_VERSION = '2025-03-26'` |
+| **Rust (`rmcp`)** | `2024-11-05` … `2025-11-25` | **known but not preferred** — `V_2026_07_28` exists, and `STANDARD_HEADERS = V_2026_07_28`, but `LATEST = V_2025_11_25` | `LATEST = 2025-11-25` |
+| **Python** | `2024-11-05` … `2025-11-25` | **full** — `MODERN_PROTOCOL_VERSIONS = ("2026-07-28",)`, and `LATEST_PROTOCOL_VERSION` (any era) **is** `2026-07-28` | handshake `2025-11-25`; `server/discover` probe `2026-07-28` |
 
-**The spec has shipped an era break that the SDK ecosystem has not adopted as its default.** A product that implements only `2026-07-28` would today interoperate with essentially nothing built on an official SDK's defaults.
+**Two claims survive the correction, and they are the load-bearing ones:**
+
+1. **No SDK's handshake-era negotiation default exceeds `2025-11-25`**, and TypeScript's is three revisions below that at `2025-03-26`. Python states this explicitly in its own docstrings: `LATEST_HANDSHAKE_VERSION` is *"the client's offer and server's counter-offer default"* (`2025-11-25`), while `LATEST_MODERN_VERSION` is *"the `server/discover` probe default"* (`2026-07-28`). **The era determines the default, and the legacy default has not moved.**
+2. **TypeScript cannot speak the modern era at all** — `2026-07-28` is not in its supported set. It carries reserved `_meta` keys commented *"for the per-request envelope (protocol revision 2026-07-28)"*, so the plumbing is being laid, but the revision is not yet offered.
+
+**The consequence for a support-set decision is unchanged and now better grounded:** a `2026-07-28`-only implementation is unreachable by any TypeScript-SDK peer today, and is reached by a Python-SDK peer only on the modern probe path. Legacy-era support is not optional.
 
 ### The published spec set is not the deployed set
 
@@ -238,17 +243,18 @@ npx @modelcontextprotocol/conformance client --command "<client>" --suite auth
 Not decided here; recorded so the decision is made against measurement rather than the spec's own recommendation.
 
 - **`2026-07-28`-only is not viable today.** No official SDK defaults to it.
-- **`2025-11-25` is the current de-facto ceiling** — every SDK's `LATEST`.
+- **`2025-11-25` is the handshake-era ceiling** — the newest revision every SDK reaches, and the negotiation default for Python and Rust.
 - **`2025-03-26` is the de-facto floor** for broad interop, because the TypeScript SDK degrades to it by default.
+- **`2026-07-28` is reachable today only against a Python-SDK peer**, and only on the modern path. TypeScript does not offer it; Rust knows it but does not prefer it.
 - **Dual-era support is what buys forward compatibility**, and the Python SDK's explicit handshake/modern split is the model worth copying.
 - Each added revision is **a decision surface**, not just a codec path (§11 item 4). The cost is in the PDP, not the parser.
 
-## 14. Limits of this record
+## 13. Limits of this record
 
 - The `schema.mdx` payloads were **not** read; type-level detail (exact field names beyond those quoted, optionality, enum members) is **not** established here.
 - The transport binding pages (`stdio`, `streamable-http`) were read only through the versioning page's summaries; their normative detail is **not** captured.
 - The authorization pages were **not** read in full; §8 is assembled from changelog entries and is a pointer, not a substitute.
 - The `draft` revision was **not** read and is non-authoritative.
-- **Harness behaviour is inferred from pins and SDK constants, not observed.** §13's harness-lag mechanism is explicitly a hypothesis; no client/server negotiation was captured on the wire.
+- **Harness behaviour is inferred from pins and SDK constants, not observed.** §12's harness-lag mechanism is explicitly a hypothesis; no client/server negotiation was captured on the wire.
 - The conformance suite was **not run**; its existence and interface are recorded, its coverage is not assessed.
 - **Maknae's role (MCP client, MCP server, or both) is not settled by this record.** #151 contemplates both — brokering outbound to servers, and being a front door that Claude Code / Codex / Cursor speak MCP to directly. The era and version obligations differ by role, and that is design work.
