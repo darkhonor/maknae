@@ -105,7 +105,7 @@ Notes:
 
 The authority map is the agent's epistemic policy. It is a Tier 0 artifact, versioned in git and portable with the Lake, authored by the operator during onboarding — a CLI wizard or the web UI, in the same spirit as OpenClaw's and Hermes' onboarding flows — and changed only by operator-signed commits thereafter. Operator-configurable never means runtime-mutable.
 
-Following the Knowledge Lake's authority-line model (ADR-0004; the #201 build-out), the map separates two concerns the v0.1 draft conflated:
+Following the Knowledge Lake's authority-line model (**`mpe-es/knowledgebase` ADR-0004** — that project's number, not Maknae's, which is the authorization seam; the #201 build-out), the map separates two concerns the v0.1 draft conflated:
 
 ### 7.1 Egress allowlist — where the agent may learn from
 
