@@ -5,7 +5,7 @@
 | **Status** | Reference record — the base facts behind Maknae's MCP alignment (issues #151, #177–#180). **No dispositions ratified beyond the operator rulings noted inline.** |
 | **Date** | 2026-08-29 |
 | **Subject** | [`modelcontextprotocol/modelcontextprotocol`](https://github.com/modelcontextprotocol/modelcontextprotocol) — the Model Context Protocol specification. **PINNED at HEAD `ca4ab3027f7c844cd3039c956438d72e8253f7f5`.** Live docs: https://modelcontextprotocol.io |
-| **Method** | **Read-only** via the GitHub API at the pinned commit. Read in full: `docs/specification/2026-07-28/{basic/versioning,deprecated,changelog,basic/patterns/mrtr}.mdx`, the `## Major changes` sections of the `2025-11-25`, `2025-06-18` and `2025-03-26` changelogs, and grep-scoped normative text from `2026-07-28/server/tools.mdx` and `client/sampling.mdx`. **NOT read:** the `schema.mdx` payloads, the transport binding pages in full, the authorization pages in full, the registry, and the `draft` revision. No clone, no install, no execution. |
+| **Method** | **Read-only** via the GitHub API at the pinned commit. Read in full: `docs/specification/2026-07-28/{basic/versioning,deprecated,changelog,basic/patterns/mrtr}.mdx`, the `## Major changes` sections of the `2025-11-25`, `2025-06-18` and `2025-03-26` changelogs, and grep-scoped normative text from `2026-07-28/server/tools.mdx` and `client/sampling.mdx`. For §13, the version constants of the TypeScript, Python and Rust SDKs, `openai/codex`'s `rmcp` pin, and the conformance suite's README — read on 2026-08-29 at repository HEAD, **not pinned**, since the point of that section is current ecosystem state. **NOT read:** the `schema.mdx` payloads, the transport binding pages in full, the authorization pages in full, the registry, and the `draft` revision. No clone, no install, no execution. |
 | **Audience** | Maknae team (dual-audience: human reviewers and AI agents) |
 | **Purpose** | Record the MCP facts Maknae's `mcp.*` vocabulary and future broker depend on, **pinned by commit**, so this research is never re-run from scratch — and so a stale recollection of MCP is never designed against. Discharges the AGENTS.md prerequisite recorded on #177–#180. |
 
@@ -168,11 +168,87 @@ Read at the pin, quoted because #178 and #179 cite them:
 
 **Not decided here.** Which revisions Maknae supports is an operator decision with a real cost curve, and it should be made against measured adoption rather than against the spec's own recommendation.
 
-## 12. Limits of this record
+## 13. Ecosystem measurement — what is actually implemented
+
+**Operator input (2026-08-29):** *"The SDKs implement most. The agent harnesses do not. I had a lot of issues with Codex compatibility when Claude Code worked fine."* Measured against the SDK and harness repositories on 2026-08-29. **This section is the answer to §11's item 2, which was previously an open question.**
+
+### The single most important number
+
+**Every official SDK's `LATEST` is `2025-11-25`. None defaults to the current spec revision `2026-07-28`.**
+
+| SDK | Knows | `LATEST` | Notes |
+|---|---|---|---|
+| **TypeScript** | `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`, **`2024-10-07`** | `2025-11-25` | **`DEFAULT_NEGOTIATED_PROTOCOL_VERSION = '2025-03-26'`** |
+| **Rust (`rmcp`)** | all five released revisions | `2025-11-25` | separate `STANDARD_HEADERS = 2026-07-28` const |
+| **Python** | all five released revisions | — | explicit `HANDSHAKE_PROTOCOL_VERSIONS` vs `MODERN_PROTOCOL_VERSIONS` split |
+
+**The spec has shipped an era break that the SDK ecosystem has not adopted as its default.** A product that implements only `2026-07-28` would today interoperate with essentially nothing built on an official SDK's defaults.
+
+### The published spec set is not the deployed set
+
+The TypeScript SDK supports **`2024-10-07`**, a revision that **does not exist in `docs/specification/` at the pin**. The set of versions in the wild is not the set of versions in the spec repository, in both directions. A support matrix derived from the spec alone is incomplete.
+
+### The Python SDK models this best
+
+Its `version.py` carries a comment worth reproducing, because it names a trap Maknae could walk into:
+
+> Date-string protocol revisions happen to sort lexicographically, but versions are an enumerated set, not an ordered scalar: future identifiers are not guaranteed to be date-shaped, and unrecognized peer strings must compare conservatively instead of accidentally (e.g. `"zzz" > "2025-11-25"`).
+
+**Do not treat protocol versions as ordered.** They are an enumerated set. Comparing them as strings is a correctness bug waiting on a non-date identifier.
+
+### `rmcp` parses unknown protocol versions permissively — fail-open
+
+`ProtocolVersion`'s `Deserialize` matches the five known revisions and, for anything else:
+
+```rust
+_ => {}
+}
+Ok(ProtocolVersion(Cow::Owned(s)))
+```
+
+**An unrecognized version string parses successfully** rather than erroring. For a general-purpose SDK that is a defensible tolerance; **for a fail-closed reference monitor it is the wrong default.** If Maknae consumes `rmcp`, rejecting unknown versions is Maknae's obligation and cannot be delegated to the type. This is the same class as ADR-0021's fail-closed rulings and the `advesary`-typo rule in `binding.rs`: an unrecognized token must refuse, never pass through.
+
+### An official Rust SDK exists, and adopting it is a TCB decision
+
+`modelcontextprotocol/rust-sdk` (crate `rmcp`) is the official Rust implementation. **Whether Maknae consumes it or implements the protocol itself is a real decision, not a convenience choice**, because of ADR-0002's static Rust TCB: an SDK in the trust plane is TCB surface, and its dependency tree is `deny.toml`'s problem (**#156** asks exactly whether `cargo-deny` sees the whole surface). The permissive-parse finding above is one concrete reason the answer is not automatic.
+
+### Harness lag — a mechanism consistent with the operator's experience
+
+**Codex pins `rmcp = "=3.1.3"`** — an exact version pin in `codex-rs/Cargo.toml`, consumed through its own `codex-rmcp-client` crate. Its MCP behaviour is therefore frozen at that release. `rmcp` 3.1.3 knows all five revisions with `LATEST = 2025-11-25`.
+
+**A hypothesis, not a verified root cause:** the TypeScript SDK carries `DEFAULT_NEGOTIATED_PROTOCOL_VERSION = '2025-03-26'` — a deliberately conservative fallback — while `rmcp` offers `LATEST = 2025-11-25`. A client built on the TypeScript SDK therefore degrades to a three-revisions-older baseline by default, where a Rust-SDK client does not. Against a server whose negotiation is strict or whose support stops earlier, that asymmetry produces exactly the shape the operator observed: **one harness works, another fails, against the same server.**
+
+**What would verify it:** capturing the negotiated version on both sides against a specific failing server. Recorded as a hypothesis so it is neither relied on nor lost.
+
+**The general lesson stands regardless of the mechanism:** harness compatibility is not derivable from the specification, and is not derivable from SDK capability either. It is a property of what a given harness pins and what it offers, and it must be tested rather than reasoned about.
+
+### There is an official conformance suite — use it
+
+`modelcontextprotocol/conformance` (`@modelcontextprotocol/conformance`) is a maintained framework that tests **both client and server implementations** against the spec, with named scenarios and suites:
+
+```
+npx @modelcontextprotocol/conformance server --url http://localhost:3000/mcp
+npx @modelcontextprotocol/conformance client --command "<client>" --suite auth
+```
+
+**This is an external, spec-authored test harness for exactly the surface #151 would build**, and it exists in the role Maknae's own gates play internally. Whatever support set is chosen, conformance runs against it are the evidence — and per the `negative-control` discipline, a conformance run that has never been observed failing proves nothing.
+
+### What this means for choosing a support set
+
+Not decided here; recorded so the decision is made against measurement rather than the spec's own recommendation.
+
+- **`2026-07-28`-only is not viable today.** No official SDK defaults to it.
+- **`2025-11-25` is the current de-facto ceiling** — every SDK's `LATEST`.
+- **`2025-03-26` is the de-facto floor** for broad interop, because the TypeScript SDK degrades to it by default.
+- **Dual-era support is what buys forward compatibility**, and the Python SDK's explicit handshake/modern split is the model worth copying.
+- Each added revision is **a decision surface**, not just a codec path (§11 item 4). The cost is in the PDP, not the parser.
+
+## 14. Limits of this record
 
 - The `schema.mdx` payloads were **not** read; type-level detail (exact field names beyond those quoted, optionality, enum members) is **not** established here.
 - The transport binding pages (`stdio`, `streamable-http`) were read only through the versioning page's summaries; their normative detail is **not** captured.
 - The authorization pages were **not** read in full; §8 is assembled from changelog entries and is a pointer, not a substitute.
 - The `draft` revision was **not** read and is non-authoritative.
-- **Real-world adoption of each revision is not established.** §11's item 2 is an open question, not a finding.
+- **Harness behaviour is inferred from pins and SDK constants, not observed.** §13's harness-lag mechanism is explicitly a hypothesis; no client/server negotiation was captured on the wire.
+- The conformance suite was **not run**; its existence and interface are recorded, its coverage is not assessed.
 - **Maknae's role (MCP client, MCP server, or both) is not settled by this record.** #151 contemplates both — brokering outbound to servers, and being a front door that Claude Code / Codex / Cursor speak MCP to directly. The era and version obligations differ by role, and that is design work.
