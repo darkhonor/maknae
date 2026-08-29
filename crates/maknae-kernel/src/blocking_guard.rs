@@ -4,6 +4,14 @@
 //! calls; this module owns the mutation-gated decision state: when a timeout
 //! is counted, when success resets the counter, and when a call must be refused
 //! before another non-cancellable blocking task is spawned.
+//!
+//! The policy, read, and NSS guards bound short-horizon orphan bursts to
+//! [`BLOCKING_BREAKER_MAX_IN_FLIGHT`] per guarded surface, then admit one
+//! half-open recovery probe per [`BLOCKING_BREAKER_RESET_AFTER`]. If the
+//! backend remains persistently wedged, that probe can orphan one additional
+//! worker per cooldown. That is an intentional recovery tradeoff: unlike the
+//! primary audit sink, these kernel surfaces keep probing so transient
+//! infrastructure stalls self-heal without requiring process restart.
 
 use std::time::{Duration, Instant};
 

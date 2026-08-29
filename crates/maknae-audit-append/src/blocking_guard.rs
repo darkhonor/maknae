@@ -35,7 +35,8 @@ pub const AUDIT_APPEND_BREAKER_REFUSAL_LOG_EVERY: Duration = Duration::from_secs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakerAdmission {
     Admit(AuditAttempt),
-    Refuse,
+    RefuseOpen,
+    RefuseAtCapacity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +78,7 @@ impl BlockingBreaker {
 
     pub fn begin_attempt_at(&mut self, now: Instant) -> BreakerAdmission {
         if self.trip_after == 0 {
-            return BreakerAdmission::Refuse;
+            return BreakerAdmission::RefuseOpen;
         }
 
         while self.stale_reclaims < self.max_stale_reclaims
@@ -95,8 +96,10 @@ impl BlockingBreaker {
             self.next_attempt_id = self.next_attempt_id.saturating_add(1);
             self.in_flight.push_back((attempt, now));
             BreakerAdmission::Admit(attempt)
+        } else if self.stale_reclaims >= self.max_stale_reclaims {
+            BreakerAdmission::RefuseOpen
         } else {
-            BreakerAdmission::Refuse
+            BreakerAdmission::RefuseAtCapacity
         }
     }
 
@@ -155,7 +158,10 @@ mod tests {
             breaker.begin_attempt_at(now),
             BreakerAdmission::Admit(_)
         ));
-        assert_eq!(breaker.begin_attempt_at(now), BreakerAdmission::Refuse);
+        assert_eq!(
+            breaker.begin_attempt_at(now),
+            BreakerAdmission::RefuseAtCapacity
+        );
     }
 
     #[test]
@@ -173,7 +179,10 @@ mod tests {
             breaker.begin_attempt_at(now),
             BreakerAdmission::Admit(_)
         ));
-        assert_eq!(breaker.begin_attempt_at(now), BreakerAdmission::Refuse);
+        assert_eq!(
+            breaker.begin_attempt_at(now),
+            BreakerAdmission::RefuseAtCapacity
+        );
         breaker.record_success(first);
         assert!(matches!(
             breaker.begin_attempt_at(now),
@@ -185,7 +194,7 @@ mod tests {
     fn zero_threshold_refuses_before_spawn() {
         assert_eq!(
             BlockingBreaker::new(0).begin_attempt_at(Instant::now()),
-            BreakerAdmission::Refuse
+            BreakerAdmission::RefuseOpen
         );
     }
 
@@ -206,7 +215,10 @@ mod tests {
             breaker.begin_attempt_at(now),
             BreakerAdmission::Admit(_)
         ));
-        assert_eq!(breaker.begin_attempt_at(now), BreakerAdmission::Refuse);
+        assert_eq!(
+            breaker.begin_attempt_at(now),
+            BreakerAdmission::RefuseAtCapacity
+        );
     }
 
     #[test]
@@ -224,7 +236,10 @@ mod tests {
             breaker.begin_attempt_at(now),
             BreakerAdmission::Admit(_)
         ));
-        assert_eq!(breaker.begin_attempt_at(now), BreakerAdmission::Refuse);
+        assert_eq!(
+            breaker.begin_attempt_at(now),
+            BreakerAdmission::RefuseAtCapacity
+        );
 
         let later = now + AUDIT_APPEND_STALE_AFTER;
         assert!(matches!(
@@ -241,12 +256,12 @@ mod tests {
         ));
         assert_eq!(
             breaker.begin_attempt_at(later + AUDIT_APPEND_STALE_AFTER),
-            BreakerAdmission::Refuse
+            BreakerAdmission::RefuseOpen
         );
         breaker.record_success(first);
         assert_eq!(
             breaker.begin_attempt_at(later + AUDIT_APPEND_STALE_AFTER),
-            BreakerAdmission::Refuse
+            BreakerAdmission::RefuseOpen
         );
     }
 

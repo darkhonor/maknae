@@ -134,7 +134,7 @@ impl AuditSink {
         };
         let attempt: AuditAttempt = match admitted {
             BreakerAdmission::Admit(attempt) => attempt,
-            BreakerAdmission::Refuse => {
+            BreakerAdmission::RefuseOpen => {
                 let should_log = self
                     .breaker
                     .lock()
@@ -148,6 +148,22 @@ impl AuditSink {
                 }
                 return Err(AuditError::WritePrimary(
                     "audit append circuit breaker open".into(),
+                ));
+            }
+            BreakerAdmission::RefuseAtCapacity => {
+                let should_log = self
+                    .breaker
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .should_log_refusal_at(now);
+                if should_log {
+                    eprintln!(
+                    "maknaed: AUDIT WRITE AT CAPACITY for event={} action={} session_id={} — refusing append before spawning blocking audit work",
+                    rec.event, rec.action, rec.session_id
+                );
+                }
+                return Err(AuditError::WritePrimary(
+                    "audit append worker capacity exhausted".into(),
                 ));
             }
         };
