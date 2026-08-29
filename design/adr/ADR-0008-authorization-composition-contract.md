@@ -71,6 +71,21 @@ Constraint-only could be made to "work" only by having `-basic` grant broadly ov
 
 ADR-0020 §3's original worry — *"a mandatory `Permit` could turn a default-deny `NotApplicable` into `Permit`"* — was correct; the remedy was too blunt. It is now carried by **decision 4 below**: an operand that cannot fully evaluate returns `NotApplicable`, never `Permit`.
 
+### 2a. Grants authorize; carved denials revoke for cause — both halves are structural
+
+Maknae is **deny-by-default**. Two mechanisms move a subject off that default, and they are not symmetric in kind:
+
+- **A grant authorizes.** Any operand may grant, per decision 2, within whatever it models.
+- **A carved denial revokes for cause** — lost clearance, invalid account, biometric failure, revocation, operator judgment. Operator ruling 2026-08-29: *"We deny by default and only authorize with grants. We can carve denials out as well for use cases … This is why the `.contain` verbs are key. They implement the carved denials."*
+
+**Containment is therefore part of the access model, not an incident-response convenience.** It is implemented by the `admin.contain` / `admin.release` / `kernel.contain` terms ([#165](https://github.com/darkhonor/maknae/issues/165)), and it has **exactly one sanctioned spelling** — `admin.subject.bind`/`.unbind` refuse the `adversary` role precisely so the carve mechanism stays the single auditable path. A second route into containment makes "denied for cause" unreconstructable.
+
+**A carve is scoped.** A bare carve is **total** (the `adversary` role, deny-all); a scoped carve is a **subject-scoped deny list** reusing the policy's own deny vocabulary. Total containment is the degenerate case where the scope is everything. Because a carve is expressed in the deny grammar, **the whole-vocabulary deny requirement in Consequences below is what makes scoped carves possible at all.**
+
+**A carve is never waivable, only liftable.** No `Permit` from any operand composes past it — including a **mandatory operand's `Permit`**, now that decision 2 allows one. `combine` rule 1 gives this for free; #165 asserts it rather than assuming it.
+
+**Distinguish a carve from a per-request predicate denial.** A mandatory operand that denies on its own predicate every request — insufficient releasability, clearance absent at decision time — needs no carve; that is the normal decision path. **Carves are for persistent, cause-attributed state** that survives across requests and remains visible whether or not the attribute engine is loaded.
+
 ### 3. No operand may waive a Deny — `combine` as ratified is the whole composition contract
 
 `crates/maknae-security/src/compose.rs::combine`, unchanged:
@@ -120,6 +135,8 @@ A fork that rewrites the composition root is a different product, and this ADR m
 - **The vocabulary is no longer a compile-time closed set.** #67's drift gate asserts a closed 59-term vocabulary. Under decision 5 the **core** vocabulary stays closed and gate-checked; the **composed** vocabulary is core plus declared extension terms and resolves at boot. The gate covers the core set and the declaration mechanism — not the union.
 
 - **Unknown-vocabulary denial needs its own audit reason.** Today it is reached emergently through `NotApplicable`, sharing the generic `"no applicable authorizer (fail-closed)"` string with "you lack the role." Overlaps the reason-enrichment work in [#181](https://github.com/darkhonor/maknae/issues/181) and [#84](https://github.com/darkhonor/maknae/issues/84) — **land it once.**
+
+- **The whole-vocabulary deny grammar is load-bearing twice over.** It is the operator's floor under attribute-native grants (below), **and** it is what a scoped carve's scope is written in (decision 2a). Until it exists, a carve can only be total. Tracked in [#158](https://github.com/darkhonor/maknae/issues/158); [#165](https://github.com/darkhonor/maknae/issues/165) depends on it for scoped carves and can land total containment without it.
 
 - **The capability deny list is not the complete statement of what is reachable.** Under decision 2, a subject can reach an attribute-native object with **no `-basic` grant at all**. That is ABAC working as ADR-0020 §2 already says it should, but it means the operator's real floor over such objects is the **whole-vocabulary deny grammar** (#158), not the capability `allow`/`deny` lists. Intend this; do not discover it.
 
