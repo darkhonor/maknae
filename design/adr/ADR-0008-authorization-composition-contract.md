@@ -49,11 +49,27 @@ The baseline is **structurally** present. Four layers, in order of strength:
 
 - **Boot-time evidence.** The daemon records in the audit trail that its composition included the baseline, and which extensions were loaded. The property becomes auditable **at runtime**, not only at build time.
 
-### 2. Every operand decides by its own model, and may grant
+### 2. Every operand decides by its own model, and may grant — including mandatory operands
 
 An extension is **not** restricted to denials, and **not** restricted to attributes. It grants or denies according to whatever it models. **Extensions add to the authorized vocabulary.**
 
 `-basic` is not expected to model the universe. A capability `-basic` does not know about is one `-basic` abstains on (`NotApplicable`), and an extension that does model it and authorizes it under its own conditions **is permitted to grant it**.
+
+**This includes mandatory (MAC) operands, and it amends [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md) §3.** That ADR required a mandatory operand to be *constraint-only* — `Deny` or `NotApplicable`, **never `Permit`** — on the reasoning that "granting is the discretionary layer's job."
+
+**That reasoning assumed permit-by-default with mandatory controls subtracting. Maknae is deny-by-default: grants authorize, and denials carve out for cause** (lost clearance, invalid account, biometric failure, revocation). Operator ruling, 2026-08-29:
+
+> I hadn't realized as written 20 assumes you are permitted by default and only removed otherwise. Which is backwards. We deny by default and only authorize with grants. We can carve denials out as well for use cases.
+
+**The worked case that breaks constraint-only.** An Australian national with SECRET clearance requesting a `SECRET//REL USA, FVEY` object. Releasability is not expressible in the capability grammar, so `maknae-authz-basic` returns `NotApplicable`. A constraint-only mandatory operand also returns `NotApplicable` — the clearance is sufficient, so there is nothing to deny. `combine` folds to `NotApplicable`, `finalize` returns **`Deny`**, and **an entitled subject is refused with no configuration able to fix it.** The only operand competent to evaluate `AUS ∈ FVEY ∧ clearance ≥ SECRET` was forbidden from ever saying yes.
+
+Constraint-only could be made to "work" only by having `-basic` grant broadly over objects whose releasability it cannot evaluate — that is, by making the **discretionary** layer fail open, which decision 4 below forbids. It also contradicted ADR-0020 §2's own claim that `maknae-authz-dcs` "provides full ABAC": a decision model that can only deny is not a decision model.
+
+**The corrected rule — a mandatory operand may `Permit` only on a COMPLETE evaluation of its own predicate.** Clearance **and** releasability **and** compartments **and** need-to-know, as its model defines. It returns `NotApplicable` when it cannot fully evaluate, and `Deny` when the predicate fails. **Clearance alone is never a grant.**
+
+**What ADR-0020 keeps, unchanged:** mandatory operands are **always composed** (never silently absent — this was always the separate, load-bearing half of §3); they **fail closed**; and **deny-overrides** means no operand's `Permit` can override a peer's `Deny`. **ADR-0020 decision 4 — no clearance bypass for any subject, admin or kernel — is unaffected**, because it rests on `Deny` winning, not on `Permit` being forbidden.
+
+ADR-0020 §3's original worry — *"a mandatory `Permit` could turn a default-deny `NotApplicable` into `Permit`"* — was correct; the remedy was too blunt. It is now carried by **decision 4 below**: an operand that cannot fully evaluate returns `NotApplicable`, never `Permit`.
 
 ### 3. No operand may waive a Deny — `combine` as ratified is the whole composition contract
 
@@ -105,6 +121,8 @@ A fork that rewrites the composition root is a different product, and this ADR m
 
 - **Unknown-vocabulary denial needs its own audit reason.** Today it is reached emergently through `NotApplicable`, sharing the generic `"no applicable authorizer (fail-closed)"` string with "you lack the role." Overlaps the reason-enrichment work in [#181](https://github.com/darkhonor/maknae/issues/181) and [#84](https://github.com/darkhonor/maknae/issues/84) — **land it once.**
 
+- **The capability deny list is not the complete statement of what is reachable.** Under decision 2, a subject can reach an attribute-native object with **no `-basic` grant at all**. That is ABAC working as ADR-0020 §2 already says it should, but it means the operator's real floor over such objects is the **whole-vocabulary deny grammar** (#158), not the capability `allow`/`deny` lists. Intend this; do not discover it.
+
 - **#154's framing is superseded.** Its body states an extension *"may only ever add denials."* That is corrected by decision 2; the issue's remaining substance — structural non-removability, defining the baseline precisely, and a negative test observed failing — stands.
 
 - **Decision logic implementing this ADR is T1** (95% region floor, zero missed mutants) per [ADR-0016](ADR-0016-risk-tiered-test-coverage.md), and the `negative-control` gate must be **observed failing** with the baseline removed.
@@ -112,7 +130,7 @@ A fork that rewrites the composition root is a different product, and this ADR m
 ## References
 
 - [ADR-0004](ADR-0004-modular-authorization-architecture.md) — modular authorization; the seam this contract governs
-- [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md) — deny-overrides and the access-control vocabulary; **decision 2 corrects a misreading of its "never waivable" clause**
+- [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md) — deny-overrides and the access-control vocabulary. **Decision 2 above corrects a misreading of its "never waivable" clause AND amends its §3 constraint-only rule** (mandatory operands may now `Permit` on a complete predicate); ADR-0020 carries the reciprocal correction in place, dated
 - [ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) — sole PDP, TCB boundary
 - [ADR-0019](ADR-0019-audit-record-model.md) — audit record model; operand attribution is an obligation against it
 - `crates/maknae-security/src/compose.rs` — `combine`, `guarded_decide`, `ConjunctionAuthorizer`
