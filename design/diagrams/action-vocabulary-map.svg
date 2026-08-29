@@ -1,0 +1,286 @@
+<svg width="1548" height="1435" viewBox="0 0 1548 1435" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d">
+  <title id="t">Maknae action vocabulary: the complete 59-term map and the dependencies between them</title>
+  <desc id="d">Left-to-right dependency map of the complete action vocabulary, all fifty-nine terms. Three built terms appear at the top as their own boxes: liveness.ping, admin.whoami and fs.read. Below, twenty-four issues are arranged in five columns by dependency depth: column one is startable now, each later column is blocked by work to its left. Each box names its issue number, the capability it delivers, the vocabulary terms it implements, and the issues that block it. Issue 162, action-scoped grants, blocks eighteen of the twenty-three capability slices and is marked as the critical path. Two terms marked K, kernel.contain and kernel.session.terminate, are kernel action strings with no wire verb and are not reachable by any client.</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1548" height="1435" fill="#FFFFFF"/>
+  <text x="30" y="34" font-family="Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#2C2C2A">The action vocabulary — 59 terms and what blocks what</text>
+  <text x="30" y="55" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#5F5E5A">3 built, 56 enumerated-but-unbuilt across 24 issues. Tracked in epic #182; enumerated by #67. Columns run left to right by dependency depth.</text>
+  <text x="30" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#2C2C2A">Class</text>
+  <rect x="74" y="70" width="12" height="12" rx="3" fill="#E4F0F2" stroke="#3A6E78" stroke-width="1"/>
+  <text x="91" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">liveness</text>
+  <rect x="154" y="70" width="12" height="12" rx="3" fill="#E7EEF9" stroke="#3D6398" stroke-width="1"/>
+  <text x="171" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">fs</text>
+  <rect x="192" y="70" width="12" height="12" rx="3" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1"/>
+  <text x="209" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">admin</text>
+  <rect x="251" y="70" width="12" height="12" rx="3" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1"/>
+  <text x="268" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">session</text>
+  <rect x="324" y="70" width="12" height="12" rx="3" fill="#F8E9E7" stroke="#9A4B42" stroke-width="1"/>
+  <text x="341" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">terminal</text>
+  <rect x="404" y="70" width="12" height="12" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
+  <text x="421" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">mcp</text>
+  <rect x="449" y="70" width="12" height="12" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="466" y="80" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#2C2C2A">prerequisite</text>
+  <text x="545" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="700" fill="#2C2C2A">[K]</text>
+  <text x="571" y="80" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#2C2C2A">kernel action string — no Verb variant, not client-reachable</text>
+  <line x1="885" y1="76" x2="907" y2="76" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="913" y="80" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#2C2C2A">blocks</text>
+  <text x="30" y="106" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">BUILT — decided, dispatched and serving today</text>
+  <text x="30" y="121" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">3 terms. Every other term in the vocabulary is enumerated and decided, and denies.</text>
+  <line x1="30" y1="130" x2="914" y2="130" stroke="#5F5E5A" stroke-width="0.75"/>
+  <g><title>liveness.ping — built and serving</title>
+  <rect x="30" y="140" width="280" height="62" rx="9" fill="#E4F0F2" stroke="#3A6E78" stroke-width="2.2"/>
+  <text x="42" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#3A6E78">BUILT</text>
+  <text x="92" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#1C3D43">Reachability, and nothing more</text>
+  <text x="48" y="180" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#1C3D43">liveness.ping</text>
+  <text x="42" y="195" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3A6E78">shipped; permitted by the live PDP</text>
+  </g>
+  <g><title>admin.whoami — built and serving</title>
+  <rect x="332" y="140" width="280" height="62" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="2.2"/>
+  <text x="344" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8A6A3A">BUILT</text>
+  <text x="394" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#4A3618">Identity, never entitlement</text>
+  <text x="350" y="180" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.whoami</text>
+  <text x="344" y="195" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">shipped; permitted by the live PDP</text>
+  </g>
+  <g><title>fs.read — built and serving</title>
+  <rect x="634" y="140" width="280" height="62" rx="9" fill="#E7EEF9" stroke="#3D6398" stroke-width="2.2"/>
+  <text x="646" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#3D6398">BUILT</text>
+  <text x="696" y="159" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#1E3A5C">Content, through the capability grammar</text>
+  <text x="652" y="180" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#1E3A5C">fs.read</text>
+  <text x="646" y="195" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3D6398">shipped; permitted by the live PDP</text>
+  </g>
+  <text x="30" y="228" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">COLUMN 1 — Ready now — nothing blocks these</text>
+  <text x="30" y="243" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">4 issue(s), 8 terms</text>
+  <line x1="30" y1="252" x2="310" y2="252" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="332" y="228" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">COLUMN 2 — Unblocked once column 1 lands</text>
+  <text x="332" y="243" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">11 issue(s), 25 terms</text>
+  <line x1="332" y1="252" x2="612" y2="252" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="634" y="228" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">COLUMN 3 — Third wave</text>
+  <text x="634" y="243" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">5 issue(s), 12 terms</text>
+  <line x1="634" y1="252" x2="914" y2="252" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="936" y="228" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">COLUMN 4 — Fourth wave</text>
+  <text x="936" y="243" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">3 issue(s), 8 terms</text>
+  <line x1="936" y1="252" x2="1216" y2="252" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="1238" y="228" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">COLUMN 5 — Last</text>
+  <text x="1238" y="243" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">1 issue(s), 3 terms</text>
+  <line x1="1238" y1="252" x2="1518" y2="252" stroke="#5F5E5A" stroke-width="0.75"/>
+  <rect x="30" y="264" width="280" height="38" rx="8" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.8"/>
+  <text x="42" y="280" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#4A3618">CRITICAL PATH — #162</text>
+  <text x="42" y="295" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#4A3618">action-scoped grants; blocks 18 of 23 slices</text>
+  <path d="M310 472.5 C320.0 472.5 320.0 576.0 330 576.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M310 472.5 C320.0 472.5 320.0 672.0 330 672.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M612 369.0 C622.0 369.0 622.0 369.0 632 369.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M612 369.0 C622.0 369.0 622.0 480.0 632 480.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M612 369.0 C622.0 369.0 622.0 583.5 632 583.5" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M612 369.0 C622.0 369.0 622.0 687.0 632 687.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M612 480.0 C622.0 480.0 622.0 775.5 632 775.5" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M914 369.0 C924.0 369.0 924.0 361.5 934 361.5" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M914 687.0 C924.0 687.0 924.0 480.0 934 480.0" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M914 583.5 C924.0 583.5 924.0 583.5 934 583.5" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <path d="M1216 361.5 C1226.0 361.5 1226.0 361.5 1236 361.5" fill="none" stroke="#5F5E5A" stroke-width="1.4" opacity="0.75" marker-end="url(#ar)"/>
+  <g><title>Issue 158: Create and modify file content</title>
+  <rect x="30" y="423" width="280" height="99" rx="9" fill="#E7EEF9" stroke="#3D6398" stroke-width="1.1"/>
+  <text x="42" y="442" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1E3A5C">#158</text>
+  <text x="80" y="442" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1E3A5C">Create and modify file content</text>
+  <text x="48" y="459" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.write</text>
+  <text x="48" y="474" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.delete</text>
+  <text x="48" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.mkdir</text>
+  <text x="42" y="513" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3D6398">no blockers — startable today</text>
+  </g>
+  <g><title>Issue 159: No laundering by relocation</title>
+  <rect x="332" y="534" width="280" height="84" rx="9" fill="#E7EEF9" stroke="#3D6398" stroke-width="1.1"/>
+  <text x="344" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1E3A5C">#159</text>
+  <text x="382" y="553" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1E3A5C">No laundering by relocation</text>
+  <text x="350" y="570" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.move</text>
+  <text x="350" y="585" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.link</text>
+  <text x="344" y="609" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3D6398">blocked by #158</text>
+  </g>
+  <g><title>Issue 160: Metadata cannot undermine controls</title>
+  <rect x="332" y="630" width="280" height="84" rx="9" fill="#E7EEF9" stroke="#3D6398" stroke-width="1.1"/>
+  <text x="344" y="649" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1E3A5C">#160</text>
+  <text x="382" y="649" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1E3A5C">Metadata cannot undermine controls</text>
+  <text x="350" y="666" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.chmod</text>
+  <text x="350" y="681" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.chown</text>
+  <text x="344" y="705" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3D6398">blocked by #158</text>
+  </g>
+  <g><title>Issue 161: Discovery is not an oracle</title>
+  <rect x="30" y="534" width="280" height="84" rx="9" fill="#E7EEF9" stroke="#3D6398" stroke-width="1.1"/>
+  <text x="42" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1E3A5C">#161</text>
+  <text x="80" y="553" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1E3A5C">Discovery is not an oracle</text>
+  <text x="48" y="570" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.list</text>
+  <text x="48" y="585" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1E3A5C">fs.stat</text>
+  <text x="42" y="609" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3D6398">no blockers — startable today</text>
+  </g>
+  <g><title>Issue 162: Inspect trust-plane state</title>
+  <rect x="30" y="312" width="280" height="99" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="2.2"/>
+  <text x="42" y="331" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#162</text>
+  <text x="80" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Inspect trust-plane state</text>
+  <text x="48" y="348" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.status</text>
+  <text x="48" y="363" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.config.show</text>
+  <text x="48" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.subject.list</text>
+  <text x="42" y="402" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">no blockers — startable today</text>
+  </g>
+  <g><title>Issue 163: Re-exports the audit trail</title>
+  <rect x="332" y="726" width="280" height="69" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="745" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#163</text>
+  <text x="382" y="745" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Re-exports the audit trail</text>
+  <text x="350" y="762" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.audit.tail</text>
+  <text x="344" y="786" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162, #99</text>
+  </g>
+  <g><title>Issue 164: Bindings change without restart</title>
+  <rect x="332" y="807" width="280" height="99" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="826" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#164</text>
+  <text x="382" y="826" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Bindings change without restart</text>
+  <text x="350" y="843" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.subject.bind</text>
+  <text x="350" y="858" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.subject.unbind</text>
+  <text x="350" y="873" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.policy.reload</text>
+  <text x="344" y="897" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162, #154</text>
+  </g>
+  <g><title>Issue 165: Stop button and recovery</title>
+  <rect x="332" y="918" width="280" height="99" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="937" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#165</text>
+  <text x="382" y="937" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Stop button and recovery</text>
+  <text x="350" y="954" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.contain</text>
+  <text x="350" y="969" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.release</text>
+  <text x="350" y="984" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">kernel.contain</text>
+  <text x="447.6" y="984" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" fill="#5F5E5A">[K]</text>
+  <text x="344" y="1008" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162</text>
+  </g>
+  <g><title>Issue 166: Connection oversight</title>
+  <rect x="332" y="1029" width="280" height="99" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="1048" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#166</text>
+  <text x="382" y="1048" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Connection oversight</text>
+  <text x="350" y="1065" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.session.list</text>
+  <text x="350" y="1080" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.session.terminate</text>
+  <text x="350" y="1095" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">kernel.session.terminate</text>
+  <text x="511.6" y="1095" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" fill="#5F5E5A">[K]</text>
+  <text x="344" y="1119" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162, #115</text>
+  </g>
+  <g><title>Issue 167: Rotate the plane's own identity</title>
+  <rect x="332" y="1140" width="280" height="69" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="1159" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#167</text>
+  <text x="382" y="1159" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Rotate the plane's own identity</text>
+  <text x="350" y="1176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.credential.rotate</text>
+  <text x="344" y="1200" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162</text>
+  </g>
+  <g><title>Issue 168: The confused-deputy term</title>
+  <rect x="332" y="1221" width="280" height="69" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="1240" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#168</text>
+  <text x="382" y="1240" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">The confused-deputy term</text>
+  <text x="350" y="1257" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.credential.broker</text>
+  <text x="344" y="1281" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162</text>
+  </g>
+  <g><title>Issue 169: Govern where content goes</title>
+  <rect x="332" y="1302" width="280" height="99" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="1.1"/>
+  <text x="344" y="1321" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#4A3618">#169</text>
+  <text x="382" y="1321" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#4A3618">Govern where content goes</text>
+  <text x="350" y="1338" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.provider.list</text>
+  <text x="350" y="1353" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.provider.set</text>
+  <text x="350" y="1368" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#4A3618">admin.provider.disable</text>
+  <text x="344" y="1392" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">blocked by #162</text>
+  </g>
+  <g><title>Issue 170: Lifecycle + tool authority</title>
+  <rect x="332" y="312" width="280" height="114" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1.1"/>
+  <text x="344" y="331" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1F4A24">#170</text>
+  <text x="382" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1F4A24">Lifecycle + tool authority</text>
+  <text x="350" y="348" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.new</text>
+  <text x="350" y="363" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.close</text>
+  <text x="350" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.list</text>
+  <text x="350" y="393" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.delete</text>
+  <text x="344" y="417" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3E7A44">blocked by #162</text>
+  </g>
+  <g><title>Issue 171: Continuity keeps provenance</title>
+  <rect x="634" y="312" width="280" height="114" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1.1"/>
+  <text x="646" y="331" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1F4A24">#171</text>
+  <text x="684" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1F4A24">Continuity keeps provenance</text>
+  <text x="652" y="348" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.resume</text>
+  <text x="652" y="363" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.load</text>
+  <text x="652" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.fork</text>
+  <text x="652" y="393" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.compact</text>
+  <text x="646" y="417" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3E7A44">blocked by #170, #162</text>
+  </g>
+  <g><title>Issue 172: The egress term</title>
+  <rect x="936" y="312" width="280" height="99" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1.1"/>
+  <text x="948" y="331" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1F4A24">#172</text>
+  <text x="986" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1F4A24">The egress term</text>
+  <text x="954" y="348" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.prompt</text>
+  <text x="954" y="363" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.cancel</text>
+  <text x="954" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.update</text>
+  <text x="948" y="402" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3E7A44">blocked by #171, #170, #153, #162</text>
+  </g>
+  <g><title>Issue 173: Second door to egress</title>
+  <rect x="634" y="438" width="280" height="84" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1.1"/>
+  <text x="646" y="457" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1F4A24">#173</text>
+  <text x="684" y="457" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1F4A24">Second door to egress</text>
+  <text x="652" y="474" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.set_config_option</text>
+  <text x="652" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.set_mode</text>
+  <text x="646" y="513" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3E7A44">blocked by #170, #162</text>
+  </g>
+  <g><title>Issue 174: Approval is never authorization</title>
+  <rect x="634" y="534" width="280" height="99" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="1.1"/>
+  <text x="646" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#1F4A24">#174</text>
+  <text x="684" y="553" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#1F4A24">Approval is never authorization</text>
+  <text x="652" y="570" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.request_permission</text>
+  <text x="652" y="585" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.elicit.create</text>
+  <text x="652" y="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#1F4A24">session.elicit.complete</text>
+  <text x="646" y="624" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#3E7A44">blocked by #170, #162</text>
+  </g>
+  <g><title>Issue 175: Arbitrary execution</title>
+  <rect x="634" y="645" width="280" height="84" rx="9" fill="#F8E9E7" stroke="#9A4B42" stroke-width="1.1"/>
+  <text x="646" y="664" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#5A2620">#175</text>
+  <text x="684" y="664" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#5A2620">Arbitrary execution</text>
+  <text x="652" y="681" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.create</text>
+  <text x="652" y="696" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.input</text>
+  <text x="646" y="720" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#9A4B42">blocked by #170, #162</text>
+  </g>
+  <g><title>Issue 176: Output never decided on</title>
+  <rect x="936" y="423" width="280" height="114" rx="9" fill="#F8E9E7" stroke="#9A4B42" stroke-width="1.1"/>
+  <text x="948" y="442" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#5A2620">#176</text>
+  <text x="986" y="442" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#5A2620">Output never decided on</text>
+  <text x="954" y="459" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.output</text>
+  <text x="954" y="474" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.wait_for_exit</text>
+  <text x="954" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.kill</text>
+  <text x="954" y="504" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#5A2620">terminal.release</text>
+  <text x="948" y="528" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#9A4B42">blocked by #175, #162</text>
+  </g>
+  <g><title>Issue 177: Connect without brokering</title>
+  <rect x="332" y="438" width="280" height="84" rx="9" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.1"/>
+  <text x="344" y="457" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#26215C">#177</text>
+  <text x="382" y="457" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Connect without brokering</text>
+  <text x="350" y="474" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.connect</text>
+  <text x="350" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.disconnect</text>
+  <text x="344" y="513" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#534AB7">blocked by #162</text>
+  </g>
+  <g><title>Issue 178: Verdict over the tool's claims</title>
+  <rect x="634" y="741" width="280" height="69" rx="9" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.1"/>
+  <text x="646" y="760" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#26215C">#178</text>
+  <text x="684" y="760" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Verdict over the tool's claims</text>
+  <text x="652" y="777" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.tool.call</text>
+  <text x="646" y="801" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#534AB7">blocked by #177, #162</text>
+  </g>
+  <g><title>Issue 179: The injection channel</title>
+  <rect x="1238" y="312" width="280" height="99" rx="9" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.1"/>
+  <text x="1250" y="331" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#26215C">#179</text>
+  <text x="1288" y="331" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">The injection channel</text>
+  <text x="1256" y="348" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.resource.read</text>
+  <text x="1256" y="363" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.prompt.get</text>
+  <text x="1256" y="378" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.message</text>
+  <text x="1250" y="402" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#534AB7">blocked by #177, #172, #170, #162</text>
+  </g>
+  <g><title>Issue 180: Egress on server initiative</title>
+  <rect x="936" y="549" width="280" height="69" rx="9" fill="#EEEDFE" stroke="#534AB7" stroke-width="1.1"/>
+  <text x="948" y="568" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#26215C">#180</text>
+  <text x="986" y="568" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Egress on server initiative</text>
+  <text x="954" y="585" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#26215C">mcp.sampling.create</text>
+  <text x="948" y="609" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#534AB7">blocked by #177, #174, #162</text>
+  </g>
+  <g><title>Issue 181: Recorded contract mismatch</title>
+  <rect x="30" y="630" width="280" height="54" rx="9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="1.1" stroke-dasharray="4 3"/>
+  <text x="42" y="649" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="700" fill="#2C2C2A">#181</text>
+  <text x="80" y="649" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">Recorded contract mismatch</text>
+  <text x="42" y="675" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#5F5E5A">no blockers — makes the burndown's premise true</text>
+  </g>
+</svg>
