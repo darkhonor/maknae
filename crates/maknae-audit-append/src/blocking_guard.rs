@@ -11,11 +11,10 @@ use std::time::{Duration, Instant};
 /// Pinned here because the async append binding is I/O orchestration.
 pub const AUDIT_APPEND_BREAKER_TRIP_AFTER: u8 = 3;
 
-/// Maximum concurrent primary audit appends before refusing new work. Kept
-/// equal to the #145 orphan budget for the primary audit sink: stale recovery
-/// below may reclaim at most this many wedged attempts once, so a persistent
-/// wedge cannot grow without bound.
-pub const AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT: u8 = 3;
+/// Maximum concurrent primary audit appends before refusing new work. This is
+/// a concurrency budget, not the orphan budget: stale recovery below carries
+/// the separate lifetime bound for additional wedged attempts.
+pub const AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT: u8 = 32;
 
 /// Age after which a still-unfinished audit append is treated as stale for
 /// admission purposes. The original append future still awaits completion, so
@@ -132,7 +131,7 @@ mod tests {
     fn audit_threshold_and_refusal_log_values_are_pinned() {
         assert_eq!(AUDIT_APPEND_BREAKER_TRIP_AFTER, 3);
         assert_ne!(AUDIT_APPEND_BREAKER_TRIP_AFTER, 0);
-        assert_eq!(AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT, 3);
+        assert_eq!(AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT, 32);
         assert_eq!(AUDIT_APPEND_STALE_AFTER, Duration::from_secs(30));
         assert_eq!(AUDIT_APPEND_MAX_STALE_RECLAIMS, 3);
         assert_eq!(
@@ -146,18 +145,12 @@ mod tests {
     fn breaker_reserves_before_spawning_and_caps_concurrent_work() {
         let mut breaker = BlockingBreaker::default();
         let now = Instant::now();
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
+        for _ in 0..AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
+            assert!(matches!(
+                breaker.begin_attempt_at(now),
+                BreakerAdmission::Admit(_)
+            ));
+        }
         assert_eq!(
             breaker.begin_attempt_at(now),
             BreakerAdmission::RefuseAtCapacity
@@ -171,14 +164,12 @@ mod tests {
         let BreakerAdmission::Admit(first) = breaker.begin_attempt_at(now) else {
             panic!("first attempt should admit");
         };
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
+        for _ in 1..AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
+            assert!(matches!(
+                breaker.begin_attempt_at(now),
+                BreakerAdmission::Admit(_)
+            ));
+        }
         assert_eq!(
             breaker.begin_attempt_at(now),
             BreakerAdmission::RefuseAtCapacity
@@ -203,18 +194,12 @@ mod tests {
         let mut breaker = BlockingBreaker::default();
         let now = Instant::now();
         breaker.record_success(AuditAttempt(999));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
+        for _ in 0..AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
+            assert!(matches!(
+                breaker.begin_attempt_at(now),
+                BreakerAdmission::Admit(_)
+            ));
+        }
         assert_eq!(
             breaker.begin_attempt_at(now),
             BreakerAdmission::RefuseAtCapacity
@@ -228,14 +213,12 @@ mod tests {
         let BreakerAdmission::Admit(first) = breaker.begin_attempt_at(now) else {
             panic!("first attempt should admit");
         };
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
-        assert!(matches!(
-            breaker.begin_attempt_at(now),
-            BreakerAdmission::Admit(_)
-        ));
+        for _ in 1..AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
+            assert!(matches!(
+                breaker.begin_attempt_at(now),
+                BreakerAdmission::Admit(_)
+            ));
+        }
         assert_eq!(
             breaker.begin_attempt_at(now),
             BreakerAdmission::RefuseAtCapacity

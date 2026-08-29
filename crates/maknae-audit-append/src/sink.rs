@@ -146,6 +146,7 @@ impl AuditSink {
                     rec.event, rec.action, rec.session_id
                 );
                 }
+                self.mirror_journald(rec);
                 return Err(AuditError::WritePrimary(
                     "audit append circuit breaker open".into(),
                 ));
@@ -162,6 +163,7 @@ impl AuditSink {
                     rec.event, rec.action, rec.session_id
                 );
                 }
+                self.mirror_journald(rec);
                 return Err(AuditError::WritePrimary(
                     "audit append worker capacity exhausted".into(),
                 ));
