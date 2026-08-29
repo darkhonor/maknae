@@ -148,6 +148,11 @@ files = [
   # The marker-file read + record construction/emission (I/O) stay in run.rs
   # (already T3, mutation-excluded via .cargo/mutants.toml).
   "crates/maknae-kernel/src/posture.rs",
+  # Issue #145: pure blocking circuit-breaker state for non-cancellable
+  # `spawn_blocking` work. A wrong transition can keep spawning into a wedged
+  # filesystem/NSS backend or fail open instead of refusing before spawn.
+  "crates/maknae-kernel/src/blocking_guard.rs",
+  "crates/maknae-audit-append/src/blocking_guard.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set

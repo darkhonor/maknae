@@ -10,6 +10,7 @@
 //! `#[used] static` (NOT const): a const inlines to nothing, blinding the P2b symbol scan.
 #![forbid(unsafe_code)]
 
+mod blocking_guard;
 mod error;
 mod record;
 mod session;

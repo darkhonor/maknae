@@ -5,6 +5,7 @@
 //! testing rather than shipped.
 use std::process::ExitCode;
 
+use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
 use maknae_proto::{Payload, Verb, WhoamiView};
 use maknae_vault::VaultError;
 
@@ -213,7 +214,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
 /// the VALUE is pinned by a T1 test here because the binding site in run.rs
 /// is mutation-excluded orchestration. Degenerate configs that shrink the
 /// frame budget to 0 are fail-closed by design, not a bug.
-pub const AUTHZ_DECIDE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries `uid` only (i64 carriage of the u32 — lossless; the reserved
