@@ -17,6 +17,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | Accepted (finalized 2026-08-10) |
 | 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform bounded sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116 |
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |
+| 0008 | Authorization composition contract — non-removable `-basic` baseline, extensions decide by their own model and may grant, no operand fails open, unknown vocabulary denies at the composition layer | Accepted (operator-ratified 2026-08-29) |
 | 0016 | Risk-tiered test coverage — tiers, mutation, fail-closed gate | Accepted (2026-08-04) |
 | 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
 | 0019 | Audit record model — AU-3-complete content now, crypto integrity/non-repudiation deferred to ADR-0007 | Accepted (2026-08-11) |
@@ -38,7 +39,7 @@ Decisions we may still need, carried as issues until (if) they are authored — 
 
 ### Relocated (not Maknae ADRs)
 
-The classification lattice/dominance engine and the SPIF schema (once docketed here as 0008 / 0017) moved to the external private DCS library `darkhonor/rust-dcs` and carry their own ADR numbering there — they are not slots in this table. Maknae reaches that engine only through the `maknae-security` seam (ADR-0004, `maknae-authz-dcs`).
+The classification lattice/dominance engine and the SPIF schema (once docketed here as 0008 / 0017) moved to the external private DCS library `darkhonor/rust-dcs` and carry their own ADR numbering there — they are not slots in this table. **Those Maknae numbers therefore returned to the pool, and 0008 has since been reused** (2026-08-29) for the authorization composition contract. **A Maknae ADR number never denotes a `rust-dcs` decision**: cite that project by name, per the authority rule below. Prose that still reads "ADR-0008/0017 relocated" is stale and was swept on 2026-08-29. Maknae reaches that engine only through the `maknae-security` seam (ADR-0004, `maknae-authz-dcs`).
 
 ## Authority rule: external ADRs are not authoritative here
 
