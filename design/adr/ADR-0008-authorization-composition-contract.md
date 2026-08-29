@@ -1,0 +1,121 @@
+# ADR-0008: Authorization composition contract — a non-removable baseline, extensions that decide by their own model, and no operand that fails open
+
+- **Status:** Accepted (operator-ratified 2026-08-29)
+- **Date:** 2026-08-29
+- **Deciders:** Alex Ackerman (operator)
+
+## Context
+
+[ADR-0004](ADR-0004-modular-authorization-architecture.md) established modular authorization: a stable, versioned contract (`maknae-security`) with swappable `maknae-authz-*` implementations behind it. [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md) established the access-control vocabulary and deny-overrides composition. PR #146 wired the per-request PDP: `crates/maknae-kernel/src/run.rs` composes `combine(vec![guarded_decide(&*a, &sec_req)])` and finalizes.
+
+Three things were true and unrecorded:
+
+1. **The composition has exactly one operand, and the baseline's presence is a property of the code path rather than a guarantee.** `boot_gate.rs` returns a concrete `BasicAuthorizer`; `run.rs` takes `Arc<P>` monomorphized at the call site; no configuration selects a backend. Issue [#154](https://github.com/darkhonor/maknae/issues/154) recorded the observation. Nothing is exploitable today — there is no mechanism to substitute a backend — but the guard must exist *before* one is added, not after.
+
+2. **What an extension is permitted to do was never decided**, only implied by `combine`'s fold rules.
+
+3. **What any operand must do with input it cannot evaluate was never decided**, only emergent: `class_of()` returns `None` for an unrecognized action, `decide_loaded` maps it to `NotApplicable`, and `finalize` converts that to `Deny { "no applicable authorizer (fail-closed)" }`. The outcome is correct; it is reached by abstention rather than by an explicit refusal, and its audit reason cannot distinguish *"this term does not exist"* from *"you lack the role."*
+
+**The failure that motivates this ADR.** In the design discussion that produced it, the agent twice derived *"extensions may only ever add denials"* from ADR-0020's *"a mandatory Deny is never waivable by a discretionary Permit."* **That reading is wrong.** ADR-0020 constrains what an extension can **undo**, not what it can **do**. Issue #154's own body carries the same error in its phrasing (*"it may only ever add denials"*), which is where the agent took it from.
+
+The operator's correction, verbatim (2026-08-29):
+
+> Your understanding of DCS is flawed. It ABSOLUTELY can specify a grant based on attributes. It's never a deny only additions. If an extension adds a capability basic doesn't know about (aka N/A) and the extension authorizes it based on conditions it should be permitted. **To think `-basic` will have all knowing knowledge of the entire universe is flawed.**
+
+> Extensions can grant on whatever they are designed to grant for. Could be attributes, could be whatever. They cannot override a `-basic` Deny. But they can grant or deny based on whatever their extension models. Combine handles the composition where 1 deny is a deny no matter what the other resulting conditions are.
+
+A deny-only extension model would have deleted the extensibility ADR-0004 exists for. The error is easy to repeat from a partial reading of ADR-0020, which is why the contract is recorded here rather than left implicit in a doc comment.
+
+## Decision
+
+### 1. `maknae-authz-basic` is always an operand — non-removable by construction, not by configuration
+
+The baseline is **structurally** present. Four layers, in order of strength:
+
+- **Type-level.** The composition holds the baseline as a **named field**, not as an element of the operand vector:
+
+  ```rust
+  pub struct Composition {
+      baseline: BasicAuthorizer,            // a named field — not a vec element
+      extensions: Vec<Box<dyn Authorizer>>,
+  }
+  ```
+
+  A `Composition` **cannot be constructed without a baseline.** This is stronger than a defaulted configuration value, which can be omitted; here the absent state is not expressible. It matches the `maknae-io` idiom already in the tree: callers name what they require, and `None` is a named, greppable value rather than a silent absence.
+
+- **Configuration vocabulary.** There is **no config key that names the baseline.** Configuration expresses *extensions*; it has no way to refer to, replace, or omit `maknae-authz-basic`. **Adding such a key in future is the regression this ADR exists to prevent.**
+
+- **A drift gate** over the composition root, in the family of `std-fs-drift`, asserting the baseline is constructed unconditionally — so the refactor that introduces a selection key fails CI rather than shipping.
+
+- **Boot-time evidence.** The daemon records in the audit trail that its composition included the baseline, and which extensions were loaded. The property becomes auditable **at runtime**, not only at build time.
+
+### 2. Every operand decides by its own model, and may grant
+
+An extension is **not** restricted to denials, and **not** restricted to attributes. It grants or denies according to whatever it models. **Extensions add to the authorized vocabulary.**
+
+`-basic` is not expected to model the universe. A capability `-basic` does not know about is one `-basic` abstains on (`NotApplicable`), and an extension that does model it and authorizes it under its own conditions **is permitted to grant it**.
+
+### 3. No operand may waive a Deny — `combine` as ratified is the whole composition contract
+
+`crates/maknae-security/src/compose.rs::combine`, unchanged:
+
+1. any `Deny` → `Deny`
+2. else any `Indeterminate` → `Deny` (never masked by a peer `Permit`)
+3. else any `Permit` → `Permit` with the union of Permit obligations; a `(id, params)` conflict → `Deny`
+4. else (all `NotApplicable`, or empty) → `NotApplicable` → `Deny` at `finalize`
+
+One `Deny` is a Deny regardless of what any peer concluded. That single rule *is* the non-waivability guarantee; no additional mechanism is required, and **`combine` is not to be modified to implement this ADR.** `guarded_decide`'s panic boundary already converts a hostile or buggy operand into `Indeterminate`, and rule 2 converts that to `Deny`.
+
+### 4. No operand may fail open
+
+For input an operand cannot evaluate, it returns **`Deny` or `Indeterminate`** — never `Permit`, and never a silent pass-through. **`NotApplicable` is reserved for a term the operand recognizes but has no rule for**, and is the correct signal for "not mine — let the owner decide."
+
+This is the operand-internal contract and applies to `maknae-authz-basic` and to every extension equally.
+
+### 5. Unknown vocabulary denies, evaluated at the composition layer over the composed union
+
+The authorized vocabulary is **core terms ∪ terms declared by loaded extensions**.
+
+- A request whose action is **outside that union** is **Denied** — explicitly, with its own audit reason, before any operand is consulted.
+- A request **inside the union** that a given operand does not own produces `NotApplicable` from that operand, so the owning operand decides.
+
+**The check is hoisted to `Composition`, not duplicated per operand.** One uniform refusal, and no operand needs to know the others' terms.
+
+**The alternative was considered and rejected:** if each operand denied every term outside *its own* vocabulary, deny-overrides would mean `-basic` blocks every extension-contributed term on every request — extensions could never grant anything, contradicting decision 2.
+
+**An extension declares the terms it contributes**, and that declaration is what extends the union.
+
+### 6. The guarantee's scope is this binary
+
+A fork that rewrites the composition root is a different product, and this ADR makes no claim about it. **The guarantee is "this binary," not "any binary"** — which means it rests on artifact integrity, not on authorization design. See [#96](https://github.com/darkhonor/maknae/issues/96) (artifacts ship unsigned) and [#88](https://github.com/darkhonor/maknae/issues/88) (persistent vTPM prerequisite). Stating the scope is part of the decision: an assessor asking *"what if someone modifies it"* is answered by supply-chain and measured-boot controls, not by this contract.
+
+## Consequences
+
+- **`combine` is unchanged.** The composition semantics were already correct; what was missing was the record of why, and the structural guarantee that the baseline is present to exercise them.
+
+- **The `Composition` type is the implementation.** `ConjunctionAuthorizer` already exists in `compose.rs` (a `Vec<Box<dyn Authorizer>>` folding through `combine`) and is unused at the real call site; it is the starting point, but it **does not** satisfy decision 1 as written, because its operands are homogeneous — the baseline must become a named field.
+
+- **The deny grammar must span the whole action vocabulary — this is the operator's veto and it is currently absent.** If extensions grant into `NotApplicable` space, then `-basic` must be able to deny a term it does not itself implement, or there is no floor under exactly the space extensions operate in. Today the deny grammar is `Read(...)` only: `deny Write(~/.ssh/**)` is not expressible, and `deny terminal.create` is not expressible at all. Tracked with the `Read`→`Write` deny-pairing gate in [#158](https://github.com/darkhonor/maknae/issues/158).
+
+- **The audit record must name the deciding operand.** `Verdict::Permit { obligations }` carries no operand identity, so *"which authorizer granted this?"* is unanswerable from the trail. With one operand that is moot; with two it is the first question asked about a decision an extension made on a model `-basic` cannot see. An ADR-0019 obligation.
+
+- **Extension identity and integrity are TCB facts.** A loaded extension decides authorization. Which extension, what version, and how it was verified are recorded at boot and carried in the trail.
+
+- **The vocabulary is no longer a compile-time closed set.** #67's drift gate asserts a closed 59-term vocabulary. Under decision 5 the **core** vocabulary stays closed and gate-checked; the **composed** vocabulary is core plus declared extension terms and resolves at boot. The gate covers the core set and the declaration mechanism — not the union.
+
+- **Unknown-vocabulary denial needs its own audit reason.** Today it is reached emergently through `NotApplicable`, sharing the generic `"no applicable authorizer (fail-closed)"` string with "you lack the role." Overlaps the reason-enrichment work in [#181](https://github.com/darkhonor/maknae/issues/181) and [#84](https://github.com/darkhonor/maknae/issues/84) — **land it once.**
+
+- **#154's framing is superseded.** Its body states an extension *"may only ever add denials."* That is corrected by decision 2; the issue's remaining substance — structural non-removability, defining the baseline precisely, and a negative test observed failing — stands.
+
+- **Decision logic implementing this ADR is T1** (95% region floor, zero missed mutants) per [ADR-0016](ADR-0016-risk-tiered-test-coverage.md), and the `negative-control` gate must be **observed failing** with the baseline removed.
+
+## References
+
+- [ADR-0004](ADR-0004-modular-authorization-architecture.md) — modular authorization; the seam this contract governs
+- [ADR-0020](ADR-0020-access-control-model-and-vocabulary.md) — deny-overrides and the access-control vocabulary; **decision 2 corrects a misreading of its "never waivable" clause**
+- [ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) — sole PDP, TCB boundary
+- [ADR-0019](ADR-0019-audit-record-model.md) — audit record model; operand attribution is an obligation against it
+- `crates/maknae-security/src/compose.rs` — `combine`, `guarded_decide`, `ConjunctionAuthorizer`
+- `crates/maknae-kernel/src/run.rs` (composition call site), `boot_gate.rs` (baseline construction)
+- [#154](https://github.com/darkhonor/maknae/issues/154), [#158](https://github.com/darkhonor/maknae/issues/158), [#164](https://github.com/darkhonor/maknae/issues/164), [#181](https://github.com/darkhonor/maknae/issues/181), [#182](https://github.com/darkhonor/maknae/issues/182)
+- Operator rulings, 2026-08-29 — quoted verbatim in Context
