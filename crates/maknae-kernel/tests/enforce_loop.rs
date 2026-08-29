@@ -700,6 +700,67 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
 }
 
 #[tokio::test]
+async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
+    let fx = Fixture::new("healthy_concurrent");
+    let authorizer = Arc::new(SleepAuthorizer(Duration::from_millis(100)));
+    let timeout = Duration::from_secs(5);
+
+    let emit1 = RecEmit::new();
+    let emit2 = RecEmit::new();
+    let emit3 = RecEmit::new();
+    let emit4 = RecEmit::new();
+
+    let (one, two, three, four) = tokio::join!(
+        drive(
+            &fx.principal,
+            authorizer.clone(),
+            emit1.clone(),
+            0,
+            maknae_proto::Verb::Ping,
+            timeout
+        ),
+        drive(
+            &fx.principal,
+            authorizer.clone(),
+            emit2.clone(),
+            0,
+            maknae_proto::Verb::Ping,
+            timeout
+        ),
+        drive(
+            &fx.principal,
+            authorizer.clone(),
+            emit3.clone(),
+            0,
+            maknae_proto::Verb::Ping,
+            timeout
+        ),
+        drive(
+            &fx.principal,
+            authorizer,
+            emit4.clone(),
+            0,
+            maknae_proto::Verb::Ping,
+            timeout
+        ),
+    );
+
+    for (frame, emit) in [
+        (one, emit1.as_ref()),
+        (two, emit2.as_ref()),
+        (three, emit3.as_ref()),
+        (four, emit4.as_ref()),
+    ] {
+        let frame = frame.expect("healthy concurrent decide should be served");
+        assert!(matches!(
+            maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Ok(Payload::Pong)
+        ));
+        assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+    }
+}
+
+#[tokio::test]
 async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     let fx = Fixture::new("outside");
     // Operator-added absolute grant outside home: PDP permits, PEP refuses.

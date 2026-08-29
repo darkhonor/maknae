@@ -25,11 +25,11 @@ bins/maknae/src/enroll/mod.rs:1359|Some(root_path) => match std::fs::read_to_str
 
 # Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
 # opens per call and intentionally has a different lifecycle/durability contract.
-crates/maknae-audit-append/src/sink.rs:13|use std::fs::File;
-crates/maknae-audit-append/src/sink.rs:19|fn open_options() -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:21|let mut opts = std::fs::OpenOptions::new();
-crates/maknae-audit-append/src/sink.rs:75|fn open_options() -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:76|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs:14|use std::fs::File;
+crates/maknae-audit-append/src/sink.rs:21|fn open_options() -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:23|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs:77|fn open_options() -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:78|let mut opts = std::fs::OpenOptions::new();
 
 # The DEFINITIONS of the three named requirement-free identifiers (issue #132). Each
 # says "OS DAC is sufficient at this scope" once, in one reviewed place, so a caller
@@ -84,5 +84,5 @@ crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
 # regular_file + max_bytes. A target owner/mode requirement would refuse
 # legitimately-shared home files the operator's own modes expose; the PDP is
 # the authorization control (spec D5).
-crates/maknae-kernel/src/handler.rs:363|owner: None,
-crates/maknae-kernel/src/handler.rs:364|mode_mask: None,
+crates/maknae-kernel/src/handler.rs:364|owner: None,
+crates/maknae-kernel/src/handler.rs:365|mode_mask: None,

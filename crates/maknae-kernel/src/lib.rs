@@ -4,6 +4,7 @@
 //! (boot_gate constructs it; handle() decides every request through the seam and
 //! enforces the read PEP); KLC hooks/egress remain gated on ADR-0005/0007/0008.
 mod authz;
+mod blocking_guard;
 mod boot;
 mod boot_gate;
 mod groupres;
