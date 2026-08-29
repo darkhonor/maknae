@@ -38,7 +38,7 @@ These axes are independent: a control can be role-based *and* discretionary, or 
    | Control | Axis | Locus | Code / ADR |
    |---|---|---|---|
    | Capability policy (`Read` grants) | **DAC**, decided by **RBAC** default | trust plane (PDP) | `maknae-config/authz.rs` operand `DAC`; `maknae-authz-basic` |
-   | Classification / clearance | **MAC**, decided by **ABAC** | trust plane (PDP), external engine | `DCS_MAC`; `maknae-authz-dcs` (external, ADR-0008/0017 relocated) |
+   | Classification / clearance | **MAC**, decided by **ABAC** | trust plane (PDP), external engine | `DCS_MAC`; `maknae-authz-dcs` (external — decided in `darkhonor/rust-dcs` under its own ADR numbering) |
    | SELinux type enforcement | **MAC** | OS | `OS_MAC` |
    | File permissions / ownership | **DAC** | OS | OS-enforced (not an `Authorizer` operand) |
    | Hardware root of trust | *not access control* — trust anchor | hardware | TPM 2.0 / Secure Enclave (ADR-0018) |
@@ -56,7 +56,7 @@ These axes are independent: a control can be role-based *and* discretionary, or 
 
 ## Scope boundary
 
-This ADR fixes vocabulary, the composition rule, and the no-bypass invariant. It does **not**: define the classification lattice or dominance engine (ADR-0008, **relocated** to the external DCS library) or the SPIF schema (ADR-0017, **relocated**); change the enforcement locus — the kernel remains the sole PDP (ADR-0005); or select the concrete policy engine (the Cedar spike, ADR-0003). Whether to *disambiguate* the code's **DAC** terminology — `maknae-config/authz.rs` names its policy the "DAC authz policy schema", which collides with OS-DAC — is a tracked follow-up; this ADR binds the meaning in the interim.
+This ADR fixes vocabulary, the composition rule, and the no-bypass invariant. It does **not**: define the classification lattice or dominance engine, or the SPIF schema — both are **relocated** to the external DCS library `darkhonor/rust-dcs` and are decided there under its own ADR numbering; change the enforcement locus — the kernel remains the sole PDP (ADR-0005); or select the concrete policy engine (the Cedar spike, ADR-0003). Whether to *disambiguate* the code's **DAC** terminology — `maknae-config/authz.rs` names its policy the "DAC authz policy schema", which collides with OS-DAC — is a tracked follow-up; this ADR binds the meaning in the interim.
 
 ## Consequences
 
@@ -79,4 +79,4 @@ This ADR fixes vocabulary, the composition rule, and the no-bypass invariant. It
 
 Provenance (not authority, per ADR-0001): CNSSI 4009 (National Information Assurance Glossary, 6 Dec 2021) — DAC/MAC/RBAC/ABAC definitions; NIST SP 800-53 Rev 5 — AC-3(3)/(4)/(7)/(13)/(15), AC-6, AC-16, AC-25; NIST SP 800-162 — ABAC; CNSSI 1253 / NSS Classified Information Overlay.
 
-Internal: ADR-0005 (enforcement locus & TCB boundary); ADR-0008 / ADR-0017 (classification engine / SPIF — relocated to the external DCS library); ADR-0018 (local-plane authorization & HRoT); ADR-0003 (policy engine spike). Code: `crates/maknae-security/src/compose.rs` (`combine`, deny-overrides), `crates/maknae-security/src/authorizer.rs` (the `Authorizer` seam), `crates/maknae-config/src/authz.rs` (the capability grammar).
+Internal: ADR-0005 (enforcement locus & TCB boundary); the classification engine and SPIF decisions (**relocated** to the external DCS library `darkhonor/rust-dcs`, under its own ADR numbering — see that project, not a Maknae number); ADR-0018 (local-plane authorization & HRoT); ADR-0003 (policy engine spike). Code: `crates/maknae-security/src/compose.rs` (`combine`, deny-overrides), `crates/maknae-security/src/authorizer.rs` (the `Authorizer` seam), `crates/maknae-config/src/authz.rs` (the capability grammar).

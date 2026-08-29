@@ -14,7 +14,7 @@
 
 ## Context
 
-Maknae is going open-source, and the DCS classification engine was in-housed to a separate private library (`rust-dcs`, ADR-0008/0017 relocated) so that Maknae depends on it **optionally**. That optionality has to be real, not aspirational: a build with no classification machinery in the tree must still be a functional, secure-by-default agent platform, and a `--features dcs` build must route the *same* enforcement calls to the classification engine without the open surface ever learning a DCS-shaped concept.
+Maknae is going open-source, and the DCS classification engine was in-housed to a separate private library (`rust-dcs`, which carries its own ADR numbering — the classification-engine and SPIF decisions live there, not here) so that Maknae depends on it **optionally**. That optionality has to be real, not aspirational: a build with no classification machinery in the tree must still be a functional, secure-by-default agent platform, and a `--features dcs` build must route the *same* enforcement calls to the classification engine without the open surface ever learning a DCS-shaped concept.
 
 The broader intent this ADR records: **authorization in Maknae is engine-agnostic and third-party-extensible.** A third party integrating Maknae into their own agent environment must be able to **replace or add** an authorization backend — Cedar, OPA, a bespoke evaluator, their own classification engine — behind a single, stable contract, without touching Maknae's core or the seam. The contract is the only sacred surface.
 
