@@ -26,10 +26,10 @@ bins/maknae/src/enroll/mod.rs:1359|Some(root_path) => match std::fs::read_to_str
 # Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
 # opens per call and intentionally has a different lifecycle/durability contract.
 crates/maknae-audit-append/src/sink.rs:14|use std::fs::File;
-crates/maknae-audit-append/src/sink.rs:21|fn open_options() -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:23|let mut opts = std::fs::OpenOptions::new();
-crates/maknae-audit-append/src/sink.rs:77|fn open_options() -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:78|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs:34|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:37|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs:94|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs:96|let mut opts = std::fs::OpenOptions::new();
 
 # The DEFINITIONS of the three named requirement-free identifiers (issue #132). Each
 # says "OS DAC is sufficient at this scope" once, in one reviewed place, so a caller
