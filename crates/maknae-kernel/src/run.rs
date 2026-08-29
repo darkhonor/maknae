@@ -31,8 +31,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use maknae_audit_append::{
     AuditEmit, AuditRecord, Integrity, Outcome, Seq, SessionIds, Source, Subject, Where,
@@ -51,6 +51,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{authorize_connection, ConnDecision};
+use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
@@ -62,6 +63,22 @@ use maknae_config::Principal;
 use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing};
 use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
+
+static AUTHZ_DECIDE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+static READ_PEP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+static GROUP_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+
+fn authz_decide_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(AUTHZ_DECIDE_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+fn read_pep_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(READ_PEP_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+fn group_lookup_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(GROUP_LOOKUP_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
 
 // ---------------------------------------------------------------------------
 // Audit-record construction (AU-3, ADR-0019). These stamp the run-loop's own
@@ -495,22 +512,55 @@ pub async fn handle<S, E, P>(
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
     let sec_req = build_authz_request(&request.verb, peer_uid);
-    let decided = {
-        let a = Arc::clone(&authorizer);
-        tokio::time::timeout(
-            authz_decide_timeout,
-            tokio::task::spawn_blocking(move || combine(vec![guarded_decide(&*a, &sec_req)])),
-        )
-        .await
-    };
-    let verdict = match decided {
-        Ok(Ok(v)) => v,
-        Ok(Err(_join)) => maknae_security::Verdict::Deny {
-            reason: "authorization decision failed (join)".into(),
+    let authz_breaker = authz_decide_breaker();
+    let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
+    let verdict = match authz_admission {
+        BreakerAdmission::RefuseOpen => maknae_security::Verdict::Deny {
+            reason: "authorization decision circuit breaker open".into(),
         },
-        Err(_elapsed) => maknae_security::Verdict::Deny {
-            reason: "authorization decision timed out".into(),
+        BreakerAdmission::RefuseAtCapacity => maknae_security::Verdict::Deny {
+            reason: "authorization decision blocking worker budget exhausted".into(),
         },
+        BreakerAdmission::Admit => {
+            let decided = {
+                let a = Arc::clone(&authorizer);
+                tokio::time::timeout(
+                    authz_decide_timeout,
+                    tokio::task::spawn_blocking(move || {
+                        combine(vec![guarded_decide(&*a, &sec_req)])
+                    }),
+                )
+                .await
+            };
+            match decided {
+                Ok(Ok(v)) => {
+                    authz_breaker.lock().await.record_success();
+                    v
+                }
+                Ok(Err(_join)) => {
+                    // Join failure means the blocking worker ended instead of
+                    // being orphaned; fail closed for this request, but do not
+                    // count it against the timeout breaker.
+                    authz_breaker.lock().await.record_success();
+                    maknae_security::Verdict::Deny {
+                        reason: "authorization decision failed (join)".into(),
+                    }
+                }
+                Err(_elapsed) => {
+                    if authz_breaker.lock().await.record_timeout_at(Instant::now())
+                        == BreakerTransition::Tripped
+                    {
+                        eprintln!(
+                        "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
+                        authz_decide_timeout.as_secs()
+                    );
+                    }
+                    maknae_security::Verdict::Deny {
+                        reason: "authorization decision timed out".into(),
+                    }
+                }
+            }
+        }
     };
     let object_path = match &request.verb {
         Verb::Read { path } => Some(path.clone()),
@@ -669,20 +719,50 @@ pub async fn handle<S, E, P>(
             // The read PEP (spec D5): per-request anchor at the enrolled home,
             // named requirements, bounded on the blocking pool like the decide.
             let budget = crate::handler::read_budget(cfg.frame_max_bytes);
-            let outcome = {
-                let home = principal.home.clone();
-                let owner = principal.uid;
-                let p = path.clone();
-                tokio::time::timeout(
-                    authz_decide_timeout,
-                    tokio::task::spawn_blocking(move || read_pep(&home, owner, &p, budget)),
-                )
-                .await
-            };
-            let read_result = match outcome {
-                Ok(Ok(r)) => r,
-                Ok(Err(_join)) => Err(ReadRefusal::JoinFailed),
-                Err(_elapsed) => Err(ReadRefusal::TimedOut),
+            let read_breaker = read_pep_breaker();
+            let read_admission = { read_breaker.lock().await.begin_attempt_at(Instant::now()) };
+            let read_result = match read_admission {
+                BreakerAdmission::RefuseOpen => {
+                    Err(ReadRefusal::Unavailable("read circuit breaker open".into()))
+                }
+                BreakerAdmission::RefuseAtCapacity => Err(ReadRefusal::Unavailable(
+                    "read blocking worker budget exhausted".into(),
+                )),
+                BreakerAdmission::Admit => {
+                    let outcome = {
+                        let home = principal.home.clone();
+                        let owner = principal.uid;
+                        let p = path.clone();
+                        tokio::time::timeout(
+                            authz_decide_timeout,
+                            tokio::task::spawn_blocking(move || read_pep(&home, owner, &p, budget)),
+                        )
+                        .await
+                    };
+                    match outcome {
+                        Ok(Ok(r)) => {
+                            read_breaker.lock().await.record_success();
+                            r
+                        }
+                        Ok(Err(_join)) => {
+                            // The read worker ended instead of being orphaned;
+                            // fail closed without tripping the timeout breaker.
+                            read_breaker.lock().await.record_success();
+                            Err(ReadRefusal::JoinFailed)
+                        }
+                        Err(_elapsed) => {
+                            if read_breaker.lock().await.record_timeout_at(Instant::now())
+                                == BreakerTransition::Tripped
+                            {
+                                eprintln!(
+                                "maknaed: read PEP circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more target-read work",
+                                authz_decide_timeout.as_secs()
+                            );
+                            }
+                            Err(ReadRefusal::TimedOut)
+                        }
+                    }
+                }
             };
             match read_result {
                 Ok(content) => {
@@ -1115,25 +1195,59 @@ where
                                             // fail closed (deny + audit) and release the
                                             // permit; the orphaned blocking lookup finishes
                                             // in the background.
-                                            let in_group = match tokio::time::timeout(
-                                                GROUP_LOOKUP_TIMEOUT,
-                                                tokio::task::spawn_blocking(move || {
-                                                    uid_in_maknae_group(uid)
-                                                }),
-                                            )
-                                            .await
-                                            {
-                                                Ok(join) => {
-                                                    join.map(|r| r.unwrap_or(false))
-                                                        .unwrap_or(false)
-                                                }
-                                                Err(_elapsed) => {
-                                                    eprintln!(
-                                                        "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
-                                                        GROUP_LOOKUP_TIMEOUT.as_secs()
-                                                    );
+                                            let group_breaker = group_lookup_breaker();
+                                            let now = Instant::now();
+                                            let admission =
+                                                group_breaker.lock().await.begin_attempt_at(now);
+                                            let in_group = match admission {
+                                                BreakerAdmission::RefuseOpen => {
+                                                    if group_breaker
+                                                        .lock()
+                                                        .await
+                                                        .should_log_refusal_at(now)
+                                                    {
+                                                        eprintln!(
+                                                            "maknaed: `maknae` group lookup circuit breaker open for uid={uid} — failing closed without spawning more NSS work"
+                                                        );
+                                                    }
                                                     false
                                                 }
+                                                BreakerAdmission::RefuseAtCapacity => false,
+                                                BreakerAdmission::Admit => match tokio::time::timeout(
+                                                    GROUP_LOOKUP_TIMEOUT,
+                                                    tokio::task::spawn_blocking(move || {
+                                                        uid_in_maknae_group(uid)
+                                                    }),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(join) => {
+                                                        // The NSS worker returned or panicked;
+                                                        // either way it is no longer an orphan.
+                                                        group_breaker.lock().await.record_success();
+                                                        join.map(|r| r.unwrap_or(false))
+                                                            .unwrap_or(false)
+                                                    }
+                                                    Err(_elapsed) => {
+                                                        if group_breaker
+                                                            .lock()
+                                                            .await
+                                                            .record_timeout_at(Instant::now())
+                                                            == BreakerTransition::Tripped
+                                                        {
+                                                            eprintln!(
+                                                                "maknaed: `maknae` group lookup circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more NSS work",
+                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                            );
+                                                        } else {
+                                                            eprintln!(
+                                                                "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
+                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                            );
+                                                        }
+                                                        false
+                                                    }
+                                                },
                                             };
                                             // The one production binding of the
                                             // T1-pinned decide-timeout const —

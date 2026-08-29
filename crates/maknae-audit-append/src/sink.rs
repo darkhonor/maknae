@@ -8,12 +8,14 @@
 //!
 //! T3 (`coverage-tiers.toml`): I/O-bound, report-only coverage; the
 //! `tests/fail_closed.rs` integration test is the primary evidence.
+use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
 use crate::error::AuditError;
 use crate::record::{canonical_json, AuditRecord};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[cfg(unix)]
 fn open_options() -> std::fs::OpenOptions {
@@ -81,6 +83,7 @@ fn open_options() -> std::fs::OpenOptions {
 /// The append-only JSONL audit sink: single-writer, off-runtime blocking I/O.
 pub struct AuditSink {
     primary: Arc<Mutex<File>>,
+    breaker: Arc<Mutex<BlockingBreaker>>,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
 }
@@ -103,6 +106,7 @@ impl AuditSink {
         validate_secure_audit_file(&file, &cfg.jsonl_path)?;
         Ok(AuditSink {
             primary: Arc::new(Mutex::new(file)),
+            breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
             path: cfg.jsonl_path.clone(),
         })
     }
@@ -120,12 +124,45 @@ impl AuditSink {
     pub async fn append(&self, rec: &AuditRecord) -> Result<(), AuditError> {
         let mut line = canonical_json(rec)?;
         line.push('\n');
+        let now = Instant::now();
+        let admitted = {
+            let mut breaker = self
+                .breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            breaker.begin_attempt_at(now)
+        };
+        let attempt: AuditAttempt = match admitted {
+            BreakerAdmission::Admit(attempt) => attempt,
+            BreakerAdmission::Refuse => {
+                let should_log = self
+                    .breaker
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .should_log_refusal_at(now);
+                if should_log {
+                    eprintln!(
+                    "maknaed: AUDIT WRITE BREAKER OPEN for event={} action={} session_id={} — refusing append before spawning blocking audit work",
+                    rec.event, rec.action, rec.session_id
+                );
+                }
+                return Err(AuditError::WritePrimary(
+                    "audit append circuit breaker open".into(),
+                ));
+            }
+        };
         let primary = Arc::clone(&self.primary);
-        let result = tokio::task::spawn_blocking(move || write_line(&primary, &line))
-            .await
-            .map_err(|e| {
-                AuditError::WritePrimary(format!("blocking write task panicked/was cancelled: {e}"))
-            })?;
+        let joined = tokio::task::spawn_blocking(move || write_line(&primary, &line)).await;
+        // Join failure means the blocking worker ended instead of being
+        // orphaned; the append still fails closed below, but it is not a stuck
+        // in-flight append.
+        self.breaker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_success(attempt);
+        let result = joined.map_err(|e| {
+            AuditError::WritePrimary(format!("blocking write task panicked/was cancelled: {e}"))
+        })?;
         self.mirror_journald(rec);
         result
     }
@@ -246,6 +283,23 @@ mod tests {
             let parsed: AuditRecord = serde_json::from_str(line).unwrap();
             assert_eq!(parsed.seq, i as u64 + 1);
         }
+    }
+
+    #[tokio::test]
+    async fn breaker_refusal_happens_before_any_audit_record_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let mut sink = AuditSink::open(&cfg).unwrap();
+        sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new(0)));
+
+        assert!(sink.append(&sample_record()).await.is_err());
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(contents, "");
     }
 
     #[tokio::test]
