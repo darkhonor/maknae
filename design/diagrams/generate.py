@@ -695,6 +695,7 @@ def d5_readpath(prov: str) -> str:
     """
     doc = tomllib.loads((OUT / "read-path.toml").read_text())
     parts, steps = doc["participant"], doc["step"]
+    check_evidence(steps, "evidence", "read-path.toml")
     idx = {p["id"]: i for i, p in enumerate(parts)}
 
     LEFT, PITCH, HEAD, ROW = 92, 170, 150, 44
@@ -751,7 +752,15 @@ def d5_readpath(prov: str) -> str:
         if s["kind"] == "self":
             p.append(f'<path d="M {a} {y-6} h 30 v 20 h -30" fill="none" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            lx, anc = a + 40, "start"
+            # A self-message on a right-hand lifeline can run its evidence off
+            # the canvas -- fully-qualified paths are long. Flip it to the left
+            # of the lifeline when it will not fit to the right.
+            need = max(len(f'{n+1}. {s["label"]}') * 5.6,
+                       len(s.get("evidence", "")) * 4.6)
+            if a + 40 + need > W - 24:
+                lx, anc = a - 40, "end"
+            else:
+                lx, anc = a + 40, "start"
         else:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
@@ -775,7 +784,7 @@ def d5_readpath(prov: str) -> str:
               "whole of ADR-0009: the same kernel, asked by two different", 11, fill=MUTED),
          text(LEFT - 52, 79, "principals, answers differently — and only the subject's answer may "
               "authorize a read. Each step names the code that implements it.", 11, fill=MUTED)] + p
-    p.append(footer(W, H, f"source: design/diagrams/read-path.toml · {prov}"))
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/read-path.toml')}"))
     return svg(W, H, "\n".join(p), "Maknae fs.read boundary crossings",
                "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
 

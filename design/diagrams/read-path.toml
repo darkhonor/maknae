@@ -64,7 +64,7 @@ from = "cli"
 to = "os_subject"
 kind = "call"
 label = "open_for_delegation(path)"
-evidence = "maknae-io/src/delegated.rs:158 · bins/maknae/src/cli.rs:215"
+evidence = "crates/maknae-io/src/delegated.rs:158 · bins/maknae/src/cli.rs:215"
 
 [[step]]
 from = "os_subject"
@@ -78,7 +78,7 @@ from = "cli"
 to = "daemon"
 kind = "call"
 label = "Request{Read} + SCM_RIGHTS(fd) over the mTLS plane"
-evidence = "delegated.rs:182 send_delegated · maknae-plane/src/send.rs:42 FdSender"
+evidence = "crates/maknae-io/src/delegated.rs:182 send_delegated · crates/maknae-plane/src/send.rs:42 FdSender"
 note = "A failed open still sends, UNARMED. Not a fallback: the daemon then has no descriptor, so it denies. (cli.rs:211)"
 
 [[step]]
@@ -86,7 +86,7 @@ from = "daemon"
 to = "daemon"
 kind = "self"
 label = "recv_delegated → FdCollector"
-evidence = "delegated.rs:219 · maknae-plane/src/fd.rs:42"
+evidence = "crates/maknae-io/src/delegated.rs:219 · crates/maknae-plane/src/fd.rs:42"
 note = "recvmsg, never read(2): a plain read silently DESTROYS the attached descriptor."
 
 [[step]]
@@ -94,7 +94,7 @@ from = "daemon"
 to = "daemon"
 kind = "self"
 label = "lexical_pregate(path)"
-evidence = "maknae-kernel/src/run.rs:488"
+evidence = "crates/maknae-kernel/src/run.rs:488"
 note = "A malformed path is BadRequest — the PDP is never consulted for it."
 
 [[step]]
@@ -102,7 +102,7 @@ from = "daemon"
 to = "os_daemon"
 kind = "call"
 label = "verify_delegated(fd)"
-evidence = "delegated.rs:286 · run.rs:538"
+evidence = "crates/maknae-io/src/delegated.rs:286 · crates/maknae-kernel/src/run.rs:538"
 note = "Reads the daemon's OWN fd table (/proc/self/fd). Needs no permission on the object's directories — which is why a 0700 home still works."
 
 [[step]]
@@ -110,14 +110,14 @@ from = "os_daemon"
 to = "daemon"
 kind = "reply"
 label = "kernel-reported path + fstat"
-evidence = "confinement beneath home, nlink == 1, owner/mode"
+evidence = "confinement beneath home, nlink == 1, owner and mode"
 
 [[step]]
 from = "daemon"
 to = "pdp"
 kind = "call"
 label = "build_authz_request(verb, uid, lane, os_path)"
-evidence = "run.rs:544"
+evidence = "crates/maknae-kernel/src/run.rs:544"
 note = "The PDP decides on the KERNEL-REPORTED path, never the string the client sent — so the deny list evaluates the object, not an alias for it (ADR-0009 D6)."
 
 [[step]]
@@ -125,7 +125,7 @@ from = "pdp"
 to = "pdp"
 kind = "self"
 label = "combine([guarded_decide]) + finalize"
-evidence = "run.rs:565 · maknae-security/src/compose.rs"
+evidence = "crates/maknae-kernel/src/run.rs:565 · crates/maknae-security/src/compose.rs"
 note = "Deny-overrides. No descriptor, or one that fails verification, is a Deny here — never a daemon-side open."
 
 [[step]]
@@ -139,14 +139,14 @@ from = "daemon"
 to = "audit"
 kind = "call"
 label = "emit_request_outcome(...)"
-evidence = "run.rs:626"
+evidence = "crates/maknae-kernel/src/run.rs:626"
 
 [[step]]
 from = "audit"
 to = "daemon"
 kind = "reply"
 label = "appended"
-evidence = "run.rs:749 may_respond(appended)"
+evidence = "crates/maknae-kernel/src/run.rs:749 may_respond(appended)"
 note = "Audit-then-respond: the reply is gated on the record landing. No trail, no answer."
 
 [[step]]
@@ -154,7 +154,7 @@ from = "daemon"
 to = "os_daemon"
 kind = "call"
 label = "read_delegated(fd)"
-evidence = "delegated.rs:270 · run.rs:920"
+evidence = "crates/maknae-io/src/delegated.rs:270 · crates/maknae-kernel/src/run.rs:920"
 note = "RE-VERIFIES immediately before taking the bytes. The gap between decision and read is where TOCTOU lives, so it is closed here rather than assumed away."
 
 [[step]]
