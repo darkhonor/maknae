@@ -4,7 +4,16 @@
 //! blocks + NotApplicable-identity** — deliberately stronger than XACML
 //! deny-overrides, which would let `Permit ∧ Indeterminate → Permit` (a
 //! fail-open we reject). [`ConjunctionAuthorizer`] is the reusable combinator
-//! the kernel holds in a DCS build (`DCS_MAC ∧ OS_MAC ∧ DAC`).
+//! the kernel holds when more than one backend is installed.
+//!
+//! *(Corrected 2026-08-31 per #108 and [ADR-0008]: this line previously read
+//! "`DCS_MAC ∧ OS_MAC ∧ DAC`", describing the fold as a conjunction of named
+//! policy types — which contradicted the paragraph directly above it and
+//! predates ADR-0008. Composition does not know what KIND of policy an operand
+//! implements. Each operand decides by its own model and returns a `Verdict`;
+//! `combine` folds those verdicts by the rule above. A mandatory operand may
+//! `Permit` on a complete evaluation of its own predicate, which a conjunction
+//! of policy types cannot express.)*
 
 use crate::authorizer::Authorizer;
 use crate::obligation::{merge_obligations, Obligation};
@@ -73,7 +82,7 @@ pub fn guarded_decide(a: &dyn Authorizer, req: &Request) -> Verdict {
 }
 
 /// Holds N backends; `decide` composes their verdicts via [`combine`], each
-/// behind [`guarded_decide`]. Spec §13/§14 (N-ary MAC ∧ DAC). The kernel
+/// behind [`guarded_decide`]. Spec §13/§14 (N-ary operand fold). The kernel
 /// constructs this in a DCS build; a non-DCS build can use a single backend
 /// directly (still via `guarded_decide`).
 pub struct ConjunctionAuthorizer {

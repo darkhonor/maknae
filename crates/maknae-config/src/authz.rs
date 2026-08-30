@@ -1,8 +1,23 @@
-//! DAC authz policy schema v1 (spec §7, PR-J1 Task 6) — the Claude-Code/Codex-
-//! style capability grammar (`Read(...)`) that a FUTURE per-request
-//! PDP evaluates. This module ships and VALIDATES the contract (parse +
-//! fail-closed validation + the matching grammar as an executable pin) — it
-//! does not wire evaluation into any request path yet.
+//! Capability-grant policy schema v1 (spec §7, PR-J1 Task 6) — the
+//! Claude-Code/Codex-style capability grammar (`Read(...)`) the per-request PDP
+//! evaluates. This module ships and VALIDATES the contract: parse, fail-closed
+//! validation, and the matching grammar as an executable pin.
+//!
+//! **Vocabulary (ADR-0020, CNSSI 4009-aligned).** This is the *capability-grant
+//! policy*. In CNSSI 4009 terms it is **discretionary in policy type**, and it
+//! is **decided by RBAC** (`maknae-authz-basic`) — policy type and decision
+//! model are orthogonal axes, not synonyms. It was formerly called "the DAC
+//! authz policy", which collided with **OS DAC** (file permissions and ACLs,
+//! the thing ADR-0009's descriptor delegation asks the kernel about). Two
+//! different controls, one label; renamed 2026-08-31 per #108. Where this tree
+//! says "OS DAC" it means file permissions; where it says "capability-grant
+//! policy" it means this file.
+//!
+//! *(Corrected 2026-08-31: the header previously said a "FUTURE per-request
+//! PDP" evaluates this and that evaluation "does not wire into any request path
+//! yet". Superseded by #77 — every request is decided through the
+//! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
+//! verb's PEP.)*
 //!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
@@ -284,7 +299,7 @@ fn component_matches(pattern: &str, text: &str) -> bool {
 // AuthzError
 // ============================================================================
 
-/// Fail-closed error for the DAC authz policy (spec §7). Span-free by design
+/// Fail-closed error for the capability-grant policy (spec §7). Span-free by design
 /// (the `Value` tree carries no line numbers) — every variant names the
 /// offending key or pattern text instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,12 +318,12 @@ pub enum AuthzError {
     /// (spec §4.6/§7 — the refusal mask is `0o027`, both halves).
     ///
     /// World/other-accessible: ANY other-class bit (`0o007` — read, write, or
-    /// execute) exposes the DAC policy to every local account; the shipped
+    /// execute) exposes the capability-grant policy to every local account; the shipped
     /// mode is `0640`, which grants nothing to `other`.
     ///
     /// Group/other-writable (`0o022`): `authz.yaml` is `root:_maknae` and the
     /// daemon runs as `_maknae`, whose primary group is `_maknae` — a
-    /// group-writable file lets a compromised daemon rewrite its own DAC
+    /// group-writable file lets a compromised daemon rewrite its own grants
     /// policy even though root ownership and a world-bit-only gate both pass.
     /// Group READ is deliberately permitted, so the daemon can read it.
     InsecurePermissions,
@@ -316,7 +331,7 @@ pub enum AuthzError {
     Symlink,
     /// `authz.yaml` is not owned by root (uid 0) — spec §4.6/§7: root
     /// ownership is the control that stops a compromised `_maknae` from
-    /// widening its own DAC by editing this file.
+    /// widening its own grants by editing this file.
     NotRootOwned,
     /// File I/O failure (missing file, unreadable, non-UTF-8, …).
     Io(String),
@@ -526,7 +541,7 @@ fn authz_target_required() -> maknae_io::TargetRequired {
         // `mode & 0o022 != 0`, an effective 0o027. The maknae-io migration
         // named only 0o022 here, dropping the world-any half — so a
         // root-owned but world-READABLE `authz.yaml` (0644, 0604) loaded at
-        // boot where it had previously been refused, exposing the DAC policy
+        // boot where it had previously been refused, exposing the capability-grant policy
         // to every local account. Group READ stays permitted on purpose:
         // spec §4.6 ships `root:_maknae 0640` and the daemon must read it.
         mode_mask: Some(0o027),
@@ -542,7 +557,7 @@ fn authz_target_required() -> maknae_io::TargetRequired {
 /// policy; the mode mask separately rejects world/other-accessible policy
 /// (`0o007`) and group- or other-writable policy (`0o022`).
 ///
-/// The world-any half keeps the DAC policy unreadable to every local account
+/// The world-any half keeps the capability-grant policy unreadable to every local account
 /// — a root-owned `0644` is not writable by anyone but root, yet publishes
 /// the policy. The group-write half closes a gap the two controls above leave
 /// open: `authz.yaml` is `root:_maknae` (spec §4.6), and the daemon runs as
@@ -1153,7 +1168,7 @@ mod tests {
         // wrote itself.
         //
         // Issue #129: `0644` is NOT group/other-writable, so a 0o022-only mask
-        // admits it — a world-readable DAC policy loaded at boot where the
+        // admits it — a world-readable capability-grant policy loaded at boot where the
         // pre-PR-#128 gate (world-any + group/other-write) refused it. The
         // fixture is owned by the test user, not root, so this test can only
         // discriminate because `maknae-io`'s `check_target` pins the order
