@@ -7,7 +7,48 @@
 # whose subject is largely unbuilt, and a concept graphic that does not say so
 # reads as a description of a working system.
 
-mission = "Let an AI agent learn on its own — and make that safe by deciding what it may do somewhere the agent cannot reach."
+mission = "An AI agent that does real work on your systems, learns from doing it, and cannot be talked into exceeding what you granted — because the grant is decided somewhere the agent cannot reach."
+
+# --- what it DOES ----------------------------------------------------------
+# An earlier draft went straight from "why it exists" to the learning loop, and
+# a reader shopping for an AI tool never found out what the tool does. Learning
+# is the differentiator; ACTING is the product.
+
+[capability]
+headline = "60 action terms enumerated and decided. 3 granted. 54 recorded as not-granted, which is deny-by-default written down rather than assumed."
+closed_set = "No wildcard arm: a new verb is a COMPILE ERROR until someone decides what it dispatches to. The vocabulary cannot grow by accident."
+evidence = "ci/gates/verb-manifest.txt · crates/maknae-kernel/src/handler.rs:27 · design/diagrams/action-vocabulary-map.svg"
+
+[[surface]]
+name = "Act on real systems"
+terms = "fs 10 · terminal 6 · mcp 7"
+detail = "Read, write and move files; run commands; call MCP tools. Every one transits the reference monitor before it happens."
+status = "partial"
+
+[[surface]]
+name = "Hold a conversation, keep a task"
+terms = "session 16"
+detail = "Prompts, context, long-horizon work. The surface OpenClaw and Hermes users expect."
+status = "unbuilt"
+
+[[surface]]
+name = "Operator control"
+terms = "admin 17"
+detail = "Audit tail, policy reload, credential rotation, session termination, and CONTAIN — pull a running agent back under control."
+status = "partial"
+
+[[surface]]
+name = "Many models, not one"
+terms = "model-agnostic by design"
+detail = "The model is a replaceable endpoint, never a trusted component. In the enclave every endpoint is local and accredited."
+status = "unbuilt"
+
+[[surface]]
+name = "Many ways in"
+terms = "on-system CLI · gateway · mobile"
+detail = "A local client today. Remote subjects arrive through a gateway that asserts identity to the PDP — never straight to the kernel."
+status = "partial"
+
 
 [delta]
 observed = "Every agent platform assessed in design/references places the authorization decision INSIDE the runtime the model influences: OpenClaw, Hermes, DeepSeek Harness, Agent Deck, FrontierAgent."

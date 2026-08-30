@@ -1189,10 +1189,40 @@ def d9_opconcept(prov: str) -> str:
         p.append(text(PAD + 16, yy, ln, 10, "700", fill="#7A2415")); yy += 14
     y += 118
 
+    # --- what it DOES, before what it governs
+    cap, surfaces = d["capability"], d["surface"]
+    p.append(text(PAD, y, "What it does", 13, "600", fill=TRUST_INK))
+    for k, ln in enumerate(_wrap_words(cap["headline"], 150)):
+        p.append(text(PAD, y + 17 + k * 13, ln, 9.5, fill=INK))
+    y += 17 + len(_wrap_words(cap["headline"], 150)) * 13
+    for k, ln in enumerate(_wrap_words(cap["closed_set"], 150)):
+        p.append(text(PAD, y + k * 13, ln, 9.5, "600", fill=WARN))
+    y += len(_wrap_words(cap["closed_set"], 150)) * 13 + 12
+
+    ns = len(surfaces)
+    CW = (W - PAD * 2 - (ns - 1) * 12) / ns
+    ch = 0
+    for i, sf in enumerate(surfaces):
+        x = PAD + i * (CW + 12)
+        dl3 = _wrap_words(sf["detail"], 34)
+        h = 54 + len(dl3) * 12
+        ch = max(ch, h)
+        part = sf["status"] == "partial"
+        fill, line = ((TRUST_FILL, TRUST_LINE) if part else ("#FFFFFF", MUTED))
+        p.append(box(x, y, CW, h, fill, line, rx=7, dash=None if part else "5 4"))
+        p.append(text(x + 10, y + 19, sf["name"], 10.5, "700",
+                      fill=TRUST_INK if part else INK))
+        p.append(text(x + 10, y + 33, sf["terms"], 8.5, fill=line, mono=True))
+        yy = y + 48
+        for ln in dl3:
+            p.append(text(x + 10, yy, ln, 8.5, fill=INK)); yy += 12
+    y += ch + 26
+
     # --- the loop
     p.append(text(PAD, y, "The governed learning loop — the agent fills its own knowledge base",
                   13, "600", fill=TRUST_INK))
-    p.append(text(PAD, y + 17, "Solid is built. Dashed is the concept.", 9.5, fill=MUTED))
+    p.append(text(PAD, y + 17, "The differentiator: the agent may fill its own knowledge base, "
+                  "because acquired knowledge informs without authorizing.", 9.5, fill=MUTED))
     y += 34
 
     n = len(steps)
