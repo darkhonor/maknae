@@ -1,7 +1,7 @@
-<svg width="960" height="1432" viewBox="0 0 960 1432" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="960" height="1742" viewBox="0 0 960 1742" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae system interfaces</title>
   <desc>DoDAF SV-1 systems interface description for Maknae.</desc>
-  <rect x="0" y="0" width="960" height="1432" fill="#FFFFFF"/>
+  <rect x="0" y="0" width="960" height="1742" fill="#FFFFFF"/>
 <text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">System interfaces — DoDAF SV-1</text>
 <text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Every interface carries a status. 5 peer interfaces exist and 3 host-platform controls act on the daemon. 2 are ratified by ADR-0006 and</text>
 <text x="44" y="82" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">NOT implemented — that ADR carries its own banner saying so. 2 are one-line marker crates with no interface at all.</text>
@@ -157,5 +157,23 @@
 <text x="78" y="1348" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">audit trail — AU-3 records go to the append-only sink at I5, on a path whose write gates the reply.</text>
 <text x="78" y="1360" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: systemd unit identity</text>
 <text x="78" y="1372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">packaging/common/maknaed.service:59</text>
-<text x="24" y="1416" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/system-interfaces.toml@2d62645854</text><text x="936" y="1416" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · SV-1</text>
+<text x="44" y="1404" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">Stated negatives — surfaces that do not exist</text>
+<text x="44" y="1421" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">Read this document for attack surface and an absent one looks like an oversight. These are absent on purpose.</text>
+<rect x="44" y="1440" width="872" height="84" rx="6" fill="#F6FBF9" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="58" y="1460" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#04342C">No inbound network interface exists. Nothing in the tree binds a TCP or UDP port; the only bind is UnixListener::bind</text>
+<text x="58" y="1473" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#04342C">on the client plane. Every occurrence of :8200 is a Vault address to DIAL.</text>
+<text x="58" y="1486" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">There is nothing to ingress-filter, which is why no firewalld, nftables or ufw profile ships. #117's gateway is the</text>
+<text x="58" y="1499" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">first inbound listener, and the first thing that will need one.</text>
+<text x="58" y="1513" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-kernel/src/run.rs:1879 — PlaneListener::bind on an AF_UNIX path</text>
+<rect x="44" y="1536" width="872" height="71" rx="6" fill="#F6FBF9" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="58" y="1556" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#04342C">The one network flow is EGRESS to Vault, and it is already constrained by something narrower than a firewall rule.</text>
+<text x="58" y="1569" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">SELinux name_connect on maknae_vault_port_t authorizes the connect per DOMAIN — only maknaed_t may reach that port —</text>
+<text x="58" y="1582" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">where a host firewall rule would authorize it per HOST. A packet filter cannot express 'this process and no other'.</text>
+<text x="58" y="1596" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te</text>
+<rect x="44" y="1619" width="872" height="71" rx="6" fill="#F6FBF9" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="58" y="1639" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#04342C">Reaching the client plane requires a local account in the gated group, not a route.</text>
+<text x="58" y="1652" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The socket is filesystem-mediated: group-gated at bind, then mutual mTLS over it. A network position buys nothing, so</text>
+<text x="58" y="1665" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">perimeter controls are not the boundary that matters here.</text>
+<text x="58" y="1679" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-kernel/src/run.rs:1879 · crates/maknae-config/src/transport.rs:15</text>
+<text x="24" y="1726" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/system-interfaces.toml@2eacd31b91</text><text x="936" y="1726" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · SV-1</text>
 </svg>

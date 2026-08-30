@@ -1019,8 +1019,9 @@ def d8_interfaces(prov: str) -> str:
     that ARE there pass without notice.
     """
     doc = tomllib.loads((OUT / "system-interfaces.toml").read_text())
-    nodes, ifaces = doc["node"], doc["iface"]
+    nodes, ifaces, negs = doc["node"], doc["iface"], doc["negative"]
     check_evidence(ifaces, "evidence", "system-interfaces.toml")
+    check_evidence(negs, "evidence", "system-interfaces.toml")
     by = {n["id"]: n for n in nodes}
 
     NW, NH, CX, CY, PAD, TOP = 176, 46, 232, 92, 44, 148
@@ -1098,6 +1099,25 @@ def d8_interfaces(prov: str) -> str:
         p.append(text(PAD + 34, yy, f'identity: {i["identity"]}', 9, fill=MUTED)); yy += 12
         p.append(text(PAD + 34, yy, i["evidence"], 7.5, fill=MUTED, mono=True))
         y += h + 14
+
+    y += 12
+    p.append(text(PAD, y, "Stated negatives — surfaces that do not exist", 13, "600",
+                  fill=TRUST_INK))
+    p.append(text(PAD, y + 17, "Read this document for attack surface and an absent one looks "
+                  "like an oversight. These are absent on purpose.", 9.5, fill=MUTED))
+    y += 36
+    for ng in negs:
+        cl = _wrap_words(ng["claim"], 118)
+        cq = _wrap_words(ng["consequence"], 118)
+        h = 16 + (len(cl) + len(cq)) * 13 + 16
+        p.append(box(PAD, y, W - PAD * 2, h, "#F6FBF9", OK_LINE, rx=6))
+        yy = y + 20
+        for ln in cl:
+            p.append(text(PAD + 14, yy, ln, 9.5, "600", fill="#04342C")); yy += 13
+        for ln in cq:
+            p.append(text(PAD + 14, yy, ln, 9.5, fill=INK)); yy += 13
+        p.append(text(PAD + 14, yy + 1, ng["evidence"], 7.5, fill=MUTED, mono=True))
+        y += h + 12
 
     H = y + 40
     # counts DERIVED — an earlier version hardcoded "five exist", which went

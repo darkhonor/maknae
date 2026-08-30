@@ -227,3 +227,22 @@ class = "platform"
 mechanism = "StandardOutput=journal, StandardError=journal, SyslogIdentifier=maknaed. This is the DIAGNOSTIC channel and is not the audit trail — AU-3 records go to the append-only sink at I5, on a path whose write gates the reply."
 identity = "systemd unit identity"
 evidence = "packaging/common/maknaed.service:59"
+
+# --- stated negatives ------------------------------------------------------
+# An SV-1 is read to find attack surface. A surface that does not exist has to
+# be SAID, or the reader assumes it was overlooked.
+
+[[negative]]
+claim = "No inbound network interface exists. Nothing in the tree binds a TCP or UDP port; the only bind is UnixListener::bind on the client plane. Every occurrence of :8200 is a Vault address to DIAL."
+consequence = "There is nothing to ingress-filter, which is why no firewalld, nftables or ufw profile ships. #117's gateway is the first inbound listener, and the first thing that will need one."
+evidence = "crates/maknae-kernel/src/run.rs:1879 — PlaneListener::bind on an AF_UNIX path"
+
+[[negative]]
+claim = "The one network flow is EGRESS to Vault, and it is already constrained by something narrower than a firewall rule."
+consequence = "SELinux name_connect on maknae_vault_port_t authorizes the connect per DOMAIN — only maknaed_t may reach that port — where a host firewall rule would authorize it per HOST. A packet filter cannot express 'this process and no other'."
+evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te"
+
+[[negative]]
+claim = "Reaching the client plane requires a local account in the gated group, not a route."
+consequence = "The socket is filesystem-mediated: group-gated at bind, then mutual mTLS over it. A network position buys nothing, so perimeter controls are not the boundary that matters here."
+evidence = "crates/maknae-kernel/src/run.rs:1879 · crates/maknae-config/src/transport.rs:15"
