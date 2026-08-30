@@ -22,6 +22,7 @@ private colour or glyph. Colour is styling only and carries no meaning; a reader
 who knows UML needs no key from us.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -121,6 +122,68 @@ def provenance() -> str:
         # diagrams came from a state that exists nowhere in history.
         dirty = " +UNCOMMITTED-INPUTS"
     return f"inputs at {sha}{dirty} · {date}"
+
+
+def content_stamp(rel: str) -> str:
+    """Provenance for a CURATED input, as a hash of its bytes.
+
+    A commit sha cannot work here. `standards-profile.toml` and the SVG it
+    produces necessarily travel in the SAME commit, so a sha computed at
+    generation time is always the PREVIOUS commit's -- the identical chasing
+    failure that made the first HEAD-based stamp unverifiable (#202). Review of
+    #204 then found the mirror-image bug: excluding the curated file entirely
+    let a claim change -- a status flipping `adopted` to `enforced` -- regenerate
+    the diagram under an UNCHANGED stamp.
+
+    A content hash escapes both. It is knowable before the commit exists, so
+    regeneration stays idempotent; it moves whenever any claim moves; and a
+    reviewer checks it with `sha256sum`, needing no git history at all.
+
+    The generator itself is deliberately NOT hashed. Its effect is already
+    carried by the SVG bytes -- a renderer change that alters output changes the
+    file, and one that does not is not a fact about the artifact. Hashing it
+    would rewrite every footer on every unrelated generator edit.
+    """
+    h = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()[:10]
+    return f"{rel}@{h}"
+
+
+# --- evidence resolution --------------------------------------------------
+
+_ADR = re.compile(r"\bADR-(\d{4})\b")
+_PATH = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+|\b[A-Za-z0-9_\-]+\.(?:toml|md)\b")
+
+
+def check_evidence(rows: list, field: str, where: str) -> None:
+    """Every evidence citation must name something a reader can open.
+
+    Hard-fails generation. The rule was stated in the README from the start and
+    enforced only by an ad-hoc script whose regex required a file EXTENSION --
+    so `design/references/oauth-compliance` (real file: `.md`) was never a
+    candidate to check, and shipped dead. Found by review on #204. An
+    unenforced rule is a wish, so this now runs on every generation.
+    """
+    bad = []
+    for r in rows:
+        ev = r.get(field, "")
+        for adr in _ADR.findall(ev):
+            if not list(ROOT.glob(f"design/adr/ADR-{adr}-*.md")):
+                bad.append((r, f"ADR-{adr}"))
+        for tok in _PATH.findall(ev):
+            tok = tok.split(":")[0].rstrip(".,;")
+            # A slash alone does not make a path: "TLS 1.2/1.3", "SC-10/AC-12"
+            # and RFC lists all contain one. A repo path starts at a directory
+            # that actually exists at the root, which none of those do.
+            head = tok.split("/")[0]
+            if "/" in tok and not (ROOT / head).is_dir():
+                continue
+            if (ROOT / tok).exists():
+                continue
+            near = sorted(p.name for p in ROOT.glob(tok + ".*"))
+            bad.append((r, tok + (f"  (did you mean {near[0]}?)" if near else "")))
+    if bad:
+        lines = "\n".join(f"    {r.get('name', r.get('label', '?'))}: {t}" for r, t in bad)
+        sys.exit(f"{where}: evidence cites paths that do not resolve:\n{lines}")
 
 
 # --- SVG primitives -------------------------------------------------------
@@ -321,6 +384,86 @@ def d1_tcb(gates, ws, links, prov) -> str:
                "plane, the untrusted client binary, and the non-privileged crates both link.")
 
 
+# --- D-StdV1: DoDAF 2.02 Standards Profile ---------------------------------
+
+STATUS_STYLE = {
+    "enforced": (OK_LINE, "enforced", "implemented, and CI or the runtime refuses a violation"),
+    "adopted": (TRUST_LINE, "adopted", "implemented and relied upon; not mechanically checked"),
+    "emerging": ("#8A6D1F", "emerging", "applies to a surface not yet built"),
+    "excluded": (MUTED, "excluded", "deliberately out of scope, decision recorded"),
+}
+STATUS_ORDER = ["enforced", "adopted", "emerging", "excluded"]
+
+
+def stdv1(prov: str) -> str:
+    """DoDAF 2.02 StdV-1 — the standards this system claims, and what enforces each.
+
+    A tabular product by nature; StdV-1 is a profile, not a picture. The
+    `status` split is the point: DoDAF separates mandated/current from emerging,
+    and a profile that blurs them is a wish list. The `evidence` column is the
+    part most StdV-1s lack — every row names a file, gate or ADR a reader can open.
+    """
+    import tomllib
+    rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
+    check_evidence(rows, "evidence", "standards-profile.toml")
+    rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
+
+    w, lh = 1220, 19
+    x = {"name": 44, "ver": 296, "cat": 500, "app": 660, "ev": 660}
+    # +112: the status-group headings and the closing note both sit below the
+    # last row. An earlier version sized only for rows and clipped the note.
+    h = 150 + sum(2 * lh + 10 for _ in rows) + 16 * len(STATUS_ORDER) + 112
+
+    def fit(sv: str, avail_px: float, size: float) -> str:
+        """Truncate to the column. A value that overruns prints over its
+        neighbour, which is worse than losing its tail."""
+        n = int(avail_px / (size * 0.56))
+        return sv if len(sv) <= n else sv[: n - 1].rstrip() + "\u2026"
+
+    p = [text(40, 46, "Standards profile — DoDAF StdV-1", 17, "600"),
+         text(40, 68, "The technical standards Maknae claims, the elements they apply to, and what "
+                      "enforces each. Status separates what is mechanically", 11, fill=MUTED),
+         text(40, 83, "checked from what is merely implemented — a profile that blurs the two is a "
+                      "wish list.", 11, fill=MUTED)]
+
+    hy = 112
+    for label, cx in [("Standard", x["name"]), ("Version / profile", x["ver"]),
+                      ("Category", x["cat"]), ("Applies to  ·  Evidence", x["app"])]:
+        p.append(text(cx, hy, label, 10, "600", fill=MUTED))
+    p.append(f'<line x1="40" y1="{hy + 8}" x2="{w - 40}" y2="{hy + 8}" '
+             f'stroke="{MUTED}" stroke-width="0.75"/>')
+
+    y = hy + 26
+    seen = set()
+    for r in rows:
+        colour, badge, _ = STATUS_STYLE[r["status"]]
+        if r["status"] not in seen:
+            seen.add(r["status"])
+            p.append(text(44, y + 2, STATUS_STYLE[r["status"]][2], 9, "600", fill=colour))
+            y += 16
+        p.append(box(40, y - 12, w - 80, 2 * lh + 6, "#FCFCFB", "none", rx=4, sw="0"))
+        p.append(text(x["name"], y + 2, fit(r["name"], x["ver"] - x["name"] - 12, 11), 11, "600"))
+        p.append(box(x["name"] - 4, y + 8, 62, 13, "#FFFFFF", colour, rx=6))
+        p.append(text(x["name"] + 27, y + 18, badge, 8, "600", fill=colour, anchor="middle"))
+        p.append(text(x["ver"], y + 2, fit(r["version"], x["cat"] - x["ver"] - 12, 10), 10,
+                      fill=INK, mono=True))
+        p.append(text(x["cat"], y + 2, fit(r["category"], x["app"] - x["cat"] - 12, 10), 10, fill=MUTED))
+        p.append(text(x["app"], y + 2, fit(r["applies_to"], w - x["app"] - 44, 10), 10, fill=INK))
+        p.append(text(x["ev"], y + 17, fit(r["evidence"], w - x["ev"] - 44, 9), 9,
+                      fill=MUTED, mono=True))
+        y += 2 * lh + 10
+
+    p.append(text(40, y + 26, "Every row names evidence a reader can open. A claim with no evidence "
+                              "does not belong in this profile.", 10, fill=MUTED))
+    p.append(text(40, h - 26, f"source: {content_stamp('design/diagrams/standards-profile.toml')}",
+                  10, fill=MUTED))
+    p.append(text(w - 40, h - 26, "DoDAF 2.02 Change 1 · StdV-1", 10, fill=MUTED, anchor="end"))
+    return svg(w, h, "\n  ".join(p),
+               "Maknae standards profile (DoDAF StdV-1)",
+               "The technical standards Maknae conforms to, the elements each applies to, "
+               "whether the claim is mechanically enforced, and the evidence for it.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -328,6 +471,7 @@ def main() -> None:
     for name, content in [
         ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
         ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
+        ("generated-standards-profile.svg", stdv1(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")
