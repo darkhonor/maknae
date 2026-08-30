@@ -1317,6 +1317,132 @@ def d9_opconcept(prov: str) -> str:
         "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · OV-1")
 
 
+# --- D10: container architecture, UML 2.5.1 deployment view ---------------
+
+def d10_containers(prov: str) -> str:
+    """design/container-architecture.md, drawn.
+
+    UML deployment notation -- containers as «execution environment» nodes,
+    volumes as «artifact», mounts and flows as communication paths. NOT an RMF
+    view: the Microkosmos SV-1 diagrams that lent the visual grammar were built
+    for an Assess-Only package and carry authorization-boundary language and the
+    800-37 inheritance taxonomy. Maknae has no package, so that framing would
+    claim a posture it has not earned.
+    """
+    d = tomllib.loads((OUT / "container-architecture.toml").read_text())
+    planes, cons, vols, flows = d["plane"], d["container"], d["volume"], d["flow"]
+    check_evidence([d["scope"], d["built"]], "evidence", "container-architecture.toml")
+    by = {c["id"]: c for c in cons}
+
+    W, PAD, CW, CH, GAP = 1300, 44, 236, 76, 18
+    TOP = 132
+    style = {"trusted": (TRUST_FILL, TRUST_LINE, TRUST_INK),
+             "security-relevant": (OK_FILL, OK_LINE, "#04342C"),
+             "untrusted": ("#FDEEE9", WARN, "#7A2415"),
+             "vendor": (PLAIN_FILL, PLAIN_LINE, MUTED)}
+    dashed = {"proposed", "post-mvp"}
+
+    p, y = [], TOP
+    pos = {}
+    for pl in planes:
+        mine = [c for c in cons if c["plane"] == pl["id"]]
+        bh = CH + 40
+        p.append(box(PAD, y, W - PAD * 2, bh, "#FBFAF7", "#E2DFD6", rx=10))
+        p.append(text(PAD + 14, y + 20, pl["label"], 11.5, "700", fill=TRUST_INK))
+        p.append(text(PAD + 14, y + 34, pl["note"], 9, fill=MUTED))
+        x = PAD + 268
+        for c in mine:
+            fill, line, ink = style[c["trust"]]
+            dash = "5 4" if c["status"] in dashed else None
+            p.append(box(x, y + 12, CW, CH, fill, line, rx=7, dash=dash))
+            p.append(text(x + 11, y + 30, c["name"], 11, "700", fill=ink, mono=True))
+            p.append(text(x + CW - 11, y + 30, c["lang"], 8.5, fill=line, anchor="end"))
+            p.append(text(x + 11, y + 43, f'«{c["trust"]}» · {c["status"]}', 8, fill=line))
+            for k, ln in enumerate(_wrap_words(c["detail"], 36)):
+                p.append(text(x + 11, y + 57 + k * 11, ln, 8, fill=INK))
+            pos[c["id"]] = (x + CW / 2, y + 12, x, y + 12 + CH, x + CW)
+            x += CW + GAP
+        y += bh + 16
+
+    # flows, drawn behind nothing -- planes are stacked so an edge is short
+    for i, f in enumerate(flows):
+        a, b = pos[f["from"]], pos[f["to"]]
+        if a[1] == b[1]:
+            # same plane: route side to side, or the vertical anchors fold the
+            # edge back on itself and the label lands inside the target box.
+            left, right = (a, b) if a[0] < b[0] else (b, a)
+            y1 = y2 = a[1] + CH / 2
+            x1, x2 = (left[4], right[2]) if a[0] < b[0] else (right[2], left[4])
+            lx, ly = (x1 + x2) / 2, y1 - 6
+        else:
+            x1, y1 = a[0], (a[3] if a[1] < b[1] else a[1])
+            x2, y2 = b[0], (b[1] if a[1] < b[1] else b[3])
+            # stagger, or four edges crossing one gap stack their labels on one
+            # line and none of them is readable
+            lx, ly = (x1 + x2) / 2, (y1 + y2) / 2 + 3 + (i % 3 - 1) * 11
+        p.append(f'<path d="M {x1:.0f} {y1:.0f} C {x1:.0f} {(y1+y2)/2:.0f} '
+                 f'{x2:.0f} {(y1+y2)/2:.0f} {x2:.0f} {y2:.0f}" fill="none" '
+                 f'stroke="{TRUST_LINE}" stroke-width="1" stroke-dasharray="4 3" '
+                 f'opacity="0.6" marker-end="url(#ca)"/>')
+        p.append(text(lx, ly, f["label"], 8.5, fill=MUTED, anchor="middle",
+                      halo="#FFFFFF"))
+    p.insert(0, '<defs><marker id="ca" viewBox="0 0 10 10" refX="9" refY="5" '
+             'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+             f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{TRUST_LINE}" '
+             'stroke-width="1.3"/></marker></defs>')
+
+    y += 8
+    p.append(text(PAD, y, "Volumes — both deployment models", 12, "700", fill=TRUST_INK))
+    y += 16
+    VW = (W - PAD * 2 - 2 * 14) / 3
+    row = 0
+    for i, v in enumerate(vols):
+        col = i % 3
+        if col == 0 and i:
+            row += 1
+        x = PAD + col * (VW + 14)
+        vy = y + row * 96
+        flagged = "flag" in v
+        p.append(box(x, vy, VW, 86, "#FFF6E6" if flagged else "#FFFFFF",
+                     WARN if flagged else PLAIN_LINE, rx=6))
+        p.append(text(x + 11, vy + 18, v["name"], 10, "700", fill=INK, mono=True))
+        p.append(text(x + VW - 11, vy + 18, "«artifact»", 8, fill=MUTED, anchor="end"))
+        p.append(text(x + 11, vy + 31, v["note"], 8, fill=MUTED))
+        mx = x + 11
+        for m in v["mounts"]:
+            who, mode = m.split(":")
+            hot = mode in ("rw", "append") and by[who]["trust"] == "untrusted"
+            p.append(text(mx, vy + 47, f"{by[who]['name']} {mode}", 8.5, "700" if hot else "400",
+                          fill=WARN if hot else INK, mono=True))
+            mx += 8 + 5.4 * len(f"{by[who]['name']} {mode}")
+        if flagged:
+            for k, ln in enumerate(_wrap_words(v["flag"], 62)):
+                p.append(text(x + 11, vy + 62 + k * 11, ln, 8, "600", fill=WARN))
+    y += (row + 1) * 96 + 10
+
+    sc = d["scope"]
+    sl = _wrap_words(sc["sans_dcs"], 148)
+    p.append(box(PAD, y, W - PAD * 2, 26 + len(sl) * 14, TRUST_FILL, TRUST_LINE, rx=8))
+    for k, ln in enumerate(sl):
+        p.append(text(PAD + 14, y + 22 + k * 14, ln, 9.5, "600" if k == 0 else "400",
+                      fill=TRUST_INK if k == 0 else INK))
+    y += 40 + len(sl) * 14
+    for k, ln in enumerate(_wrap_words(d["built"]["claim"], 150)):
+        p.append(text(PAD, y + k * 13, ln, 9.5, fill=WARN))
+    y += 26
+
+    H = y + 44
+    p = [text(PAD, 44, sc["title"], 16, "600"),
+         text(PAD, 66, sc["subtitle"], 11, fill=MUTED),
+         text(PAD, 86, "Visual grammar borrowed from the Microkosmos SV-1 deployment views. "
+              "Their RMF apparatus — authorization boundary, CNSSI 1253", 10, fill=MUTED),
+         text(PAD, 100, "categorization, control-inheritance taxonomy — is deliberately absent: "
+              "those answer an Assess-Only package, and Maknae has none yet.", 10, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/container-architecture.toml')}"))
+    return svg(W, H, "\n".join(p), "Maknae container architecture",
+               "UML deployment view of the Maknae container architecture.")
+
+
 def check_catalog(written: list) -> None:
     """The catalog's own description must not drift from the catalog.
 
@@ -1358,6 +1484,7 @@ def main() -> None:
         ("generated-data-model.svg", d7_datamodel(prov)),
         ("generated-system-interfaces.svg", d8_interfaces(prov)),
         ("generated-operational-concept.svg", d9_opconcept(prov)),
+        ("generated-container-architecture.svg", d10_containers(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

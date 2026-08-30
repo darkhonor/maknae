@@ -63,6 +63,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
+| `generated-container-architecture.svg` | UML deployment | *What containers exist, in which plane, with what trust and which volumes?* | contributor, security assessor | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -109,16 +110,16 @@ is understood and accepted: `check_evidence` and byte-stable regeneration fire f
 whoever regenerates, so a stale diagram can be committed and no gate will object.
 Regenerate with the command above and commit the result; that is the whole contract.
 
-### Six products are curated, not derived
+### Seven products are curated, not derived
 
 `standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml`,
-`system-interfaces.toml` and `operational-concept.toml` are hand-maintained inputs.
+`system-interfaces.toml`, `operational-concept.toml` and `container-architecture.toml` are hand-maintained inputs.
 A conformance claim, a call sequence, a precedence ladder, a normalization judgement,
 an interface register and a statement of intent are none of them readable out of a
-manifest, so all six are kept as reviewable data files in which **every row names
+manifest, so all seven are kept as reviewable data files in which **every row names
 something a reader can check**.
 
-None of the six is part of the provenance stamp, deliberately. The stamp names the last
+None of the seven is part of the provenance stamp, deliberately. The stamp names the last
 commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
 travels in the same commit as the SVG it produces, so including it would make the stamp
 chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)
