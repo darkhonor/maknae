@@ -57,6 +57,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-tcb-components.svg` | UML component | *What is in the TCB and where does the boundary run?* | security assessor | generated |
 | `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
+| `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -66,7 +67,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 | Product | Notation | Question |
 |---|---|---|
-| workspace + key externals | UML package | *How do the crates fit together; what do we depend on?* |
 | runtime boundary crossings | UML sequence (≈ DoDAF SV-10c) | *Where does data cross a trust boundary, by what mechanism?* |
 | audit / policy / config schemas | IDEF1X | *What is the shape of the data we record and enforce?* |
 | system interfaces | DoDAF SV-1 | *What talks to what, across which interfaces?* |

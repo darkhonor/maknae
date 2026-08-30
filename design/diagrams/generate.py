@@ -186,6 +186,76 @@ def check_evidence(rows: list, field: str, where: str) -> None:
         sys.exit(f"{where}: evidence cites paths that do not resolve:\n{lines}")
 
 
+# --- facts: the internal crate graph and each crate's direct externals -----
+
+def crate_graph() -> dict:
+    """Direct, normal-kind dependencies among workspace members, plus each
+    member's direct externals. dev- and build-dependencies are excluded: they
+    are not in any shipped artifact, so they are not part of what this diagram
+    claims."""
+    meta = json.loads(sh("cargo", "metadata", "--format-version", "1"))
+    members = {p["name"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
+    internal, external = {}, {}
+    for p in meta["packages"]:
+        if p["name"] not in members:
+            continue
+        ins, exs = set(), set()
+        for d in p["dependencies"]:
+            if d["kind"] not in (None, "null"):
+                continue
+            (ins if d["name"] in members else exs).add(d["name"])
+        internal[p["name"]] = sorted(ins)
+        external[p["name"]] = sorted(exs)
+    return {"members": sorted(members), "deps": internal, "ext": external}
+
+
+def layer_of(deps: dict) -> dict:
+    """Longest-path layering. The graph is a DAG (cargo enforces it), so the
+    recursion terminates; the `seen` guard is belt-and-braces, not a cycle
+    handler."""
+    lvl = {}
+
+    def L(n, seen=()):
+        if n in lvl:
+            return lvl[n]
+        if n in seen:
+            return 0
+        lvl[n] = 1 + max([L(d, seen + (n,)) for d in deps.get(n, [])], default=-1)
+        return lvl[n]
+
+    for n in deps:
+        L(n)
+    return lvl
+
+
+def order_rows(rows: dict, deps: dict, sweeps: int = 12) -> dict:
+    """Barycentre ordering, swept both ways, to cut edge crossings.
+
+    Without it the bands are alphabetical and the kernel's twelve edges cross
+    nearly everything. This is the standard Sugiyama heuristic, not an exact
+    minimum -- it does not need to be, it needs to be readable."""
+    pos = {n: i for r in rows.values() for i, n in enumerate(r)}
+    up = {n: [d for d in deps.get(n, [])] for n in pos}
+    down = {}
+    for n, ds in up.items():
+        for d in ds:
+            down.setdefault(d, []).append(n)
+    for s in range(sweeps):
+        use = up if s % 2 == 0 else down
+        for lv in (sorted(rows) if s % 2 == 0 else sorted(rows, reverse=True)):
+            r = rows[lv]
+            key = {}
+            for n in r:
+                nb = [pos[x] for x in use.get(n, []) if x in pos]
+                key[n] = sum(nb) / len(nb) if nb else pos[n]
+            rows[lv] = sorted(r, key=lambda n: (key[n], n))
+            for i, n in enumerate(rows[lv]):
+                pos[n] = i
+    return rows
+
+
+
+
 # --- SVG primitives -------------------------------------------------------
 
 def esc(s: str) -> str:
@@ -464,14 +534,161 @@ def stdv1(prov: str) -> str:
                "whether the claim is mechanically enforced, and the evidence for it.")
 
 
+# --- D4: workspace packages, UML 2.5.1 package diagram --------------------
+
+def d4_packages(gates, cg, prov) -> str:
+    """How the crates fit together and what they pull in.
+
+    UML 2.5.1 package diagram: folder-shaped packages, «stereotype» for the
+    trust classification, dependencies as dashed lines with an open arrowhead
+    pointing at the SUPPLIER (the thing depended upon), per UML 7.8.4.
+    """
+    deps, ext = cg["deps"], cg["ext"]
+    priv = set(gates["privileged"])
+    bins = {"maknaed", gates["untrusted_bin"]}
+    lvl = layer_of(deps)
+    rows = {}
+    for n, l in lvl.items():
+        rows.setdefault(l, []).append(n)
+    for l in rows:
+        rows[l].sort()
+    rows = order_rows(rows, deps)
+
+    BW, GAP, PAD, TOP, PERROW, GUT = 150, 18, 44, 112, 8, 84
+    widest = min(PERROW, max(len(r) for r in rows.values()))
+    W = PAD * 2 + GUT + widest * BW + (widest - 1) * GAP
+
+    def wrap(items, cols=27):
+        out, cur = [], ""
+        for it in items:
+            add = it if not cur else cur + ", " + it
+            if len(add) > cols and cur:
+                out.append(cur + ",")
+                cur = it
+            else:
+                cur = add
+        if cur:
+            out.append(cur)
+        return out
+
+    # geometry first: every box's height depends on its external list
+    geo, y, bands = {}, TOP, []
+    for l in sorted(rows, reverse=True):
+        band = rows[l]
+        ytop = y
+        for s0 in range(0, len(band), PERROW):
+            sub = band[s0:s0 + PERROW]
+            span = len(sub) * BW + (len(sub) - 1) * GAP
+            hmax = 0
+            for i, c in enumerate(sub):
+                x0 = GUT + (W - GUT - span) / 2
+                lines = wrap(ext.get(c, []))
+                stereo = 11 if (c in priv or c in bins) else 0
+                h = 37 + stereo + (len(lines) * 11 + 6 if lines else 0)
+                geo[c] = {"x": x0 + i * (BW + GAP), "y": y, "h": h,
+                          "lines": lines, "st": stereo}
+                hmax = max(hmax, h)
+            y += hmax + 44
+        bands.append((l, ytop, y - 44))
+    H = y + 74
+
+    # layer bands, behind everything. The band is what makes a WRAPPED layer
+    # legible: layer 0 spills onto a second row, and without the band that row
+    # reads as a deeper layer when those packages are in fact leaves.
+    p = []
+    for l, ytop, ybot in bands:
+        shade = "#FBFAF7" if l % 2 == 0 else "#FFFFFF"
+        p.append(f'<rect x="0" y="{ytop-14:.0f}" width="{W}" '
+                 f'height="{ybot-ytop+28:.0f}" fill="{shade}"/>')
+        p.append(text(24, ytop + 4, f"layer {l}", 10, "600", fill=MUTED))
+        if l == 0:
+            p.append(text(24, ytop + 17, "no deps", 9, fill=MUTED))
+    p += ['<defs><marker id="dep" viewBox="0 0 10 10" refX="9" refY="5" '
+         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+         f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
+         'stroke-width="1.2"/></marker></defs>']
+
+    # edges BEHIND the packages: a supplier several layers down would otherwise
+    # have its line clipped by whatever sits between, and the crossing matters
+    # less than the box being readable.
+    for c, ds in deps.items():
+        for d in ds:
+            if d not in geo:
+                continue
+            a, b = geo[c], geo[d]
+            x1, y1 = a["x"] + BW / 2, a["y"] + a["h"]
+            x2, y2 = b["x"] + BW / 2, b["y"]
+            my = (y1 + y2) / 2
+            hot = c in priv or c in bins
+            p.append(f'<path d="M {x1:.0f} {y1:.0f} C {x1:.0f} {my:.0f} '
+                     f'{x2:.0f} {my:.0f} {x2:.0f} {y2:.0f}" fill="none" '
+                     f'stroke="{TRUST_LINE if hot else MUTED}" stroke-width="0.8" '
+                     f'stroke-dasharray="4 3" opacity="{0.55 if hot else 0.3}" '
+                     'marker-end="url(#dep)"/>')
+
+    for c, g in geo.items():
+        trusted, is_bin = c in priv, c in bins
+        fill, line, ink = PLAIN_FILL, PLAIN_LINE, INK
+        if trusted:
+            fill, line, ink = TRUST_FILL, TRUST_LINE, TRUST_INK
+        elif is_bin:
+            fill, line, ink = OK_FILL, OK_LINE, "#04342C"
+        x, yy, h = g["x"], g["y"], g["h"]
+        # UML package: the tab, then the body.
+        p.append(f'<path d="M {x} {yy+9} h 46 l 5 -9 h 0 v 9" fill="{fill}" '
+                 f'stroke="{line}" stroke-width="0.75"/>')
+        p.append(box(x, yy + 9, BW, h - 9, fill, line, rx=3))
+        short = c.replace("maknae-", "") if c != "maknae" else "maknae"
+        p.append(text(x + 9, yy + 26, short, 11, "600", fill=ink, mono=True))
+        st = "«trusted»" if trusted else ("«artifact»" if is_bin else "")
+        if st:
+            p.append(text(x + 9, yy + 36, st, 8.5, fill=line))
+        for k, ln in enumerate(g["lines"]):
+            p.append(text(x + 9, yy + 37 + g["st"] + k * 11, ln, 8,
+                          fill=MUTED, mono=True))
+
+    # Derived, not asserted: the external surface a TRUSTED package can reach.
+    reach, stack = set(), [c for c in deps if c in priv]
+    while stack:
+        n = stack.pop()
+        if n in reach:
+            continue
+        reach.add(n)
+        stack += deps.get(n, [])
+    tcb_ext = {e for c in reach for e in ext.get(c, [])}
+    all_ext = {e for c in deps for e in ext.get(c, [])}
+    top = max(reach, key=lambda c: len(ext.get(c, [])))
+    p.append(text(PAD, H - 56,
+                  f"The dependency closure of a «trusted» package covers {len(reach)} of the "
+                  f"{len(deps)} workspace packages and {len(tcb_ext)} of the {len(all_ext)} "
+                  f"direct external crates — {len(ext[top])} through {top} alone.",
+                  11, "600", fill=WARN))
+    p.append(text(PAD, H - 41,
+                  "Closure is not TCB membership (see the component view) — but it is the code "
+                  "a privileged package can reach, so it is the surface that matters.",
+                  10, fill=MUTED))
+    p.append(footer(W, H, f"source: cargo metadata (normal deps) · {prov}"))
+
+    p = [text(PAD, 44, "Workspace packages and their dependencies", 16, "600"),
+         text(PAD, 64, "Every package in the workspace, layered by what it depends on. "
+                       "Grey text inside a package is its DIRECT external crates.", 11, fill=MUTED),
+         text(PAD, 80, "Normal dependencies only — dev- and build-dependencies are excluded, "
+                       "since they reach no shipped artifact.", 11, fill=MUTED)] + p
+    return svg(W, H, "\n".join(p),
+               "Maknae workspace package diagram",
+               "UML package diagram of the Maknae workspace, layered by dependency.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
+    cg = crate_graph()
     prov = provenance()
     for name, content in [
         ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
         ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
         ("generated-standards-profile.svg", stdv1(prov)),
+        ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")
