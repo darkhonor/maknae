@@ -75,8 +75,8 @@ crates/maknae-vault/src/socket.rs:56|match std::fs::symlink_metadata(path) {
 crates/maknae-vault/src/socket.rs:75|std::fs::remove_file(path)
 crates/maknae-vault/src/socket.rs:107|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-crates/maknae-vault/src/stream.rs:196|let _ = std::fs::remove_file(&self.path);
-crates/maknae-vault/src/stream.rs:235|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/stream.rs:208|let _ = std::fs::remove_file(&self.path);
+crates/maknae-vault/src/stream.rs:247|let _ = std::fs::remove_file(path);
 
 # The read PEP's target requirement (handler.rs::delegated_plan). These two `None`s
 # are DELIBERATE and, since ADR-0009 (2026-08-30), load-bearing rather than merely
@@ -94,3 +94,15 @@ crates/maknae-vault/src/stream.rs:235|let _ = std::fs::remove_file(path);
 # corrected for exactly this reason.
 crates/maknae-kernel/src/handler.rs:398|owner: None,
 crates/maknae-kernel/src/handler.rs:399|mode_mask: None,
+
+# ADR-0009 open_for_delegation — the SUBJECT's own open, performed by the untrusted
+# CLIENT under its own credentials. This is the ONE std::fs call in the crate whose
+# point is that it applies no requirement: the kernel's answer for that subject is the
+# whole product, and the descriptor carries it to a daemon that never resolves the
+# name. O_NOFOLLOW is deliberately absent (decision 6 has the daemon decide on the
+# RESOLVED path, so an in-home symlink must work and a malicious one must resolve to
+# the object the deny list names); object kind, link count and size are the daemon's to
+# require, on this very descriptor, and duplicating them here would put policy in an
+# untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
+# lifecycle stays in one crate and the client needs no exemption of its own.
+crates/maknae-io/src/delegated.rs:159|Ok(OwnedFd::from(std::fs::File::open(path)?))

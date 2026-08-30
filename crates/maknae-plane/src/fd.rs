@@ -68,9 +68,9 @@ fn recv_once(sock: &UnixStream, fds: &DelegatedFds, buf: &mut ReadBuf<'_>) -> st
 
 /// What the read loop does with one attempt's result.
 #[derive(Debug)]
-enum Step {
+pub(crate) enum Step<T> {
     /// Hand this to the caller.
-    Done(std::io::Result<()>),
+    Done(std::io::Result<T>),
     /// Readiness was spurious -- tokio signalled readable and the socket then said
     /// `EAGAIN`. Wait for readiness again rather than reporting a failure the caller
     /// would have to interpret.
@@ -79,13 +79,15 @@ enum Step {
 
 /// The read loop's only decision, split out so it can be asserted directly.
 ///
-/// `poll_read` below is thin orchestration over it -- the same shape
-/// `run.rs::read_pep` uses over `handler::delegated_plan`. Inlined into the loop this
-/// branch is reachable only by racing tokio's readiness against the kernel, which no
-/// unit test can do deterministically; separated, all three arms are ordinary inputs.
-fn classify(attempt: std::io::Result<()>) -> Step {
+/// Both `poll_read` here and `poll_write` in [`crate::send`] are thin orchestration
+/// over it -- the same shape `run.rs::read_pep` uses over `handler::delegated_plan`.
+/// Inlined into either loop this branch is reachable only by racing tokio's readiness
+/// against the kernel, which no unit test can do deterministically; separated, all
+/// three arms are ordinary inputs, and BOTH directions share one tested decision
+/// rather than two copies of it.
+pub(crate) fn classify<T>(attempt: std::io::Result<T>) -> Step<T> {
     match attempt {
-        Ok(()) => Step::Done(Ok(())),
+        Ok(v) => Step::Done(Ok(v)),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Step::Retry,
         Err(e) => Step::Done(Err(e)),
     }
@@ -230,10 +232,10 @@ mod tests {
         use std::io::ErrorKind;
         assert!(matches!(classify(Ok(())), Step::Done(Ok(()))));
         assert!(matches!(
-            classify(Err(std::io::Error::from(ErrorKind::WouldBlock))),
+            classify::<()>(Err(std::io::Error::from(ErrorKind::WouldBlock))),
             Step::Retry
         ));
-        match classify(Err(std::io::Error::from(ErrorKind::ConnectionReset))) {
+        match classify::<()>(Err(std::io::Error::from(ErrorKind::ConnectionReset))) {
             Step::Done(Err(e)) => assert_eq!(e.kind(), ErrorKind::ConnectionReset),
             other => panic!("a real error must surface, not spin the loop: {other:?}"),
         }

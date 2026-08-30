@@ -129,6 +129,74 @@ pub struct Received {
     pub fds: Vec<OwnedFd>,
 }
 
+/// Open an object the caller intends to **delegate** to the trust plane (ADR-0009).
+///
+/// The first step of the delegation lifecycle, performed by the SUBJECT under its own
+/// credentials — which is the whole point: the kernel runs the complete permission
+/// check here (DAC bits, POSIX ACLs, supplementary groups, SELinux/AppArmor), and the
+/// resulting descriptor IS that answer, carried to a daemon that never has to resolve
+/// the name to find the object.
+///
+/// **It names NO requirements, and that absence is the design rather than an
+/// oversight.** Everywhere else in this crate the caller names what it requires and
+/// `None` is a named, greppable value. Here the honest requirement is *nothing*:
+///
+/// - **Symlinks are followed, deliberately.** ADR-0009 decision 6 has the daemon decide
+///   on the resolved path, so `~/current -> ~/versions/v3` must work and
+///   `~/innocent -> ~/.ssh/id_rsa` must resolve to the object the deny list names.
+///   `O_NOFOLLOW` here would break the first and hide the second.
+/// - **Object kind, link count and size are the DAEMON's to require.** It applies them
+///   to this very descriptor ([`verify_delegated`], [`read_delegated`]). Duplicating
+///   them client-side would put policy in an untrusted process and give two places to
+///   disagree.
+///
+/// So the client's job is to open, honestly, as itself — and to send the request even
+/// when this fails, so the refusal is DECIDED and audited rather than lost (decision 2).
+///
+/// Returns `std::io::Result` because the OS's refusal is the meaningful outcome and
+/// this function applies no requirement of its own to fail.
+pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    Ok(OwnedFd::from(std::fs::File::open(path)?))
+}
+
+/// Write to a socket, delegating one descriptor alongside the bytes.
+///
+/// The mirror of [`recv_delegated`], and the SUBJECT's half of ADR-0009: the client
+/// has already opened the object under its own credentials, so the kernel has run the
+/// whole permission check, and this hands the resulting authority to the daemon.
+///
+/// **The descriptor rides the message these bytes are in**, which is what makes FIFO
+/// correlation sound on the receiving side: the kernel does not merge ancillary data
+/// across `sendmsg` boundaries, so a descriptor arrives with the frame it accompanied
+/// and not with some later one.
+///
+/// Returns how many bytes were accepted. A short write means the caller must send the
+/// remainder WITHOUT re-attaching — the descriptor has already been transferred, and
+/// sending it twice would install two descriptors for one request.
+pub fn send_delegated(
+    sock: BorrowedFd<'_>,
+    buf: &[u8],
+    fd: BorrowedFd<'_>,
+) -> std::io::Result<usize> {
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut anc = rustix::net::SendAncillaryBuffer::new(&mut space);
+    let fds = [fd];
+    if !anc.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)) {
+        // The buffer is sized for exactly one descriptor by the macro above, so this
+        // is unreachable — named rather than unwrapped, because "cannot happen" is how
+        // a silent partial send arrives.
+        return Err(std::io::Error::other(
+            "ancillary buffer rejected the descriptor",
+        ));
+    }
+    Ok(rustix::net::sendmsg(
+        sock,
+        &[std::io::IoSlice::new(buf)],
+        &mut anc,
+        rustix::net::SendFlags::empty(),
+    )?)
+}
+
 /// Read from a socket, collecting any descriptors the peer delegated over `SCM_RIGHTS`.
 ///
 /// **This exists because a plain `read(2)` silently destroys them.** Measured on RHEL
@@ -528,6 +596,70 @@ mod tests {
             }
             other => panic!("an oversize object must be refused at the read: {other:?}"),
         }
+    }
+
+    /// The two primitives are each other's inverse, and asserting them as a ROUND
+    /// TRIP is what keeps them so: a send that attached the descriptor to the wrong
+    /// message, or a receive that dropped it, fails here rather than in an
+    /// integration test that would blame the transport.
+    #[test]
+    fn a_descriptor_survives_a_round_trip_through_both_primitives() {
+        use std::os::unix::fs::MetadataExt;
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let f = std::fs::File::open("/etc/hostname").expect("a file to delegate");
+        let want = f.metadata().expect("stat").ino();
+
+        let sent = send_delegated(tx.as_fd(), b"FRAME", f.as_fd()).expect("sendmsg");
+        assert_eq!(sent, 5, "the whole frame went in one message with the descriptor");
+
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(&buf[..got.bytes], b"FRAME");
+        assert_eq!(got.fds.len(), 1);
+        let received = std::fs::File::from(got.fds.into_iter().next().expect("one fd"));
+        assert_eq!(received.metadata().expect("stat").ino(), want);
+    }
+
+    /// The SUBJECT's open — the first step of the delegation lifecycle, and the one
+    /// that makes the kernel the decider. It is deliberately unconstrained.
+    #[test]
+    fn open_for_delegation_yields_a_descriptor_for_a_readable_object() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let notes = root.path().join("notes");
+        std::fs::write(&notes, b"content").expect("write");
+        let want = std::fs::metadata(&notes).expect("stat").ino();
+
+        let fd = open_for_delegation(&notes).expect("the subject can open its own file");
+        assert_eq!(
+            std::fs::File::from(fd).metadata().expect("stat").ino(),
+            want
+        );
+    }
+
+    /// When the OS refuses the SUBJECT, there is nothing to delegate — and the caller
+    /// must still send its request so the refusal is DECIDED and audited rather than
+    /// failing silently client-side (ADR-0009 decision 2). This asserts the error is
+    /// surfaced rather than swallowed.
+    #[test]
+    fn open_for_delegation_surfaces_the_os_refusal() {
+        if nix::unistd::geteuid().is_root() {
+            crate::testutil::skip_or_fail(
+                "open_for_delegation_surfaces_the_os_refusal",
+                "running as root, which opens a 0000 file and voids the premise",
+            );
+            return;
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let secret = root.path().join("secret");
+        std::fs::write(&secret, b"x").expect("write");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let got = open_for_delegation(&secret);
+        assert_eq!(
+            got.expect_err("a 0000 file must not open").kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     /// A delegated fd is honest authority over an OBJECT -- it says nothing about

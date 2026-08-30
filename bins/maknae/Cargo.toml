@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-config = { path = "../../crates/maknae-config" }
+# ADR-0009: the SUBJECT's open. Routed through maknae-io rather than std::fs so the
+# delegation lifecycle's first step lives with the rest of it and the exact-inventory
+# std-fs-drift gate needs no client-side exemption — the crate is the single home for
+# descriptor I/O, in the untrusted binary as much as in the daemon.
+maknae-io = { path = "../../crates/maknae-io" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 maknae-msgs = { path = "../../crates/maknae-msgs" }
 clap = { version = "4", features = ["derive"] }
