@@ -321,6 +321,85 @@ def d1_tcb(gates, ws, links, prov) -> str:
                "plane, the untrusted client binary, and the non-privileged crates both link.")
 
 
+# --- D-StdV1: DoDAF 2.02 Standards Profile ---------------------------------
+
+STATUS_STYLE = {
+    "enforced": (OK_LINE, "enforced", "implemented, and CI or the runtime refuses a violation"),
+    "adopted": (TRUST_LINE, "adopted", "implemented and relied upon; not mechanically checked"),
+    "emerging": ("#8A6D1F", "emerging", "applies to a surface not yet built"),
+    "excluded": (MUTED, "excluded", "deliberately out of scope, decision recorded"),
+}
+STATUS_ORDER = ["enforced", "adopted", "emerging", "excluded"]
+
+
+def stdv1(prov: str) -> str:
+    """DoDAF 2.02 StdV-1 — the standards this system claims, and what enforces each.
+
+    A tabular product by nature; StdV-1 is a profile, not a picture. The
+    `status` split is the point: DoDAF separates mandated/current from emerging,
+    and a profile that blurs them is a wish list. The `evidence` column is the
+    part most StdV-1s lack — every row names a file, gate or ADR a reader can open.
+    """
+    import tomllib
+    rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
+    rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
+
+    w, lh = 1220, 19
+    x = {"name": 44, "ver": 296, "cat": 500, "app": 660, "ev": 660}
+    # +112: the status-group headings and the closing note both sit below the
+    # last row. An earlier version sized only for rows and clipped the note.
+    h = 150 + sum(2 * lh + 10 for _ in rows) + 16 * len(STATUS_ORDER) + 112
+
+    def fit(sv: str, avail_px: float, size: float) -> str:
+        """Truncate to the column. A value that overruns prints over its
+        neighbour, which is worse than losing its tail."""
+        n = int(avail_px / (size * 0.56))
+        return sv if len(sv) <= n else sv[: n - 1].rstrip() + "\u2026"
+
+    p = [text(40, 46, "Standards profile — DoDAF StdV-1", 17, "600"),
+         text(40, 68, "The technical standards Maknae claims, the elements they apply to, and what "
+                      "enforces each. Status separates what is mechanically", 11, fill=MUTED),
+         text(40, 83, "checked from what is merely implemented — a profile that blurs the two is a "
+                      "wish list.", 11, fill=MUTED)]
+
+    hy = 112
+    for label, cx in [("Standard", x["name"]), ("Version / profile", x["ver"]),
+                      ("Category", x["cat"]), ("Applies to  ·  Evidence", x["app"])]:
+        p.append(text(cx, hy, label, 10, "600", fill=MUTED))
+    p.append(f'<line x1="40" y1="{hy + 8}" x2="{w - 40}" y2="{hy + 8}" '
+             f'stroke="{MUTED}" stroke-width="0.75"/>')
+
+    y = hy + 26
+    seen = set()
+    for r in rows:
+        colour, badge, _ = STATUS_STYLE[r["status"]]
+        if r["status"] not in seen:
+            seen.add(r["status"])
+            p.append(text(44, y + 2, STATUS_STYLE[r["status"]][2], 9, "600", fill=colour))
+            y += 16
+        p.append(box(40, y - 12, w - 80, 2 * lh + 6, "#FCFCFB", "none", rx=4, sw="0"))
+        p.append(text(x["name"], y + 2, fit(r["name"], x["ver"] - x["name"] - 12, 11), 11, "600"))
+        p.append(box(x["name"] - 4, y + 8, 62, 13, "#FFFFFF", colour, rx=6))
+        p.append(text(x["name"] + 27, y + 18, badge, 8, "600", fill=colour, anchor="middle"))
+        p.append(text(x["ver"], y + 2, fit(r["version"], x["cat"] - x["ver"] - 12, 10), 10,
+                      fill=INK, mono=True))
+        p.append(text(x["cat"], y + 2, fit(r["category"], x["app"] - x["cat"] - 12, 10), 10, fill=MUTED))
+        p.append(text(x["app"], y + 2, fit(r["applies_to"], w - x["app"] - 44, 10), 10, fill=INK))
+        p.append(text(x["ev"], y + 17, fit(r["evidence"], w - x["ev"] - 44, 9), 9,
+                      fill=MUTED, mono=True))
+        y += 2 * lh + 10
+
+    p.append(text(40, y + 26, "Every row names evidence a reader can open. A claim with no evidence "
+                              "does not belong in this profile.", 10, fill=MUTED))
+    p.append(text(40, h - 26, f"source: design/diagrams/standards-profile.toml · {prov}",
+                  10, fill=MUTED))
+    p.append(text(w - 40, h - 26, "DoDAF 2.02 Change 1 · StdV-1", 10, fill=MUTED, anchor="end"))
+    return svg(w, h, "\n  ".join(p),
+               "Maknae standards profile (DoDAF StdV-1)",
+               "The technical standards Maknae conforms to, the elements each applies to, "
+               "whether the claim is mechanically enforced, and the evidence for it.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -328,6 +407,7 @@ def main() -> None:
     for name, content in [
         ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
         ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
+        ("generated-standards-profile.svg", stdv1(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")
