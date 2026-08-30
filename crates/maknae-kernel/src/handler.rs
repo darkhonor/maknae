@@ -221,19 +221,59 @@ pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 /// `name` token is door-stamped only for runtime-originated requests, and no
 /// runtime channel exists — post-#117). `Read` carries the client-supplied
 /// path as the resource `path` attribute; resource/context otherwise empty.
-pub fn build_authz_request(verb: &Verb, peer_uid: u32) -> maknae_security::Request {
+/// The kernel-reported path of a descriptor the subject delegated, once verified.
+///
+/// Its presence IS the OS's answer (ADR-0009 decision 1): the subject's own `open(2)`
+/// already ran the kernel's whole permission check — DAC bits, ACLs, supplementary
+/// groups, SELinux/AppArmor. Absence means no descriptor arrived, or one arrived and
+/// failed verification; either way the OS was not established and decision 2 makes
+/// that a `Deny`.
+pub type VerifiedObject<'a> = Option<&'a str>;
+
+pub fn build_authz_request(
+    verb: &Verb,
+    peer_uid: u32,
+    lane: maknae_security::Lane,
+    object: VerifiedObject<'_>,
+) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
     let mut resource = Attributes::new();
     if let Verb::Read { path } = verb {
-        resource.insert("path", AttrValue::Str(path.clone()));
+        match object {
+            // GROUND TRUTH. The deny list evaluates the path the object actually has,
+            // so `~/innocent -> ~/.ssh/id_rsa` is decided on `.ssh/id_rsa`, not on the
+            // alias the client chose to send (ADR-0009 decision 6).
+            Some(real) => {
+                resource.insert("path", AttrValue::Str(real.to_string()));
+                resource.insert(
+                    maknae_security::RESOURCE_OS_ACCESSIBLE,
+                    AttrValue::Bool(true),
+                );
+            }
+            // No verified descriptor: stamp what was ASKED so the trail is honest,
+            // and stamp NO answer -- on the local lane that is unknown, and unknown
+            // denies. Never a fallback to a daemon-side open.
+            None => {
+                resource.insert("path", AttrValue::Str(path.clone()));
+            }
+        }
     }
+    // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
+    // caller is the accept loop, which knows which listener accepted, and there is
+    // therefore no code path by which client-supplied content could reach it
+    // (ADR-0009 decision 8).
+    let mut context = Attributes::new();
+    context.insert(
+        maknae_security::CONTEXT_DAC_LANE,
+        AttrValue::Str(lane.as_str().to_string()),
+    );
     maknae_security::Request {
         subject: Subject(subject),
         resource: Resource(resource),
         action: Action(verb_to_action(verb).to_string()),
-        context: Context(Attributes::new()),
+        context: Context(context),
     }
 }
 
@@ -296,9 +336,6 @@ pub enum ReadRefusal {
     /// Target exceeds the frame budget: a PERMIT whose delivery is refused —
     /// never truncated (spec D5).
     TooLarge,
-    /// PDP permitted a path outside the enrolled home: v1's PEP reads only
-    /// under the anchor, regardless of grammar (spec D5).
-    OutsideRoot,
     /// The anchor itself could not open (missing ACL, unmounted home, bad
     /// mode) — the read subsystem is unavailable; ping/whoami unaffected.
     Unavailable(String),
@@ -323,51 +360,48 @@ pub fn read_budget(frame_max_bytes: usize) -> u64 {
     (frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN)
 }
 
-/// The read PEP's DECISION half (T1 — spec D5's "read-path decision logic
-/// incl. the size bound and TargetRequired naming"): given the enrolled home,
-/// its owner, the canonical client path and the budget, produce the
-/// home-relative remainder plus the NAMED requirements the anchored open and
-/// read must enforce — or the refusal. Pure; the two maknae-io calls stay in
-/// run.rs as orchestration.
-#[allow(clippy::type_complexity)]
-pub fn read_plan(
+/// The named requirements for a SUBJECT-DELEGATED read (ADR-0009).
+///
+/// Three proofs, all required (decision 3): the descriptor proves the subject has OS
+/// access — its existence IS the OS's answer — `confined_beneath` proves the object
+/// lies under the enrolled home, and `root_required` proves the home itself is not a
+/// place where aliases can be planted (decision 7; the anchor REQUIREMENT survives
+/// even though the anchor OPEN does not). No one of them substitutes for another: the
+/// descriptor says nothing about *where*, and confinement says nothing about *who*.
+///
+/// This replaced `read_plan`, which resolved a client-supplied name under an opened
+/// anchor. That shape is gone, deliberately: resolving a name needs traversal
+/// permission on the subject's home, which a STIG `0700` home does not grant (#194).
+///
+/// `owner`/`mode_mask` on the TARGET stay `None` deliberately and are NOT a gap:
+/// evaluating them daemon-side is the mode-algebra reimplementation that ACLs,
+/// supplementary groups, SELinux and AppArmor make non-equivalent to the kernel's own
+/// answer. `nlink_exactly_one` is load-bearing three ways (decision 5).
+///
+/// **`budget` is `None` at DECISION time and `Some` at READ time, and that split is
+/// load-bearing.** An oversize object is "a PERMIT whose delivery is refused — never
+/// truncated" (#77 spec D5): applying the frame budget before the decision would turn
+/// an authorized read of a large file into an *authorization* failure, losing the
+/// distinction between "you may not" and "it will not fit".
+pub fn delegated_plan(
     home: &std::path::Path,
     owner_uid: u32,
-    path: &str,
-    budget: u64,
-) -> Result<
-    (
-        std::path::PathBuf,
-        maknae_io::AnchorRequired,
-        maknae_io::TargetRequired,
-    ),
-    ReadRefusal,
-> {
-    // Component-wise, never str::strip_prefix (`/home/opx` is a string-prefix
-    // of `/home/op` and must NOT match).
-    let rel = match std::path::Path::new(path).strip_prefix(home) {
-        Ok(rel) => rel.to_path_buf(),
-        Err(_) => return Err(ReadRefusal::OutsideRoot),
-    };
-    Ok((
-        rel,
-        // THE alias-planting boundary (spec D5): owner + no group/other write
-        // on the home. A home any non-principal can write is refused outright.
-        maknae_io::AnchorRequired {
+    budget: Option<u64>,
+) -> maknae_io::DelegatedRequired {
+    maknae_io::DelegatedRequired {
+        confined_beneath: home.to_path_buf(),
+        root_required: maknae_io::AnchorRequired {
             owner: Some(owner_uid),
             mode_mask: Some(0o022),
         },
-        maknae_io::TargetRequired {
-            // OS DAC at the target: the boundary requirement lives on the
-            // ANCHOR above; nlink/regular/max_bytes ARE named (std-fs
-            // allowlist carries the justified entry).
+        target: maknae_io::TargetRequired {
             owner: None,
             mode_mask: None,
             nlink_exactly_one: true,
             regular_file: true,
-            max_bytes: Some(budget),
+            max_bytes: budget,
         },
-    ))
+    }
 }
 
 /// The read PEP's error mapping (T1): io refusal → typed [`ReadRefusal`].
@@ -398,13 +432,6 @@ pub fn read_refusal_disposition(
             "refused-oversize",
             C::TooLarge,
             "resource too large",
-        ),
-        ReadRefusal::OutsideRoot => (
-            "permit",
-            "delivery refused: outside anchored root".into(),
-            "refused-outside-root",
-            C::Internal,
-            "read outside supported root",
         ),
         ReadRefusal::Unavailable(e) => (
             "deny",
@@ -560,12 +587,12 @@ mod tests {
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0);
+        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
         );
-        let r = build_authz_request(&Verb::Whoami, u32::MAX);
+        let r = build_authz_request(&Verb::Whoami, u32::MAX, maknae_security::Lane::Local, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(i64::from(u32::MAX)))
@@ -574,10 +601,14 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501);
+        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None);
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
-        assert!(r.context.0.is_empty());
+        // Context is no longer empty: every request carries its lane (ADR-0009 D8).
+        assert_eq!(
+            r.context.0.get(maknae_security::CONTEXT_DAC_LANE),
+            Some(&maknae_security::AttrValue::Str("local".into()))
+        );
     }
 
     #[test]
@@ -587,11 +618,54 @@ mod tests {
                 path: "/home/op/n".into(),
             },
             501,
+            maknae_security::Lane::Local,
+            None,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
             r.resource.0.get("path"),
             Some(&maknae_security::AttrValue::Str("/home/op/n".into()))
+        );
+    }
+
+    /// ADR-0009 decision 8's load-bearing control, and the ADR calls it the single
+    /// most important one in the design: **the lane comes from the ACCEPTING LISTENER
+    /// and from nothing else.**
+    ///
+    /// It is what separates *"absent means `Deny`"* (local — the OS could have been
+    /// asked and was not) from *"absent means not applicable"* (remote — there is no
+    /// uid on this host to ask about). So anything that lets a local request present
+    /// as remote escapes OS DAC entirely, and the client controls the verb.
+    #[test]
+    fn the_lane_comes_from_the_listener_and_client_content_cannot_change_it() {
+        use maknae_security::{AttrValue, Lane, CONTEXT_DAC_LANE};
+
+        // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
+        // be a function of anything the client sent.
+        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None);
+        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None);
+        assert_eq!(
+            local.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("local".into()))
+        );
+        assert_eq!(
+            remote.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("remote".into()))
+        );
+
+        // A client putting "remote" in the one field it controls gets nowhere.
+        let smuggled = build_authz_request(
+            &Verb::Read {
+                path: "/home/op/remote".into(),
+            },
+            501,
+            Lane::Local,
+            None,
+        );
+        assert_eq!(
+            smuggled.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("local".into())),
+            "client-supplied content must never influence the lane"
         );
     }
 
@@ -685,16 +759,30 @@ mod tests {
         assert_eq!(msg, "resource too large");
     }
 
+    /// `ReadRefusal::OutsideRoot` was RETIRED by ADR-0009 and its test with it.
+    /// Confinement is now one of the two proofs the DECISION requires, so an object
+    /// outside the enrolled home never establishes OS access and the PDP denies —
+    /// there is no longer a "permitted, then refused at delivery" outcome to render.
+    /// The e2e coverage moved to `a_permit_outside_the_anchored_root_is_refused_
+    /// distinctly`, which now asserts the composed Deny.
+    ///
+    /// `TooLarge` remains the one refusal that renders as a PERMIT whose delivery
+    /// failed, and it keeps its own test above.
     #[test]
-    fn outside_root_is_a_permit_with_internal_not_unauthorized() {
-        let (result, _, posture, code, _) = read_refusal_disposition(&ReadRefusal::OutsideRoot);
-        assert_eq!(
-            result, "permit",
-            "a Permit was rendered — the record must say so"
-        );
-        assert_eq!(posture, "refused-outside-root");
-        assert_eq!(code, maknae_proto::ProtoErrCode::Internal);
-        assert_ne!(code, maknae_proto::ProtoErrCode::Unauthorized);
+    fn only_oversize_still_renders_a_permit_whose_delivery_was_refused() {
+        for r in [
+            ReadRefusal::Refused("x".into()),
+            ReadRefusal::Unavailable("y".into()),
+            ReadRefusal::TimedOut,
+            ReadRefusal::JoinFailed,
+        ] {
+            assert_eq!(
+                read_refusal_disposition(&r).0,
+                "deny",
+                "every refusal but oversize is a denial: {r:?}"
+            );
+        }
+        assert_eq!(read_refusal_disposition(&ReadRefusal::TooLarge).0, "permit");
     }
 
     #[test]
@@ -729,18 +817,19 @@ mod tests {
 
     #[test]
     fn dispositions_are_pairwise_distinct_where_it_matters() {
-        // Arm-swap killers: oversize vs outside-root differ in posture;
-        // refused vs unavailable differ in code+message.
+        // Arm-swap killers. The oversize-vs-outside-root pair is gone with
+        // `OutsideRoot` (ADR-0009); oversize vs refused still differ in posture,
+        // and refused vs unavailable differ in code+message.
         assert_ne!(
             read_refusal_disposition(&ReadRefusal::TooLarge).2,
-            read_refusal_disposition(&ReadRefusal::OutsideRoot).2
+            read_refusal_disposition(&ReadRefusal::Refused("x".into())).2
         );
         assert_ne!(
             read_refusal_disposition(&ReadRefusal::Refused("x".into())).3,
             read_refusal_disposition(&ReadRefusal::Unavailable("y".into())).3
         );
     }
-    // ---- read_plan / map_read_error / read_budget (T1: spec D5's decision
+    // ---- delegated_plan / map_read_error / read_budget (T1: the decision
     //      logic — the alias boundary, the named requirements, the bound) ----
 
     #[test]
@@ -755,46 +844,45 @@ mod tests {
     }
 
     #[test]
-    fn read_plan_names_the_boundary_and_target_requirements_exactly() {
-        let (rel, anchor_req, target_req) = read_plan(
-            std::path::Path::new("/home/op"),
-            501,
-            "/home/op/docs/notes.txt",
-            1000,
-        )
-        .expect("in-home path plans");
-        assert_eq!(rel, std::path::Path::new("docs/notes.txt"));
+    fn delegated_plan_names_all_three_proofs_and_splits_the_budget() {
+        let req = delegated_plan(std::path::Path::new("/home/op"), 501, Some(1000));
         assert_eq!(
-            anchor_req.owner,
-            Some(501),
-            "anchor owner = the enrolled principal"
+            req.confined_beneath,
+            std::path::Path::new("/home/op"),
+            "confinement is the enrolled home, and it is not optional"
         );
         assert_eq!(
-            anchor_req.mode_mask,
+            req.root_required.owner,
+            Some(501),
+            "the alias-planting boundary survives the anchor open (ADR-0009 D7)"
+        );
+        assert_eq!(
+            req.root_required.mode_mask,
             Some(0o022),
             "no group/other write on home"
         );
-        assert!(target_req.nlink_exactly_one, "hardlink aliases refused");
-        assert!(target_req.regular_file, "no fifo/device");
+        assert!(
+            req.target.nlink_exactly_one,
+            "load-bearing three ways (ADR-0009 D5)"
+        );
+        assert!(req.target.regular_file, "no fifo/device");
         assert_eq!(
-            target_req.max_bytes,
+            req.target.max_bytes,
             Some(1000),
             "the budget is the named bound"
         );
-        assert_eq!(target_req.owner, None);
-        assert_eq!(target_req.mode_mask, None);
-    }
+        // NOT a gap: the descriptor IS the OS's answer, and recomputing the mode
+        // algebra here is what the operator forbade (ADR-0009 D1).
+        assert_eq!(req.target.owner, None);
+        assert_eq!(req.target.mode_mask, None);
 
-    #[test]
-    fn read_plan_refuses_outside_root_component_wise() {
-        // String-prefix must NOT match: /home/opx is not under /home/op.
+        // Oversize is a PERMIT whose delivery is refused, never a denial — so the
+        // budget is absent at decision time and present at read time.
         assert_eq!(
-            read_plan(std::path::Path::new("/home/op"), 501, "/home/opx/f", 10),
-            Err(ReadRefusal::OutsideRoot)
-        );
-        assert_eq!(
-            read_plan(std::path::Path::new("/home/op"), 501, "/etc/hostname", 10),
-            Err(ReadRefusal::OutsideRoot)
+            delegated_plan(std::path::Path::new("/home/op"), 501, None)
+                .target
+                .max_bytes,
+            None
         );
     }
 
@@ -911,7 +999,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501);
+            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),

@@ -171,6 +171,86 @@ fn cab(ca: &Ca) -> CaBundle {
     }
 }
 
+/// **THE SEAM.** Every other test in this file uses `tokio::io::duplex`, and the
+/// descriptor adapters are unit-tested on a bare `socketpair` — so until this test
+/// nothing exercised the assembled path: a real Unix socket, `FdSender` beneath the
+/// TLS connector, `FdCollector` beneath the TLS acceptor, and rustls doing its
+/// byte-stream work on top.
+///
+/// That gap is exactly where the failure this design exists to prevent would hide.
+/// `SCM_RIGHTS` is ancillary data on the raw socket; rustls can neither see nor carry
+/// it, and a plain `read(2)` DESTROYS it with no error whatsoever (measured: the frame
+/// bytes arrive intact and the kernel closes the descriptor). Both halves passing in
+/// isolation proves nothing about them meeting.
+///
+/// Arming happens AFTER the handshake, deliberately and necessarily: the handshake's
+/// own writes would otherwise consume the descriptor before the request frame exists.
+#[tokio::test]
+async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::MetadataExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    provider();
+    let ca = mk_ca();
+    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let server = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+    let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
+
+    // A REAL socket pair — a duplex pipe cannot carry ancillary data at all, which is
+    // why every other test here is blind to this property.
+    let (client_raw, server_raw) = tokio::net::UnixStream::pair().expect("socketpair");
+    let sender = maknae_plane::FdSender::new(client_raw);
+    let armer = sender.armer();
+    let collector = maknae_plane::FdCollector::new(server_raw, 8);
+    let delegated = collector.delegated();
+
+    let acceptor = TlsAcceptor::from(server);
+    let connector = TlsConnector::from(client);
+    let srv = tokio::spawn(async move {
+        let mut tls = acceptor.accept(collector).await.expect("server handshake");
+        let mut buf = [0u8; 5];
+        tls.read_exact(&mut buf)
+            .await
+            .expect("server reads the frame");
+        buf
+    });
+
+    let name = rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+    let mut tls = connector
+        .connect(name, sender)
+        .await
+        .expect("client handshake");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let obj = dir.path().join("obj");
+    std::fs::write(&obj, b"delegated").expect("write fixture");
+    let f = std::fs::File::open(&obj).expect("an object to delegate");
+    let want = f.metadata().expect("stat").ino();
+    armer.arm(OwnedFd::from(f));
+    tls.write_all(b"FRAME")
+        .await
+        .expect("client writes the frame");
+    tls.flush().await.expect("flush");
+
+    assert_eq!(
+        &srv.await.expect("server task"),
+        b"FRAME",
+        "TLS carried the bytes"
+    );
+    let got = delegated
+        .take()
+        .expect("the descriptor must survive the assembled path, not only the bare socket");
+    assert_eq!(
+        std::fs::File::from(got).metadata().expect("stat").ino(),
+        want,
+        "and it names the same object the client opened"
+    );
+    drop(tls);
+}
+
 #[tokio::test]
 async fn happy_path_mutual_auth() {
     provider();

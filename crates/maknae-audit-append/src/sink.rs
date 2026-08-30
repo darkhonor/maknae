@@ -309,6 +309,7 @@ mod tests {
             },
             action: "connect".into(),
             object: None,
+            object_requested: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),

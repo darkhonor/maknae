@@ -24,10 +24,18 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false }  # its rustls uses the installed FIPS provider (§4.1)
 arc-swap = "1"                                                  # hot-path ResolvesServerCert swap (Microkosmos pattern)
-nix = { version = "0.31", default-features = false, features = ["socket", "user", "fs"] }  # socket=peer-creds; user=geteuid (dir-owner check); fs=fchown (group-own the UDS)
+nix = { version = "0.31", default-features = false, features = ["socket", "user", "fs"] }
+  # socket=peer-creds; user=geteuid (dir-owner check); fs=fchown (group-own the UDS)
 
 [target.'cfg(unix)'.dependencies]
 maknae-io = { path = "../maknae-io" }
+# The client-plane descriptor collector (ADR-0009). It must sit BENEATH the TLS layer,
+# and the TLS acceptor lives here — so until #66 moves PlaneListener/AuthenticatedStream
+# into maknae-plane, the wrapping happens here and the adapter is borrowed from there.
+maknae-plane = { path = "../maknae-plane" }
 
 [dev-dependencies]
+# Fixtures CREATE the objects they delegate rather than borrowing a system file:
+# `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }

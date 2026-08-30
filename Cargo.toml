@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/maknae-audit",
   "crates/maknae-audit-append",
+  "crates/maknae-plane",
   "crates/maknae-authz-basic",
   "crates/maknae-config",
   "crates/maknae-io",
