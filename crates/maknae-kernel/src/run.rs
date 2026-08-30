@@ -257,6 +257,7 @@ fn make_record(
         },
         action: action.to_string(),
         object: object.map(str::to_string),
+        object_requested: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -493,6 +494,7 @@ pub async fn handle<S, E, P>(
                 seq.next(),
                 verb_to_action(&request.verb),
                 Some(path),
+                None,
                 "deny",
                 &format!("path fails canonical pre-gate: {why}"),
                 "unauthorized",
@@ -593,8 +595,24 @@ pub async fn handle<S, E, P>(
             }
         }
     };
+    // The trail's AU-3 object is the path the DECISION was made on — the kernel's
+    // answer for the subject's delegated descriptor (ADR-0009 decision 6) — falling
+    // back to the client's own string when no descriptor was established, which is
+    // then all the trail has to record.
     let object_path = match &request.verb {
-        Verb::Read { path } => Some(path.clone()),
+        Verb::Read { path } => Some(
+            verified_read
+                .as_ref()
+                .map(|(_, real)| real.clone())
+                .unwrap_or_else(|| path.clone()),
+        ),
+        _ => None,
+    };
+    // Recorded ONLY on divergence, so its presence stays a signal rather than noise:
+    // a client naming one object while a different one is evaluated is either
+    // following a symlink it did not expect, or probing for one.
+    let object_asked = match (&request.verb, &object_path) {
+        (Verb::Read { path }, Some(decided)) if decided != path => Some(path.clone()),
         _ => None,
     };
     let obligations = match finalize(verdict) {
@@ -613,6 +631,7 @@ pub async fn handle<S, E, P>(
                 seq.next(),
                 verb_to_action(&request.verb),
                 object_path.as_deref(),
+                object_asked.as_deref(),
                 "deny",
                 &reason,
                 "unauthorized",
@@ -648,6 +667,7 @@ pub async fn handle<S, E, P>(
             seq.next(),
             verb_to_action(&request.verb),
             object_path.as_deref(),
+            object_asked.as_deref(),
             "deny",
             &format!("unhonorable obligation: {}", unhonorable.0),
             "unauthorized",
@@ -687,6 +707,7 @@ pub async fn handle<S, E, P>(
                 seq.next(),
                 verb_to_action(&request.verb),
                 object_path.as_deref(),
+                object_asked.as_deref(),
                 "permit",
                 "permitted; term not implemented",
                 "not-implemented",
@@ -715,6 +736,7 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
+                None,
                 None,
                 "permit",
                 "authorized",
@@ -746,7 +768,14 @@ pub async fn handle<S, E, P>(
                 .await;
             }
         }
-        Dispatch::ReadRequested(path) => {
+        // UNUSED, and that is the design showing through: the read arm no longer
+        // touches the client's string for anything. The object it reads is the
+        // descriptor the subject delegated, and the path it audits is the kernel's
+        // answer for that descriptor (`object_path`, computed before the decision).
+        // If this binding is ever needed again, something has started trusting the
+        // client's name (ADR-0009 decision 6).
+        Dispatch::ReadRequested(_client_path) => {
+
             // The read PEP (spec D5): per-request anchor at the enrolled home,
             // named requirements, bounded on the blocking pool like the decide.
             let budget = crate::handler::read_budget(cfg.frame_max_bytes);
@@ -809,7 +838,8 @@ pub async fn handle<S, E, P>(
                         session_id,
                         seq.next(),
                         verb_to_action(&request.verb),
-                        Some(&path),
+                        object_path.as_deref(),
+                        object_asked.as_deref(),
                         "permit",
                         "authorized",
                         "authorized",
@@ -850,7 +880,8 @@ pub async fn handle<S, E, P>(
                         session_id,
                         seq.next(),
                         verb_to_action(&request.verb),
-                        Some(&path),
+                        object_path.as_deref(),
+                        object_asked.as_deref(),
                         result,
                         &reason,
                         posture,
@@ -931,12 +962,15 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     seq: u64,
     action: &str,
     object: Option<&str>,
+    // What the client asked for, when it is NOT what was decided. `None` in the
+    // ordinary case so presence stays meaningful (ADR-0009 decision 6).
+    object_requested: Option<&str>,
     result: &str,
     reason: &str,
     posture: &str,
     au3_1: &serde_json::Value,
 ) -> bool {
-    let rec = make_record(
+    let mut rec = make_record(
         "request",
         host,
         socket,
@@ -953,6 +987,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
         posture,
         au3_1,
     );
+    rec.object_requested = object_requested.map(str::to_string);
     match emit.emit(&rec).await {
         Ok(()) => true,
         Err(e) => {

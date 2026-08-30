@@ -71,6 +71,21 @@ pub struct AuditRecord {
     /// absent for resource-free verbs (Ping/Whoami) — additive for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
+    /// What the CLIENT asked for, recorded **only when it differs from `object`**
+    /// (ADR-0009 decision 6).
+    ///
+    /// The two can legitimately differ: the decision is made on the kernel-reported
+    /// path of the subject's delegated descriptor, so a client naming `~/innocent`
+    /// has `~/.ssh/id_rsa` evaluated when that is what the descriptor points at. A
+    /// trail carrying only one of them cannot be reconstructed.
+    ///
+    /// **Absent in the ordinary case, so its PRESENCE is the signal.** A client that
+    /// names one object while a different one is evaluated is either following a
+    /// symlink it did not know about or probing for one — and either way that is the
+    /// divergence a reviewer, or a future detection rule, wants to key on. Diluting
+    /// it by emitting it always would destroy exactly that property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_requested: Option<String>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -162,6 +177,7 @@ mod tests {
             },
             action: "connect".into(),
             object: None,
+            object_requested: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -328,6 +344,7 @@ mod tests {
                 },
                 action: "fs.read".into(),
                 object,
+                object_requested: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

@@ -523,6 +523,11 @@ async fn a_permitted_read_returns_the_file_bytes() {
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.object.as_deref(), Some(target.as_str()));
+    assert_eq!(
+        req.object_requested, None,
+        "asked and decided agree, so the divergence field stays absent — its presence \
+         is the anomaly signal and must not be diluted by the ordinary case"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +576,23 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
         req.outcome.reason.contains(".ssh"),
         "the deny list must match the RESOLVED path, not the alias: {}",
         req.outcome.reason
+    );
+
+    // The trail must be reconstructable: a reviewer has to see BOTH what the client
+    // asked for and what was actually decided, because ADR-0009 D6 makes them able to
+    // differ by design. `object` is the DECIDED path; `object_requested` appears only
+    // when it diverges -- so its PRESENCE is itself the signal that a client named one
+    // object and a different one was evaluated.
+    let resolved = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
+    assert_eq!(
+        req.object.as_deref(),
+        Some(resolved.as_str()),
+        "object is the path the decision was made on"
+    );
+    assert_eq!(
+        req.object_requested.as_deref(),
+        Some(target.as_str()),
+        "object_requested is what the client asked for, recorded because it differs"
     );
 }
 
