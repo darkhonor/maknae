@@ -84,12 +84,13 @@
 <text x="55.0" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">lake-data</text>
 <text x="427.6666666666667" y="570" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
 <text x="55.0" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">The governed corpus; git-backed</text>
-<text x="55.0" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#B3452F">lake rw</text>
-<text x="100.80000000000001" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#B3452F">dreamer rw</text>
-<text x="162.8" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel ro</text>
-<text x="55.0" y="614" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">The frontmatter IS the tier state, and the two UNTRUSTED</text>
-<text x="55.0" y="625" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">containers hold rw on it while the kernel is read-only. Open</text>
-<text x="55.0" y="636" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">finding #2.</text>
+<text x="55.0" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel rw</text>
+<text x="111.6" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">lake ro</text>
+<text x="157.4" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">dreamer ro</text>
+<text x="55.0" y="614" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">Was lake rw / dreamer rw / kernel ro — the untrusted</text>
+<text x="55.0" y="625" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">containers held write on label state while the only trusted</text>
+<text x="55.0" y="636" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">one was read-only. Corrected by KLC 6.1; writes are brokered</text>
+<text x="55.0" y="647" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">through the kernel (issue #2, closed).</text>
 <rect x="452.6666666666667" y="552" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="463.6666666666667" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">audit-log</text>
 <text x="836.3333333333334" y="570" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
@@ -123,5 +124,5 @@
 <text x="58" y="804" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">backend is added or swapped; that is what the seam is for (ADR-0004).</text>
 <text x="44" y="836" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">One image ships today: the kernel, FROM scratch on a static musl target, built with cargo auditable. Six of the eight containers are Proposed, and</text>
 <text x="44" y="849" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">there is no Compose file or Kubernetes manifest in the tree.</text>
-<text x="24" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/container-architecture.toml@6a0b1ba07f · maknae 855de07 · 2026-08-30</text><text x="1276" y="890" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/container-architecture.toml@63999c2d17 · maknae 855de07 · 2026-08-30</text><text x="1276" y="890" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

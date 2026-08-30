@@ -78,4 +78,4 @@ The full control matrix belongs in the RMF package, not this ADR.
 
 ## References
 
-Source specs (memory store): topology design §3/§4/§5/§9/§10; crypto-foundation design (2026-08-10). Merged Vault PKI: `deploy/vault-pki/`. Microkosmos ADR 0006 + Vault server-configuration; HashiCorp Consul-as-Vault-Connect-CA; CNSA Suite. Issues #3, #18; #117 (gateway epic — the remote-client boundary this ADR's 2026-08-22 amendment defers to; #66 is the separate `maknae-transport` crate-boundary revisit the gateway triggers).
+Source specs (memory store): topology design §3/§4/§5/§9/§10; crypto-foundation design (2026-08-10). Merged Vault PKI: `deploy/vault-pki/`. **Provenance, never authority** (the dual Vault-client identity pattern is decided in Decision 4 of this ADR, on its own rationale): Microkosmos ADR 0006 + Vault server-configuration; HashiCorp Consul-as-Vault-Connect-CA; CNSA Suite. Issues #3, #18; #117 (gateway epic — the remote-client boundary this ADR's 2026-08-22 amendment defers to; #66 is the separate `maknae-transport` crate-boundary revisit the gateway triggers).

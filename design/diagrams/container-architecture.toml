@@ -119,8 +119,8 @@ detail = "Sidecar per service needing secrets. AppRole auto-auth → tmpfs sink.
 id = "lakedata"
 name = "lake-data"
 note = "The governed corpus; git-backed"
-mounts = ["lake:rw", "dreamer:rw", "kernel:ro"]
-flag = "The frontmatter IS the tier state, and the two UNTRUSTED containers hold rw on it while the kernel is read-only. Open finding #2."
+mounts = ["kernel:rw", "lake:ro", "dreamer:ro"]
+flag = "Was lake rw / dreamer rw / kernel ro — the untrusted containers held write on label state while the only trusted one was read-only. Corrected by KLC 6.1; writes are brokered through the kernel (issue #2, closed)."
 
 [[volume]]
 id = "audit"

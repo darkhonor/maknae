@@ -476,5 +476,19 @@ kernel-action	kernel.contain	not-granted	no Verb variant
 expect_reject "verb-vocabulary-drift/capability-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
+# ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
+# The wording IS the control here, so the fixture is a wording fixture.
+ea_fixture() { # <line> — a bare dir (not a repo) holding one normative doc
+  local fixture; fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/design"
+  cp "$here/external-authority-lint.sh" "$fixture/ci/gates/"
+  printf '# doc\n\n%s\n' "$1" > "$fixture/design/some-design.md"
+  echo "$fixture"
+}
+fx="$(ea_fixture "Following the Knowledge Lake ADR-0004 authority model, the map separates two concerns.")"
+expect_reject "external-authority-lint/unqualified-foreign-adr" "$fx/ci/gates/external-authority-lint.sh"
+fx="$(ea_fixture "Microkosmos ADR 0006 defines the dual-client identity pattern used here.")"
+expect_reject "external-authority-lint/unqualified-microkosmos-adr" "$fx/ci/gates/external-authority-lint.sh"
+
 echo "negative-control: $pass/$total gates proven to fire"
 [ "$pass" = "$total" ]
