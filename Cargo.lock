@@ -1027,6 +1027,7 @@ name = "maknae-io"
 version = "0.0.0"
 dependencies = [
  "nix",
+ "rustix",
  "tempfile",
  "zeroize",
 ]
@@ -1063,6 +1064,15 @@ version = "0.0.0"
 [[package]]
 name = "maknae-msgs"
 version = "0.0.0"
+
+[[package]]
+name = "maknae-plane"
+version = "0.0.0"
+dependencies = [
+ "maknae-io",
+ "rustix",
+ "tokio",
+]
 
 [[package]]
 name = "maknae-proto"

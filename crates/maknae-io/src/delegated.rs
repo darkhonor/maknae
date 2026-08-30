@@ -10,7 +10,8 @@
 //! never by resolving a client-supplied name, which would need traversal permission
 //! on the subject's home that a `0700` home does not grant (#194).
 
-use std::os::fd::BorrowedFd;
+use std::mem::MaybeUninit;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 
 use crate::checks::TargetRequired;
@@ -42,6 +43,62 @@ pub struct Delegated {
     /// The path the kernel reports -- **ground truth**, and what the PDP decides
     /// on (ADR-0009 decision 6), never the client-supplied string.
     pub path: PathBuf,
+}
+
+/// How many descriptors one message may carry.
+///
+/// The protocol delegates exactly one per request. The headroom exists so an
+/// over-eager peer is *seen* rather than silently truncated: `MSG_CTRUNC` is the only
+/// signal that the kernel dropped descriptors it had already installed, and a control
+/// buffer sized to exactly one would raise it for an honest client that sent two.
+const MAX_DELEGATED_FDS_PER_MESSAGE: usize = 4;
+
+/// What one `recvmsg` yielded: stream bytes, plus any descriptors the peer delegated
+/// alongside them.
+#[derive(Debug)]
+pub struct Received {
+    /// Bytes read into the caller's buffer.
+    pub bytes: usize,
+    /// Descriptors the peer delegated with those bytes, owned — so dropping them
+    /// closes them, including on the refusal path, which is the path an attacker
+    /// controls.
+    pub fds: Vec<OwnedFd>,
+}
+
+/// Read from a socket, collecting any descriptors the peer delegated over `SCM_RIGHTS`.
+///
+/// **This exists because a plain `read(2)` silently destroys them.** Measured on RHEL
+/// 10.2: a 5-byte `recv()` closed the attached descriptor outright while the frame
+/// bytes arrived intact, and the following `recvmsg` reported zero ancillary
+/// descriptors. There is no error and no signal — so any read path that is not this
+/// one loses every delegated descriptor, and (ADR-0009 decision 2) denies every read.
+///
+/// `CMSG_CLOEXEC` is set so a received descriptor can never leak across an exec.
+///
+/// Returns `std::io::Result` rather than [`IoError`]: this is a socket operation with
+/// no path to name, and its caller is an `AsyncRead` that needs `io::Error` anyway.
+/// A `WouldBlock` propagates unchanged so a non-blocking caller can retry.
+pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<Received> {
+    let mut space =
+        [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE))];
+    let mut anc = rustix::net::RecvAncillaryBuffer::new(&mut space);
+    let mut iov = [std::io::IoSliceMut::new(buf)];
+    let msg = rustix::net::recvmsg(
+        sock,
+        &mut iov,
+        &mut anc,
+        rustix::net::RecvFlags::CMSG_CLOEXEC,
+    )?;
+    let mut fds = Vec::new();
+    for message in anc.drain() {
+        if let rustix::net::RecvAncillaryMessage::ScmRights(received) = message {
+            fds.extend(received);
+        }
+    }
+    Ok(Received {
+        bytes: msg.bytes,
+        fds,
+    })
 }
 
 /// Verify a subject-delegated descriptor. Does not consume the fd: the caller
@@ -147,6 +204,45 @@ mod tests {
                  it must be refused: {other:?}"
             ),
         }
+    }
+
+    /// MEASURED on RHEL 10.2 before this was written: a plain `read(2)` on a socket
+    /// DESTROYS attached ancillary data with no error whatsoever -- the bytes arrive
+    /// intact and the kernel closes the descriptor. `recvmsg` is therefore not an
+    /// optimisation; it is the only way a delegated descriptor reaches the daemon at
+    /// all (ADR-0009 decision 1).
+    #[test]
+    fn a_descriptor_delegated_over_a_socket_is_received_with_its_bytes() {
+        use std::io::IoSlice;
+        use std::mem::MaybeUninit;
+        use std::os::unix::fs::MetadataExt;
+
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let f = std::fs::File::open("/etc/hostname").expect("a file to delegate");
+        let want = f.metadata().expect("stat").ino();
+
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut anc = rustix::net::SendAncillaryBuffer::new(&mut space);
+        let fds = [f.as_fd()];
+        assert!(anc.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
+        rustix::net::sendmsg(
+            &tx,
+            &[IoSlice::new(b"FRAME")],
+            &mut anc,
+            rustix::net::SendFlags::empty(),
+        )
+        .expect("sendmsg");
+
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(&buf[..got.bytes], b"FRAME", "the byte stream is unaffected");
+        assert_eq!(got.fds.len(), 1, "the descriptor must survive the read");
+        let received = std::fs::File::from(got.fds.into_iter().next().expect("one fd"));
+        assert_eq!(
+            received.metadata().expect("stat received").ino(),
+            want,
+            "the received descriptor names the same object"
+        );
     }
 
     /// A delegated fd is honest authority over an OBJECT -- it says nothing about

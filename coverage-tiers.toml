@@ -175,7 +175,16 @@ mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic 
 
 [t2]
 floor_production_region = 90
-files = []
+# The client-plane descriptor adapter (ADR-0009). NOT T1, by the line-drawing rule
+# above and not by convenience: if this silently breaks, delegated descriptors are
+# LOST, and an absent descriptor is a `Deny` (ADR-0009 decision 2) -- it cannot yield
+# a Permit for an access policy denies. The queue is per-connection, so a mis-ordered
+# take stays within one subject, and the PDP decides on the path of whichever
+# descriptor is actually used (decision 6), so the verdict follows the object rather
+# than diverging from it. What IS at stake here is availability and descriptor
+# exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
+# CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
+files = ["crates/maknae-plane/src/fd.rs"]
 
 [project]
 # Cohort ratchet (ADR-0016 §4): the floor applies to ratchet_cohort ONLY —
@@ -211,6 +220,10 @@ lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merg
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
 
 # ---- T3: report-only, per-file justification (never a blanket glob) --------
+
+[[t3]]
+path = "crates/maknae-plane/src/lib.rs"
+why = "module declarations and re-exports only; no production regions of its own — same treatment as maknae-io/src/lib.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

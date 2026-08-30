@@ -1,0 +1,35 @@
+[package]
+name = "maknae-plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# NOT optional: Cargo does not apply [workspace.lints] to a member that omits this,
+# and the workspace sets `unsafe_code = "forbid"`. This crate sits in the client-plane
+# read path; exempting it from the project's headline memory-safety control by omission
+# is exactly the silent gap maknae-io's manifest warns about.
+[lints]
+workspace = true
+
+# The whole crate is cfg(unix): a Unix-domain socket is its subject matter.
+[target.'cfg(unix)'.dependencies]
+# The security-relevant half of descriptor delegation lives in maknae-io, per AGENTS.md
+# ("file and directory I/O goes through maknae-io"): the recvmsg itself, CMSG_CLOEXEC,
+# the per-message descriptor bound, and the checks a received descriptor must satisfy.
+# This crate contributes NO security decision — only the async plumbing that calls it.
+maknae-io = { path = "../maknae-io" }
+# net      — tokio::net::UnixStream, the stream being adapted.
+# io-util  — the AsyncRead/ReadBuf machinery the adapter implements.
+# Deliberately NOT "rt"/"macros"/"time": this crate spawns nothing and sleeps on
+# nothing; a runtime dependency here would be surface with no caller.
+tokio = { version = "1", default-features = false, features = ["net", "io-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# TEST-ONLY. The end-to-end proof has to SEND ancillary data, and rustix is the only
+# safe SCM_RIGHTS API in the tree (maknae-io's production pin records why nix cannot
+# serve: its ScmRights yields bare RawFds and every conversion is `unsafe`, which is
+# forbidden workspace-wide). Production code here never touches rustix.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros"] }
