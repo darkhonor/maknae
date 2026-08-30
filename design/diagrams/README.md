@@ -62,6 +62,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
+| `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -71,7 +72,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 | Product | Notation | Question |
 |---|---|---|
-| operational concept | DoDAF OV-1 | *What is this system for?* |
 
 ## Three kinds, and the rule for each
 
@@ -111,7 +111,7 @@ Regenerate with the command above and commit the result; that is the whole contr
 
 ### Two products are curated, not derived
 
-`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml` and `system-interfaces.toml` are hand-maintained inputs. Neither a
+`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml`, `system-interfaces.toml` and `operational-concept.toml` are hand-maintained inputs. Neither a
 conformance claim nor a call sequence can be read out of a manifest, so both are kept
 as reviewable data files in which **every row names the code a reader can check**.
 

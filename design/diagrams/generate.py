@@ -1157,6 +1157,136 @@ def d8_interfaces(prov: str) -> str:
         "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · SV-1")
 
 
+# --- D9: DoDAF OV-1 — High-Level Operational Concept Graphic ---------------
+
+def d9_opconcept(prov: str) -> str:
+    """What Maknae is for.
+
+    The only product here whose subject is largely unbuilt, so status is drawn
+    rather than footnoted: a solid step exists, a dashed one is the concept.
+    An OV-1 that omits that reads as a description of a working system, and
+    this catalog's whole discipline is saying which is which.
+    """
+    d = tomllib.loads((OUT / "operational-concept.toml").read_text())
+    steps, envs = d["step"], d["env"]
+    check_evidence([d["delta"], d["spectrum"], d["delivery"]], "evidence",
+                   "operational-concept.toml")
+
+    W, PAD = 1280, 44
+    p = []
+
+    # --- why it exists
+    y = 118
+    dl = d["delta"]
+    p.append(box(PAD, y, W - PAD * 2, 104, "#FDEEE9", WARN, rx=8))
+    p.append(text(PAD + 16, y + 22, "Why it exists", 11, "700", fill="#7A2415"))
+    yy = y + 40
+    for ln in _wrap_words(dl["observed"], 152):
+        p.append(text(PAD + 16, yy, ln, 10, fill=INK)); yy += 14
+    for ln in _wrap_words(dl["evidence_line"], 152):
+        p.append(text(PAD + 16, yy, ln, 10, fill=MUTED)); yy += 14
+    for ln in _wrap_words(dl["conclusion"], 152):
+        p.append(text(PAD + 16, yy, ln, 10, "700", fill="#7A2415")); yy += 14
+    y += 118
+
+    # --- the loop
+    p.append(text(PAD, y, "The governed learning loop — the agent fills its own knowledge base",
+                  13, "600", fill=TRUST_INK))
+    p.append(text(PAD, y + 17, "Solid is built. Dashed is the concept.", 9.5, fill=MUTED))
+    y += 34
+
+    n = len(steps)
+    SW = (W - PAD * 2 - (n - 1) * 14) / n
+    top = y
+    hmax = 0
+    for i, s in enumerate(steps):
+        built = s["status"] == "built"
+        fill, line, ink = ((TRUST_FILL, TRUST_LINE, TRUST_INK) if built
+                           else ("#FFFFFF", MUTED, INK))
+        dl2 = _wrap_words(s["detail"], 30)
+        nt = _wrap_words(s.get("note", ""), 30) if s.get("note") else []
+        h = 52 + len(dl2) * 12 + (len(nt) * 11 + 6 if nt else 0)
+        hmax = max(hmax, h)
+        x = PAD + i * (SW + 14)
+        p.append(box(x, y, SW, h, fill, line, rx=7, dash=None if built else "5 4"))
+        p.append(text(x + 10, y + 18, s["n"] + ".", 9.5, "700", fill=line))
+        p.append(text(x + 26, y + 18, s["label"], 10.5, "700", fill=ink))
+        p.append(text(x + 10, y + 32, s["who"], 8.5, fill=line))
+        yy = y + 47
+        for ln in dl2:
+            p.append(text(x + 10, yy, ln, 8.5, fill=INK)); yy += 12
+        for ln in nt:
+            p.append(text(x + 10, yy + 4, ln, 8, fill=WARN)); yy += 11
+        if i < n - 1:
+            p.append(f'<path d="M {x+SW+2} {y+26} h 9" stroke="{MUTED}" '
+                     f'stroke-width="1.2" marker-end="url(#ov)"/>')
+    p.insert(0, '<defs><marker id="ov" viewBox="0 0 10 10" refX="9" refY="5" '
+             'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+             f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
+             'stroke-width="1.4"/></marker></defs>')
+    y += hmax + 10
+    # the return edge: promoted knowledge informs the next task
+    p.append(f'<path d="M {W-PAD-SW/2} {y} V {y+18} H {PAD+SW/2} V {top+hmax}" '
+             f'fill="none" stroke="{MUTED}" stroke-width="1.2" '
+             f'stroke-dasharray="5 4" marker-end="url(#ov)"/>')
+    p.append(text(W / 2, y + 14, "…and the next task starts better informed than the last",
+                  9.5, fill=MUTED, anchor="middle", halo="#FFFFFF"))
+    y += 34
+
+    t0 = d["tier0"]
+    p.append(box(PAD, y, W - PAD * 2, 42, "#FFFFFF", MUTED, rx=7, dash="5 4"))
+    p.append(text(PAD + 14, y + 18, t0["label"], 10.5, "700", fill=INK))
+    p.append(text(PAD + 14, y + 33, t0["detail"], 9, fill=MUTED))
+    y += 62
+
+    # --- environments
+    p.append(text(PAD, y, "One kernel, three environments", 13, "600", fill=TRUST_INK))
+    p.append(text(PAD, y + 17, d["spectrum"]["claim"], 9.5, fill=MUTED))
+    y += 34
+    EW = (W - PAD * 2 - 2 * 14) / 3
+    for i, e in enumerate(envs):
+        x = PAD + i * (EW + 14)
+        nl = _wrap_words(e["note"], 52)
+        h = 46 + len(nl) * 12
+        p.append(box(x, y, EW, h, OK_FILL, OK_LINE, rx=7))
+        p.append(text(x + 12, y + 20, e["name"], 10.5, "700", fill="#04342C"))
+        p.append(text(x + 12, y + 34, e["lattice"], 8.5, fill=OK_LINE))
+        yy = y + 48
+        for ln in nl:
+            p.append(text(x + 12, yy, ln, 8.5, fill=INK)); yy += 12
+        if i < 2:
+            p.append(f'<path d="M {x+EW+2} {y+24} h 9" stroke="{OK_LINE}" '
+                     f'stroke-width="1.2" marker-end="url(#ov)"/>')
+    y += 46 + max(len(_wrap_words(e["note"], 52)) for e in envs) * 12 + 26
+
+    # --- what is real
+    dv = d["delivery"]
+    p.append(box(PAD, y, W - PAD * 2, 96, "#FBFAF7", PLAIN_LINE, rx=8))
+    p.append(text(PAD + 16, y + 22, "What is actually built, as of this rendering",
+                  11, "700", fill=INK))
+    yy = y + 40
+    p.append(text(PAD + 16, yy, "BUILT", 9, "700", fill="#0F6E56"))
+    for k, ln in enumerate(_wrap_words(dv["built"], 138)):
+        p.append(text(PAD + 66, yy + k * 13, ln, 9.5, fill=INK))
+    yy += max(1, len(_wrap_words(dv["built"], 138))) * 13 + 4
+    p.append(text(PAD + 16, yy, "NOT YET", 9, "700", fill=WARN))
+    for k, ln in enumerate(_wrap_words(dv["unbuilt"], 138)):
+        p.append(text(PAD + 66, yy + k * 13, ln, 9.5, fill=INK))
+    yy += max(1, len(_wrap_words(dv["unbuilt"], 138))) * 13 + 4
+    p.append(text(PAD + 16, yy, dv["honest"], 9.5, "700", fill=WARN))
+    y += 112
+
+    H = y + 44
+    p = [text(PAD, 44, "What Maknae is for — DoDAF OV-1", 16, "600"),
+         text(PAD, 68, d["mission"], 12, fill=INK),
+         text(PAD, 88, "High-level operational concept. Reader: stakeholder or newcomer. "
+              "This states INTENT, and marks how much of it exists.", 10, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/operational-concept.toml')}"))
+    return svg(W, H, "\n".join(p), "Maknae operational concept",
+               "DoDAF OV-1 high-level operational concept graphic for Maknae.").replace(
+        "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · OV-1")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -1171,6 +1301,7 @@ def main() -> None:
         ("generated-decision-cycle.svg", d6_decision(prov)),
         ("generated-data-model.svg", d7_datamodel(prov)),
         ("generated-system-interfaces.svg", d8_interfaces(prov)),
+        ("generated-operational-concept.svg", d9_opconcept(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")
