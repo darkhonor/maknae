@@ -18,6 +18,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform bounded sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116 |
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |
 | 0008 | Authorization composition contract — non-removable `-basic` baseline, extensions decide by their own model and may grant, no operand fails open, unknown vocabulary denies at the composition layer | Accepted (operator-ratified 2026-08-29) |
+| 0009 | Subject-side OS DAC evaluation — fd delegation on the local lane, confinement from the daemon's own fd table, lane-conditional applicability | Accepted (operator-ratified 2026-08-30) |
 | 0016 | Risk-tiered test coverage — tiers, mutation, fail-closed gate | Accepted (2026-08-04) |
 | 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
 | 0019 | Audit record model — AU-3-complete content now, crypto integrity/non-repudiation deferred to ADR-0007 | Accepted (2026-08-11) |
