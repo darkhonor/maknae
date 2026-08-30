@@ -168,7 +168,23 @@ Naming the gap is part of the decision, so that nobody reads decision 8's *"not 
 
   **A cross-compile check is not verification, but it is not nothing** — adding `--target aarch64-apple-darwin` immediately caught `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant `recv_delegated` did not compile there at all. `MSG_CMSG_CLOEXEC` is a Linux extension, so off Linux a received descriptor arrives **without close-on-exec** and `FD_CLOEXEC` is set explicitly instead — leaving a real window between the `recvmsg` and the `fcntl`. That is a **security-relevant platform delta**, and a Linux-only CI would never have surfaced it.
 
-  **Consequence — this is available hardening, not a constraint.** Once fd delegation lands the daemon never traverses a home at all, so `ProtectHome=` may be tightened from `read-only` to `yes` or `tmpfs` without breaking the read path. Not done in this ADR (it belongs with the implementation and its own removed-behavior note), but the door the earlier draft nailed shut is open. *Residual, stated: measured on the user manager; a system unit applies the same namespace directives through the same mechanism, but the acceptance host should confirm under `User=_maknae` when the implementation lands.*
+  **Consequence — this is available hardening, not a constraint.** Once fd delegation lands the daemon never traverses a home at all, so `ProtectHome=` may be tightened from `read-only` to `yes` or `tmpfs` without breaking the read path. Not done in this ADR (it belongs with the implementation and its own removed-behavior note), but the door the earlier draft nailed shut is open. *Residual, stated: measured on the user manager; a system unit applies the same namespace directives through the same mechanism.*
+
+  **ACCEPTANCE, 2026-08-30 — the owed confirmation, done better than promised.** Rather than a `ProtectHome` re-measurement, the whole premise was proven end to end on `maknae.asan.darkhonor.net` (Rocky 10.2, el10 kernel 6.12, **SELinux enforcing**, fapolicyd active, STIG'd) across a **real privilege boundary between two real users** — the case no unit test can express, because a test process cannot be two uids at once:
+
+  ```
+  daemon euid=991 | home 0o700 owner=1006
+  daemon opens by NAME: EACCES   |   traverses the home: EACCES
+  subject delegated its descriptor
+  kernel-reported path: /home/maksubj/notes
+  fstat: nlink=1 size=43 owner=1006 regular=True
+  bytes read THROUGH the descriptor: b'SUBJECT-SECRET: only maksubj may read this\n'
+  RESULT: PASS
+  ```
+
+  A service-account daemon that can neither open the object by name **nor list the directory containing it** learns the object's path from its own descriptor table and reads the bytes. That is decision 4 and [#194](https://github.com/darkhonor/maknae/issues/194) demonstrated in the target environment, not inferred from a `0000`-directory unit test. Test users and their homes were removed afterwards.
+
+  **Cross-host suite runs, same day:** Rocky 9.8 (el9, kernel 5.14, SELinux enforcing) — full `--all-features` FIPS workspace, **48 suites, 0 failures**. Debian 13 (kernel 6.12) — pure-Rust crates, **0 failures**. Together with RHEL 10 locally that is three kernels and three distributions.
 
 - **New syscalls go through [`maknae-io`](../../crates/maknae-io).** `readlink`/`F_GETPATH`, `fstat` on a delegated fd, `fcntl(F_GETFL)`, and the `stat` of decision 7 are security-critical and belong behind a named requirement. The exact-inventory `std-fs-drift` gate refuses direct production calls.
 
