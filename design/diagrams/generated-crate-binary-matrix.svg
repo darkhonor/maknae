@@ -1,0 +1,167 @@
+<svg width="662" height="930" viewBox="0 0 662 930" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae crate to binary linkage matrix</title>
+  <desc>Which workspace crates and key external dependencies each Maknae binary links, with the cells a CI gate refuses marked as UML stereotypes.</desc>
+  <rect x="0" y="0" width="662" height="930" fill="#FFFFFF"/>
+<rect x="24" y="24" width="614" height="866" rx="16" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="44" y="52" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#2C2C2A">Crate × binary linkage, and what the gates refuse</text>
+  <text x="44" y="72" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Derived from the cargo-auditable inventory of each built artifact — the real transitive closure, not declared dependencies.</text>
+  <text x="44" y="88" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">«» denotes a UML stereotype. A refused cell is refused by gate P1's per-consumer allowlist, not merely absent today.</text>
+  <rect x="256" y="108" width="112" height="34" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="4 3"/>
+  <text x="312.0" y="123" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="600" fill="#2C2C2A">maknae</text>
+  <text x="312.0" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">«untrusted»</text>
+  <rect x="380" y="108" width="112" height="34" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="436.0" y="123" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="600" fill="#26215C">maknae-spifc</text>
+  <text x="436.0" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«trusted»</text>
+  <rect x="504" y="108" width="112" height="34" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="560.0" y="123" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="600" fill="#26215C">maknaed</text>
+  <text x="560.0" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«trusted»</text>
+  <text x="44" y="146" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">workspace crates</text>
+  <rect x="40" y="152" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="166" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-audit</text>
+  <text x="312.0" y="167" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="167" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="167" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="188" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-audit-append</text>
+  <text x="211.79999999999998" y="188" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«privileged»</text>
+  <text x="306.0" y="189" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="316.0" y="189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="430.0" y="189" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="440.0" y="189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="560.0" y="189" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
+  <rect x="40" y="196" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="210" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-authz-basic</text>
+  <text x="203.6" y="210" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«privileged»</text>
+  <text x="306.0" y="211" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="316.0" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="430.0" y="211" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="440.0" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="560.0" y="211" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
+  <text x="48" y="232" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-config</text>
+  <text x="312.0" y="233" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="233" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="233" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="240" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="254" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-io</text>
+  <text x="312.0" y="255" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="255" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="255" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="276" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-kernel</text>
+  <text x="162.6" y="276" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«privileged»</text>
+  <text x="306.0" y="277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="316.0" y="277" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="430.0" y="277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="440.0" y="277" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="560.0" y="277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
+  <rect x="40" y="284" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="298" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-llm</text>
+  <text x="312.0" y="299" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="299" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="299" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="320" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-mcp</text>
+  <text x="312.0" y="321" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="321" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="321" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="328" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="342" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-msgs</text>
+  <text x="312.0" y="343" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="343" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="343" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="364" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-plane</text>
+  <text x="312.0" y="365" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="365" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="365" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="372" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="386" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-proto</text>
+  <text x="312.0" y="387" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="387" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="387" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="408" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-security</text>
+  <text x="312.0" y="409" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="409" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="409" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="416" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="430" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-spif</text>
+  <text x="312.0" y="431" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="431" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="431" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="452" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-spif-compile</text>
+  <text x="211.79999999999998" y="452" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«privileged»</text>
+  <text x="306.0" y="453" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="316.0" y="453" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="436.0" y="453" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
+  <text x="554.0" y="453" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="564.0" y="453" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <rect x="40" y="460" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="474" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-subject-ctx</text>
+  <text x="312.0" y="475" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="436.0" y="475" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="475" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="496" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-subject-ctx-mint</text>
+  <text x="244.6" y="496" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#534AB7">«privileged»</text>
+  <text x="306.0" y="497" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="316.0" y="497" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="430.0" y="497" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
+  <text x="440.0" y="497" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
+  <text x="560.0" y="497" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
+  <rect x="40" y="504" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="518" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-vault</text>
+  <text x="312.0" y="519" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="519" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="519" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="44" y="550" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">key external dependencies</text>
+  <rect x="40" y="556" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-fips-sys</text>
+  <text x="312.0" y="571" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="571" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="571" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="592" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-rs</text>
+  <text x="312.0" y="593" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="593" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="593" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="600" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="614" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">nix</text>
+  <text x="312.0" y="615" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="615" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="615" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="636" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rcgen</text>
+  <text x="312.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="644" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="658" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustix</text>
+  <text x="312.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="680" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustls</text>
+  <text x="312.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="688" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="702" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio</text>
+  <text x="312.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="724" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio-rustls</text>
+  <text x="312.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="732" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="746" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">vaultrs</text>
+  <text x="312.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="48" y="768" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">yaml-rust2</text>
+  <text x="312.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <rect x="40" y="776" width="582" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="790" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">zeroize</text>
+  <text x="312.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="560.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="44" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">● linked</text>
+  <text x="130" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● linked (privileged)</text>
+  <text x="285" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#B3452F">✕ refused by gate</text>
+  <text x="410" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not linked</text>
+  <text x="24" y="914" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + rust-audit-info · sources at 33cff0b · 2026-08-30</text><text x="638" y="914" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+</svg>
