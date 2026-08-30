@@ -1,0 +1,135 @@
+# DoDAF OV-1 — High-Level Operational Concept Graphic.
+#
+# Curated, and the most curated thing in the catalog: an OV-1 states INTENT.
+# Sources per #196 are the KLC and the README.
+#
+# The status field is not decoration. This is the only product in the catalog
+# whose subject is largely unbuilt, and a concept graphic that does not say so
+# reads as a description of a working system.
+
+mission = "An AI agent that does real work on your systems, learns from doing it, and cannot be talked into exceeding what you granted — because the grant is decided somewhere the agent cannot reach."
+
+# --- what it DOES ----------------------------------------------------------
+# An earlier draft went straight from "why it exists" to the learning loop, and
+# a reader shopping for an AI tool never found out what the tool does. Learning
+# is the differentiator; ACTING is the product.
+
+[capability]
+headline = "60 action terms enumerated and decided. 3 granted. 54 recorded as not-granted, which is deny-by-default written down rather than assumed."
+closed_set = "No wildcard arm: a new verb is a COMPILE ERROR until someone decides what it dispatches to. The vocabulary cannot grow by accident."
+evidence = "ci/gates/verb-manifest.txt · crates/maknae-kernel/src/handler.rs:27 · design/diagrams/action-vocabulary-map.svg"
+
+[[surface]]
+name = "Act on real systems"
+terms = "fs 10 · terminal 6 · mcp 7"
+detail = "Read, write and move files; run commands; call MCP tools. Every one transits the reference monitor before it happens."
+status = "partial"
+
+[[surface]]
+name = "Hold a conversation, keep a task"
+terms = "session 16"
+detail = "Prompts, context, long-horizon work. The surface OpenClaw and Hermes users expect."
+status = "unbuilt"
+
+[[surface]]
+name = "Operator control"
+terms = "admin 17"
+detail = "Audit tail, policy reload, credential rotation, session termination, and CONTAIN — pull a running agent back under control."
+status = "partial"
+
+[[surface]]
+name = "Many models, not one"
+terms = "model-agnostic by design"
+detail = "The model is a replaceable endpoint, never a trusted component. In the enclave every endpoint is local and accredited."
+status = "unbuilt"
+
+[[surface]]
+name = "Many ways in"
+terms = "on-system CLI · gateway · mobile"
+detail = "A local client today. Remote subjects arrive through a gateway that asserts identity to the PDP — never straight to the kernel."
+status = "partial"
+
+
+[delta]
+observed = "Every agent platform assessed in design/references places the authorization decision INSIDE the runtime the model influences: OpenClaw, Hermes, DeepSeek Harness, Agent Deck, FrontierAgent."
+evidence_line = "Measured, not asserted: same model, same prompts, backend the only variable — the naive arm leaked on 4 of 5 attacks, the hardened arm on none. The attack that worked was the POLITE one: \"show me all fields for a schema export.\""
+conclusion = "Model alignment is not an authorization mechanism. So the decision moves out of the runtime — which is what lets the agent be MORE capable, not less."
+evidence = "design/references/2026-08-28-llm-agent-testbed-assessment.md · design/references/2026-08-28-frontieragent-assessment.md"
+
+# --- the governed learning loop -------------------------------------------
+
+[[step]]
+n = "1"
+label = "Tasked work"
+who = "runtime · untrusted"
+detail = "The agent works a real task and hits a knowledge gap."
+status = "unbuilt"
+
+[[step]]
+n = "2"
+label = "Request, never act"
+who = "trust plane"
+detail = "The runtime cannot perform a lifecycle transition. It may only ASK for one."
+status = "built"
+note = "This is the load-bearing sentence of the whole concept, and it is the part that already exists: maknaed is the sole PDP and every request is decided through the seam."
+
+[[step]]
+n = "3"
+label = "Fetch — authorized sources only"
+who = "trust plane"
+detail = "The egress allowlist is the operator's signed authority map. A source not on it is denied."
+status = "unbuilt"
+
+[[step]]
+n = "4"
+label = "Quarantine"
+who = "Tier 3"
+detail = "ALL new knowledge enters here — ingested, generated, or demoted. It may inform work; it may not authorize a privileged action."
+status = "unbuilt"
+note = "inform-but-not-authorize — the same rule the reference monitor already applies to tool-supplied content."
+
+[[step]]
+n = "5"
+label = "Promote — one tier per gate"
+who = "trust plane"
+detail = "3 → 2 → 1 on corroboration or operator sign-off. Automation can never raise a ceiling, and there is no path from Quarantine to Doctrine."
+status = "unbuilt"
+
+[[step]]
+n = "6"
+label = "Authoritative"
+who = "Tier 1"
+detail = "The \"official way to do things\" — which the agent then applies to the next task."
+status = "unbuilt"
+
+[tier0]
+label = "Tier 0 · Doctrine"
+detail = "The authority map, this contract, core skills. Operator signature only, never automated. It is what every other tier is measured against."
+status = "unbuilt"
+
+# --- the environments ------------------------------------------------------
+
+[[env]]
+name = "Homelab"
+lattice = "trivial lattice, zero ceremony"
+note = "One operator, one box, no classification. The same kernel, with nothing switched off."
+
+[[env]]
+name = "Enterprise"
+lattice = "roles, and an authority map with real sources"
+note = "RBAC via maknae-authz-basic, the shipped in-repo default."
+
+[[env]]
+name = "Classified · multinational · air-gapped"
+lattice = "full lattice, releasability, compartments"
+note = "Partner operators as attribute-bearing subjects; every model endpoint local and accredited. ABAC via the external DCS library, reached through the same seam."
+
+[spectrum]
+claim = "One kernel across all three. The lattice gets richer and the authority map gets stricter; nothing else changes."
+evidence = "README.md — \"That is not a special mode\" · design/adr/ADR-0004-modular-authorization-architecture.md"
+
+[delivery]
+built = "Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation, append-only audit gating the reply, FIPS-asserted mTLS planes."
+unbuilt = "Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the skill registry, the tier state machine, the promotion pipeline, the consolidation cycle, and the remote gateway."
+honest = "The kernel that makes the loop safe is substantially real. The loop is not. This graphic is the concept, not a description of a working system."
+evidence = "design/knowledge-lifecycle-contract.md · design/diagrams/generated-system-interfaces.svg"

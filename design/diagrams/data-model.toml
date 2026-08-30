@@ -1,0 +1,193 @@
+# The three data models Maknae records and enforces, in IDEF1X.
+#
+# Curated, like read-path.toml. IDEF1X models a SHAPE, and the shape here is a
+# normalization of Rust structs that are serialized as nested JSON — a judgement
+# about identity and dependence that no manifest holds. Every entity cites the
+# type it is drawn from so a reader can check the normalization rather than
+# take it.
+#
+# IDEF1X notation (ISO/IEC/IEEE 31320-2:2012):
+#   square corners  = independent entity (identity does not depend on another)
+#   rounded corners = dependent entity   (identity inherits from its parent)
+#   solid line      = identifying relationship
+#   filled circle   = the child end
+#   attributes above the rule are the primary key
+
+[[section]]
+id = "audit"
+title = "Audit trail — AU-3"
+note = "One record per request outcome. The key is (session-id, seq), not the timestamp: two records can share a clock tick, and seq is per-session monotonic, so the pair is what orders and identifies the trail."
+
+[[section]]
+id = "authz"
+title = "Authorization request — the PDP's input"
+note = "The ABAC four-tuple. Subject, Resource and Context are attribute BAGS, not fixed columns — which is what lets an extension key on attributes the core never declared (ADR-0004)."
+
+[[section]]
+id = "policy"
+title = "Authorization policy — the shipped baseline"
+note = "Read per request from disk. `allow` and `deny` are the same shape distinguished by rule-kind; deny-overrides is applied at composition, not encoded in the data."
+
+# --- audit -----------------------------------------------------------------
+
+[[entity]]
+id = "record"
+section = "audit"
+name = "AUDIT-RECORD"
+kind = "independent"
+pk = ["session-id", "seq"]
+attrs = ["ts", "event", "action", "object", "object-requested", "au3-1"]
+evidence = "crates/maknae-audit-append/src/record.rs:61"
+
+[[entity]]
+id = "where"
+section = "audit"
+name = "WHERE"
+kind = "dependent"
+pk = ["session-id (FK)", "seq (FK)"]
+attrs = ["host", "component", "socket"]
+evidence = "crates/maknae-audit-append/src/record.rs:30"
+
+[[entity]]
+id = "source"
+section = "audit"
+name = "SOURCE"
+kind = "dependent"
+pk = ["session-id (FK)", "seq (FK)"]
+attrs = ["uid", "gid", "pid", "plane-uri-san"]
+evidence = "crates/maknae-audit-append/src/record.rs:13"
+
+[[entity]]
+id = "subj"
+section = "audit"
+name = "SUBJECT"
+kind = "dependent"
+pk = ["session-id (FK)", "seq (FK)"]
+attrs = ["user", "plane-uri-san"]
+evidence = "crates/maknae-audit-append/src/record.rs:23"
+
+[[entity]]
+id = "outcome"
+section = "audit"
+name = "OUTCOME"
+kind = "dependent"
+pk = ["session-id (FK)", "seq (FK)"]
+attrs = ["result", "reason", "posture"]
+evidence = "crates/maknae-audit-append/src/record.rs:39"
+
+[[entity]]
+id = "integrity"
+section = "audit"
+name = "INTEGRITY"
+kind = "dependent"
+pk = ["session-id (FK)", "seq (FK)"]
+attrs = ["prev-hash", "sig"]
+evidence = "crates/maknae-audit-append/src/record.rs:49"
+
+# --- authz request ---------------------------------------------------------
+
+[[entity]]
+id = "request"
+section = "authz"
+name = "AUTHZ-REQUEST"
+kind = "independent"
+pk = ["request-id"]
+attrs = ["action"]
+evidence = "crates/maknae-security/src/request.rs:72"
+
+[[entity]]
+id = "attribute"
+section = "authz"
+name = "ATTRIBUTE"
+kind = "dependent"
+pk = ["request-id (FK)", "scope", "key"]
+attrs = ["value"]
+note = "scope :: subject | resource | context"
+evidence = "crates/maknae-security/src/request.rs:11"
+
+[[entity]]
+id = "verdict"
+section = "authz"
+name = "VERDICT"
+kind = "dependent"
+pk = ["request-id (FK)"]
+attrs = ["decision", "reason"]
+evidence = "crates/maknae-security/src/compose.rs"
+
+# --- policy ----------------------------------------------------------------
+
+[[entity]]
+id = "policy"
+section = "policy"
+name = "AUTHZ-POLICY"
+kind = "independent"
+pk = ["policy-path"]
+attrs = ["loaded-at"]
+evidence = "crates/maknae-config/src/authz.rs:29"
+
+[[entity]]
+id = "pattern"
+section = "policy"
+name = "PATTERN"
+kind = "dependent"
+pk = ["policy-path (FK)", "rule-kind", "ordinal"]
+attrs = ["glob", "match3"]
+note = "rule-kind :: allow | deny"
+evidence = "crates/maknae-config/src/authz.rs:114"
+
+[[entity]]
+id = "binding"
+section = "policy"
+name = "ROLE-BINDING"
+kind = "dependent"
+pk = ["policy-path (FK)", "role"]
+attrs = ["principal"]
+evidence = "crates/maknae-config/src/authz.rs:37"
+
+# --- relationships ---------------------------------------------------------
+
+[[rel]]
+parent = "record"
+child = "where"
+kind = "identifying"
+card = "1"
+[[rel]]
+parent = "record"
+child = "source"
+kind = "identifying"
+card = "1"
+[[rel]]
+parent = "record"
+child = "subj"
+kind = "identifying"
+card = "1"
+[[rel]]
+parent = "record"
+child = "outcome"
+kind = "identifying"
+card = "1"
+[[rel]]
+parent = "record"
+child = "integrity"
+kind = "identifying"
+card = "Z"
+[[rel]]
+parent = "request"
+child = "attribute"
+kind = "identifying"
+card = "P"
+[[rel]]
+parent = "request"
+child = "verdict"
+kind = "identifying"
+card = "1"
+[[rel]]
+parent = "policy"
+child = "pattern"
+kind = "identifying"
+card = "P"
+[[rel]]
+parent = "policy"
+child = "binding"
+kind = "identifying"
+card = ""

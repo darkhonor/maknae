@@ -1,0 +1,172 @@
+# The fs.read path, end to end — the one request that crosses every boundary
+# Maknae has. Curated, like standards-profile.toml: a call sequence is not
+# derivable from a manifest, so each step names the code that implements it and
+# a reader is expected to check it.
+#
+# Participants are the LIFELINES, in the order they are drawn. The OS appears
+# TWICE on purpose. That is the whole of ADR-0009: the same kernel, asked by two
+# different principals, returns two different answers, and only the subject's
+# answer is the one that may authorize a read.
+
+[[participant]]
+id = "subject"
+label = "subject"
+stereo = "«actor»"
+kind = "actor"
+
+[[participant]]
+id = "cli"
+label = "maknae"
+stereo = "«untrusted»"
+kind = "untrusted"
+
+[[participant]]
+id = "os_subject"
+label = "OS · as subject uid"
+stereo = "«DAC authority»"
+kind = "os"
+
+[[participant]]
+id = "daemon"
+label = "maknaed"
+stereo = "«trusted»"
+kind = "trusted"
+boundary_before = true
+
+[[participant]]
+id = "os_daemon"
+label = "OS · as _maknae"
+stereo = "«DAC authority»"
+kind = "os"
+
+[[participant]]
+id = "authz"
+label = "maknae-authz-basic"
+stereo = "«authz backend»"
+kind = "trusted"
+
+[[participant]]
+id = "audit"
+label = "audit sink"
+stereo = "«trusted»"
+kind = "trusted"
+
+# --- the sequence ---------------------------------------------------------
+
+[[step]]
+from = "subject"
+to = "cli"
+kind = "call"
+label = "maknae read <path>"
+
+[[step]]
+from = "cli"
+to = "os_subject"
+kind = "call"
+label = "open_for_delegation(path)"
+evidence = "crates/maknae-io/src/delegated.rs:158 · bins/maknae/src/cli.rs:215"
+
+[[step]]
+from = "os_subject"
+to = "cli"
+kind = "reply"
+label = "fd — or EACCES"
+evidence = "the OS decides as the SUBJECT; this is the answer that counts"
+
+[[step]]
+from = "cli"
+to = "daemon"
+kind = "call"
+label = "Request{Read} + SCM_RIGHTS(fd) over the mTLS plane"
+evidence = "crates/maknae-io/src/delegated.rs:182 send_delegated · crates/maknae-plane/src/send.rs:42 FdSender"
+note = "A failed open still sends, UNARMED. Not a fallback: the daemon then has no descriptor, so it denies. (cli.rs:211)"
+
+[[step]]
+from = "daemon"
+to = "daemon"
+kind = "self"
+label = "recv_delegated → FdCollector"
+evidence = "crates/maknae-io/src/delegated.rs:219 · crates/maknae-plane/src/fd.rs:42"
+note = "recvmsg, never read(2): a plain read silently DESTROYS the attached descriptor."
+
+[[step]]
+from = "daemon"
+to = "daemon"
+kind = "self"
+label = "lexical_pregate(path)"
+evidence = "crates/maknae-kernel/src/run.rs:488"
+note = "A malformed path is BadRequest — no authorization decision is reached at all."
+
+[[step]]
+from = "daemon"
+to = "os_daemon"
+kind = "call"
+label = "verify_delegated(fd)"
+evidence = "crates/maknae-io/src/delegated.rs:286 · crates/maknae-kernel/src/run.rs:538"
+note = "Reads the daemon's OWN fd table (/proc/self/fd). Needs no permission on the object's directories — which is why a 0700 home still works."
+
+[[step]]
+from = "os_daemon"
+to = "daemon"
+kind = "reply"
+label = "kernel-reported path + fstat"
+evidence = "confinement beneath home, nlink == 1, owner and mode"
+
+[[step]]
+from = "daemon"
+to = "daemon"
+kind = "self"
+label = "build_authz_request(verb, uid, lane, os_path)"
+evidence = "crates/maknae-kernel/src/run.rs:544"
+note = "Built on the KERNEL-REPORTED path, never the string the client sent — so the deny list evaluates the object, not an alias for it (ADR-0009 D6)."
+
+[[step]]
+from = "daemon"
+to = "authz"
+kind = "call"
+label = "guarded_decide(&dyn Authorizer, &Request)"
+evidence = "crates/maknae-security/src/compose.rs:70 · crates/maknae-kernel/src/run.rs:565"
+note = "THE SEAM, and the only crossing on this diagram that is not a process boundary — an in-process trait-object call on a spawn_blocking worker. maknae-authz-basic is what a deployment swaps to change the decision model (ADR-0004); maknae-authz-dcs would sit here."
+
+[[step]]
+from = "authz"
+to = "daemon"
+kind = "reply"
+label = "Verdict :: Permit | Deny"
+
+[[step]]
+from = "daemon"
+to = "daemon"
+kind = "self"
+label = "combine([...]) + finalize"
+evidence = "crates/maknae-security/src/compose.rs:20 · crates/maknae-security/src/verdict.rs:47"
+note = "Composition runs in the KERNEL, not the backend: deny-overrides is the daemon's rule, so no backend can waive another's Deny. An absent or unverifiable descriptor is a Deny here — never a daemon-side open."
+
+[[step]]
+from = "daemon"
+to = "audit"
+kind = "call"
+label = "emit_request_outcome(...)"
+evidence = "crates/maknae-kernel/src/run.rs:626"
+
+[[step]]
+from = "audit"
+to = "daemon"
+kind = "reply"
+label = "appended"
+evidence = "crates/maknae-kernel/src/run.rs:749 may_respond(appended)"
+note = "Audit-then-respond: the reply is gated on the record landing. No trail, no answer."
+
+[[step]]
+from = "daemon"
+to = "os_daemon"
+kind = "call"
+label = "read_delegated(fd)"
+evidence = "crates/maknae-io/src/delegated.rs:270 · crates/maknae-kernel/src/run.rs:920"
+note = "RE-VERIFIES immediately before taking the bytes. The gap between decision and read is where TOCTOU lives, so it is closed here rather than assumed away."
+
+[[step]]
+from = "daemon"
+to = "cli"
+kind = "reply"
+label = "bytes"
