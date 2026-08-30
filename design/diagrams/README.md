@@ -56,6 +56,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 |---|---|---|---|---|
 | `generated-tcb-components.svg` | UML component | *What is in the TCB and where does the boundary run?* | security assessor | generated |
 | `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
+| `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -69,7 +70,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | runtime boundary crossings | UML sequence (≈ DoDAF SV-10c) | *Where does data cross a trust boundary, by what mechanism?* |
 | audit / policy / config schemas | IDEF1X | *What is the shape of the data we record and enforce?* |
 | system interfaces | DoDAF SV-1 | *What talks to what, across which interfaces?* |
-| standards profile | DoDAF StdV-1 | *Which technical standards does this claim to meet?* |
 | operational concept | DoDAF OV-1 | *What is this system for?* |
 
 ## Three kinds, and the rule for each
@@ -98,6 +98,24 @@ merely describes it:
 | TCB membership | `ci/gates/lib.sh` — the list P1 polices | `packaging/isolation-contract.md`, a mirror that can agree with itself while both drift |
 | Binary linkage | `rust-audit-info` on the built artifact — the real transitive closure | `cargo depgraph` — declared dependencies are not what a binary links |
 | Members, binaries | `cargo metadata` | a hardcoded list |
+| Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
+
+### The standards profile is curated, not derived
+
+`generated-standards-profile.svg` renders `standards-profile.toml`. Conformance is a
+**claim**, not a fact a manifest holds — no file states that Maknae targets NIST SP
+800-53 Rev. 5. Keeping the claims in one reviewable data file, rendered consistently,
+beats both prose scattered across sixteen ADRs and a picture nobody can check.
+
+Two rules the file enforces on itself:
+
+- **`status` separates what is mechanically checked from what is merely implemented.**
+  `enforced` means CI or the runtime refuses a violation; `adopted` means implemented
+  and relied upon but unchecked; `emerging` means the surface is not built yet;
+  `excluded` means deliberately out of scope with the decision recorded. **A profile
+  that blurs those is a wish list.**
+- **`evidence` must name a file, gate or ADR a reader can open.** A claim with no
+  evidence does not belong in the profile.
 
 ## Adding a diagram
 

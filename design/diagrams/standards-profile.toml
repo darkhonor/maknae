@@ -1,0 +1,152 @@
+# DoDAF 2.02 StdV-1 — Standards Profile.
+#
+# The technical standards Maknae claims, the elements they apply to, and — the
+# column most StdV-1s do not carry — WHAT ENFORCES EACH CLAIM.
+#
+# `status` is the load-bearing field. DoDAF separates mandated/current standards
+# from emerging ones, and conflating them is how a standards profile becomes a
+# wish list:
+#
+#   enforced   implemented AND something in CI or the runtime refuses a violation
+#   adopted    implemented and relied upon, but nothing mechanically checks it
+#   emerging   applies to a surface not yet built (gateway #117, MCP #151)
+#   excluded   deliberately out of scope, with the decision recorded
+#
+# `evidence` must name a file, gate or ADR a reader can open. A claim with no
+# evidence does not belong in this file.
+
+[[standard]]
+name = "FIPS 140-3"
+version = "aws-lc-fips (BoringCrypto module)"
+category = "Cryptography"
+applies_to = "all crypto operations; Vault leg, plane mTLS"
+status = "enforced"
+evidence = "crates/maknae-vault/src/fips.rs — runtime .fips() assertion; ci/gates/feature-resolution-pin.sh"
+
+[[standard]]
+name = "TLS"
+version = "1.3 only"
+category = "Transport security"
+applies_to = "Maknae-CONTROLLED channels: client plane (UDS), machine plane"
+status = "enforced"
+evidence = "crates/maknae-vault/src/tls.rs — with_protocol_versions(&[&TLS13]), server and client"
+
+[[standard]]
+name = "TLS"
+version = "1.2 floor"
+category = "Transport security"
+applies_to = "outbound to THIRD PARTIES: Vault leg today; model/MCP endpoints later"
+status = "enforced"
+evidence = "rustls implements only 1.2/1.3 — no older path exists; suites FIPS-restricted either way via assert_fips_provider (crates/maknae-vault/src/client.rs:344)"
+
+[[standard]]
+name = "CNSA Suite"
+version = "1.0 — EC P-384"
+category = "Cryptography"
+applies_to = "plane certificate keys and signatures"
+status = "enforced"
+evidence = "crates/maknae-vault/src/csr.rs — rejects a CSR whose key is not a 97-byte P-384 point"
+
+[[standard]]
+name = "X.509"
+version = "RFC 5280 profile"
+category = "Identity"
+applies_to = "plane leaves — MACHINE identity only"
+status = "enforced"
+evidence = "ADR-0006 D2; crates/maknae-vault/src/plane_verify.rs — URI-SAN verifier"
+
+[[standard]]
+name = "CBOR"
+version = "RFC 8949"
+category = "Data encoding"
+applies_to = "the maknaed <-> maknae wire protocol"
+status = "enforced"
+evidence = "crates/maknae-proto; ADR-0009 (byte-string content codec)"
+
+[[standard]]
+name = "NIST SP 800-53"
+version = "Rev. 5"
+category = "Security controls"
+applies_to = "AC-12, AC-25, AU-3, AU-9, AU-10, AU-12, SC-10"
+status = "adopted"
+evidence = "ADR-0019 (audit record model); ADR-0006 D4 (visit clock, SC-10/AC-12)"
+
+[[standard]]
+name = "NIST SP 800-207"
+version = "Zero Trust Architecture"
+category = "Architecture"
+applies_to = "the reference-monitor posture; per-request decision"
+status = "adopted"
+evidence = "ADR-0005 (sole PDP); ADR-0006 (per-request re-validation)"
+
+[[standard]]
+name = "CNSSI 4009"
+version = "current"
+category = "Vocabulary"
+applies_to = "the access-control vocabulary — DAC/MAC, RBAC/ABAC"
+status = "enforced"
+evidence = "ADR-0020; AGENTS.md currency guard names it as the fixed vocabulary"
+
+[[standard]]
+name = "NIST SP 800-63B / 63C"
+version = "AAL2 / FAL2"
+category = "Identity assurance"
+applies_to = "remote authentication via the gateway"
+status = "emerging"
+evidence = "ADR-0006 D5 — REQUIREd properties; gateway is #117, unbuilt"
+
+[[standard]]
+name = "DoD ZT Reference Architecture"
+version = "2.0"
+category = "Architecture"
+applies_to = "the authentication strategy assessment"
+status = "adopted"
+evidence = "ADR-0006 — the three candidate strategies were evaluated against it"
+
+[[standard]]
+name = "OAuth 2.0 family"
+version = "RFC 6749 + 8 related"
+category = "Federation"
+applies_to = "gateway OIDC federation; MCP authorization"
+status = "emerging"
+evidence = "RFC 6750/7591/7636/8414/9068/9728/8707 — design/references/oauth-compliance.md; #117, #151"
+
+[[standard]]
+name = "SPDX license expressions"
+version = "current"
+category = "Supply chain"
+applies_to = "every dependency in the graph"
+status = "enforced"
+evidence = "deny.toml [licenses] allow-list; cargo-deny in CI"
+
+[[standard]]
+name = "UML"
+version = "2.5.1 (OMG formal/2017-12-05)"
+category = "Documentation"
+applies_to = "the generated architecture diagrams"
+status = "enforced"
+evidence = "design/diagrams/README.md; design/diagrams/generate.py"
+
+[[standard]]
+name = "DoDAF"
+version = "2.02 Change 1"
+category = "Documentation"
+applies_to = "StdV-1 (this profile); planned SV-1, OV-1"
+status = "adopted"
+evidence = "design/diagrams/README.md catalog"
+
+[[standard]]
+name = "IDEF1X"
+version = "ISO/IEC/IEEE 31320-2:2012"
+category = "Documentation"
+applies_to = "planned data-model diagrams"
+status = "emerging"
+evidence = "design/diagrams/README.md — planned products"
+
+[[standard]]
+name = "STANAG 4774 / 4778"
+version = "—"
+category = "Labelling"
+applies_to = "confidentiality metadata label binding"
+status = "excluded"
+evidence = "ADR-0007 §Out of scope — deferred to the external DCS library"
