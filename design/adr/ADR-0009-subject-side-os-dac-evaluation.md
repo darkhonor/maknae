@@ -99,6 +99,8 @@ The existing requirement now does **triple duty**:
 2. it guarantees the kernel reports *the* path rather than *a* path — with exactly one link, `d_path` is unambiguous, which is what makes prefix-checking a sound containment proof;
 3. it detects deletion for free — an unlinked file has `nlink == 0` and fails the requirement, on both platforms, with no special handling of Linux's `" (deleted)"` suffix or macOS's silent stale path.
 
+**Measured 2026-08-30 (RHEL 10.2):** an unlinked-but-open descriptor reports `nlink = 0` *and* a `" (deleted)"` suffix on `d_path` — so the `nlink` requirement catches it first and the suffix never needs parsing. A hard-linked object reports `nlink = 2`, so a second name inside or outside the home is refused before confinement is even consulted.
+
 Without it, an object could be linked both inside and outside the home and containment would prove nothing. **A future change relaxing `nlink` for an unrelated good reason would silently delete this proof.** That is why the coupling is recorded here rather than left in a doc comment.
 
 ### 6. The PDP decides on the kernel-reported path, not the client-supplied string
@@ -106,6 +108,8 @@ Without it, an object could be linked both inside and outside the home and conta
 `resource.path` is stamped from the **kernel's answer** for the delegated fd. The client-supplied string is recorded in the trail as *what was asked*, and is not the basis of the decision.
 
 **This is a strict improvement in the deny list's reach.** Today the shipped deny list matches a string the client chose. Under this decision it matches ground truth: a symlink `~/innocent → ~/.ssh/id_rsa` is denied because the deny list evaluates `.ssh/id_rsa`, the path the object actually has.
+
+**Measured 2026-08-30 (RHEL 10.2), because the decision rests on it:** opening `home/innocent` (a symlink to `.ssh/id_rsa`) yields `d_path = …/home/.ssh/id_rsa` — the kernel reports the **resolved** path, not the link. Opening `home/current → versions/v3` likewise reports `…/home/versions/v3`. The deny list therefore sees the object, not the alias.
 
 **Consequent behavior change, stated for the removed-behavior audit ([ADR-0021](ADR-0021-fail-closed-storage-io-tightenings.md)).** Today the read path refuses **every** symlink via `O_NOFOLLOW`. Under this decision symlinks resolve and the policy decides on the resolved path. A legitimate in-home symlink (`~/current → ~/versions/v3`) begins to work where it previously failed. **This is a deliberate loosening**, and it applies the operator's standing correction on `fs.move`/`fs.link` — *"Moving and linking are valid actions in the proper context"* — rather than refusing a valid filesystem feature. The malicious case is not weakened: it is denied by the deny list, on the true path, which is strictly better than a blanket refusal that never consulted policy at all.
 
@@ -158,7 +162,9 @@ Naming the gap is part of the decision, so that nobody reads decision 8's *"not 
 
 - **macOS carries a documented weaker attribution.** It has no per-message sender-credential facility (`LOCAL_PEERCRED`/`LOCAL_PEERTOKEN` are connection-scoped). ADR-0006 already books this as a T4-class voluntary-credential-sharing residual bounded by the visit clock. Fd delegation sharpens it from *"someone else can drive your session"* to *"someone else's fd can be presented as your authority"* — the same class, restated here because the consequence is now about object access rather than session control.
 
-- **An owed measurement, not an assertion: the `ProtectHome=` / `d_path` interaction.** `d_path` is computed against the reading process's mount namespace. `ProtectHome=read-only` keeps the real `/home` mount visible and `readlink` should resolve; `ProtectHome=yes` masks `/home` with a tmpfs and may render the dentry unreachable. **The unit file therefore keeps `read-only` and must NOT be tightened to `yes`.** This has not been measured — it is owed on the Rocky 10 acceptance host before the implementation is relied on, in the style of ADR-0006's measured-evidence notes.
+- **MEASURED 2026-08-30 (RHEL 10.2, systemd 257, `systemd-run --user`): `d_path` is unaffected by `ProtectHome=`, in every mode.** The concern was that `d_path` is computed against the reading process's mount namespace, so a masked `/home` might render a received descriptor unreachable. It does not. An fd opened outside the sandbox and inherited into a unit resolved to `/home/aackerman/dpath-probe.txt` and read its bytes correctly under `read-only`, under `yes` (where `ls /home` is `Permission denied`), and under `tmpfs` (where `/home` is replaced outright). The reason is that `ProtectHome` **overmounts** `/home`; it does not detach the mount the descriptor was opened on, and `d_path` walks that mount.
+
+  **Consequence — this is available hardening, not a constraint.** Once fd delegation lands the daemon never traverses a home at all, so `ProtectHome=` may be tightened from `read-only` to `yes` or `tmpfs` without breaking the read path. Not done in this ADR (it belongs with the implementation and its own removed-behavior note), but the door the earlier draft nailed shut is open. *Residual, stated: measured on the user manager; a system unit applies the same namespace directives through the same mechanism, but the acceptance host should confirm under `User=_maknae` when the implementation lands.*
 
 - **New syscalls go through [`maknae-io`](../../crates/maknae-io).** `readlink`/`F_GETPATH`, `fstat` on a delegated fd, `fcntl(F_GETFL)`, and the `stat` of decision 7 are security-critical and belong behind a named requirement. The exact-inventory `std-fs-drift` gate refuses direct production calls.
 
