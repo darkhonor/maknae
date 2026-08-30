@@ -1008,6 +1008,119 @@ def _wrap_words(s, cols):
     return out
 
 
+# --- D8: DoDAF SV-1 — Systems Interface Description ------------------------
+
+def d8_interfaces(prov: str) -> str:
+    """What talks to what, across which interfaces, and which of them EXIST.
+
+    A node-and-edge view over an interface register. The status column is the
+    load-bearing part: an SV-1 that mixes shipped interfaces with designed ones
+    sends an assessor to test surfaces that are not there, and lets the ones
+    that ARE there pass without notice.
+    """
+    doc = tomllib.loads((OUT / "system-interfaces.toml").read_text())
+    nodes, ifaces = doc["node"], doc["iface"]
+    check_evidence(ifaces, "evidence", "system-interfaces.toml")
+    by = {n["id"]: n for n in nodes}
+
+    NW, NH, CX, CY, PAD, TOP = 176, 46, 232, 92, 44, 148
+    for n in nodes:
+        n["x"] = PAD + n["col"] * CX
+        n["y"] = TOP + n["row"] * CY
+    W = PAD * 2 + 3 * CX + NW
+    graph_h = TOP + 3 * CY + NH + 34
+
+    style = {"actor": (PLAIN_FILL, PLAIN_LINE, INK),
+             "untrusted": ("#FDEEE9", WARN, "#7A2415"),
+             "trusted": (TRUST_FILL, TRUST_LINE, TRUST_INK),
+             "external": (OK_FILL, OK_LINE, "#04342C"),
+             "unbuilt": ("#FFFFFF", MUTED, MUTED),
+             "stub": ("#FFFFFF", MUTED, MUTED),
+             "platform": ("#FFF6E6", "#8A5B00", "#5A3D00")}
+    line_for = {"built": (TRUST_LINE, None, "1.4"),
+                "ratified-unbuilt": (MUTED, "6 4", "1"),
+                "stub": (MUTED, "2 4", "1")}
+
+    p = ['<defs><marker id="if" viewBox="0 0 10 10" refX="9" refY="5" '
+         f'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+         f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
+         'stroke-width="1.3"/></marker></defs>']
+
+    for i in ifaces:
+        a, b = by[i["from"]], by[i["to"]]
+        col, dash, sw = line_for[i["status"]]
+        if i.get("class") == "platform":
+            col, dash, sw = "#8A5B00", "1 3", "1.6"
+        if a["row"] == b["row"]:
+            x1, y1 = a["x"] + NW, a["y"] + NH / 2
+            x2, y2 = b["x"], b["y"] + NH / 2
+        else:
+            x1, y1 = a["x"] + NW / 2, a["y"] + NH
+            x2, y2 = b["x"] + NW / 2, b["y"]
+            if a["col"] != b["col"]:
+                x1, y1 = a["x"] + NW, a["y"] + NH / 2
+                x2, y2 = b["x"], b["y"] + NH / 2
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        my = (y1 + y2) / 2
+        p.append(f'<path d="M {x1:.0f} {y1:.0f} C {(x1+x2)/2:.0f} {y1:.0f} '
+                 f'{(x1+x2)/2:.0f} {y2:.0f} {x2:.0f} {y2:.0f}" fill="none" '
+                 f'stroke="{col}" stroke-width="{sw}"{d} marker-end="url(#if)"/>')
+        p.append(text((x1 + x2) / 2, my - 5, i["n"], 9, "700", fill=col,
+                      anchor="middle", halo="#FFFFFF"))
+
+    for n in nodes:
+        fill, line, ink = style[n["kind"]]
+        dash = "5 4" if n["kind"] in ("unbuilt", "stub") else None
+        p.append(box(n["x"], n["y"], NW, NH, fill, line, rx=6, dash=dash))
+        p.append(text(n["x"] + 12, n["y"] + 20, n["label"], 11, "600", fill=ink))
+        p.append(text(n["x"] + 12, n["y"] + 34, n["sub"], 8.5, fill=line))
+
+    y = graph_h + 16
+    p.append(text(PAD, y, "Interface register", 13, "600", fill=TRUST_INK))
+    y += 20
+    tag = {"built": ("#0F6E56", "built"),
+           "platform": ("#8A5B00", "host control"),
+           "ratified-unbuilt": (WARN, "ratified · NOT built"),
+           "stub": (MUTED, "stub — no interface")}
+    for i in ifaces:
+        col, lab = tag["platform" if i.get("class") == "platform" else i["status"]]
+        ml = _wrap_words(i["mechanism"], 118)
+        h = 28 + len(ml) * 12 + 12
+        p.append(f'<line x1="{PAD}" y1="{y-8}" x2="{W-PAD}" y2="{y-8}" '
+                 f'stroke="#E8E6DF" stroke-width="1"/>')
+        p.append(text(PAD, y + 8, i["n"], 10, "700", fill=TRUST_INK, mono=True))
+        p.append(text(PAD + 34, y + 8,
+                      f'{by[i["from"]]["label"]}  →  {by[i["to"]]["label"]}', 10, "600"))
+        p.append(text(W - PAD, y + 8, lab, 9, "700", fill=col, anchor="end"))
+        yy = y + 22
+        for ln in ml:
+            p.append(text(PAD + 34, yy, ln, 9, fill=INK)); yy += 12
+        p.append(text(PAD + 34, yy, f'identity: {i["identity"]}', 9, fill=MUTED)); yy += 12
+        p.append(text(PAD + 34, yy, i["evidence"], 7.5, fill=MUTED, mono=True))
+        y += h + 14
+
+    H = y + 40
+    # counts DERIVED — an earlier version hardcoded "five exist", which went
+    # stale the moment the host-platform band was added.
+    nb = sum(1 for i in ifaces if i.get("class") != "platform" and i["status"] == "built")
+    npl = sum(1 for i in ifaces if i.get("class") == "platform")
+    nr = sum(1 for i in ifaces if i["status"] == "ratified-unbuilt")
+    ns = sum(1 for i in ifaces if i["status"] == "stub")
+    p = [text(PAD, 44, "System interfaces — DoDAF SV-1", 16, "600"),
+         text(PAD, 66, f"Every interface carries a status. {nb} peer interfaces exist and "
+              f"{npl} host-platform controls act on the daemon. {nr} are ratified by "
+              "ADR-0006 and", 11, fill=MUTED),
+         text(PAD, 82, f"NOT implemented — that ADR carries its own banner saying so. {ns} are "
+              "one-line marker crates with no interface at all.", 11, fill=MUTED),
+         text(PAD, 98, "Solid violet is a built peer interface; dashed grey is not built; "
+              "dotted gold is a mandatory host control, which enforces rather than exchanges.",
+              10, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/system-interfaces.toml')}"))
+    return svg(W, H, "\n".join(p), "Maknae system interfaces",
+               "DoDAF SV-1 systems interface description for Maknae.").replace(
+        "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · SV-1")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -1021,6 +1134,7 @@ def main() -> None:
         ("generated-read-path.svg", d5_readpath(prov)),
         ("generated-decision-cycle.svg", d6_decision(prov)),
         ("generated-data-model.svg", d7_datamodel(prov)),
+        ("generated-system-interfaces.svg", d8_interfaces(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

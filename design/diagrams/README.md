@@ -61,6 +61,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
+| `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -70,7 +71,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 | Product | Notation | Question |
 |---|---|---|
-| system interfaces | DoDAF SV-1 | *What talks to what, across which interfaces?* |
 | operational concept | DoDAF OV-1 | *What is this system for?* |
 
 ## Three kinds, and the rule for each
@@ -111,7 +111,7 @@ Regenerate with the command above and commit the result; that is the whole contr
 
 ### Two products are curated, not derived
 
-`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml` and `data-model.toml` are hand-maintained inputs. Neither a
+`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml` and `system-interfaces.toml` are hand-maintained inputs. Neither a
 conformance claim nor a call sequence can be read out of a manifest, so both are kept
 as reviewable data files in which **every row names the code a reader can check**.
 

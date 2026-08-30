@@ -1,0 +1,229 @@
+# DoDAF SV-1 — Systems Interface Description.
+#
+# Curated. The point of an SV-1 is the INVENTORY, and an inventory that mixes
+# what exists with what is designed is worse than none: an assessor reading it
+# would test interfaces that are not there and miss that the ones that are have
+# no gateway in front of them.
+#
+# So every interface carries a status, on the same rule the StdV-1 uses:
+#   built            the code does this today; evidence names it
+#   ratified-unbuilt an ADR fixes it, the code does not implement it yet
+#   stub             the crate exists as a marker; there is no interface
+#
+# ADR-0006 carries its own banner to this effect ("the code does NOT yet
+# implement this ADR"), and the authority order is code -> KLC -> ADRs.
+
+[[node]]
+id = "subject"
+label = "subject"
+sub = "local uid"
+col = 0
+row = 1
+kind = "actor"
+
+[[node]]
+id = "cli"
+label = "maknae"
+sub = "untrusted CLI"
+col = 1
+row = 1
+kind = "untrusted"
+
+[[node]]
+id = "daemon"
+label = "maknaed"
+sub = "trust plane · sole PDP"
+col = 2
+row = 1
+kind = "trusted"
+
+[[node]]
+id = "vault"
+label = "HashiCorp Vault"
+sub = "external · PKI + secrets"
+col = 3
+row = 0
+kind = "external"
+
+[[node]]
+id = "audit"
+label = "audit sink"
+sub = "append-only file"
+col = 3
+row = 1
+kind = "trusted"
+
+[[node]]
+id = "gateway"
+label = "gateway"
+sub = "#117 · remote boundary"
+col = 1
+row = 3
+kind = "unbuilt"
+
+[[node]]
+id = "remote"
+label = "remote subject"
+sub = "OIDC principal"
+col = 0
+row = 3
+kind = "unbuilt"
+
+[[node]]
+id = "llm"
+label = "LLM provider"
+sub = "maknae-llm"
+col = 2
+row = 3
+kind = "stub"
+
+[[node]]
+id = "mcp"
+label = "MCP server"
+sub = "maknae-mcp · #151"
+col = 3
+row = 3
+kind = "stub"
+
+[[node]]
+id = "mac"
+label = "SELinux / AppArmor"
+sub = "host MAC"
+col = 1
+row = 2
+kind = "platform"
+
+[[node]]
+id = "fapolicyd"
+label = "fapolicyd"
+sub = "exec allowlist"
+col = 2
+row = 2
+kind = "platform"
+
+[[node]]
+id = "journald"
+label = "journald"
+sub = "diagnostic log"
+col = 3
+row = 2
+kind = "platform"
+
+# --- interfaces ------------------------------------------------------------
+
+[[iface]]
+n = "I1"
+from = "subject"
+to = "cli"
+status = "built"
+mechanism = "local process invocation"
+identity = "the invoking uid; the OS is the authority"
+evidence = "bins/maknae/src/cli.rs"
+
+[[iface]]
+n = "I2"
+from = "cli"
+to = "daemon"
+status = "built"
+mechanism = "AF_UNIX stream at /run/maknae/maknaed.sock, group-gated on bind; mutual mTLS, TLS 1.3 pinned; SCM_RIGHTS carries the subject's descriptor"
+identity = "plane leaf certificate, URI-SAN — MACHINE identity only"
+evidence = "crates/maknae-config/src/transport.rs:15 · crates/maknae-vault/src/tls.rs:51 · crates/maknae-io/src/delegated.rs:182"
+
+[[iface]]
+n = "I3"
+from = "daemon"
+to = "vault"
+status = "built"
+mechanism = "HTTPS via vaultrs/reqwest; AppRole login, then pki sign; TLS negotiated (1.2 floor), FIPS suite set asserted"
+identity = "AppRole role `maknaed` + per-plane SecretID"
+evidence = "crates/maknae-vault/src/client.rs:344 · crates/maknae-vault/src/plane.rs:17"
+
+[[iface]]
+n = "I4"
+from = "cli"
+to = "vault"
+status = "built"
+mechanism = "HTTPS; the CLI holds its own AppRole SecretID and self-mints a cli-plane leaf"
+identity = "AppRole role `maknae`"
+evidence = "crates/maknae-vault/src/plane.rs:18 — ADR-0006 names this the PRE-ADR model, retired by #116"
+
+[[iface]]
+n = "I5"
+from = "daemon"
+to = "audit"
+status = "built"
+mechanism = "append-only write + fsync on a blocking worker; the reply is gated on the append"
+identity = "n/a — daemon-owned artifact"
+evidence = "crates/maknae-audit-append/src/sink.rs"
+
+[[iface]]
+n = "I6"
+from = "remote"
+to = "gateway"
+status = "ratified-unbuilt"
+mechanism = "OIDC federation; AAL2/FAL2 (NIST SP 800-63B/63C)"
+identity = "enrolled remote subject, asserted by the gateway"
+evidence = "design/adr/ADR-0006-client-authentication-model.md"
+
+[[iface]]
+n = "I7"
+from = "gateway"
+to = "daemon"
+status = "ratified-unbuilt"
+mechanism = "machine channel; the gateway ASSERTS the principal to the PDP"
+identity = "gateway's own scoped machine credential — never the daemon's plane/kernel identity"
+evidence = "design/adr/ADR-0006-client-authentication-model.md"
+
+[[iface]]
+n = "I8"
+from = "daemon"
+to = "llm"
+status = "stub"
+mechanism = "none — maknae-llm is a one-line CRATE_MARKER"
+identity = "undecided"
+evidence = "crates/maknae-llm/src/lib.rs"
+
+[[iface]]
+n = "I9"
+from = "daemon"
+to = "mcp"
+status = "stub"
+mechanism = "none — maknae-mcp is a one-line CRATE_MARKER"
+identity = "undecided"
+evidence = "crates/maknae-mcp/src/lib.rs"
+
+# --- host platform controls -----------------------------------------------
+# Not peer systems. These act ON the daemon rather than exchanging data with
+# it, which is why they are drawn as a separate band: they are MANDATORY
+# controls, and per ADR-0020 a mandatory Deny is not waivable by any
+# discretionary grant the PDP could issue.
+
+[[iface]]
+n = "P1"
+from = "mac"
+to = "daemon"
+status = "built"
+class = "platform"
+mechanism = "SELinux policy_module(maknae, 1.0.0) confines maknaed_t, with separate types for etc, private, secret, audit and runtime, plus maknae_vault_port_t on the outbound leg. Debian and Ubuntu get an equivalent AppArmor 3.x profile."
+identity = "the daemon's own domain — maknaed_t, entered via maknaed_exec_t"
+evidence = "packaging/common/maknae.te · packaging/common/maknae.fc · packaging/deb/apparmor/usr.bin.maknaed"
+
+[[iface]]
+n = "P2"
+from = "fapolicyd"
+to = "daemon"
+status = "built"
+class = "platform"
+mechanism = "Execution is gated by fapolicyd's rpmdb trust backend; the rpm-installed binary is trusted automatically. NO per-file trust record is shipped, deliberately — a static path/size/sha256 record goes stale on every rebuild, and a bare path is silently ignored."
+identity = "package provenance, not a credential"
+evidence = "packaging/common/maknae.fapolicyd.trust — verified on a STIG-hardened enforcing Rocky 10 host"
+
+[[iface]]
+n = "P3"
+from = "daemon"
+to = "journald"
+status = "built"
+class = "platform"
+mechanism = "StandardOutput=journal, StandardError=journal, SyslogIdentifier=maknaed. This is the DIAGNOSTIC channel and is not the audit trail — AU-3 records go to the append-only sink at I5, on a path whose write gates the reply."
+identity = "systemd unit identity"
+evidence = "packaging/common/maknaed.service:59"

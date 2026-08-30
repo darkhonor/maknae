@@ -1,0 +1,161 @@
+<svg width="960" height="1432" viewBox="0 0 960 1432" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae system interfaces</title>
+  <desc>DoDAF SV-1 systems interface description for Maknae.</desc>
+  <rect x="0" y="0" width="960" height="1432" fill="#FFFFFF"/>
+<text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">System interfaces — DoDAF SV-1</text>
+<text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Every interface carries a status. 5 peer interfaces exist and 3 host-platform controls act on the daemon. 2 are ratified by ADR-0006 and</text>
+<text x="44" y="82" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">NOT implemented — that ADR carries its own banner saying so. 2 are one-line marker crates with no interface at all.</text>
+<text x="44" y="98" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Solid violet is a built peer interface; dashed grey is not built; dotted gold is a mandatory host control, which enforces rather than exchanges.</text>
+<defs><marker id="if" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#5F5E5A" stroke-width="1.3"/></marker></defs>
+<path d="M 220 263 C 248 263 248 263 276 263" fill="none" stroke="#534AB7" stroke-width="1.4" marker-end="url(#if)"/>
+<text x="248.0" y="258.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#534AB7" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I1</text>
+<path d="M 452 263 C 480 263 480 263 508 263" fill="none" stroke="#534AB7" stroke-width="1.4" marker-end="url(#if)"/>
+<text x="480.0" y="258.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#534AB7" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I2</text>
+<path d="M 684 263 C 712 263 712 171 740 171" fill="none" stroke="#534AB7" stroke-width="1.4" marker-end="url(#if)"/>
+<text x="712.0" y="212.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#534AB7" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I3</text>
+<path d="M 452 263 C 596 263 596 171 740 171" fill="none" stroke="#534AB7" stroke-width="1.4" marker-end="url(#if)"/>
+<text x="596.0" y="212.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#534AB7" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I4</text>
+<path d="M 684 263 C 712 263 712 263 740 263" fill="none" stroke="#534AB7" stroke-width="1.4" marker-end="url(#if)"/>
+<text x="712.0" y="258.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#534AB7" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I5</text>
+<path d="M 220 447 C 248 447 248 447 276 447" fill="none" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="6 4" marker-end="url(#if)"/>
+<text x="248.0" y="442.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I6</text>
+<path d="M 452 447 C 480 447 480 263 508 263" fill="none" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="6 4" marker-end="url(#if)"/>
+<text x="480.0" y="350.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I7</text>
+<path d="M 596 286 C 596 286 596 424 596 424" fill="none" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="2 4" marker-end="url(#if)"/>
+<text x="596.0" y="350.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I8</text>
+<path d="M 684 263 C 712 263 712 447 740 447" fill="none" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="2 4" marker-end="url(#if)"/>
+<text x="712.0" y="350.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">I9</text>
+<path d="M 452 355 C 480 355 480 263 508 263" fill="none" stroke="#8A5B00" stroke-width="1.6" stroke-dasharray="1 3" marker-end="url(#if)"/>
+<text x="480.0" y="304.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">P1</text>
+<path d="M 596 378 C 596 378 596 240 596 240" fill="none" stroke="#8A5B00" stroke-width="1.6" stroke-dasharray="1 3" marker-end="url(#if)"/>
+<text x="596.0" y="304.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">P2</text>
+<path d="M 684 263 C 712 263 712 355 740 355" fill="none" stroke="#8A5B00" stroke-width="1.6" stroke-dasharray="1 3" marker-end="url(#if)"/>
+<text x="712.0" y="304.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">P3</text>
+<rect x="44" y="240" width="176" height="46" rx="6" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="56" y="260" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">subject</text>
+<text x="56" y="274" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">local uid</text>
+<rect x="276" y="240" width="176" height="46" rx="6" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="288" y="260" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#7A2415">maknae</text>
+<text x="288" y="274" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#B3452F">untrusted CLI</text>
+<rect x="508" y="240" width="176" height="46" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="520" y="260" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#26215C">maknaed</text>
+<text x="520" y="274" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">trust plane · sole PDP</text>
+<rect x="740" y="148" width="176" height="46" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="752" y="168" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#04342C">HashiCorp Vault</text>
+<text x="752" y="182" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">external · PKI + secrets</text>
+<rect x="740" y="240" width="176" height="46" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="752" y="260" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#26215C">audit sink</text>
+<text x="752" y="274" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">append-only file</text>
+<rect x="276" y="424" width="176" height="46" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="288" y="444" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">gateway</text>
+<text x="288" y="458" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">#117 · remote boundary</text>
+<rect x="44" y="424" width="176" height="46" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="56" y="444" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">remote subject</text>
+<text x="56" y="458" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">OIDC principal</text>
+<rect x="508" y="424" width="176" height="46" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="520" y="444" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">LLM provider</text>
+<text x="520" y="458" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">maknae-llm</text>
+<rect x="740" y="424" width="176" height="46" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="752" y="444" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">MCP server</text>
+<text x="752" y="458" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">maknae-mcp · #151</text>
+<rect x="276" y="332" width="176" height="46" rx="6" fill="#FFF6E6" stroke="#8A5B00" stroke-width="0.75"/>
+<text x="288" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5A3D00">SELinux / AppArmor</text>
+<text x="288" y="366" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#8A5B00">host MAC</text>
+<rect x="508" y="332" width="176" height="46" rx="6" fill="#FFF6E6" stroke="#8A5B00" stroke-width="0.75"/>
+<text x="520" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5A3D00">fapolicyd</text>
+<text x="520" y="366" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#8A5B00">exec allowlist</text>
+<rect x="740" y="332" width="176" height="46" rx="6" fill="#FFF6E6" stroke="#8A5B00" stroke-width="0.75"/>
+<text x="752" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5A3D00">journald</text>
+<text x="752" y="366" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#8A5B00">diagnostic log</text>
+<text x="44" y="520" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">Interface register</text>
+<line x1="44" y1="532" x2="916" y2="532" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="548" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I1</text>
+<text x="78" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">subject  →  maknae</text>
+<text x="916" y="548" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">built</text>
+<text x="78" y="562" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">local process invocation</text>
+<text x="78" y="574" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: the invoking uid; the OS is the authority</text>
+<text x="78" y="586" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">bins/maknae/src/cli.rs</text>
+<line x1="44" y1="598" x2="916" y2="598" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="614" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I2</text>
+<text x="78" y="614" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknae  →  maknaed</text>
+<text x="916" y="614" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">built</text>
+<text x="78" y="628" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">AF_UNIX stream at /run/maknae/maknaed.sock, group-gated on bind; mutual mTLS, TLS 1.3 pinned; SCM_RIGHTS carries the</text>
+<text x="78" y="640" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">subject's descriptor</text>
+<text x="78" y="652" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: plane leaf certificate, URI-SAN — MACHINE identity only</text>
+<text x="78" y="664" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-config/src/transport.rs:15 · crates/maknae-vault/src/tls.rs:51 · crates/maknae-io/src/delegated.rs:182</text>
+<line x1="44" y1="676" x2="916" y2="676" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="692" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I3</text>
+<text x="78" y="692" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknaed  →  HashiCorp Vault</text>
+<text x="916" y="692" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">built</text>
+<text x="78" y="706" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">HTTPS via vaultrs/reqwest; AppRole login, then pki sign; TLS negotiated (1.2 floor), FIPS suite set asserted</text>
+<text x="78" y="718" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: AppRole role `maknaed` + per-plane SecretID</text>
+<text x="78" y="730" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-vault/src/client.rs:344 · crates/maknae-vault/src/plane.rs:17</text>
+<line x1="44" y1="742" x2="916" y2="742" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="758" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I4</text>
+<text x="78" y="758" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknae  →  HashiCorp Vault</text>
+<text x="916" y="758" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">built</text>
+<text x="78" y="772" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">HTTPS; the CLI holds its own AppRole SecretID and self-mints a cli-plane leaf</text>
+<text x="78" y="784" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: AppRole role `maknae`</text>
+<text x="78" y="796" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-vault/src/plane.rs:18 — ADR-0006 names this the PRE-ADR model, retired by #116</text>
+<line x1="44" y1="808" x2="916" y2="808" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="824" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I5</text>
+<text x="78" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknaed  →  audit sink</text>
+<text x="916" y="824" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">built</text>
+<text x="78" y="838" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">append-only write + fsync on a blocking worker; the reply is gated on the append</text>
+<text x="78" y="850" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: n/a — daemon-owned artifact</text>
+<text x="78" y="862" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-audit-append/src/sink.rs</text>
+<line x1="44" y1="874" x2="916" y2="874" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="890" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I6</text>
+<text x="78" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">remote subject  →  gateway</text>
+<text x="916" y="890" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">ratified · NOT built</text>
+<text x="78" y="904" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">OIDC federation; AAL2/FAL2 (NIST SP 800-63B/63C)</text>
+<text x="78" y="916" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: enrolled remote subject, asserted by the gateway</text>
+<text x="78" y="928" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">design/adr/ADR-0006-client-authentication-model.md</text>
+<line x1="44" y1="940" x2="916" y2="940" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="956" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I7</text>
+<text x="78" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">gateway  →  maknaed</text>
+<text x="916" y="956" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">ratified · NOT built</text>
+<text x="78" y="970" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">machine channel; the gateway ASSERTS the principal to the PDP</text>
+<text x="78" y="982" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: gateway's own scoped machine credential — never the daemon's plane/kernel identity</text>
+<text x="78" y="994" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">design/adr/ADR-0006-client-authentication-model.md</text>
+<line x1="44" y1="1006" x2="916" y2="1006" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="1022" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I8</text>
+<text x="78" y="1022" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknaed  →  LLM provider</text>
+<text x="916" y="1022" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A">stub — no interface</text>
+<text x="78" y="1036" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">none — maknae-llm is a one-line CRATE_MARKER</text>
+<text x="78" y="1048" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: undecided</text>
+<text x="78" y="1060" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-llm/src/lib.rs</text>
+<line x1="44" y1="1072" x2="916" y2="1072" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="1088" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I9</text>
+<text x="78" y="1088" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknaed  →  MCP server</text>
+<text x="916" y="1088" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#5F5E5A">stub — no interface</text>
+<text x="78" y="1102" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">none — maknae-mcp is a one-line CRATE_MARKER</text>
+<text x="78" y="1114" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: undecided</text>
+<text x="78" y="1126" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-mcp/src/lib.rs</text>
+<line x1="44" y1="1138" x2="916" y2="1138" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="1154" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">P1</text>
+<text x="78" y="1154" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">SELinux / AppArmor  →  maknaed</text>
+<text x="916" y="1154" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00">host control</text>
+<text x="78" y="1168" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">SELinux policy_module(maknae, 1.0.0) confines maknaed_t, with separate types for etc, private, secret, audit and</text>
+<text x="78" y="1180" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">runtime, plus maknae_vault_port_t on the outbound leg. Debian and Ubuntu get an equivalent AppArmor 3.x profile.</text>
+<text x="78" y="1192" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: the daemon's own domain — maknaed_t, entered via maknaed_exec_t</text>
+<text x="78" y="1204" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">packaging/common/maknae.te · packaging/common/maknae.fc · packaging/deb/apparmor/usr.bin.maknaed</text>
+<line x1="44" y1="1216" x2="916" y2="1216" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="1232" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">P2</text>
+<text x="78" y="1232" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">fapolicyd  →  maknaed</text>
+<text x="916" y="1232" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00">host control</text>
+<text x="78" y="1246" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">Execution is gated by fapolicyd's rpmdb trust backend; the rpm-installed binary is trusted automatically. NO per-file</text>
+<text x="78" y="1258" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">trust record is shipped, deliberately — a static path/size/sha256 record goes stale on every rebuild, and a bare path</text>
+<text x="78" y="1270" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">is silently ignored.</text>
+<text x="78" y="1282" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: package provenance, not a credential</text>
+<text x="78" y="1294" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">packaging/common/maknae.fapolicyd.trust — verified on a STIG-hardened enforcing Rocky 10 host</text>
+<line x1="44" y1="1306" x2="916" y2="1306" stroke="#E8E6DF" stroke-width="1"/>
+<text x="44" y="1322" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">P3</text>
+<text x="78" y="1322" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">maknaed  →  journald</text>
+<text x="916" y="1322" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#8A5B00">host control</text>
+<text x="78" y="1336" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">StandardOutput=journal, StandardError=journal, SyslogIdentifier=maknaed. This is the DIAGNOSTIC channel and is not the</text>
+<text x="78" y="1348" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">audit trail — AU-3 records go to the append-only sink at I5, on a path whose write gates the reply.</text>
+<text x="78" y="1360" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: systemd unit identity</text>
+<text x="78" y="1372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">packaging/common/maknaed.service:59</text>
+<text x="24" y="1416" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/system-interfaces.toml@2d62645854</text><text x="936" y="1416" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · SV-1</text>
+</svg>
