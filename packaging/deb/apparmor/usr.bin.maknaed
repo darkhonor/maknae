@@ -52,7 +52,9 @@ profile maknaed /usr/bin/maknaed {
   # same append-only MAC posture as the SELinux .te. First-create fallback is
   # kernel-arbitrated with O_CREAT|O_EXCL, but normal packaged operation does
   # not require create. The postinst's `chattr +a` stays as a filesystem-level
-  # defense in depth; MAC no longer depends on it for append-only parity.
+  # defense in depth; MAC no longer depends on it for append-only parity. If
+  # audit.jsonl is deleted under confinement, maknaed fails closed until an
+  # operator restores the file.
   /var/log/maknae/                       r,
   /var/log/maknae/audit.jsonl            ak,
   /var/log/maknae/**                     a,
