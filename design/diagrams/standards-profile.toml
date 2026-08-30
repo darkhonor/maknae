@@ -109,7 +109,7 @@ version = "RFC 6749 + 8 related"
 category = "Federation"
 applies_to = "gateway OIDC federation; MCP authorization"
 status = "emerging"
-evidence = "RFC 6750/7591/7636/8414/9068/9728/8707 — design/references/oauth-compliance; #117, #151"
+evidence = "RFC 6750/7591/7636/8414/9068/9728/8707 — design/references/oauth-compliance.md; #117, #151"
 
 [[standard]]
 name = "SPDX license expressions"

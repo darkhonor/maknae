@@ -22,6 +22,7 @@ private colour or glyph. Colour is styling only and carries no meaning; a reader
 who knows UML needs no key from us.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -121,6 +122,68 @@ def provenance() -> str:
         # diagrams came from a state that exists nowhere in history.
         dirty = " +UNCOMMITTED-INPUTS"
     return f"inputs at {sha}{dirty} · {date}"
+
+
+def content_stamp(rel: str) -> str:
+    """Provenance for a CURATED input, as a hash of its bytes.
+
+    A commit sha cannot work here. `standards-profile.toml` and the SVG it
+    produces necessarily travel in the SAME commit, so a sha computed at
+    generation time is always the PREVIOUS commit's -- the identical chasing
+    failure that made the first HEAD-based stamp unverifiable (#202). Review of
+    #204 then found the mirror-image bug: excluding the curated file entirely
+    let a claim change -- a status flipping `adopted` to `enforced` -- regenerate
+    the diagram under an UNCHANGED stamp.
+
+    A content hash escapes both. It is knowable before the commit exists, so
+    regeneration stays idempotent; it moves whenever any claim moves; and a
+    reviewer checks it with `sha256sum`, needing no git history at all.
+
+    The generator itself is deliberately NOT hashed. Its effect is already
+    carried by the SVG bytes -- a renderer change that alters output changes the
+    file, and one that does not is not a fact about the artifact. Hashing it
+    would rewrite every footer on every unrelated generator edit.
+    """
+    h = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()[:10]
+    return f"{rel}@{h}"
+
+
+# --- evidence resolution --------------------------------------------------
+
+_ADR = re.compile(r"\bADR-(\d{4})\b")
+_PATH = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+|\b[A-Za-z0-9_\-]+\.(?:toml|md)\b")
+
+
+def check_evidence(rows: list, field: str, where: str) -> None:
+    """Every evidence citation must name something a reader can open.
+
+    Hard-fails generation. The rule was stated in the README from the start and
+    enforced only by an ad-hoc script whose regex required a file EXTENSION --
+    so `design/references/oauth-compliance` (real file: `.md`) was never a
+    candidate to check, and shipped dead. Found by review on #204. An
+    unenforced rule is a wish, so this now runs on every generation.
+    """
+    bad = []
+    for r in rows:
+        ev = r.get(field, "")
+        for adr in _ADR.findall(ev):
+            if not list(ROOT.glob(f"design/adr/ADR-{adr}-*.md")):
+                bad.append((r, f"ADR-{adr}"))
+        for tok in _PATH.findall(ev):
+            tok = tok.split(":")[0].rstrip(".,;")
+            # A slash alone does not make a path: "TLS 1.2/1.3", "SC-10/AC-12"
+            # and RFC lists all contain one. A repo path starts at a directory
+            # that actually exists at the root, which none of those do.
+            head = tok.split("/")[0]
+            if "/" in tok and not (ROOT / head).is_dir():
+                continue
+            if (ROOT / tok).exists():
+                continue
+            near = sorted(p.name for p in ROOT.glob(tok + ".*"))
+            bad.append((r, tok + (f"  (did you mean {near[0]}?)" if near else "")))
+    if bad:
+        lines = "\n".join(f"    {r.get('name', r.get('label', '?'))}: {t}" for r, t in bad)
+        sys.exit(f"{where}: evidence cites paths that do not resolve:\n{lines}")
 
 
 # --- SVG primitives -------------------------------------------------------
@@ -342,6 +405,7 @@ def stdv1(prov: str) -> str:
     """
     import tomllib
     rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
+    check_evidence(rows, "evidence", "standards-profile.toml")
     rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
 
     w, lh = 1220, 19
@@ -391,7 +455,7 @@ def stdv1(prov: str) -> str:
 
     p.append(text(40, y + 26, "Every row names evidence a reader can open. A claim with no evidence "
                               "does not belong in this profile.", 10, fill=MUTED))
-    p.append(text(40, h - 26, f"source: design/diagrams/standards-profile.toml · {prov}",
+    p.append(text(40, h - 26, f"source: {content_stamp('design/diagrams/standards-profile.toml')}",
                   10, fill=MUTED))
     p.append(text(w - 40, h - 26, "DoDAF 2.02 Change 1 · StdV-1", 10, fill=MUTED, anchor="end"))
     return svg(w, h, "\n  ".join(p),
