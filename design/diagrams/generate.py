@@ -24,6 +24,7 @@ who knows UML needs no key from us.
 
 import hashlib
 import json
+import tomllib
 import re
 import subprocess
 import sys
@@ -262,10 +263,13 @@ def esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def text(x, y, s, size=12, weight="400", fill=INK, anchor="start", mono=False):
+def text(x, y, s, size=12, weight="400", fill=INK, anchor="start", mono=False,
+         halo=None):
     fam = "ui-monospace, SFMono-Regular, Menlo, monospace" if mono else FONT
+    h = (f' stroke="{halo}" stroke-width="3.5" paint-order="stroke" '
+         'stroke-linejoin="round"') if halo else ""
     return (f'<text x="{x}" y="{y}" text-anchor="{anchor}" font-family="{fam}" '
-            f'font-size="{size}" font-weight="{weight}" fill="{fill}">{esc(s)}</text>')
+            f'font-size="{size}" font-weight="{weight}" fill="{fill}"{h}>{esc(s)}</text>')
 
 
 def box(x, y, w, h, fill, stroke, rx=8, dash=None, sw="0.75"):
@@ -473,7 +477,6 @@ def stdv1(prov: str) -> str:
     and a profile that blurs them is a wish list. The `evidence` column is the
     part most StdV-1s lack — every row names a file, gate or ADR a reader can open.
     """
-    import tomllib
     rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
     check_evidence(rows, "evidence", "standards-profile.toml")
     rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
@@ -680,6 +683,103 @@ def d4_packages(gates, cg, prov) -> str:
                "UML package diagram of the Maknae workspace, layered by dependency.")
 
 
+# --- D5: the fs.read path, UML 2.5.1 sequence diagram (~ DoDAF SV-10c) ----
+
+def d5_readpath(prov: str) -> str:
+    """Where a read crosses a trust boundary, and by what mechanism.
+
+    UML 2.5.1 sequence diagram: lifelines with execution occurrences, filled
+    arrowhead for a synchronous call (17.4.4), open arrowhead on a dashed line
+    for a reply. Steps are numbered so the notes can key to them -- eight UML
+    note symbols on one diagram would cost more legibility than they buy.
+    """
+    doc = tomllib.loads((OUT / "read-path.toml").read_text())
+    parts, steps = doc["participant"], doc["step"]
+    idx = {p["id"]: i for i, p in enumerate(parts)}
+
+    LEFT, PITCH, HEAD, ROW = 92, 170, 150, 44
+    xs = [LEFT + i * PITCH for i in range(len(parts))]
+    W = xs[-1] + 100
+    body_h = HEAD + len(steps) * ROW + 26
+    notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
+    H = body_h + 34 + len(notes) * 27 + 58
+
+    style = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
+             "untrusted": ("#FDEEE9", WARN, "#7A2415"),
+             "os":       (OK_FILL, OK_LINE, "#04342C"),
+             "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK)}
+
+    p = ['<defs>'
+         f'<marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" '
+         f'markerHeight="8" orient="auto-start-reverse">'
+         f'<path d="M 0 1 L 9 5 L 0 9 z" fill="{INK}"/></marker>'
+         f'<marker id="rep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" '
+         f'markerHeight="8" orient="auto-start-reverse">'
+         f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
+         f'stroke-width="1.1"/></marker></defs>']
+
+    # the trust boundary, behind the lifelines
+    bx = 0
+    for i, pa in enumerate(parts):
+        if pa.get("boundary_before"):
+            bx = (xs[i] + xs[i - 1]) / 2
+    if bx:
+        p.append(f'<rect x="{bx}" y="{HEAD-34}" width="{W-bx}" height="{body_h-HEAD+46}" '
+                 f'fill="{TRUST_FILL}" opacity="0.35"/>')
+        p.append(f'<line x1="{bx}" y1="{HEAD-34}" x2="{bx}" y2="{body_h+12}" '
+                 f'stroke="{WARN}" stroke-width="1.2" stroke-dasharray="7 4"/>')
+        p.append(text(bx - 8, HEAD - 40, "untrusted", 10, "600", fill=WARN, anchor="end"))
+        p.append(text(bx + 8, HEAD - 40, "TRUST BOUNDARY — trust plane", 10, "600", fill=WARN))
+
+    # lifelines
+    for i, pa in enumerate(parts):
+        fill, line, ink = style[pa["kind"]]
+        x, bw = xs[i], 150
+        p.append(box(x - bw / 2, HEAD - 28, bw, 34, fill, line, rx=4))
+        p.append(text(x, HEAD - 14, pa["label"], 10.5, "600", fill=ink, anchor="middle"))
+        p.append(text(x, HEAD - 3, pa["stereo"], 8, fill=line, anchor="middle"))
+        p.append(f'<line x1="{x}" y1="{HEAD+6}" x2="{x}" y2="{body_h}" stroke="{MUTED}" '
+                 f'stroke-width="0.7" stroke-dasharray="3 4"/>')
+
+    # messages
+    for n, s in enumerate(steps):
+        y = HEAD + 34 + n * ROW
+        a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
+        rep = s["kind"] == "reply"
+        stroke, dash = (MUTED, ' stroke-dasharray="5 3"') if rep else (INK, "")
+        mark = "rep" if rep else "call"
+        if s["kind"] == "self":
+            p.append(f'<path d="M {a} {y-6} h 30 v 20 h -30" fill="none" stroke="{stroke}" '
+                     f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
+            lx, anc = a + 40, "start"
+        else:
+            p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
+                     f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
+            lx, anc = (a + b) / 2, "middle"
+        p.append(text(lx, y - 2, f'{n+1}. {s["label"]}', 10,
+                      "600" if not rep else "400", fill=INK if not rep else MUTED,
+                      anchor=anc, halo="#FFFFFF"))
+        if s.get("evidence"):
+            p.append(text(lx, y + 15, s["evidence"], 7.5, fill=MUTED, anchor=anc,
+                          mono=True, halo="#FFFFFF"))
+
+    y = body_h + 44
+    p.append(text(LEFT - 52, y, "Notes", 12, "600"))
+    for num, nt in notes:
+        y += 27
+        p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
+        p.append(text(LEFT - 32, y, nt, 9.5, fill=INK))
+
+    p = [text(LEFT - 52, 44, "The fs.read path — boundary crossings", 16, "600"),
+         text(LEFT - 52, 64, "One request, end to end. The OS appears TWICE because that is the "
+              "whole of ADR-0009: the same kernel, asked by two different", 11, fill=MUTED),
+         text(LEFT - 52, 79, "principals, answers differently — and only the subject's answer may "
+              "authorize a read. Each step names the code that implements it.", 11, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: design/diagrams/read-path.toml · {prov}"))
+    return svg(W, H, "\n".join(p), "Maknae fs.read boundary crossings",
+               "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -690,6 +790,7 @@ def main() -> None:
         ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
         ("generated-standards-profile.svg", stdv1(prov)),
         ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
+        ("generated-read-path.svg", d5_readpath(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

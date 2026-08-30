@@ -58,6 +58,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
+| `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -67,7 +68,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 | Product | Notation | Question |
 |---|---|---|
-| runtime boundary crossings | UML sequence (≈ DoDAF SV-10c) | *Where does data cross a trust boundary, by what mechanism?* |
 | audit / policy / config schemas | IDEF1X | *What is the shape of the data we record and enforce?* |
 | system interfaces | DoDAF SV-1 | *What talks to what, across which interfaces?* |
 | operational concept | DoDAF OV-1 | *What is this system for?* |
@@ -99,6 +99,18 @@ merely describes it:
 | Binary linkage | `rust-audit-info` on the built artifact — the real transitive closure | `cargo depgraph` — declared dependencies are not what a binary links |
 | Members, binaries | `cargo metadata` | a hardcoded list |
 | Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
+
+### Two products are curated, not derived
+
+`standards-profile.toml` and `read-path.toml` are hand-maintained inputs. Neither a
+conformance claim nor a call sequence can be read out of a manifest, so both are kept
+as reviewable data files in which **every row names the code a reader can check**.
+
+Neither file is part of the provenance stamp, deliberately. The stamp names the last
+commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
+travels in the same commit as the SVG it produces, so including it would make the stamp
+chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)
+fixed. The footer of each diagram names its source file instead.
 
 ### The standards profile is curated, not derived
 
