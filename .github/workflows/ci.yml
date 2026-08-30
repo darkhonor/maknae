@@ -193,7 +193,12 @@ jobs:
     # A cross-compile check proves the code BUILDS for macOS. This proves it
     # WORKS there — the difference that turns ADR-0009's F_GETPATH lane from
     # written into verified.
-    runs-on: macos-15
+    # Pinned to a NAMED image, deliberately not `macos-latest`. macOS is a
+    # deployment target, so the runner is part of the evidence: `macos-latest`
+    # silently re-points as images roll, which would change what "verified on
+    # macOS" means without any commit saying so. Operator-selected image:
+    # https://github.com/actions/runner-images/releases/tag/macos-26/20260729.0423
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
