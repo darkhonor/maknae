@@ -367,11 +367,12 @@ mod tests {
     #[test]
     fn a_sibling_root_whose_name_extends_the_confinement_root_does_not_match() {
         let root = tempfile::tempdir().expect("tempdir");
-        let base = root.path().canonicalize().expect("canonicalize");
+        let base = confinement_root(root.path());
         let confined = base.join("op");
         let sibling = base.join("opx");
         std::fs::create_dir_all(&confined).expect("mkdir op");
         std::fs::create_dir_all(&sibling).expect("mkdir opx");
+        let confined = confinement_root(&confined);
         let secret = sibling.join("secret");
         std::fs::write(&secret, b"another subject's file").expect("write");
         let f = std::fs::File::open(&secret).expect("open");
@@ -438,7 +439,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_is_verified_then_read_from_directly() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let notes = home.join("notes.bin");
         let content: &[u8] = &[0x4d, 0x41, 0x4b, 0xff, 0x00, 0x4e]; // non-UTF-8 is legal
         std::fs::write(&notes, content).expect("write");
@@ -462,9 +463,10 @@ mod tests {
     #[test]
     fn an_unconfined_delegated_fd_is_refused_before_any_bytes_are_read() {
         let root = tempfile::tempdir().expect("tempdir");
-        let base = root.path().canonicalize().expect("canonicalize");
+        let base = confinement_root(root.path());
         let home = base.join("home");
         std::fs::create_dir_all(&home).expect("mkdir");
+        let home = confinement_root(&home);
         let outside = base.join("secret");
         std::fs::write(&outside, b"NOT YOURS").expect("write");
         let f = std::fs::File::open(&outside).expect("open");
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn a_group_writable_confinement_root_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let notes = home.join("notes");
         std::fs::write(&notes, b"planted?").expect("write");
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o770))
@@ -533,6 +535,23 @@ mod tests {
             Err(IoError::InsecurePermissions { path, .. }) => assert_eq!(path, home),
             other => panic!("a group-writable root must be refused: {other:?}"),
         }
+    }
+
+    /// A tempdir that is a VALID confinement root **regardless of the host umask**.
+    ///
+    /// `tempfile` inherits the umask, so on a user-private-group host the directory is
+    /// `0775` — group-writable — and `root_required`'s `0o022` mask correctly refuses
+    /// it. A fixture that only works under one umask is testing the host, not the code.
+    ///
+    /// MEASURED 2026-08-30 across the standing test hosts, which is how this was
+    /// found: umask `0022` on RHEL 10 and Rocky 9, **`0002` on Debian 13**, `0077` on
+    /// the STIG'd el10 box. Eight tests passed locally and failed on Debian. CI runs
+    /// `ubuntu-latest`, whose umask is `0022`, so CI would have stayed green while any
+    /// Debian/Ubuntu developer hit it on the first run.
+    fn confinement_root(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .expect("pin the confinement root's mode against the host umask");
+        dir.canonicalize().expect("canonicalize")
     }
 
     fn maknae_io_root_req() -> crate::AnchorRequired {
@@ -566,7 +585,7 @@ mod tests {
     #[test]
     fn a_confinement_root_that_cannot_be_stat_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let notes = home.join("notes");
         std::fs::write(&notes, b"x").expect("write");
         let f = std::fs::File::open(&notes).expect("open");
@@ -590,7 +609,7 @@ mod tests {
     #[test]
     fn read_delegated_refuses_an_object_past_the_read_time_budget() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let big = home.join("big");
         std::fs::write(&big, b"more than four bytes").expect("write");
         let f = std::fs::File::open(&big).expect("open");
@@ -687,7 +706,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_to_a_non_regular_file_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let pipe = home.join("pipe");
         nix::unistd::mkfifo(
             &pipe,
@@ -723,7 +742,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_with_a_second_link_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let real = home.join("notes");
         std::fs::write(&real, b"one object, two names").expect("write");
         std::fs::hard_link(&real, home.join("alias")).expect("hard link");
@@ -747,7 +766,7 @@ mod tests {
     #[test]
     fn a_delegated_fd_over_the_named_budget_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
-        let home = root.path().canonicalize().expect("canonicalize");
+        let home = confinement_root(root.path());
         let big = home.join("big");
         std::fs::write(&big, b"more than four bytes").expect("write");
         let f = std::fs::File::open(&big).expect("open");
@@ -791,7 +810,7 @@ mod tests {
         std::fs::create_dir_all(&home).expect("mkdir home");
         let secret = home.join("notes");
         std::fs::write(&secret, b"beneath the home").expect("write");
-        let home_c = home.canonicalize().expect("canonicalize home");
+        let home_c = confinement_root(&home);
         let secret_c = secret.canonicalize().expect("canonicalize target");
 
         let f = std::fs::File::open(&secret).expect("the subject opens it while it still can");
@@ -833,12 +852,12 @@ mod tests {
         let elsewhere = root.path().join("elsewhere");
         std::fs::create_dir_all(&home).expect("mkdir home");
         std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let home = confinement_root(&home);
         let secret = elsewhere.join("secret");
         std::fs::write(&secret, b"NOT BENEATH THE HOME").expect("write");
 
         // Canonical, because the kernel reports the resolved path and a
         // tempdir root may itself sit behind a symlink.
-        let home = home.canonicalize().expect("canonicalize home");
         let secret = secret.canonicalize().expect("canonicalize target");
 
         let f = std::fs::File::open(&secret).expect("the subject opens its own file");
