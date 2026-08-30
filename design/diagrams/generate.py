@@ -146,7 +146,23 @@ def content_stamp(rel: str) -> str:
     would rewrite every footer on every unrelated generator edit.
     """
     h = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()[:10]
-    return f"{rel}@{h}"
+    # The hash identifies the input exactly; it does not say how OLD the image
+    # is, and #196 requires a date for a specific reason -- "a stale image on a
+    # documentation site is read as current by people with no way to check."
+    # So the repo-state anchor rides along. It is deliberately NOT labelled as
+    # this diagram's inputs (the #204 finding): the hash names those. This says
+    # which repo state rendered it, which is the staleness question a reader of
+    # a published image actually has.
+    return f"{rel}@{h} · maknae {_repo_anchor()}"
+
+
+def _repo_anchor() -> str:
+    inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
+        str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
+    )
+    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
+    return f"{sha} · {date}"
 
 
 # --- evidence resolution --------------------------------------------------

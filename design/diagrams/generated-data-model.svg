@@ -129,5 +129,5 @@
 <text x="156.0" y="942" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">P</text>
 <path d="M 148.0 913 V 929 H 374.0 V 947" fill="none" stroke="#534AB7" stroke-width="1"/>
 <circle cx="374.0" cy="947" r="3.5" fill="#534AB7"/>
-<text x="24" y="1130" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/data-model.toml@03af6814b1</text><text x="1176" y="1130" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">IDEF1X (ISO/IEC/IEEE 31320-2:2012)</text>
+<text x="24" y="1130" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/data-model.toml@03af6814b1 · maknae 855de07 · 2026-08-30</text><text x="1176" y="1130" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">IDEF1X (ISO/IEC/IEEE 31320-2:2012)</text>
 </svg>
