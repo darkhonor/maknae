@@ -6,7 +6,7 @@
 
 ## Context
 
-Maknae is built by three architects directing AI implementation, with large segments delegated (autopsy §6.4). Decisions made in conversation are lost to future contributors — human and AI — unless recorded durably with their rationale. The Knowledge Lake's ADR practice (knowledgebase `design/adr/`, ADR-0001) has proven the format keeps multi-party, multi-agent efforts aligned: agreed-to schemas, decision records, and guides are the coordination substrate.
+Maknae is built by three architects directing AI implementation, with large segments delegated (autopsy §6.4). Decisions made in conversation are lost to future contributors — human and AI — unless recorded durably with their rationale. *(Provenance, never authority: the operator's Knowledge Lake ADR practice — knowledgebase `design/adr/`, that project's ADR-0001 — informed this decision.)* That practice has shown the format keeps multi-party, multi-agent efforts aligned: agreed-to schemas, decision records, and guides are the coordination substrate.
 
 ## Decision
 
