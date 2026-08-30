@@ -25,58 +25,13 @@
 //! across `sendmsg` boundaries, so descriptors arrive in the same order as the frames
 //! they accompanied.
 
-use std::collections::VecDeque;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::AsFd;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use maknae_io::DelegatedFds;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::UnixStream;
-
-/// The per-connection queue of descriptors the peer delegated.
-///
-/// Cloning shares the queue: the collector pushes, the request loop takes. Dropping
-/// the last handle closes every descriptor still queued -- the close-on-drop the
-/// refusal path needs, since the refusal path is the one an attacker controls.
-#[derive(Clone)]
-pub struct DelegatedFds {
-    queue: Arc<Mutex<VecDeque<OwnedFd>>>,
-    cap: usize,
-}
-
-impl DelegatedFds {
-    fn new(cap: usize) -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(VecDeque::new())),
-            cap,
-        }
-    }
-
-    /// Take the oldest unconsumed descriptor. `None` means the peer delegated none --
-    /// which ADR-0009 decision 2 makes a `Deny`, never a fallback to a daemon-side open.
-    pub fn take(&self) -> Option<OwnedFd> {
-        self.lock().pop_front()
-    }
-
-    /// A poisoned mutex means a panic while holding the queue. Recover the guard
-    /// rather than propagating: the descriptors are still valid, and refusing to
-    /// serve them would turn one panicked request into a dead connection.
-    fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<OwnedFd>> {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Queue a descriptor, or drop it -- closing it -- when the connection is already
-    /// at its cap. Dropping is fail-closed: the request that wanted it finds none and
-    /// is denied. Received descriptors count against the daemon's `RLIMIT_NOFILE`, so
-    /// the bound is a resource control, not a style choice.
-    fn push(&self, fd: OwnedFd) {
-        let mut q = self.lock();
-        if q.len() < self.cap {
-            q.push_back(fd);
-        }
-    }
-}
 
 /// An `AsyncRead` over a `UnixStream` that collects delegated descriptors instead of
 /// letting `read(2)` destroy them. Interposed between the socket and rustls.
@@ -125,7 +80,7 @@ enum Step {
 /// The read loop's only decision, split out so it can be asserted directly.
 ///
 /// `poll_read` below is thin orchestration over it -- the same shape
-/// `run.rs::read_pep` uses over `handler::read_plan`. Inlined into the loop this
+/// `run.rs::read_pep` uses over `handler::delegated_plan`. Inlined into the loop this
 /// branch is reachable only by racing tokio's readiness against the kernel, which no
 /// unit test can do deterministically; separated, all three arms are ordinary inputs.
 fn classify(attempt: std::io::Result<()>) -> Step {
@@ -133,6 +88,22 @@ fn classify(attempt: std::io::Result<()>) -> Step {
         Ok(()) => Step::Done(Ok(())),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Step::Retry,
         Err(e) => Step::Done(Err(e)),
+    }
+}
+
+impl tokio::io::AsyncWrite for FdCollector {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        b: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, b)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -232,26 +203,23 @@ mod tests {
         assert_eq!(ino(delegated.take().expect("second")), second);
     }
 
-    /// The queue recovers from a poisoned mutex rather than propagating, and the doc
-    /// comment on `lock` claims exactly that. A panic in one request must not take the
-    /// whole connection down with it -- the queued descriptors are still valid.
+    /// TLS sits ON this adapter, so it must be a full duplex stream, not a reader.
+    /// Writes carry no ancillary data and are plain passthrough -- delegation is
+    /// one-directional, subject to daemon.
     #[tokio::test]
-    async fn a_panic_while_holding_the_queue_does_not_disable_the_connection() {
-        let (_client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let delegated = FdCollector::new(server, 4).delegated();
+    async fn writes_pass_through_untouched() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+        let mut collector = FdCollector::new(server, 4);
+        collector.write_all(b"RESPONSE").await.expect("write");
+        collector.flush().await.expect("flush");
 
-        let poisoner = delegated.clone();
-        let joined = std::thread::spawn(move || {
-            let _held = poisoner.lock();
-            panic!("a request panicked while holding the queue");
-        })
-        .join();
-        assert!(joined.is_err(), "the helper must actually have panicked");
-
-        assert!(
-            delegated.take().is_none(),
-            "a poisoned queue still answers; it must not propagate the panic"
-        );
+        let mut buf = [0u8; 8];
+        client
+            .read_exact(&mut buf)
+            .await
+            .expect("peer reads what was written");
+        assert_eq!(&buf, b"RESPONSE");
     }
 
     /// The read loop's only branch, asserted directly. A spurious readiness must

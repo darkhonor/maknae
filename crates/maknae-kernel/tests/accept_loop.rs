@@ -123,6 +123,7 @@ impl PlaneAccept for FakeAccept {
     ) -> Result<Conn<DuplexStream>, AcceptRejection> {
         match raw {
             FakeRaw::Conn(stream, uri, uid) => Ok(Conn {
+                delegated: maknae_io::DelegatedFds::new(0),
                 stream,
                 peer_uri: uri,
                 peer_uid: uid,
@@ -131,6 +132,7 @@ impl PlaneAccept for FakeAccept {
             FakeRaw::Stall(d, stream, uri, uid) => {
                 tokio::time::sleep(d).await;
                 Ok(Conn {
+                delegated: maknae_io::DelegatedFds::new(0),
                     stream,
                     peer_uri: uri,
                     peer_uid: uid,

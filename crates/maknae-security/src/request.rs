@@ -28,6 +28,17 @@ pub struct Context(pub Attributes);
 /// abstain" (ADR-0009 decision 8).
 pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 
+/// The resource attribute carrying the OPERATING SYSTEM'S ANSWER on whether this
+/// subject may access this object.
+///
+/// **The answer, never the raw bits.** Owner, mode and gid are deliberately NOT put on
+/// the request for a backend to recompute: ACLs, supplementary groups, SELinux and
+/// AppArmor make a hand-rolled mode calculation non-equivalent to what the kernel
+/// decides, so the kernel is asked and its verdict is stamped (ADR-0009 decision 1).
+/// Absent on the local lane means UNKNOWN and denies; absent on the remote lane means
+/// structurally inapplicable — which is why the lane must be read first.
+pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
+
 /// Which boundary a request arrived on.
 ///
 /// **Derived from the accepting listener and from nothing else.** Never from a request

@@ -50,7 +50,7 @@ crates/maknae-io/src/checks.rs:89|mode_mask: None,
 # here since issue #137 — maknae-config::loader, maknae-config::authz and maknae-vault
 # each carried their own copy of this anchor requirement until the adapter absorbed
 # absolutization and they were deleted.
-crates/maknae-io/src/anchor.rs:266|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
+crates/maknae-io/src/anchor.rs:362|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
 
 # read_storage carries no requirement of its own beyond regular-file: it reads
 # non-sensitive artifacts (CA pins, sealed-source blobs), and every caller needing a
@@ -75,10 +75,10 @@ crates/maknae-vault/src/socket.rs:56|match std::fs::symlink_metadata(path) {
 crates/maknae-vault/src/socket.rs:75|std::fs::remove_file(path)
 crates/maknae-vault/src/socket.rs:107|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
-crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/stream.rs:196|let _ = std::fs::remove_file(&self.path);
+crates/maknae-vault/src/stream.rs:235|let _ = std::fs::remove_file(path);
 
-# #77 read PEP (handler.rs::read_plan — the T1 decision half). These two `None`s
+# The read PEP's target requirement (handler.rs::delegated_plan). These two `None`s
 # are DELIBERATE and, since ADR-0009 (2026-08-30), load-bearing rather than merely
 # tolerated. The original justification here — "a target owner/mode requirement
 # would refuse legitimately-shared home files the operator's own modes expose" —
@@ -88,8 +88,9 @@ crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
 # which ACLs, supplementary groups, SELinux and AppArmor make non-equivalent to what
 # the kernel decides — and which the operator explicitly forbade. The boundary
 # requirement lives on the ANCHOR (owner + 0o022); the target names
-# nlink_exactly_one + regular_file + max_bytes, and nlink is load-bearing three ways
+# nlink_exactly_one + regular_file + a read-time-only max_bytes, and nlink is
+# load-bearing three ways
 # (ADR-0009 decision 5). Do not "complete" these fields; #186 owed-bullet 1 was
 # corrected for exactly this reason.
-crates/maknae-kernel/src/handler.rs:377|owner: None,
-crates/maknae-kernel/src/handler.rs:378|mode_mask: None,
+crates/maknae-kernel/src/handler.rs:398|owner: None,
+crates/maknae-kernel/src/handler.rs:399|mode_mask: None,

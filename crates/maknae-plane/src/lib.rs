@@ -22,4 +22,7 @@
 
 pub mod fd;
 
-pub use fd::{DelegatedFds, FdCollector};
+pub use fd::FdCollector;
+/// Re-exported for callers that only need the queue: descriptor custody lives in
+/// [`maknae_io`], and the kernel consumes it without linking `tokio::net`.
+pub use maknae_io::DelegatedFds;

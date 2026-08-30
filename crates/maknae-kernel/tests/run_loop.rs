@@ -122,6 +122,7 @@ async fn audit_failure_withholds_response() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -170,6 +171,7 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -222,6 +224,7 @@ async fn deny_audits_then_closes() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -271,6 +274,7 @@ async fn happy_ping_responds() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -317,6 +321,7 @@ async fn permit_admission_precedes_request_record() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -372,6 +377,7 @@ async fn happy_whoami_carries_peer_facts() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
 
@@ -408,6 +414,7 @@ async fn read_timeout_closes() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
     let elapsed = start.elapsed();
@@ -462,6 +469,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
     let recs = emit.records();
@@ -492,6 +500,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         authz.1.clone(),
         authz.2,
         maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
     )
     .await;
     let recs2 = emit2.records();
@@ -549,6 +558,7 @@ async fn unread_response_does_not_hang_the_handler() {
             authz.1.clone(),
             authz.2,
             maknae_security::Lane::Local,
+            maknae_io::DelegatedFds::new(0),
         ),
     )
     .await;

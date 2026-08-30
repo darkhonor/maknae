@@ -1118,6 +1118,7 @@ dependencies = [
  "arc-swap",
  "maknae-config",
  "maknae-io",
+ "maknae-plane",
  "nix",
  "rcgen",
  "rustify",

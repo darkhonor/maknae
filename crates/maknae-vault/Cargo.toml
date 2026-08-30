@@ -29,6 +29,10 @@ nix = { version = "0.31", default-features = false, features = ["socket", "user"
 
 [target.'cfg(unix)'.dependencies]
 maknae-io = { path = "../maknae-io" }
+# The client-plane descriptor collector (ADR-0009). It must sit BENEATH the TLS layer,
+# and the TLS acceptor lives here — so until #66 moves PlaneListener/AuthenticatedStream
+# into maknae-plane, the wrapping happens here and the adapter is borrowed from there.
+maknae-plane = { path = "../maknae-plane" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }

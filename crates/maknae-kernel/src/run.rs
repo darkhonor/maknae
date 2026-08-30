@@ -327,6 +327,10 @@ pub async fn handle<S, E, P>(
     // the listener — never inferred here, and never readable from the request
     // (ADR-0009 decision 8).
     lane: maknae_security::Lane,
+    // The descriptors this connection's peer delegated, oldest first. Correlation is
+    // FIFO and sound: the kernel does not merge ancillary data across `sendmsg`
+    // boundaries, so descriptors arrive in the order of the frames they accompanied.
+    delegated: maknae_io::DelegatedFds,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -515,7 +519,30 @@ pub async fn handle<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(&request.verb, peer_uid, lane);
+    // ADR-0009: for a term that names an object, the subject's OWN descriptor is the
+    // OS's answer. Take and verify it BEFORE the decision — the PDP must decide on the
+    // kernel-reported path, not on the string the client chose to send, so the shipped
+    // deny list evaluates the object rather than an alias for it (decision 6).
+    //
+    // Absent or unverifiable means the OS was never established. That is a `Deny` at
+    // the PDP (decision 2), never a fallback to a daemon-side open — the fallback IS
+    // the confused deputy this ADR exists to close.
+    let verified_read: Option<(std::os::fd::OwnedFd, String)> = match &request.verb {
+        maknae_proto::Verb::Read { .. } => delegated.take().and_then(|fd| {
+            // No budget here: oversize must not become an authorization failure.
+            let plan = crate::handler::delegated_plan(&principal.home, principal.uid, None);
+            maknae_io::verify_delegated(std::os::fd::AsFd::as_fd(&fd), plan)
+                .ok()
+                .map(|v| (fd, v.path.to_string_lossy().into_owned()))
+        }),
+        _ => None,
+    };
+    let sec_req = build_authz_request(
+        &request.verb,
+        peer_uid,
+        lane,
+        verified_read.as_ref().map(|(_, p)| p.as_str()),
+    );
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     let verdict = match authz_admission {
@@ -736,10 +763,12 @@ pub async fn handle<S, E, P>(
                     let outcome = {
                         let home = principal.home.clone();
                         let owner = principal.uid;
-                        let p = path.clone();
+                        // Permitted implies verified: the PDP only says yes on this
+                        // term when a descriptor was established above.
+                        let fd = verified_read.map(|(fd, _)| fd);
                         tokio::time::timeout(
                             authz_decide_timeout,
-                            tokio::task::spawn_blocking(move || read_pep(&home, owner, &p, budget)),
+                            tokio::task::spawn_blocking(move || read_pep(fd, &home, owner, budget)),
                         )
                         .await
                     };
@@ -839,23 +868,26 @@ pub async fn handle<S, E, P>(
 }
 
 /// The blocking half of the read PEP: THIN orchestration over the T1
-/// decision logic (`handler::read_plan` names every requirement;
+/// decision logic (`handler::delegated_plan` names every requirement;
 /// `handler::map_read_error` types every refusal) — this fn only performs
 /// the two maknae-io calls the plan prescribes. Per-request anchor open:
 /// the same Zero-Trust cadence as the policy re-read.
 fn read_pep(
+    fd: Option<std::os::fd::OwnedFd>,
     home: &std::path::Path,
     owner_uid: u32,
-    path: &str,
     budget: u64,
 ) -> Result<Zeroizing<Vec<u8>>, ReadRefusal> {
-    let (rel, anchor_req, target_req) = crate::handler::read_plan(home, owner_uid, path, budget)?;
-    let anchor = open_anchor_resolved(home, anchor_req, StrategyPref::Auto)
-        .map_err(|e| ReadRefusal::Unavailable(e.to_string()))?;
-    match anchor.read(&rel, None, target_req) {
-        Ok(outcome) => Ok(outcome.value),
-        Err(e) => Err(crate::handler::map_read_error(e)),
-    }
+    // Unreachable on a permit — the gate denies without a verified descriptor — but
+    // named rather than unwrapped, because "cannot happen" is how fail-open arrives.
+    let fd = fd.ok_or_else(|| ReadRefusal::Refused("no delegated descriptor".into()))?;
+    // Re-verified inside `read_delegated`, immediately before the bytes are taken. If
+    // the object changed between the decision and the read, the read refuses: this is
+    // the TOCTOU backstop, adapted — there is no second OPEN to enforce at, so the
+    // check rides the descriptor that was already pinned.
+    maknae_io::read_delegated(&fd, crate::handler::delegated_plan(home, owner_uid, Some(budget)))
+        .map(|(_path, bytes)| bytes)
+        .map_err(crate::handler::map_read_error)
 }
 
 /// Write one generic error frame, bounded like every response write. The
@@ -980,8 +1012,11 @@ pub struct Conn<S> {
     pub stream: S,
     pub peer_uri: String,
     pub peer_uid: u32,
+    /// Descriptors this peer delegated over `SCM_RIGHTS`, collected beneath the TLS
+    /// layer (ADR-0009). A property of the accepted CONNECTION, like the peer facts
+    /// above — and like them, established by the door rather than read off the wire.
+    pub delegated: maknae_io::DelegatedFds,
 }
-
 /// The accept surface the run-loop consumes, split into a prompt raw-accept and a bounded
 /// handshake so a stalled TLS handshake cannot serialize acceptance (anti-DoS, spec §6a).
 /// `PlaneListener` is the production impl; the accept-loop integration tests supply a
@@ -1029,10 +1064,12 @@ impl PlaneAccept for PlaneListener {
             PlaneListener::finish_handshake(self, raw, peer_creds, handshake_timeout).await?;
         let peer_uri = stream.peer_uri_san().to_string();
         let peer_uid = stream.peer_creds().uid;
+        let delegated = stream.delegated();
         Ok(Conn {
             stream,
             peer_uri,
             peer_uid,
+            delegated,
         })
     }
 }
@@ -1270,6 +1307,7 @@ where
                                                 // the lane is a property of the door,
                                                 // not of anything read off the wire.
                                                 maknae_security::Lane::Local,
+                                                conn.delegated,
                                             )
                                             .await;
                                         }

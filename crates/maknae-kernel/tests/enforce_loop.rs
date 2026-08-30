@@ -122,6 +122,33 @@ fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     .unwrap()
 }
 
+/// Drive a request whose subject DELEGATES a descriptor for `delegate`, the way a
+/// real client does: the client process opens the object itself, so the kernel has
+/// already run the whole permission check for that subject, and the descriptor it
+/// hands over IS the OS's answer (ADR-0009 decision 1).
+#[allow(clippy::too_many_arguments)]
+async fn drive_read<P>(
+    fx_principal: &maknae_config::Principal,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegate: &std::path::Path,
+) -> Option<Vec<u8>>
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    let fds = maknae_io::DelegatedFds::new(4);
+    // `open` here is the SUBJECT's open. If it fails, the subject genuinely cannot
+    // read the object and no descriptor is delegated -- which is itself the case
+    // ADR-0009 decision 2 turns into a Deny, so the test still exercises a real path.
+    if let Ok(f) = std::fs::File::open(delegate) {
+        fds.push(std::os::fd::OwnedFd::from(f));
+    }
+    drive_with(fx_principal, authorizer, emit, peer_uid, verb, timeout, fds).await
+}
+
 /// Drive one request through `handle()` with the given authorizer; return
 /// (raw response frame if any, audit records).
 async fn drive<P>(
@@ -131,6 +158,31 @@ async fn drive<P>(
     peer_uid: u32,
     verb: maknae_proto::Verb,
     timeout: Duration,
+) -> Option<Vec<u8>>
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    drive_with(
+        fx_principal,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_with<P>(
+    fx_principal: &maknae_config::Principal,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegated: maknae_io::DelegatedFds,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -152,6 +204,7 @@ where
         Arc::new(fx_principal.clone()),
         timeout,
         maknae_security::Lane::Local,
+        delegated,
     )
     .await;
     match tokio::time::timeout(
@@ -384,7 +437,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
@@ -393,6 +446,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
             path: target.clone(),
         },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("deny frame");
@@ -438,7 +492,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
@@ -447,6 +501,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
             path: target.clone(),
         },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("permitted read answers");
@@ -485,13 +540,16 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
-        maknae_proto::Verb::Read { path: target },
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("refusal frame");
@@ -503,9 +561,15 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     assert!(!frame.windows(needle.len()).any(|w| w == needle));
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
+    // CHANGED BY ADR-0009 decision 6, and this is the improvement: the refusal is no
+    // longer a blanket structural "symlink refused" that never consulted policy. The
+    // subject's descriptor resolves to the real object, the kernel reports THAT path,
+    // and the shipped deny list matches it by name. The alias is defeated by the rule
+    // it was trying to dodge — which also means a LEGITIMATE in-home symlink now
+    // works, the deliberate loosening ADR-0009 D6 records.
     assert!(
-        req.outcome.reason.to_lowercase().contains("symlink"),
-        "the STRUCTURAL symlink refusal is the reason, not e.g. ENOENT: {}",
+        req.outcome.reason.contains(".ssh"),
+        "the deny list must match the RESOLVED path, not the alias: {}",
         req.outcome.reason
     );
 }
@@ -526,13 +590,16 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
-        maknae_proto::Verb::Read { path: target },
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("refusal frame");
@@ -541,9 +608,18 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
         other => panic!("hardlink alias must refuse (nlink_exactly_one): {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
+    // CHANGED BY ADR-0009: `nlink_exactly_one` is now checked while VERIFYING the
+    // delegated descriptor, before the decision — so a multiply-linked object never
+    // establishes OS access at all and the verdict is a composed Deny rather than a
+    // PEP refusal. The outcome is right and strictly earlier.
+    //
+    // OWED (#84 / #181 / ADR-0008 D5, "land it once"): this reason cannot yet
+    // distinguish "a descriptor arrived and failed verification" from "no descriptor
+    // arrived". Both deny, so nothing is unsafe — but an operator cannot tell a
+    // hard-link alias from a client that sent nothing.
     assert!(
-        req.outcome.reason.contains("hard-linked"),
-        "the nlink refusal is the audit reason: {}",
+        req.outcome.reason.contains("os dac"),
+        "the refusal is OS-DAC-attributed: {}",
         req.outcome.reason
     );
 }
@@ -559,27 +635,36 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
-        maknae_proto::Verb::Read { path: target },
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("unavailable frame");
     // Restore so Drop can clean up.
     std::fs::set_permissions(&fx.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // CHANGED BY ADR-0009 decision 7 — and this is the removed-behavior obligation
+    // (ADR-0021) DISCHARGED, not waived. The anchor OPEN is gone from the read path,
+    // but the anchor REQUIREMENT survives: `root_required` is checked by `stat` on the
+    // home, which needs only search on its parent and no permission on the home
+    // itself. A home any non-principal can write is still refused.
+    //
+    // What changed is the SHAPE of the refusal, for the better: it is now a composed
+    // Deny at the PDP rather than a PEP unavailability. ADR-0009's "it produces a
+    // verdict instead of a failure" — the trail records a decision, not an outage.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Internal);
-            assert_eq!(e.message, "read unavailable");
-        }
-        other => panic!("group-writable home must refuse at the anchor: {other:?}"),
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("group-writable home must still be refused: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.posture, "unavailable");
+    assert_eq!(req.outcome.result, "deny");
 }
 
 #[tokio::test]
@@ -597,13 +682,16 @@ async fn an_oversize_file_is_refused_too_large_after_a_real_permit() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
-        maknae_proto::Verb::Read { path: target },
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
         Duration::from_secs(5),
+        std::path::Path::new(&target),
     )
     .await
     .expect("TooLarge frame");
@@ -770,7 +858,7 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     );
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive(
+    let frame = drive_read(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
@@ -779,20 +867,30 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
             path: "/etc/hostname".into(),
         },
         Duration::from_secs(5),
+        std::path::Path::new("/etc/hostname"),
     )
     .await
     .expect("outside-root frame");
+    // CHANGED BY ADR-0009. Previously the PDP PERMITTED an operator-granted absolute
+    // path and the PEP refused it afterwards, so the trail recorded "permit, then
+    // refused-outside-root". Confinement is now one of the two proofs the decision
+    // itself requires (decision 3), so an object outside the enrolled home never
+    // establishes OS access and the verdict is a real Deny.
+    //
+    // The property this test exists for is unchanged and better served: a grant the
+    // operator wrote for a path outside the home does NOT yield the bytes, and the
+    // trail says so as a decision rather than as a delivery failure.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Internal);
-            assert_eq!(e.message, "read outside supported root");
-            assert_ne!(e.code, ProtoErrCode::Unauthorized, "a Permit was rendered");
-        }
-        other => panic!("outside-root must refuse distinctly: {other:?}"),
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("a grant outside the enrolled home must not deliver: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.result, "permit");
-    assert_eq!(req.outcome.posture, "refused-outside-root");
+    assert_eq!(req.outcome.result, "deny");
+    let leak = b"maknae";
+    assert!(
+        !frame.windows(leak.len()).any(|w| w == leak),
+        "no content from outside the home may ride the frame"
+    );
 }
 
 #[tokio::test]

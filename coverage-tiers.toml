@@ -484,7 +484,7 @@ why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the 
 [[exception]]
 path = "crates/maknae-io/src/delegated.rs"
 anchor = "fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {"
-end_anchor = "})?;"
+end_anchor = "        kind: crate::checks::kind_of_errno(e),"
 why = "The /proc/self/fd lane failing for a descriptor the caller already holds requires /proc to be absent from the process's mount namespace (a container built without it). That is a REAL deployment condition, not a theoretical one, and it is why the arm exists and why it maps to FdPathUnavailable -> ADR-0009 decision 8's unknown -> Deny rather than to any success. It is not constructible in-process: unsharing a mount namespace mid-test would apply to every thread of a parallel harness, and fork-then-unshare in a multithreaded process leaves only async-signal-safe operations available. The testable path is a re-exec of the test binary into `unshare -Urm` with /proc masked; that is a harness the crate does not have and would be the way to retire this exception. The arm itself carries NO decision -- it is a total mapping of any errno to one variant -- and its Display is separately asserted in error.rs (display_strings_the_crate_reasons_about), including that it names no false path."
 
 [[exception]]
@@ -529,13 +529,13 @@ why = "fstat on a dirfd the kernel just returned from openat cannot fail on a he
 # is an unclassified one, which is the state this gate exists to prevent.
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "                Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
-end_anchor = "                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
+anchor = "            Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
+end_anchor = "                return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
 why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "                Ok(0) => break,"
+anchor = "            Ok(0) => break,"
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
 why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm below them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
 

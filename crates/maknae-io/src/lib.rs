@@ -61,7 +61,10 @@ pub use anchor::{
     StrategyPref,
 };
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
-pub use delegated::{recv_delegated, verify_delegated, Delegated, DelegatedRequired, Received};
+pub use delegated::{
+    read_delegated, recv_delegated, verify_delegated, Delegated, DelegatedFds, DelegatedRequired,
+    Received, DELEGATED_FDS_PER_CONNECTION,
+};
 pub use error::{IoError, IoKind};
 pub use normalize::normalize;
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
