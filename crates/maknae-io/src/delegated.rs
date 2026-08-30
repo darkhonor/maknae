@@ -215,16 +215,32 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
         [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE))];
     let mut anc = rustix::net::RecvAncillaryBuffer::new(&mut space);
     let mut iov = [std::io::IoSliceMut::new(buf)];
-    let msg = rustix::net::recvmsg(
-        sock,
-        &mut iov,
-        &mut anc,
-        rustix::net::RecvFlags::CMSG_CLOEXEC,
-    )?;
+    // `MSG_CMSG_CLOEXEC` is a Linux extension. Where it exists it closes the window
+    // entirely — the descriptor is close-on-exec the instant the kernel installs it.
+    #[cfg(target_os = "linux")]
+    let flags = rustix::net::RecvFlags::CMSG_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = rustix::net::RecvFlags::empty();
+    let msg = rustix::net::recvmsg(sock, &mut iov, &mut anc, flags)?;
     let mut fds = Vec::new();
     for message in anc.drain() {
         if let rustix::net::RecvAncillaryMessage::ScmRights(received) = message {
-            fds.extend(received);
+            for fd in received {
+                // PLATFORM DELTA, stated rather than silently accepted: without
+                // `MSG_CMSG_CLOEXEC` a received descriptor arrives WITHOUT
+                // close-on-exec, so it is set here instead. The residual is the window
+                // between the `recvmsg` above and this `fcntl` — an exec inside it
+                // would leak the descriptor to the child. `maknaed` execs nothing on
+                // this path, which bounds it, but the window is real and is the reason
+                // the Linux flag is preferred where it exists.
+                #[cfg(not(target_os = "linux"))]
+                nix::fcntl::fcntl(
+                    &fd,
+                    nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+                )
+                .map_err(std::io::Error::from)?;
+                fds.push(fd);
+            }
         }
     }
     Ok(Received {

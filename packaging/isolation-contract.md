@@ -8,9 +8,15 @@ matrix** (the human-readable statement of the P1/P2 capability-separation proper
 
 Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the lint until enabled.
 
+> **CORRECTED 2026-08-30 (operator ruling): host-native macOS is a DEPLOYMENT TARGET, not a dev convenience.** The column below read *"Host-native macOS (dev; reduced)"* and every downstream decision inherited that framing — including, on the day this was corrected, an argument that an unverified macOS lane was acceptable because *"macOS is a dev host anyway"*. It is not. The operator's statement of intent: **the Mac mini fleet bought when OpenClaw shipped is a market Maknae intends to serve.** The column is renamed accordingly.
+>
+> **What this changes, concretely:** a macOS delta is now a *supported-platform gap*, not a reduced-profile footnote. `launchd (no seccomp)` stays an honest delta because it is a platform fact with no macOS equivalent; *"we have not tested it there"* is not a delta, it is an unmet obligation. **Anything the Linux profile enforces needs a macOS answer or a recorded, ratified reason there is none** — and the reason may not be "dev host".
+>
+> **The verification constraint, named because it binds:** macOS verification runs on **Wrathion** (the operator's Apple Silicon machine) and nowhere else. CI is `ubuntu-latest` only and all three standing test hosts are Linux (`state/linux-test-hosts.md`). Until a macOS lane exists in CI, *every* macOS claim in this contract rests on a manual Wrathion run, and any change that cannot be verified there ships unverified — which for a deployment target is a release-gating condition, not a note.
+
 ## Property × profile
 
-| Property | Host-native Linux (MVP reference) | Host-native macOS (dev; reduced) | Compose/Podman | K8s |
+| Property | Host-native Linux (MVP reference) | Host-native macOS (deployment target; Wrathion-verified) | Compose/Podman | K8s |
 |---|---|---|---|---|
 | Trust-plane process isolation | `_maknae`; systemd `ProtectSystem=strict`/`NoNewPrivileges`/cap-drop/seccomp ✓`systemd-analyze security` threshold in smoke | `_maknae` daemon; launchd (no seccomp — delta) ✓plist lint + perms smoke | non-root, RO rootfs ✓compose lint (`user:`,`read_only:`) | `deferred` |
 | Channel auth (session) | mTLS over UDS + peer-creds ✓§7(3) negative suite | same ✓same | mTLS internal net ✓same | `deferred` |
