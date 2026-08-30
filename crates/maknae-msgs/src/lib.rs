@@ -26,7 +26,7 @@ pub enum MsgId {
     AuthzUnknownSubject,
     DaemonNotRunning,
     DaemonStartFailed,
-    /// PR-J1 Task 7 (spec §5.4): the boot-time DAC authz-config gate
+    /// PR-J1 Task 7 (spec §5.4): the boot-time capability-grant config gate
     /// (`authz.yaml` + the enrolled `principal`) could not be resolved — the
     /// daemon refuses to start.
     AuthzConfigRefused,
