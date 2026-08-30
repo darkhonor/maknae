@@ -120,6 +120,19 @@ pub enum IoError {
         path: PathBuf,
         kind: IoKind,
     },
+    /// The kernel could not be asked where a delegated descriptor points: the
+    /// `/proc/self/fd` lane is unavailable (a namespace without `/proc`), or the
+    /// platform has no lane yet.
+    ///
+    /// **Deliberately carries NO path.** There is no path to name — that is the
+    /// whole condition — and naming `/proc/self/fd` would report the failure as
+    /// being at a directory the caller never asked about. Saying something FALSE
+    /// about a path is the defect `NonUtf8Component` exists to prevent.
+    ///
+    /// Per ADR-0009 decision 8 this is the UNKNOWN answer, and unknown denies.
+    FdPathUnavailable {
+        kind: IoKind,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -174,6 +187,9 @@ impl std::fmt::Display for IoError {
                 )
             }
             Self::Io { path, kind } => write!(f, "io error {kind:?}: {}", path.display()),
+            Self::FdPathUnavailable { kind } => {
+                write!(f, "cannot determine the delegated descriptor's path: {kind:?}")
+            }
         }
     }
 }
@@ -226,6 +242,20 @@ mod tests {
         assert_eq!(
             IoError::EmptyRemainder.to_string(),
             "empty relative remainder"
+        );
+        // ADR-0009: when the kernel cannot be asked where a delegated descriptor
+        // points, the answer is UNKNOWN and unknown denies. The message must name
+        // the CONDITION and no path — an earlier draft rendered "/proc/self/fd",
+        // which is not where the failure is and is exactly the falsehood
+        // NonUtf8Component exists to prevent.
+        let msg = IoError::FdPathUnavailable {
+            kind: IoKind::NotFound,
+        }
+        .to_string();
+        assert_eq!(msg, "cannot determine the delegated descriptor's path: NotFound");
+        assert!(
+            !msg.contains("/proc"),
+            "the message must not name a path the failure is not at: {msg}"
         );
         assert_eq!(
             IoError::EscapesAnchor {

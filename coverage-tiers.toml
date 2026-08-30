@@ -42,6 +42,10 @@ files = [
   "crates/maknae-proto/src/bytes.rs",
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
+  # ADR-0009 confinement: every line is a refusal path, and the failure mode is
+  # exact — a wrong branch hands a subject an object outside its enrolled home,
+  # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
+  "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
   # Promoted from [[t3]] once it reached 100%. MEASURED ON BOTH LANES, because the
   # cfg(linux) openat2 block and the real probe are regions darwin never compiles and
@@ -463,6 +467,17 @@ why = "IoError/IoKind enums with Display only (there is no From impl, despite wh
 path = "crates/maknae-io/src/anchor.rs"
 anchor = "syscall::fstat(&afd).map_err"
 why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-io/src/delegated.rs"
+anchor = "fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {"
+end_anchor = "})?;"
+why = "The /proc/self/fd lane failing for a descriptor the caller already holds requires /proc to be absent from the process's mount namespace (a container built without it). That is a REAL deployment condition, not a theoretical one, and it is why the arm exists and why it maps to FdPathUnavailable -> ADR-0009 decision 8's unknown -> Deny rather than to any success. It is not constructible in-process: unsharing a mount namespace mid-test would apply to every thread of a parallel harness, and fork-then-unshare in a multithreaded process leaves only async-signal-safe operations available. The testable path is a re-exec of the test binary into `unshare -Urm` with /proc masked; that is a harness the crate does not have and would be the way to retire this exception. The arm itself carries NO decision -- it is a total mapping of any errno to one variant -- and its Display is separately asserted in error.rs (display_strings_the_crate_reasons_about), including that it names no false path."
+
+[[exception]]
+path = "crates/maknae-io/src/delegated.rs"
+anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))"
+why = "Identical in kind to the anchor.rs fstat exception above, and strictly weaker: this fstat runs on a descriptor whose /proc/self/fd entry resolved two lines earlier, so the fd is demonstrably valid and open at that instant. A pure errno passthrough with no decision."
 
 
 # The last three uncovered production regions in the crate's [t1] files, classified
