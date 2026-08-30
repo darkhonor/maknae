@@ -902,6 +902,112 @@ def d6_decision(prov: str) -> str:
                "How maknae-authz-* backends compose into one authorization decision.")
 
 
+# --- D7: the data models Maknae records and enforces, in IDEF1X ------------
+
+def d7_datamodel(prov: str) -> str:
+    """What the recorded and enforced data actually looks like.
+
+    IDEF1X (ISO/IEC/IEEE 31320-2:2012): square corners for an independent
+    entity, rounded for a dependent one whose identity inherits from its
+    parent; a solid line for an identifying relationship with a filled circle
+    at the child end; primary key above the rule inside the box.
+
+    The nested Rust structs are serialized as ONE JSON document, so treating
+    them as separate entities is a normalization judgement, not a transcription
+    -- which is why every entity cites the type it was drawn from.
+    """
+    doc = tomllib.loads((OUT / "data-model.toml").read_text())
+    secs, ents, rels = doc["section"], doc["entity"], doc["rel"]
+    check_evidence(ents, "evidence", "data-model.toml")
+    by_id = {e["id"]: e for e in ents}
+
+    BW, GAP, PAD = 208, 18, 44
+    per = max(len([e for e in ents if e["section"] == s["id"]]) - 1 for s in secs)
+    W = PAD * 2 + per * BW + (per - 1) * GAP
+
+    def ebox(e, x, y):
+        pk, at = e["pk"], e.get("attrs", [])
+        nt = e.get("note")
+        h = 26 + len(pk) * 12 + 6 + len(at) * 12 + (13 if nt else 0) + 10
+        dep = e["kind"] == "dependent"
+        out = [box(x, y, BW, h, "#FFFFFF", TRUST_LINE if not dep else PLAIN_LINE,
+                   rx=10 if dep else 0, sw="1" if not dep else "0.75"),
+               text(x + 10, y + 17, e["name"], 10, "700",
+                    fill=TRUST_INK if not dep else INK, mono=True)]
+        yy = y + 30
+        for a in pk:
+            out.append(text(x + 10, yy, a, 8.5, "600", fill=INK, mono=True)); yy += 12
+        out.append(f'<line x1="{x}" y1="{yy-8}" x2="{x+BW}" y2="{yy-8}" '
+                   f'stroke="{MUTED}" stroke-width="0.75"/>')
+        yy += 3
+        for a in at:
+            out.append(text(x + 10, yy, a, 8.5, fill=MUTED, mono=True)); yy += 12
+        if nt:
+            out.append(text(x + 10, yy + 1, nt, 8, fill=WARN, mono=True))
+        return out, h
+
+    p, y = [], 116
+    geo = {}
+    for s in secs:
+        mine = [e for e in ents if e["section"] == s["id"]]
+        parent = next(e for e in mine if e["kind"] == "independent")
+        kids = [e for e in mine if e is not parent]
+        p.append(text(PAD, y, s["title"], 13, "600", fill=TRUST_INK))
+        for k, ln in enumerate(_wrap_words(s["note"], 150)):
+            p.append(text(PAD, y + 16 + k * 13, ln, 9.5, fill=MUTED))
+        y += 16 + len(_wrap_words(s["note"], 150)) * 13 + 12
+
+        b, ph = ebox(parent, PAD, y)
+        p += b
+        geo[parent["id"]] = (PAD + BW / 2, y, ph)
+        y += ph + 34
+        kh = 0
+        for i, e in enumerate(kids):
+            x = PAD + i * (BW + GAP)
+            b, h = ebox(e, x, y)
+            p += b
+            geo[e["id"]] = (x + BW / 2, y, h)
+            kh = max(kh, h)
+        y += kh + 40
+
+    # relationships, drawn last so a line never sits on top of a box
+    for r in rels:
+        px, py, ph = geo[r["parent"]]
+        cx, cy, _ = geo[r["child"]]
+        mid = py + ph + 16
+        p.append(f'<path d="M {px} {py+ph} V {mid} H {cx} V {cy}" fill="none" '
+                 f'stroke="{TRUST_LINE}" stroke-width="1"/>')
+        p.append(f'<circle cx="{cx}" cy="{cy}" r="3.5" fill="{TRUST_LINE}"/>')
+        if r.get("card"):
+            p.append(text(cx + 8, cy - 5, r["card"], 8.5, "700", fill=TRUST_LINE))
+
+    H = y + 44
+    p = [text(PAD, 44, "Data model — what Maknae records and enforces", 16, "600"),
+         text(PAD, 66, "IDEF1X. Square corners are independent entities; rounded corners "
+              "inherit their identity from a parent. A filled circle marks the child end;", 11,
+              fill=MUTED),
+         text(PAD, 82, "P is one-or-more, Z is zero-or-one, 1 is exactly one, blank is "
+              "zero-or-more. Attributes above the rule are the primary key.", 11, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/data-model.toml')}"))
+    out = svg(W, H, "\n".join(p), "Maknae data model",
+              "IDEF1X data model of the Maknae audit trail, authorization request and policy.")
+    return out.replace("UML 2.5.1 (OMG formal/2017-12-05)",
+                       "IDEF1X (ISO/IEC/IEEE 31320-2:2012)")
+
+
+def _wrap_words(s, cols):
+    out, cur = [], ""
+    for w in s.split():
+        t = w if not cur else cur + " " + w
+        if len(t) > cols and cur:
+            out.append(cur); cur = w
+        else:
+            cur = t
+    if cur:
+        out.append(cur)
+    return out
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -914,6 +1020,7 @@ def main() -> None:
         ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", d5_readpath(prov)),
         ("generated-decision-cycle.svg", d6_decision(prov)),
+        ("generated-data-model.svg", d7_datamodel(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

@@ -1,0 +1,133 @@
+<svg width="1200" height="1146" viewBox="0 0 1200 1146" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae data model</title>
+  <desc>IDEF1X data model of the Maknae audit trail, authorization request and policy.</desc>
+  <rect x="0" y="0" width="1200" height="1146" fill="#FFFFFF"/>
+<text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Data model — what Maknae records and enforces</text>
+<text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">IDEF1X. Square corners are independent entities; rounded corners inherit their identity from a parent. A filled circle marks the child end;</text>
+<text x="44" y="82" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">P is one-or-more, Z is zero-or-one, 1 is exactly one, blank is zero-or-more. Attributes above the rule are the primary key.</text>
+<text x="44" y="116" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">Audit trail — AU-3</text>
+<text x="44" y="132" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">One record per request outcome. The key is (session-id, seq), not the timestamp: two records can share a clock tick, and seq is per-session monotonic,</text>
+<text x="44" y="145" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">so the pair is what orders and identifies the trail.</text>
+<rect x="44" y="170" width="208" height="138" rx="0" fill="#FFFFFF" stroke="#534AB7" stroke-width="1"/>
+<text x="54" y="187" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">AUDIT-RECORD</text>
+<text x="54" y="200" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id</text>
+<text x="54" y="212" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq</text>
+<line x1="44" y1="216" x2="252" y2="216" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="227" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">ts</text>
+<text x="54" y="239" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">event</text>
+<text x="54" y="251" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">action</text>
+<text x="54" y="263" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">object</text>
+<text x="54" y="275" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">object-requested</text>
+<text x="54" y="287" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">au3-1</text>
+<rect x="44" y="342" width="208" height="102" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="359" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">WHERE</text>
+<text x="54" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id (FK)</text>
+<text x="54" y="384" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq (FK)</text>
+<line x1="44" y1="388" x2="252" y2="388" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="399" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">host</text>
+<text x="54" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">component</text>
+<text x="54" y="423" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">socket</text>
+<rect x="270" y="342" width="208" height="114" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="359" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">SOURCE</text>
+<text x="280" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id (FK)</text>
+<text x="280" y="384" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq (FK)</text>
+<line x1="270" y1="388" x2="478" y2="388" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="399" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">uid</text>
+<text x="280" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">gid</text>
+<text x="280" y="423" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">pid</text>
+<text x="280" y="435" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">plane-uri-san</text>
+<rect x="496" y="342" width="208" height="90" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="506" y="359" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">SUBJECT</text>
+<text x="506" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id (FK)</text>
+<text x="506" y="384" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq (FK)</text>
+<line x1="496" y1="388" x2="704" y2="388" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="506" y="399" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">user</text>
+<text x="506" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">plane-uri-san</text>
+<rect x="722" y="342" width="208" height="102" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="732" y="359" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">OUTCOME</text>
+<text x="732" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id (FK)</text>
+<text x="732" y="384" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq (FK)</text>
+<line x1="722" y1="388" x2="930" y2="388" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="732" y="399" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">result</text>
+<text x="732" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">reason</text>
+<text x="732" y="423" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">posture</text>
+<rect x="948" y="342" width="208" height="90" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="958" y="359" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">INTEGRITY</text>
+<text x="958" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">session-id (FK)</text>
+<text x="958" y="384" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">seq (FK)</text>
+<line x1="948" y1="388" x2="1156" y2="388" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="958" y="399" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">prev-hash</text>
+<text x="958" y="411" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">sig</text>
+<text x="44" y="496" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">Authorization request — the PDP's input</text>
+<text x="44" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">The ABAC four-tuple. Subject, Resource and Context are attribute BAGS, not fixed columns — which is what lets an extension key on attributes the core</text>
+<text x="44" y="525" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">never declared (ADR-0004).</text>
+<rect x="44" y="550" width="208" height="66" rx="0" fill="#FFFFFF" stroke="#534AB7" stroke-width="1"/>
+<text x="54" y="567" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">AUTHZ-REQUEST</text>
+<text x="54" y="580" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">request-id</text>
+<line x1="44" y1="584" x2="252" y2="584" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="595" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">action</text>
+<rect x="44" y="650" width="208" height="103" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="667" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">ATTRIBUTE</text>
+<text x="54" y="680" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">request-id (FK)</text>
+<text x="54" y="692" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">scope</text>
+<text x="54" y="704" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">key</text>
+<line x1="44" y1="708" x2="252" y2="708" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="719" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">value</text>
+<text x="54" y="732" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#B3452F">scope :: subject | resource | context</text>
+<rect x="270" y="650" width="208" height="78" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="667" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">VERDICT</text>
+<text x="280" y="680" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">request-id (FK)</text>
+<line x1="270" y1="684" x2="478" y2="684" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="695" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">decision</text>
+<text x="280" y="707" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">reason</text>
+<text x="44" y="793" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">Authorization policy — the shipped baseline</text>
+<text x="44" y="809" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">Read per request from disk. `allow` and `deny` are the same shape distinguished by rule-kind; deny-overrides is applied at composition, not encoded in</text>
+<text x="44" y="822" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">the data.</text>
+<rect x="44" y="847" width="208" height="66" rx="0" fill="#FFFFFF" stroke="#534AB7" stroke-width="1"/>
+<text x="54" y="864" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">AUTHZ-POLICY</text>
+<text x="54" y="877" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">policy-path</text>
+<line x1="44" y1="881" x2="252" y2="881" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="892" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">loaded-at</text>
+<rect x="44" y="947" width="208" height="115" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="964" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">PATTERN</text>
+<text x="54" y="977" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">policy-path (FK)</text>
+<text x="54" y="989" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">rule-kind</text>
+<text x="54" y="1001" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">ordinal</text>
+<line x1="44" y1="1005" x2="252" y2="1005" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="54" y="1016" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">glob</text>
+<text x="54" y="1028" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">match3</text>
+<text x="54" y="1041" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#B3452F">rule-kind :: allow | deny</text>
+<rect x="270" y="947" width="208" height="78" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="964" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">ROLE-BINDING</text>
+<text x="280" y="977" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">policy-path (FK)</text>
+<text x="280" y="989" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#2C2C2A">role</text>
+<line x1="270" y1="993" x2="478" y2="993" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="280" y="1004" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#5F5E5A">principal</text>
+<path d="M 148.0 308 V 324 H 148.0 V 342" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="148.0" cy="342" r="3.5" fill="#534AB7"/>
+<text x="156.0" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">1</text>
+<path d="M 148.0 308 V 324 H 374.0 V 342" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="374.0" cy="342" r="3.5" fill="#534AB7"/>
+<text x="382.0" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">1</text>
+<path d="M 148.0 308 V 324 H 600.0 V 342" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="600.0" cy="342" r="3.5" fill="#534AB7"/>
+<text x="608.0" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">1</text>
+<path d="M 148.0 308 V 324 H 826.0 V 342" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="826.0" cy="342" r="3.5" fill="#534AB7"/>
+<text x="834.0" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">1</text>
+<path d="M 148.0 308 V 324 H 1052.0 V 342" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="1052.0" cy="342" r="3.5" fill="#534AB7"/>
+<text x="1060.0" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">Z</text>
+<path d="M 148.0 616 V 632 H 148.0 V 650" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="148.0" cy="650" r="3.5" fill="#534AB7"/>
+<text x="156.0" y="645" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">P</text>
+<path d="M 148.0 616 V 632 H 374.0 V 650" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="374.0" cy="650" r="3.5" fill="#534AB7"/>
+<text x="382.0" y="645" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">1</text>
+<path d="M 148.0 913 V 929 H 148.0 V 947" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="148.0" cy="947" r="3.5" fill="#534AB7"/>
+<text x="156.0" y="942" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="700" fill="#534AB7">P</text>
+<path d="M 148.0 913 V 929 H 374.0 V 947" fill="none" stroke="#534AB7" stroke-width="1"/>
+<circle cx="374.0" cy="947" r="3.5" fill="#534AB7"/>
+<text x="24" y="1130" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/data-model.toml@03af6814b1</text><text x="1176" y="1130" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">IDEF1X (ISO/IEC/IEEE 31320-2:2012)</text>
+</svg>
