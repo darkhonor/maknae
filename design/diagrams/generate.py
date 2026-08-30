@@ -789,6 +789,119 @@ def d5_readpath(prov: str) -> str:
                "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
 
 
+# --- D6: how maknae-authz-* backends layer into one decision --------------
+
+def d6_decision(prov: str) -> str:
+    """The operand vector and the precedence ladder that folds it.
+
+    Two panels because there are two questions and they have different shapes:
+    how a backend gets ADDED (a vector, ADR-0004) and how the results are
+    RECONCILED (an ordered ladder, ADR-0008). UML 2.5.1 activity semantics for
+    the ladder -- a decision node per rung, first match wins.
+    """
+    doc = tomllib.loads((OUT / "decision-cycle.toml").read_text())
+    ops, rungs = doc["operand"], doc["rung"]
+    check_evidence(ops, "evidence", "decision-cycle.toml")
+    check_evidence(rungs, "evidence", "decision-cycle.toml")
+
+    W, LEFT, COLW = 1320, 44, 560
+    RX = LEFT + COLW + 56
+
+    def wrap(s, cols):
+        out, cur = [], ""
+        for w in s.split():
+            t = w if not cur else cur + " " + w
+            if len(t) > cols and cur:
+                out.append(cur); cur = w
+            else:
+                cur = t
+        if cur:
+            out.append(cur)
+        return out
+
+    p, y = [], 132
+    p.append(text(LEFT, y - 26, "1 · How a backend is added", 13, "600", fill=TRUST_INK))
+    p.append(text(LEFT, y - 10, "ConjunctionAuthorizer holds Vec<Box<dyn Authorizer>>. Adding a "
+                  "model means adding an operand —", 10, fill=MUTED))
+    p.append(text(LEFT, y + 3, "never editing a peer, and never editing the kernel.",
+                  10, fill=MUTED))
+    y += 22
+
+    fills = {"in-repo": (TRUST_FILL, TRUST_LINE, TRUST_INK),
+             "external": (OK_FILL, OK_LINE, "#04342C"),
+             "future": (PLAIN_FILL, PLAIN_LINE, MUTED)}
+    for o in ops:
+        fill, line, ink = fills[o["status"]]
+        ml = wrap(o["model"], 62)
+        h = 40 + len(ml) * 12
+        dash = "5 4" if o["status"] != "in-repo" else None
+        p.append(box(LEFT, y, COLW, h, fill, line, rx=6, dash=dash))
+        p.append(text(LEFT + 12, y + 18, o["name"], 11, "600", fill=ink, mono=True))
+        p.append(text(LEFT + 12, y + 31, o["stereo"], 8.5, fill=line))
+        for k, ln in enumerate(ml):
+            p.append(text(LEFT + 12, y + 45 + k * 12, ln, 9, fill=INK))
+        p.append(text(LEFT + COLW - 12, y + 18, "guarded_decide()", 8.5,
+                      fill=WARN, anchor="end", mono=True))
+        y += h + 12
+
+    p.append(text(LEFT, y + 16, "guarded_decide() wraps EVERY operand in a panic boundary: a "
+                  "backend that panics becomes", 9.5, fill=WARN))
+    p.append(text(LEFT, y + 29, "Indeterminate, which rung 2 turns into Deny. A hostile operand "
+                  "cannot crash the daemon,", 9.5, fill=WARN))
+    p.append(text(LEFT, y + 42, "and cannot fail open either.  (compose.rs:70)", 9.5, fill=WARN))
+    left_bottom = y + 52
+
+    p.append(f'<path d="M {LEFT+COLW+10} {320} h 28" stroke="{MUTED}" '
+             f'stroke-width="1" marker-end="url(#dep2)"/>')
+    p.append('<defs><marker id="dep2" viewBox="0 0 10 10" refX="9" refY="5" '
+             'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+             f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
+             'stroke-width="1.2"/></marker></defs>')
+    p.append(text(LEFT + COLW + 24, 312, "combine()", 8.5, "600", fill=MUTED,
+                  anchor="middle", mono=True))
+
+    y = 132
+    p.append(text(RX, y - 26, "2 · How the results are reconciled", 13, "600", fill=TRUST_INK))
+    p.append(text(RX, y - 10, "combine() folds the operands' verdicts. Rungs are tried IN ORDER; "
+                  "the first match wins.", 10, fill=MUTED))
+    p.append(text(RX, y + 3, "Three of the four exits are a Deny.", 10, fill=MUTED))
+    y += 22
+    RW = W - RX - LEFT
+    for r in rungs:
+        wl = wrap(r["why"], 78)
+        dl = wrap(r["detail"], 74)
+        h = 34 + len(dl) * 12 + len(wl) * 12 + 8
+        deny = "Deny" in r["result"]
+        fill, line = ("#FDEEE9", WARN) if deny else (OK_FILL, OK_LINE)
+        p.append(box(RX, y, RW, h, fill, line, rx=6))
+        p.append(text(RX + 12, y + 19, f'{r["n"]}.  {r["test"]}', 10.5, "600"))
+        p.append(text(RX + RW - 12, y + 19, r["result"], 11, "700",
+                      fill=WARN if deny else "#0F6E56", anchor="end", mono=True))
+        yy = y + 33
+        for ln in dl:
+            p.append(text(RX + 26, yy, ln, 9, fill=INK, mono=True)); yy += 12
+        for ln in wl:
+            p.append(text(RX + 26, yy, ln, 9, fill=MUTED)); yy += 12
+        y += h + 10
+        if r is not rungs[-1]:
+            p.append(f'<line x1="{RX+16}" y1="{y-9}" x2="{RX+16}" y2="{y-1}" '
+                     f'stroke="{MUTED}" stroke-width="1"/>')
+
+    p.append(text(RX, y + 18, "finalize() then maps the folded Verdict to a Decision at the "
+                  "boundary. NotApplicable becomes Deny:", 9.5, fill=WARN))
+    p.append(text(RX, y + 31, "an empty operand vector can never become a grant. "
+                  "(verdict.rs:47)", 9.5, fill=WARN))
+
+    H = max(left_bottom, y + 31) + 56
+    p = [text(LEFT, 44, "The authorization decision cycle — how backends layer", 16, "600"),
+         text(LEFT, 66, "maknaed is the PDP. These are the operands it folds, and the order it "
+              "folds them in. No operand can waive another's Deny —", 11, fill=MUTED),
+         text(LEFT, 82, "not an extension, not the baseline, not the kernel.", 11, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/decision-cycle.toml')}"))
+    return svg(W, H, "\n".join(p), "Maknae authorization decision cycle",
+               "How maknae-authz-* backends compose into one authorization decision.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -800,6 +913,7 @@ def main() -> None:
         ("generated-standards-profile.svg", stdv1(prov)),
         ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", d5_readpath(prov)),
+        ("generated-decision-cycle.svg", d6_decision(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

@@ -1,0 +1,69 @@
+<svg width="1320" height="605" viewBox="0 0 1320 605" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae authorization decision cycle</title>
+  <desc>How maknae-authz-* backends compose into one authorization decision.</desc>
+  <rect x="0" y="0" width="1320" height="605" fill="#FFFFFF"/>
+<text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">The authorization decision cycle — how backends layer</text>
+<text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">maknaed is the PDP. These are the operands it folds, and the order it folds them in. No operand can waive another's Deny —</text>
+<text x="44" y="82" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">not an extension, not the baseline, not the kernel.</text>
+<text x="44" y="106" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">1 · How a backend is added</text>
+<text x="44" y="122" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">ConjunctionAuthorizer holds Vec&lt;Box&lt;dyn Authorizer&gt;&gt;. Adding a model means adding an operand —</text>
+<text x="44" y="135" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">never editing a peer, and never editing the kernel.</text>
+<rect x="44" y="154" width="560" height="64" rx="6" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="56" y="172" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">maknae-authz-basic</text>
+<text x="56" y="185" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«baseline · non-removable»</text>
+<text x="56" y="199" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">RBAC — role-keyed, plus the shipped deny list and the OS-DAC</text>
+<text x="56" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">gate</text>
+<text x="592" y="172" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#B3452F">guarded_decide()</text>
+<rect x="44" y="230" width="560" height="64" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="56" y="248" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknae-authz-dcs</text>
+<text x="56" y="261" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«extension · optional»</text>
+<text x="56" y="275" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ABAC — clearance, classification, releasability, compartments,</text>
+<text x="56" y="287" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">need-to-know</text>
+<text x="592" y="248" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#B3452F">guarded_decide()</text>
+<rect x="44" y="306" width="560" height="64" rx="6" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="56" y="324" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#5F5E5A">any conforming backend</text>
+<text x="56" y="337" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">«extension»</text>
+<text x="56" y="351" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">decides by its own model; may Permit on a complete evaluation</text>
+<text x="56" y="363" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">of its own predicate</text>
+<text x="592" y="324" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#B3452F">guarded_decide()</text>
+<text x="44" y="398" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">guarded_decide() wraps EVERY operand in a panic boundary: a backend that panics becomes</text>
+<text x="44" y="411" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">Indeterminate, which rung 2 turns into Deny. A hostile operand cannot crash the daemon,</text>
+<text x="44" y="424" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">and cannot fail open either.  (compose.rs:70)</text>
+<path d="M 614 320 h 28" stroke="#5F5E5A" stroke-width="1" marker-end="url(#dep2)"/>
+<defs><marker id="dep2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#5F5E5A" stroke-width="1.2"/></marker></defs>
+<text x="628" y="312" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="600" fill="#5F5E5A">combine()</text>
+<text x="660" y="106" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">2 · How the results are reconciled</text>
+<text x="660" y="122" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">combine() folds the operands' verdicts. Rungs are tried IN ORDER; the first match wins.</text>
+<text x="660" y="135" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Three of the four exits are a Deny.</text>
+<rect x="660" y="154" width="616" height="78" rx="6" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="672" y="173" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">1.  any operand returned Deny</text>
+<text x="1264" y="173" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#B3452F">Deny</text>
+<text x="686" y="187" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#2C2C2A">the operand's own reason is propagated verbatim</text>
+<text x="686" y="199" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Deny-overrides. No Permit from any peer can waive it — this is what denies the</text>
+<text x="686" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">kernel itself a clearance bypass.</text>
+<line x1="676" y1="233" x2="676" y2="241" stroke="#5F5E5A" stroke-width="1"/>
+<rect x="660" y="242" width="616" height="78" rx="6" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="672" y="261" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">2.  any operand returned Indeterminate</text>
+<text x="1264" y="261" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#B3452F">Deny</text>
+<text x="686" y="275" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#2C2C2A">"indeterminate operand blocks (fail-closed)"</text>
+<text x="686" y="287" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Never masked by a peer Permit. An operand that could not decide is not an</text>
+<text x="686" y="299" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">operand that abstained.</text>
+<line x1="676" y1="321" x2="676" y2="329" stroke="#5F5E5A" stroke-width="1"/>
+<rect x="660" y="330" width="616" height="102" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="672" y="349" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">3.  any operand returned Permit</text>
+<text x="1264" y="349" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#0F6E56">Permit</text>
+<text x="686" y="363" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#2C2C2A">obligations UNIONed across permitting operands; a conflict is "conflicting</text>
+<text x="686" y="375" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#2C2C2A">obligations (fail-closed)" → Deny</text>
+<text x="686" y="387" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">An extension MAY grant, on a complete evaluation of its own predicate</text>
+<text x="686" y="399" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">(ADR-0008 amending ADR-0020 §3). Constraint-only made an attribute-native</text>
+<text x="686" y="411" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">grant undecidable by any operand.</text>
+<line x1="676" y1="433" x2="676" y2="441" stroke="#5F5E5A" stroke-width="1"/>
+<rect x="660" y="442" width="616" height="66" rx="6" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="672" y="461" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">4.  all NotApplicable, or no operands at all</text>
+<text x="1264" y="461" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#B3452F">NotApplicable → Deny</text>
+<text x="686" y="475" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#2C2C2A">finalize() turns this into a Deny at the boundary</text>
+<text x="686" y="487" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Deny-by-default. An empty operand vector cannot become a grant.</text>
+<text x="660" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">finalize() then maps the folded Verdict to a Decision at the boundary. NotApplicable becomes Deny:</text>
+<text x="660" y="549" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">an empty operand vector can never become a grant. (verdict.rs:47)</text>
+<text x="24" y="589" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/decision-cycle.toml@03dd31418d</text><text x="1296" y="589" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+</svg>
