@@ -60,6 +60,38 @@
 # behaviourally, by tests that run there. Narrowing this
 # to an `exclude_re` on the `^` family is tracked as #126.
 
+# ---------------------------------------------------------------------------
+# exclude_re — method-scoped, where a whole-file glob would be too blunt.
+#
+# `maknae-plane`'s fd.rs and send.rs carry real decisions (the descriptor queue's
+# cap, FIFO ordering, attach-once, the readiness-retry classifier) that MUST stay
+# mutated — attach-once in particular is an invariant a mutant kills and review did
+# not. So these two methods are excluded individually rather than the files.
+#
+# `poll_flush` on both adapters delegates to `tokio::net::UnixStream::poll_flush`.
+# VERIFIED IN TOKIO'S SOURCE, not assumed — tokio 1.53.1, src/net/unix/stream.rs:1058:
+#
+#     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+#         Poll::Ready(Ok(()))
+#     }
+#
+# The mutation replaces our delegation with `Poll::from(Ok(()))`, which is the SAME
+# VALUE by the same reasoning. No test can distinguish them because there is nothing
+# to distinguish: a socket has no userspace buffer to flush. A textbook equivalent
+# mutant, and the honest handling is to exclude it rather than to invent an assertion
+# that would only be testing tokio.
+#
+# NOT excluded, deliberately: `poll_shutdown` on either adapter. It looked like the
+# same shape and is not — a shutdown that returns Ok without shutting down leaves the
+# peer waiting for an EOF that never comes. Mutation caught that as MISSED because the
+# test asserted only that `shutdown()` returned Ok; asserting the peer actually reads
+# 0 bytes turned both into TIMEOUTs, which is a detection. The near-miss is recorded
+# because "it delegates, so it is equivalent" is the reasoning that would have wrongly
+# excluded it too.
+exclude_re = [
+  "maknae-plane.*::poll_flush",
+]
+
 exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind enum + Display; no From impl exists
   "crates/maknae-io/src/syscall.rs",     # raw wrappers; OFlag/Mode/ResolveFlag/AtFlags unions -> equivalent mutants

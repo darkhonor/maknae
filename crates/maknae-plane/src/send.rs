@@ -185,7 +185,18 @@ mod tests {
             .expect("read through the adapter");
         assert_eq!(&buf, b"REPLY");
 
+        // Asserted by its EFFECT, not its return value. `shutdown().await.is_ok()`
+        // is satisfied by a poll_shutdown that does nothing at all — mutation caught
+        // exactly that, replacing the delegation with `Ok(())` and surviving. The peer
+        // seeing EOF is the only thing that distinguishes them.
         sender.shutdown().await.expect("shutdown passes through");
+        let mut after = [0u8; 1];
+        assert_eq!(
+            server.read(&mut after).await.expect("peer read"),
+            0,
+            "the peer must see EOF — a shutdown that returns Ok without shutting down \
+             leaves the connection half-open and the daemon waiting"
+        );
     }
 
     /// An un-armed connection writes plainly. Ping and whoami name no object, so they

@@ -220,6 +220,16 @@ mod tests {
             .await
             .expect("peer reads what was written");
         assert_eq!(&buf, b"RESPONSE");
+
+        // By EFFECT: a poll_shutdown that returns Ok without shutting down leaves the
+        // peer waiting forever. Mutation survives the return-value-only assertion.
+        collector.shutdown().await.expect("shutdown passes through");
+        let mut after = [0u8; 1];
+        assert_eq!(
+            client.read(&mut after).await.expect("peer read"),
+            0,
+            "the peer must see EOF"
+        );
     }
 
     /// The read loop's only branch, asserted directly. A spurious readiness must
