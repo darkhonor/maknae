@@ -57,6 +57,12 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-tcb-components.svg` | UML component | *What is in the TCB and where does the boundary run?* | security assessor | generated |
 | `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
+| `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
+| `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
+| `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
+| `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
+| `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
+| `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -66,11 +72,6 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 | Product | Notation | Question |
 |---|---|---|
-| workspace + key externals | UML package | *How do the crates fit together; what do we depend on?* |
-| runtime boundary crossings | UML sequence (≈ DoDAF SV-10c) | *Where does data cross a trust boundary, by what mechanism?* |
-| audit / policy / config schemas | IDEF1X | *What is the shape of the data we record and enforce?* |
-| system interfaces | DoDAF SV-1 | *What talks to what, across which interfaces?* |
-| operational concept | DoDAF OV-1 | *What is this system for?* |
 
 ## Three kinds, and the rule for each
 
@@ -99,6 +100,29 @@ merely describes it:
 | Binary linkage | `rust-audit-info` on the built artifact — the real transitive closure | `cargo depgraph` — declared dependencies are not what a binary links |
 | Members, binaries | `cargo metadata` | a hardcoded list |
 | Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
+
+### Generation is a manual step, by standing operator decision
+
+Nothing in CI runs `generate.py`, and nothing should. These are built **on demand** —
+before a release, or when an input changes — not on every pipeline run. The consequence
+is understood and accepted: `check_evidence` and byte-stable regeneration fire for
+whoever regenerates, so a stale diagram can be committed and no gate will object.
+Regenerate with the command above and commit the result; that is the whole contract.
+
+### Six products are curated, not derived
+
+`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml`,
+`system-interfaces.toml` and `operational-concept.toml` are hand-maintained inputs.
+A conformance claim, a call sequence, a precedence ladder, a normalization judgement,
+an interface register and a statement of intent are none of them readable out of a
+manifest, so all six are kept as reviewable data files in which **every row names
+something a reader can check**.
+
+None of the six is part of the provenance stamp, deliberately. The stamp names the last
+commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
+travels in the same commit as the SVG it produces, so including it would make the stamp
+chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)
+fixed. The footer of each diagram names its own source file and content hash instead.
 
 ### The standards profile is curated, not derived
 

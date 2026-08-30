@@ -98,33 +98,33 @@
   <text x="71" y="668" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#534AB7">adopted</text>
   <text x="296" y="652" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">2.02 Change 1</text>
   <text x="500" y="652" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Documentation</text>
-  <text x="660" y="652" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">StdV-1 (this profile); planned SV-1, OV-1</text>
+  <text x="660" y="652" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">StdV-1 (this profile), SV-1 (system interfaces), OV-1 (operational concept)</text>
   <text x="660" y="667" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">design/diagrams/README.md catalog</text>
   <rect x="40" y="686" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-207</text>
+  <text x="44" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">IDEF1X</text>
   <rect x="40" y="706" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
   <text x="71" y="716" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#534AB7">adopted</text>
-  <text x="296" y="700" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">Zero Trust Architecture</text>
-  <text x="500" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Architecture</text>
-  <text x="660" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the reference-monitor posture; per-request decision</text>
-  <text x="660" y="715" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0005 (sole PDP); ADR-0006 (per-request re-validation)</text>
+  <text x="296" y="700" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">ISO/IEC/IEEE 31320-2:2012</text>
+  <text x="500" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Documentation</text>
+  <text x="660" y="700" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the audit, authorization-request and policy data models</text>
+  <text x="660" y="715" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">design/diagrams/generated-data-model.svg · design/diagrams/data-model.toml</text>
   <rect x="40" y="734" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-53</text>
+  <text x="44" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-207</text>
   <rect x="40" y="754" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
   <text x="71" y="764" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#534AB7">adopted</text>
-  <text x="296" y="748" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">Rev. 5</text>
-  <text x="500" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Security controls</text>
-  <text x="660" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">AC-12, AC-25, AU-3, AU-9, AU-10, AU-12, SC-10</text>
-  <text x="660" y="763" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0019 (audit record model); ADR-0006 D4 (visit clock, SC-10/AC-12)</text>
-  <text x="44" y="796" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A6D1F">applies to a surface not yet built</text>
-  <rect x="40" y="798" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="812" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">IDEF1X</text>
-  <rect x="40" y="818" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#8A6D1F" stroke-width="0.75"/>
-  <text x="71" y="828" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#8A6D1F">emerging</text>
-  <text x="296" y="812" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">ISO/IEC/IEEE 31320-2:2012</text>
-  <text x="500" y="812" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Documentation</text>
-  <text x="660" y="812" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">planned data-model diagrams</text>
-  <text x="660" y="827" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">design/diagrams/README.md — planned products</text>
+  <text x="296" y="748" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">Zero Trust Architecture</text>
+  <text x="500" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Architecture</text>
+  <text x="660" y="748" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the reference-monitor posture; per-request decision</text>
+  <text x="660" y="763" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0005 (sole PDP); ADR-0006 (per-request re-validation)</text>
+  <rect x="40" y="782" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
+  <text x="44" y="796" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-53</text>
+  <rect x="40" y="802" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="71" y="812" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#534AB7">adopted</text>
+  <text x="296" y="796" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">Rev. 5</text>
+  <text x="500" y="796" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Security controls</text>
+  <text x="660" y="796" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">AC-12, AC-25, AU-3, AU-9, AU-10, AU-12, SC-10</text>
+  <text x="660" y="811" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0019 (audit record model); ADR-0006 D4 (visit clock, SC-10/AC-12)</text>
+  <text x="44" y="844" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A6D1F">applies to a surface not yet built</text>
   <rect x="40" y="846" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
   <text x="44" y="860" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-63B / 63C</text>
   <rect x="40" y="866" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#8A6D1F" stroke-width="0.75"/>
@@ -151,6 +151,6 @@
   <text x="660" y="972" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">confidentiality metadata label binding</text>
   <text x="660" y="987" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0007 §Out of scope — deferred to the external DCS library</text>
   <text x="40" y="1044" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Every row names evidence a reader can open. A claim with no evidence does not belong in this profile.</text>
-  <text x="40" y="1116" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@d502419691</text>
+  <text x="40" y="1116" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@296600143d · maknae 855de07 · 2026-08-30</text>
   <text x="1180" y="1116" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · StdV-1</text>
 </svg>

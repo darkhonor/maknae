@@ -1,0 +1,65 @@
+# How maknae-authz-* backends layer into one decision.
+#
+# Curated. The operand VECTOR is the extensibility point (ADR-0004) and the
+# precedence ladder is the safety property (ADR-0008); neither is readable off a
+# manifest. Every rung cites the branch in compose.rs that implements it, and
+# the reason strings are quoted verbatim from the code so a reader can grep for
+# them in an audit trail.
+
+[[operand]]
+id = "basic"
+name = "maknae-authz-basic"
+stereo = "«baseline · non-removable»"
+status = "in-repo"
+model = "RBAC — role-keyed, plus the shipped deny list and the OS-DAC gate"
+evidence = "crates/maknae-authz-basic/src/decide.rs"
+
+[[operand]]
+id = "dcs"
+name = "maknae-authz-dcs"
+stereo = "«extension · optional»"
+status = "external"
+model = "ABAC — clearance, classification, releasability, compartments, need-to-know"
+evidence = "darkhonor/rust-dcs — reached only through the seam; NOT in this repo"
+
+[[operand]]
+id = "next"
+name = "any conforming backend"
+stereo = "«extension»"
+status = "future"
+model = "decides by its own model; may Permit on a complete evaluation of its own predicate"
+evidence = "design/adr/ADR-0008-authorization-composition-contract.md"
+
+# --- combine()'s precedence ladder, in evaluation order -------------------
+
+[[rung]]
+n = "1"
+test = "any operand returned Deny"
+result = "Deny"
+detail = "the operand's own reason is propagated verbatim"
+why = "Deny-overrides. No Permit from any peer can waive it — this is what denies the kernel itself a clearance bypass."
+evidence = "crates/maknae-security/src/compose.rs:22"
+
+[[rung]]
+n = "2"
+test = "any operand returned Indeterminate"
+result = "Deny"
+detail = "\"indeterminate operand blocks (fail-closed)\""
+why = "Never masked by a peer Permit. An operand that could not decide is not an operand that abstained."
+evidence = "crates/maknae-security/src/compose.rs:29"
+
+[[rung]]
+n = "3"
+test = "any operand returned Permit"
+result = "Permit"
+detail = "obligations UNIONed across permitting operands; a conflict is \"conflicting obligations (fail-closed)\" → Deny"
+why = "An extension MAY grant, on a complete evaluation of its own predicate (ADR-0008 amending ADR-0020 §3). Constraint-only made an attribute-native grant undecidable by any operand."
+evidence = "crates/maknae-security/src/compose.rs:36"
+
+[[rung]]
+n = "4"
+test = "all NotApplicable, or no operands at all"
+result = "NotApplicable → Deny"
+detail = "finalize() turns this into a Deny at the boundary"
+why = "Deny-by-default. An empty operand vector cannot become a grant."
+evidence = "crates/maknae-security/src/compose.rs:56 · crates/maknae-security/src/verdict.rs:47"
