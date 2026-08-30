@@ -76,7 +76,9 @@ Provider-selection evidence:
 
 Dependency-source note:
 
-`reqwest 0.12.28` will use a process-default rustls provider if one has been installed; if none is installed and its ring feature is compiled, it falls back to `rustls::crypto::ring::default_provider()`. Maknae's load-bearing control is therefore ordering: install and assert the aws-lc-rs FIPS default before constructing Vault clients. That ordering is present in the daemon and CLI paths above.
+`reqwest 0.12.28` will use a process-default rustls provider if one has been installed; if none is installed and its ring feature is compiled, it falls back to `rustls::crypto::ring::default_provider()`. Maknae's load-bearing control is therefore enforced at Vault-client construction, not only by caller convention: `crates/maknae-vault/src/client.rs` documents the load-bearing ordering and calls `assert_fips_provider()` inside `VaultClient::from_document_with_secret()` before building the `reqwest` Vault client. The daemon and CLI paths also install and assert the aws-lc-rs FIPS default before constructing Vault clients.
+
+The `deny.toml` comment at lines 9-12 summarizes this as a present-but-dead `ring` dependency. This record is the compiled-artifact evidence for that statement: `ring` is present in the shipped `maknaed` and `maknae` binaries, but is not selected by Maknae call sites under the current provider gate.
 
 Conclusion:
 
