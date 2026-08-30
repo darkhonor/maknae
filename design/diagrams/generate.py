@@ -95,9 +95,21 @@ def linkage(binaries: list[str]) -> dict:
 
 
 def provenance() -> str:
+    """The source state these diagrams were derived FROM.
+
+    Named "sources at <sha>" rather than a bare hash, because the two are not the
+    same thing: the commit that *carries* an SVG is necessarily one later than the
+    commit whose `lib.sh` and manifests it read. Stating which is meant makes the
+    stamp checkable instead of merely present.
+
+    `+UNCOMMITTED` is loud on purpose. A committed diagram must never carry it —
+    it means the artifact was produced from a worktree state that exists nowhere
+    in history, so a reader cannot reconstruct what produced it. Regenerate from
+    a clean tree before committing.
+    """
     sha = sh("git", "rev-parse", "--short", "HEAD").strip()
-    dirty = " +local-changes" if sh("git", "status", "--porcelain").strip() else ""
-    return f"{sha}{dirty} · {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    dirty = " +UNCOMMITTED" if sh("git", "status", "--porcelain").strip() else ""
+    return f"sources at {sha}{dirty} · {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
 
 # --- SVG primitives -------------------------------------------------------
