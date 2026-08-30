@@ -21,9 +21,13 @@
 //! while the frame bytes arrived intact. The failure is fail-closed (an absent
 //! descriptor is a `Deny`), but it is total and silent.
 //!
-//! Correlation is FIFO, and that is sound: the kernel does not merge ancillary data
-//! across `sendmsg` boundaries, so descriptors arrive in the same order as the frames
-//! they accompanied.
+//! Correlation is FIFO. On Linux that is sound because the kernel does not merge
+//! ancillary data across `sendmsg` boundaries. **macOS coalesces** — measured on a
+//! `macos-26` runner: two writes arrived as one segment, carrying both frames' bytes
+//! and the single descriptor. For one fd-bearing request per connection (today's
+//! per-invocation CLI) the take is still correct, because the descriptor never
+//! arrives *after* its frame's bytes. Pipelining on macOS is NOT characterised —
+//! see ADR-0009.
 
 use std::os::fd::AsFd;
 use std::pin::Pin;

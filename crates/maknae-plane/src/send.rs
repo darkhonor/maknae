@@ -150,6 +150,14 @@ mod tests {
     /// Arming is per-request, not per-connection: once a descriptor has gone it must
     /// NOT be attached again. Two descriptors for one request would leave the daemon
     /// holding an orphan that its FIFO take would hand to the NEXT request.
+    ///
+    /// **Asserted by DRAINING, not by per-read framing.** An earlier version read
+    /// twice and expected the second read to carry no descriptor — which passed on
+    /// Linux and failed on macOS with `EAGAIN`, because macOS coalesced both writes
+    /// into one stream segment and the first read consumed everything. That was the
+    /// test asserting a Linux delivery *shape* rather than the invariant. The
+    /// invariant is about the SENDER: exactly one descriptor total, however the
+    /// receiving kernel chooses to segment the stream.
     #[tokio::test]
     async fn a_descriptor_is_attached_once_and_only_once() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
@@ -163,14 +171,26 @@ mod tests {
         sender.write_all(b"BB").await.expect("second write");
         sender.flush().await.expect("flush");
 
-        let mut buf = [0u8; 64];
-        let first = maknae_io::recv_delegated(server.as_fd(), &mut buf).expect("recvmsg");
-        assert_eq!(first.fds.len(), 1, "the first write carries it");
-        let second = maknae_io::recv_delegated(server.as_fd(), &mut buf).expect("recvmsg");
-        assert!(
-            second.fds.is_empty(),
-            "the second write must carry nothing — a re-attach would orphan a \
-             descriptor onto the next request"
+        // Drain everything the peer can see, however it is segmented.
+        let mut total_fds = 0usize;
+        let mut total_bytes = Vec::new();
+        loop {
+            let mut buf = [0u8; 64];
+            match maknae_io::recv_delegated(server.as_fd(), &mut buf) {
+                Ok(got) if got.bytes == 0 && got.fds.is_empty() => break,
+                Ok(got) => {
+                    total_bytes.extend_from_slice(&buf[..got.bytes]);
+                    total_fds += got.fds.len();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("recvmsg: {e}"),
+            }
+        }
+        assert_eq!(total_bytes, b"AABB", "both writes arrived, in order");
+        assert_eq!(
+            total_fds, 1,
+            "exactly ONE descriptor total — a re-attach would orphan a second onto \
+             the next request, and the daemon's FIFO take would hand it over"
         );
     }
 

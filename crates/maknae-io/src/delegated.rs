@@ -165,10 +165,16 @@ pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
 /// has already opened the object under its own credentials, so the kernel has run the
 /// whole permission check, and this hands the resulting authority to the daemon.
 ///
-/// **The descriptor rides the message these bytes are in**, which is what makes FIFO
-/// correlation sound on the receiving side: the kernel does not merge ancillary data
-/// across `sendmsg` boundaries, so a descriptor arrives with the frame it accompanied
-/// and not with some later one.
+/// **The descriptor rides the message these bytes are in**, so it arrives with the
+/// frame it accompanied and never with a later one — which is what the receiving
+/// side's FIFO take relies on.
+///
+/// On **Linux** that is exact: the kernel does not merge ancillary data across
+/// `sendmsg` boundaries. On **macOS** it is weaker — measured on a `macos-26` runner,
+/// two writes coalesced into one stream segment carrying both frames' bytes and the
+/// single descriptor. The take is still correct for one fd-bearing request per
+/// connection (the descriptor never arrives *after* its frame's bytes); pipelining on
+/// macOS is not characterised. See ADR-0009.
 ///
 /// Returns how many bytes were accepted. A short write means the caller must send the
 /// remainder WITHOUT re-attaching — the descriptor has already been transferred, and

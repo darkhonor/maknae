@@ -329,8 +329,10 @@ pub async fn handle<S, E, P>(
     // (ADR-0009 decision 8).
     lane: maknae_security::Lane,
     // The descriptors this connection's peer delegated, oldest first. Correlation is
-    // FIFO and sound: the kernel does not merge ancillary data across `sendmsg`
-    // boundaries, so descriptors arrive in the order of the frames they accompanied.
+    // FIFO. Exact on Linux (no merging across `sendmsg` boundaries); weaker on
+    // macOS, which coalesces — measured. Correct either way for ONE fd-bearing
+    // request per connection, which is what today's per-invocation CLI sends;
+    // pipelining on macOS is uncharacterised (ADR-0009).
     delegated: maknae_io::DelegatedFds,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,

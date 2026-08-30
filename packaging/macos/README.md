@@ -46,6 +46,19 @@ Unsigned or un-notarized packages are refused on any Mac that has not had the po
 An MDM-managed fleet can carry an exception, but designing for that narrows deployment to
 managed estates only — decide it deliberately rather than by omission.
 
+**Mechanism for CI.** GitHub documents the runner-side pattern —
+[Installing an Apple certificate on macOS runners for Xcode development](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications):
+base64 the `.p12` into a secret, import it into a **temporary keychain** created for
+the run, and delete the keychain in an `if: always()` cleanup step. The same shape
+applies to a `pkgbuild`/`productbuild` flow — the certificate is different (Installer,
+not Application) but the custody pattern is identical. Notarization credentials
+(App Store Connect key id, issuer id, `.p8`) are separate secrets on the same footing.
+
+Two things that guide does not decide for us: the cleanup step is **not optional** on a
+hosted runner (an un-deleted keychain outlives the job only if the runner is reused —
+which is exactly the case on a self-hosted one), and `if: always()` is what makes it
+hold on a failed run.
+
 **The key-custody question is sharper here than for GPG.** A leaked Developer ID certificate
 signs software attributed to the operator's identity, and revoking it invalidates everything
 previously shipped under it. The GPG-key-on-ephemeral-runners trade was accepted knowingly; this
