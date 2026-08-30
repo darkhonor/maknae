@@ -4,7 +4,7 @@
   <rect x="0" y="0" width="1498" height="850" fill="#FFFFFF"/>
 <text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Workspace packages and their dependencies</text>
 <text x="44" y="64" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Every package in the workspace, layered by what it depends on. Grey text inside a package is its DIRECT external crates.</text>
-<text x="44" y="80" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Normal dependencies only — dev- and build-dependencies are excluded, since they reach no shipped artifact.</text>
+<text x="44" y="80" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Normal dependencies only — dev- and build-dependencies are excluded, since they reach no shipped artifact. An edge is a DECLARED dependency: a manifest entry with no use site still draws one.</text>
 <rect x="0" y="98" width="1498" height="76" fill="#FBFAF7"/>
 <text x="24" y="116" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#5F5E5A">layer 4</text>
 <rect x="0" y="190" width="1498" height="115" fill="#FFFFFF"/>

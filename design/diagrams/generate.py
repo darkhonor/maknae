@@ -673,7 +673,8 @@ def d4_packages(gates, cg, prov) -> str:
          text(PAD, 64, "Every package in the workspace, layered by what it depends on. "
                        "Grey text inside a package is its DIRECT external crates.", 11, fill=MUTED),
          text(PAD, 80, "Normal dependencies only — dev- and build-dependencies are excluded, "
-                       "since they reach no shipped artifact.", 11, fill=MUTED)] + p
+                       "since they reach no shipped artifact. An edge is a DECLARED dependency: "
+                       "a manifest entry with no use site still draws one.", 11, fill=MUTED)] + p
     return svg(W, H, "\n".join(p),
                "Maknae workspace package diagram",
                "UML package diagram of the Maknae workspace, layered by dependency.")
