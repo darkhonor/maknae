@@ -1317,11 +1317,37 @@ def d9_opconcept(prov: str) -> str:
         "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · OV-1")
 
 
+def check_catalog(written: list) -> None:
+    """The catalog's own description must not drift from the catalog.
+
+    Both findings on #205 were this: `standards-profile.toml` still called SV-1,
+    OV-1 and the data model "planned" in the same commit that shipped them, and
+    the README still said "Two products are curated" above a list of six. The
+    catalog is the thing that makes this a practice rather than a pile of
+    scripts, so a catalog that misdescribes itself is the one drift that costs
+    the most -- and it is exactly the class the diagrams exist to prevent.
+
+    Enumerable, so checked rather than remembered: every generated SVG must be
+    named in the README, and every generated filename the README names must
+    exist. A new product cannot land uncatalogued, and a deleted one cannot
+    leave a dangling row.
+    """
+    readme = (OUT / "README.md").read_text()
+    missing = [n for n in written if n not in readme]
+    if missing:
+        sys.exit("README.md does not list: " + ", ".join(sorted(missing)))
+    named = set(re.findall(r"generated-[a-z0-9-]+\.svg", readme))
+    ghost = sorted(n for n in named if not (OUT / n).exists())
+    if ghost:
+        sys.exit("README.md names files that do not exist: " + ", ".join(ghost))
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
     cg = crate_graph()
     prov = provenance()
+    written: list = []
     for name, content in [
         ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
         ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
@@ -1335,6 +1361,8 @@ def main() -> None:
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")
+        written.append(name)
+    check_catalog(written)
     print(f"  provenance: {prov}")
 
 
