@@ -152,9 +152,19 @@ mod tests {
         .expect("sendmsg");
     }
 
-    fn delegate(sock: &tokio::net::UnixStream, bytes: &[u8], path: &str) -> u64 {
+    /// A real file to delegate, CREATED rather than borrowed from the host. This was
+    /// `/etc/hostname` / `/etc/os-release`, neither of which exists on macOS — caught
+    /// by the darwin-native CI job on its first run. A fixture that depends on a
+    /// system file is testing the distribution, not the code.
+    fn a_file(dir: &std::path::Path, name: &str, body: &[u8]) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("write fixture");
+        p
+    }
+
+    fn delegate(sock: &tokio::net::UnixStream, bytes: &[u8], path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
-        let f = std::fs::File::open(path).expect("a file to delegate");
+        let f = std::fs::File::open(path).expect("open fixture");
         let ino = f.metadata().expect("stat").ino();
         send_with_fd(sock, bytes, f.as_fd());
         ino
@@ -167,8 +177,9 @@ mod tests {
     #[tokio::test]
     async fn descriptors_beyond_the_connection_cap_are_dropped_not_queued() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        delegate(&client, b"AA", "/etc/hostname");
-        delegate(&client, b"BB", "/etc/os-release");
+        let dir = tempfile::tempdir().expect("tempdir");
+        delegate(&client, b"AA", &a_file(dir.path(), "one", b"first"));
+        delegate(&client, b"BB", &a_file(dir.path(), "two", b"second"));
 
         let mut collector = FdCollector::new(server, 1);
         let delegated = collector.delegated();
@@ -188,8 +199,9 @@ mod tests {
     #[tokio::test]
     async fn descriptors_are_taken_in_the_order_their_frames_arrived() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let first = delegate(&client, b"AA", "/etc/hostname");
-        let second = delegate(&client, b"BB", "/etc/os-release");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = delegate(&client, b"AA", &a_file(dir.path(), "one", b"first"));
+        let second = delegate(&client, b"BB", &a_file(dir.path(), "two", b"second"));
         assert_ne!(first, second, "the fixture files must be distinguishable");
 
         let mut collector = FdCollector::new(server, 4);
@@ -257,7 +269,8 @@ mod tests {
     #[tokio::test]
     async fn a_descriptor_sent_with_a_frame_survives_the_read_path() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let f = std::fs::File::open("/etc/hostname").expect("open a file to delegate");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = std::fs::File::open(a_file(dir.path(), "obj", b"delegated")).expect("open");
         let want = f.metadata().expect("stat").ino();
         send_with_fd(&client, b"FRAME", f.as_fd());
 

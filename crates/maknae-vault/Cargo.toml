@@ -35,4 +35,7 @@ maknae-io = { path = "../maknae-io" }
 maknae-plane = { path = "../maknae-plane" }
 
 [dev-dependencies]
+# Fixtures CREATE the objects they delegate rather than borrowing a system file:
+# `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }

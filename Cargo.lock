@@ -1072,6 +1072,7 @@ version = "0.0.0"
 dependencies = [
  "maknae-io",
  "rustix",
+ "tempfile",
  "tokio",
 ]
 
@@ -1126,6 +1127,7 @@ dependencies = [
  "rustify_derive",
  "rustls",
  "serde",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "url",

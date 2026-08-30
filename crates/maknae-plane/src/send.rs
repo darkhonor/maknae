@@ -128,7 +128,10 @@ mod tests {
     #[tokio::test]
     async fn an_armed_descriptor_rides_the_next_write() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let f = std::fs::File::open("/etc/hostname").expect("a file to delegate");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = dir.path().join("obj");
+        std::fs::write(&obj, b"delegated").expect("write fixture");
+        let f = std::fs::File::open(&obj).expect("open");
         let want = f.metadata().expect("stat").ino();
 
         let mut sender = FdSender::new(client);
@@ -150,7 +153,10 @@ mod tests {
     #[tokio::test]
     async fn a_descriptor_is_attached_once_and_only_once() {
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let f = std::fs::File::open("/etc/hostname").expect("open");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = dir.path().join("obj");
+        std::fs::write(&obj, b"delegated").expect("write fixture");
+        let f = std::fs::File::open(&obj).expect("open");
         let mut sender = FdSender::new(client);
         sender.armer().arm(OwnedFd::from(f));
         sender.write_all(b"AA").await.expect("first write");

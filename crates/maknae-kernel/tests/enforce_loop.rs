@@ -874,10 +874,20 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
 #[tokio::test]
 async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     let fx = Fixture::new("outside");
-    // Operator-added absolute grant outside home: PDP permits, PEP refuses.
-    fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/etc/**)\"\n  deny: []\n",
-    );
+    // An operator-added absolute grant for a tree OUTSIDE the enrolled home. The
+    // object is CREATED rather than borrowed from `/etc`: the old fixture granted
+    // `Read(/etc/**)` and delegated `/etc/hostname`, neither of which exists on
+    // macOS — caught by the darwin-native CI job.
+    let outside_dir =
+        std::env::temp_dir().join(format!("enforce_offhome_obj_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside_dir);
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside = outside_dir.join("obj");
+    std::fs::write(&outside, b"outside the enrolled home").unwrap();
+    fx.write_policy(&format!(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read({}/**)\"\n  deny: []\n",
+        outside_dir.display()
+    ));
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive_read(
@@ -886,10 +896,10 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
-            path: "/etc/hostname".into(),
+            path: outside.to_string_lossy().into_owned(),
         },
         Duration::from_secs(5),
-        std::path::Path::new("/etc/hostname"),
+        &outside,
     )
     .await
     .expect("outside-root frame");
@@ -908,11 +918,12 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
-    let leak = b"maknae";
+    let leak = b"outside the enrolled home";
     assert!(
         !frame.windows(leak.len()).any(|w| w == leak),
         "no content from outside the home may ride the frame"
     );
+    let _ = std::fs::remove_dir_all(&outside_dir);
 }
 
 #[tokio::test]

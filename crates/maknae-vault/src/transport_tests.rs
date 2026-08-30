@@ -224,7 +224,10 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
         .await
         .expect("client handshake");
 
-    let f = std::fs::File::open("/etc/hostname").expect("an object to delegate");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let obj = dir.path().join("obj");
+    std::fs::write(&obj, b"delegated").expect("write fixture");
+    let f = std::fs::File::open(&obj).expect("an object to delegate");
     let want = f.metadata().expect("stat").ino();
     armer.arm(OwnedFd::from(f));
     tls.write_all(b"FRAME")

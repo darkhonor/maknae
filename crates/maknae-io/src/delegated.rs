@@ -404,8 +404,9 @@ mod tests {
         use std::mem::MaybeUninit;
         use std::os::unix::fs::MetadataExt;
 
+        let dir = tempfile::tempdir().expect("tempdir");
         let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let f = std::fs::File::open("/etc/hostname").expect("a file to delegate");
+        let f = std::fs::File::open(a_file(dir.path(), "obj", b"delegated")).expect("open");
         let want = f.metadata().expect("stat").ino();
 
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
@@ -554,6 +555,18 @@ mod tests {
         dir.canonicalize().expect("canonicalize")
     }
 
+    /// A real file to delegate, CREATED rather than borrowed from the host.
+    ///
+    /// This was `/etc/hostname`, which does not exist on macOS — caught by the
+    /// darwin-native CI job on its first run, after the whole delegated suite had
+    /// been green on three Linux distributions. A fixture that depends on a system
+    /// file is testing the distribution, not the code.
+    fn a_file(dir: &std::path::Path, name: &str, body: &[u8]) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("write fixture");
+        p
+    }
+
     fn maknae_io_root_req() -> crate::AnchorRequired {
         crate::AnchorRequired {
             owner: Some(nix::unistd::geteuid().as_raw()),
@@ -567,8 +580,10 @@ mod tests {
     /// wanted it finds none and is denied. Fail-closed, never an unbounded queue.
     #[test]
     fn the_queue_is_bounded_and_hands_back_the_oldest_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"queued");
         let fds = DelegatedFds::new(2);
-        let open = || OwnedFd::from(std::fs::File::open("/etc/hostname").expect("open"));
+        let open = || OwnedFd::from(std::fs::File::open(&obj).expect("open"));
         for _ in 0..4 {
             fds.push(open());
         }
@@ -639,8 +654,9 @@ mod tests {
     #[test]
     fn a_descriptor_survives_a_round_trip_through_both_primitives() {
         use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().expect("tempdir");
         let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let f = std::fs::File::open("/etc/hostname").expect("a file to delegate");
+        let f = std::fs::File::open(a_file(dir.path(), "obj", b"delegated")).expect("open");
         let want = f.metadata().expect("stat").ino();
 
         let sent = send_delegated(tx.as_fd(), b"FRAME", f.as_fd()).expect("sendmsg");
