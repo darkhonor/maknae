@@ -77,13 +77,20 @@ CI verifies macOS in two layers, neither of which is a substitute for the other:
    earned its place immediately: it caught `RecvFlags::CMSG_CLOEXEC` not existing on darwin,
    which meant `maknae-io::recv_delegated` did not compile there at all — a security-relevant
    delta (`FD_CLOEXEC` must then be set explicitly) that a Linux-only CI would never surface.
-2. **Native test run** (`darwin-native`, on a `macos-15` runner) — actually executes the suites
-   for the crates that build without a macOS SDK. This is what turns "written" into "verified".
+2. **Native test run** (`darwin-native`, on a pinned **`macos-26`** runner) — executes the
+   suites for the crates that build without a macOS SDK. This is what turned "written" into
+   "verified": the ADR-0009 `fcntl(F_GETPATH)` lane is green there, 18 delegated tests, with the
+   job asserting the suite was *collected* rather than trusting an exit code.
+
+   **Wrathion runs macOS 26 on Apple Silicon, so the runner has OS-version and architecture
+   parity with it.** For this surface CI is an equivalent lane, not a stand-in — and it repeats
+   on every change rather than once. The image is pinned by name for exactly that reason;
+   `macos-latest` would re-point silently and quietly change what "verified" means.
 
 **Not covered by either:** `maknae-vault` and everything above it. `aws-lc-fips-sys` and `ring`
 have build scripts requiring a macOS SDK, so they cannot be cross-checked from Linux, and a
 FIPS build on a hosted macOS runner has not been attempted. **macOS FIPS therefore rests on
-manual runs on the operator's own Apple Silicon machine.** Separately and more importantly:
+manual runs on Wrathion — the parity above buys the SDK-free crates, not this.** Separately and more importantly:
 whether `aws-lc-fips` is FIPS-140-3 **validated** on macOS arm64 — as opposed to merely
 compiling — is an open compliance question, and the answer may reshape what macOS deployment
 means for a FIPS-posture product.
