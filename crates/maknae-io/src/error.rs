@@ -188,7 +188,10 @@ impl std::fmt::Display for IoError {
             }
             Self::Io { path, kind } => write!(f, "io error {kind:?}: {}", path.display()),
             Self::FdPathUnavailable { kind } => {
-                write!(f, "cannot determine the delegated descriptor's path: {kind:?}")
+                write!(
+                    f,
+                    "cannot determine the delegated descriptor's path: {kind:?}"
+                )
             }
         }
     }
@@ -252,7 +255,10 @@ mod tests {
             kind: IoKind::NotFound,
         }
         .to_string();
-        assert_eq!(msg, "cannot determine the delegated descriptor's path: NotFound");
+        assert_eq!(
+            msg,
+            "cannot determine the delegated descriptor's path: NotFound"
+        );
         assert!(
             !msg.contains("/proc"),
             "the message must not name a path the failure is not at: {msg}"

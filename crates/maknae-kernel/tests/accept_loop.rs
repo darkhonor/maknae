@@ -132,7 +132,7 @@ impl PlaneAccept for FakeAccept {
             FakeRaw::Stall(d, stream, uri, uid) => {
                 tokio::time::sleep(d).await;
                 Ok(Conn {
-                delegated: maknae_io::DelegatedFds::new(0),
+                    delegated: maknae_io::DelegatedFds::new(0),
                     stream,
                     peer_uri: uri,
                     peer_uid: uid,

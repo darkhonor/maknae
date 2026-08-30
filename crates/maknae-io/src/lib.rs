@@ -62,8 +62,8 @@ pub use anchor::{
 };
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
-    open_for_delegation, read_delegated, recv_delegated, send_delegated, verify_delegated, Delegated, DelegatedFds, DelegatedRequired,
-    Received, DELEGATED_FDS_PER_CONNECTION,
+    open_for_delegation, read_delegated, recv_delegated, send_delegated, verify_delegated,
+    Delegated, DelegatedFds, DelegatedRequired, Received, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use normalize::normalize;

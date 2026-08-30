@@ -118,11 +118,9 @@ impl AsyncRead for FdCollector {
         let me = self.get_mut();
         loop {
             std::task::ready!(me.inner.poll_read_ready(cx))?;
-            let attempt = me
-                .inner
-                .try_io(tokio::io::Interest::READABLE, || {
-                    recv_once(&me.inner, &me.fds, buf)
-                });
+            let attempt = me.inner.try_io(tokio::io::Interest::READABLE, || {
+                recv_once(&me.inner, &me.fds, buf)
+            });
             match classify(attempt) {
                 Step::Done(r) => return Poll::Ready(r),
                 Step::Retry => continue,
@@ -257,13 +255,20 @@ mod tests {
         let delegated = collector.delegated();
 
         let mut buf = [0u8; 5];
-        collector.read_exact(&mut buf).await.expect("frame bytes read");
+        collector
+            .read_exact(&mut buf)
+            .await
+            .expect("frame bytes read");
         assert_eq!(&buf, b"FRAME", "the byte stream is unaffected");
 
         let got = delegated
             .take()
             .expect("the descriptor must SURVIVE the read; read(2) would have destroyed it");
         let got = std::fs::File::from(got).metadata().expect("stat received");
-        assert_eq!(got.ino(), want, "the received descriptor names the same object");
+        assert_eq!(
+            got.ino(),
+            want,
+            "the received descriptor names the same object"
+        );
     }
 }

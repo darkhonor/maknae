@@ -359,7 +359,9 @@ mod tests {
             c.insert(maknae_security::CONTEXT_DAC_LANE, AttrValue::Str(l.into()));
         }
         if let Some(a) = accessible {
-            r.resource.0.insert(maknae_security::RESOURCE_OS_ACCESSIBLE, a);
+            r.resource
+                .0
+                .insert(maknae_security::RESOURCE_OS_ACCESSIBLE, a);
         }
         r.context = Context(c);
         r
@@ -426,7 +428,10 @@ mod tests {
     #[test]
     fn a_wrong_typed_answer_is_indeterminate_never_a_fall_through() {
         assert!(matches!(
-            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Str("true".into())))),
+            os_dac_gate(&read_req(
+                Some("local"),
+                Some(AttrValue::Str("true".into()))
+            )),
             OsDacGate::Indeterminate
         ));
         assert!(matches!(

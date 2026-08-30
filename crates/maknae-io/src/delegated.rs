@@ -11,10 +11,10 @@
 //! on the subject's home that a `0700` home does not grant (#194).
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::checks::TargetRequired;
 use crate::error::IoError;
@@ -284,9 +284,8 @@ pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<De
     // The confinement root's OWN soundness, before it is used as a boundary: a root
     // that any non-principal can write is not a boundary at all. `stat` by path, not
     // an open — the open is what a `0700` home refuses (ADR-0009 decision 7).
-    let root_st = nix::sys::stat::stat(&req.confined_beneath).map_err(|e| {
-        crate::checks::map_errno_no_disambiguation(e, &req.confined_beneath)
-    })?;
+    let root_st = nix::sys::stat::stat(&req.confined_beneath)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &req.confined_beneath))?;
     crate::checks::check_owner_mode(
         &root_st,
         &req.confined_beneath,
@@ -316,8 +315,8 @@ mod tests {
     use super::*;
     use crate::{IoError, TargetRequired};
     use std::os::fd::{AsFd, OwnedFd};
-    use std::path::PathBuf;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     fn target() -> TargetRequired {
         TargetRequired {
@@ -626,7 +625,10 @@ mod tests {
         let want = f.metadata().expect("stat").ino();
 
         let sent = send_delegated(tx.as_fd(), b"FRAME", f.as_fd()).expect("sendmsg");
-        assert_eq!(sent, 5, "the whole frame went in one message with the descriptor");
+        assert_eq!(
+            sent, 5,
+            "the whole frame went in one message with the descriptor"
+        );
 
         let mut buf = [0u8; 64];
         let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
@@ -687,8 +689,11 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let home = root.path().canonicalize().expect("canonicalize");
         let pipe = home.join("pipe");
-        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
-            .expect("mkfifo");
+        nix::unistd::mkfifo(
+            &pipe,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("mkfifo");
         // O_NONBLOCK: a reader on a writerless fifo blocks forever otherwise --
         // which is precisely the denial-of-service this requirement refuses.
         let f = nix::fcntl::open(
@@ -811,7 +816,8 @@ mod tests {
             "premise: the directory must be untraversable, or this control proves nothing"
         );
         assert_eq!(
-            got.expect("the fd table needs NO permission on the object's directory").path,
+            got.expect("the fd table needs NO permission on the object's directory")
+                .path,
             secret_c,
         );
     }

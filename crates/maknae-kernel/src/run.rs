@@ -775,7 +775,6 @@ pub async fn handle<S, E, P>(
         // If this binding is ever needed again, something has started trusting the
         // client's name (ADR-0009 decision 6).
         Dispatch::ReadRequested(_client_path) => {
-
             // The read PEP (spec D5): per-request anchor at the enrolled home,
             // named requirements, bounded on the blocking pool like the decide.
             let budget = crate::handler::read_budget(cfg.frame_max_bytes);
@@ -916,9 +915,12 @@ fn read_pep(
     // the object changed between the decision and the read, the read refuses: this is
     // the TOCTOU backstop, adapted — there is no second OPEN to enforce at, so the
     // check rides the descriptor that was already pinned.
-    maknae_io::read_delegated(&fd, crate::handler::delegated_plan(home, owner_uid, Some(budget)))
-        .map(|(_path, bytes)| bytes)
-        .map_err(crate::handler::map_read_error)
+    maknae_io::read_delegated(
+        &fd,
+        crate::handler::delegated_plan(home, owner_uid, Some(budget)),
+    )
+    .map(|(_path, bytes)| bytes)
+    .map_err(crate::handler::map_read_error)
 }
 
 /// Write one generic error frame, bounded like every response write. The

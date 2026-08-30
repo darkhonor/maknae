@@ -86,11 +86,9 @@ impl AsyncWrite for FdSender {
         let me = self.get_mut();
         loop {
             std::task::ready!(me.inner.poll_write_ready(cx))?;
-            let attempt = me
-                .inner
-                .try_io(tokio::io::Interest::WRITABLE, || {
-                    send_once(&me.inner, &me.pending, buf)
-                });
+            let attempt = me.inner.try_io(tokio::io::Interest::WRITABLE, || {
+                send_once(&me.inner, &me.pending, buf)
+            });
             match crate::fd::classify(attempt) {
                 crate::fd::Step::Done(r) => return Poll::Ready(r),
                 crate::fd::Step::Retry => continue,
@@ -181,7 +179,10 @@ mod tests {
         server.write_all(b"REPLY").await.expect("peer writes");
 
         let mut buf = [0u8; 5];
-        sender.read_exact(&mut buf).await.expect("read through the adapter");
+        sender
+            .read_exact(&mut buf)
+            .await
+            .expect("read through the adapter");
         assert_eq!(&buf, b"REPLY");
 
         sender.shutdown().await.expect("shutdown passes through");

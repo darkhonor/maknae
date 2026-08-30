@@ -843,7 +843,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn delegated_plan_names_all_three_proofs_and_splits_the_budget() {
         let req = delegated_plan(std::path::Path::new("/home/op"), 501, Some(1000));
@@ -857,10 +856,21 @@ mod tests {
             Some(501),
             "the alias-planting boundary survives the anchor open (ADR-0009 D7)"
         );
-        assert_eq!(req.root_required.mode_mask, Some(0o022), "no group/other write on home");
-        assert!(req.target.nlink_exactly_one, "load-bearing three ways (ADR-0009 D5)");
+        assert_eq!(
+            req.root_required.mode_mask,
+            Some(0o022),
+            "no group/other write on home"
+        );
+        assert!(
+            req.target.nlink_exactly_one,
+            "load-bearing three ways (ADR-0009 D5)"
+        );
         assert!(req.target.regular_file, "no fifo/device");
-        assert_eq!(req.target.max_bytes, Some(1000), "the budget is the named bound");
+        assert_eq!(
+            req.target.max_bytes,
+            Some(1000),
+            "the budget is the named bound"
+        );
         // NOT a gap: the descriptor IS the OS's answer, and recomputing the mode
         // algebra here is what the operator forbade (ADR-0009 D1).
         assert_eq!(req.target.owner, None);
@@ -875,7 +885,6 @@ mod tests {
             None
         );
     }
-
 
     #[test]
     fn map_read_error_types_oversize_and_everything_else() {
