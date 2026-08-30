@@ -85,8 +85,8 @@ fn classify_handshake_error(e: &std::io::Error) -> RejectReason {
 }
 
 enum TlsStream {
-    Server(tokio_rustls::server::TlsStream<tokio::net::UnixStream>),
-    Client(tokio_rustls::client::TlsStream<tokio::net::UnixStream>),
+    Server(tokio_rustls::server::TlsStream<maknae_plane::FdCollector>),
+    Client(tokio_rustls::client::TlsStream<maknae_plane::FdSender>),
 }
 
 /// A raw-accepted plane connection: the bare UDS stream plus the `PeerCreds` captured
@@ -104,6 +104,10 @@ pub struct AuthenticatedStream {
     inner: TlsStream,
     peer_uri_san: String,
     peer_creds: PeerCreds,
+    delegated: maknae_io::DelegatedFds,
+    /// Present only on a CLIENT stream: the handle for arming the descriptor the next
+    /// request carries. `None` server-side — delegation is one-directional.
+    armer: Option<maknae_plane::FdArmer>,
 }
 
 impl AuthenticatedStream {
@@ -114,6 +118,21 @@ impl AuthenticatedStream {
     /// Kernel-captured peer credentials — the daemon polices `uid`.
     pub fn peer_creds(&self) -> &PeerCreds {
         &self.peer_creds
+    }
+
+    /// Descriptors this peer delegated over `SCM_RIGHTS`, collected BENEATH the TLS
+    /// layer (ADR-0009). Empty on a client-side stream: delegation is one-directional.
+    pub fn delegated(&self) -> maknae_io::DelegatedFds {
+        self.delegated.clone()
+    }
+
+    /// Arm the descriptor the next request will carry (ADR-0009, client side).
+    ///
+    /// Available only on a connected CLIENT stream, and only AFTER the handshake —
+    /// which is exactly when this is reachable, since the handshake produces the
+    /// stream. Arming earlier would have let the handshake's own writes consume it.
+    pub fn armer(&self) -> Option<maknae_plane::FdArmer> {
+        self.armer.clone()
     }
 }
 
@@ -302,7 +321,11 @@ pub(crate) async fn finish_handshake_on(
     peer_creds: PeerCreds,
     handshake_timeout: Duration,
 ) -> Result<AuthenticatedStream, AcceptRejection> {
-    let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(raw.0)).await {
+    // Interposed BEFORE the acceptor: rustls reads through this, and tokio's own
+    // `read(2)` path would destroy every attached descriptor with no error at all.
+    let collector = maknae_plane::FdCollector::new(raw.0, maknae_io::DELEGATED_FDS_PER_CONNECTION);
+    let delegated = collector.delegated();
+    let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(collector)).await {
         Err(_elapsed) => {
             return Err(AcceptRejection {
                 peer_creds: Some(peer_creds),
@@ -323,6 +346,9 @@ pub(crate) async fn finish_handshake_on(
             inner: TlsStream::Server(tls),
             peer_uri_san: peer_uri,
             peer_creds,
+            delegated,
+            // Server-side: nothing to arm. The daemon never delegates outward.
+            armer: None,
         }),
         // Recomputing the SAN post-handshake failed — the client-cert verifier already
         // accepted this leaf, so in practice this path is defense-in-depth, not a live
@@ -354,8 +380,13 @@ impl PlaneConnector {
         let peer_creds = peercred::capture(&raw)?;
         let name = rustls::pki_types::ServerName::try_from("maknae.invalid")
             .map_err(|e| VaultError::Handshake(format!("placeholder server name: {e}")))?;
+        // Interposed BEFORE the connector, for the same reason the collector sits
+        // beneath the acceptor: SCM_RIGHTS is ancillary data on the raw socket and
+        // rustls can neither carry it nor see it.
+        let sender = maknae_plane::FdSender::new(raw);
+        let armer = sender.armer();
         let tls = TlsConnector::from(cfg)
-            .connect(name, raw)
+            .connect(name, sender)
             .await
             .map_err(|e| VaultError::Handshake(e.to_string()))?;
         let peer_certs = tls.get_ref().1.peer_certificates().map(|c| c.to_vec());
@@ -364,6 +395,11 @@ impl PlaneConnector {
             inner: TlsStream::Client(tls),
             peer_uri_san: peer_uri,
             peer_creds,
+            // Cap 0, not merely empty: delegation is one-directional (subject to
+            // daemon), so a CLIENT-side stream can never legitimately receive a
+            // descriptor. A queue that cannot hold one says so structurally.
+            delegated: maknae_io::DelegatedFds::new(0),
+            armer: Some(armer),
         })
     }
 }

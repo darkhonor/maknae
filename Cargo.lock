@@ -976,6 +976,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "maknae-config",
+ "maknae-io",
  "maknae-msgs",
  "maknae-proto",
  "maknae-vault",
@@ -1027,6 +1028,7 @@ name = "maknae-io"
 version = "0.0.0"
 dependencies = [
  "nix",
+ "rustix",
  "tempfile",
  "zeroize",
 ]
@@ -1063,6 +1065,16 @@ version = "0.0.0"
 [[package]]
 name = "maknae-msgs"
 version = "0.0.0"
+
+[[package]]
+name = "maknae-plane"
+version = "0.0.0"
+dependencies = [
+ "maknae-io",
+ "rustix",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "maknae-proto"
@@ -1108,12 +1120,14 @@ dependencies = [
  "arc-swap",
  "maknae-config",
  "maknae-io",
+ "maknae-plane",
  "nix",
  "rcgen",
  "rustify",
  "rustify_derive",
  "rustls",
  "serde",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "url",

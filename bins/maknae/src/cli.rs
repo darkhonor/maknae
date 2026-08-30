@@ -163,6 +163,18 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 /// [`execute`] can revoke the minted token on EVERY return path (success or error) before
 /// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
+/// The object this verb delegates a descriptor for, if any.
+///
+/// Only terms that NAME an object have one (ADR-0009). `ping` and `whoami` name none,
+/// so an unarmed connection writes plainly and the daemon's OS-DAC gate never asks
+/// about them.
+fn delegated_object(verb: &Verb) -> Option<&str> {
+    match verb {
+        Verb::Read { path } => Some(path.as_str()),
+        Verb::Ping | Verb::Whoami => None,
+    }
+}
+
 async fn round_trip(
     verb: Verb,
     transport: &maknae_config::TransportConfig,
@@ -187,6 +199,28 @@ async fn round_trip(
         }
         Ok(r) => r.map_err(|e| e.to_string())?,
     };
+
+    // ADR-0009: for a term that names an object, WE open it — as the subject — and
+    // delegate the descriptor. The kernel therefore runs the whole permission check
+    // (DAC bits, ACLs, supplementary groups, SELinux) under our own credentials, and
+    // the daemon decides on an object it never had to resolve a name to find.
+    //
+    // Armed AFTER the handshake, deliberately: the handshake's own writes would
+    // otherwise consume the descriptor.
+    //
+    // If the open FAILS the request is still sent, unarmed. That is not a fallback —
+    // the daemon denies for want of a descriptor (ADR-0009 decision 2) and the refusal
+    // lands in the audit trail, which is the whole reason not to fail silently here.
+    if let (Some(object), Some(armer)) = (delegated_object(&verb), stream.armer()) {
+        match maknae_io::open_for_delegation(std::path::Path::new(object)) {
+            Ok(fd) => {
+                armer.arm(fd);
+            }
+            Err(e) => {
+                eprintln!("maknae: cannot open {object}: {e}");
+            }
+        }
+    }
 
     let request = Request {
         protocol_version: PROTOCOL_VERSION,
@@ -323,6 +357,23 @@ fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
+    /// Only terms that NAME an object delegate one. `ping` and `whoami` name none, so
+    /// the client must not manufacture a descriptor for them — an unarmed connection
+    /// writes plainly, and the daemon's gate does not ask about OS DAC for a term with
+    /// no object.
+    #[test]
+    fn only_object_naming_verbs_delegate_a_descriptor() {
+        assert_eq!(
+            super::delegated_object(&super::Verb::Read {
+                path: "/home/op/notes".into()
+            }),
+            Some("/home/op/notes")
+        );
+        assert_eq!(super::delegated_object(&super::Verb::Ping), None);
+        assert_eq!(super::delegated_object(&super::Verb::Whoami), None);
+    }
+
     use super::*;
     use std::sync::Mutex;
 

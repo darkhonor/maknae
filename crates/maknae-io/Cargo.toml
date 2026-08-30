@@ -29,6 +29,20 @@ workspace = true
 #        unification hid it — maknae-kernel::groupres enables "user" — so it only shows
 #        in a standalone `cargo build -p maknae-io`. Moved to dev-dependencies.
 nix = { version = "0.31", default-features = false, features = ["fs", "dir"] }
+# net — recvmsg with SCM_RIGHTS, for ADR-0009 subject-delegated descriptors. THE reason
+#       this is rustix and not another nix feature: `unsafe_code = "forbid"` is set
+#       workspace-wide and cannot be locally overridden, and nix's
+#       `ControlMessageOwned::ScmRights(Vec<RawFd>)` yields BARE RawFds whose conversion
+#       to OwnedFd/BorrowedFd is `unsafe` in every form std offers. rustix's
+#       `RecvAncillaryMessage::ScmRights(AncillaryIter<'_, OwnedFd>)` yields OWNED
+#       descriptors safely. Without it the only paths were introducing the workspace's
+#       first unsafe block into precisely the crate AGENTS.md holds up as the minimal-TCB
+#       I/O primitive, or holding bare RawFds with hand-rolled close-on-drop — the exact
+#       leak-on-the-refusal-path hazard ADR-0009 names. `default-features = false` keeps
+#       it to "std" + "net"; the fs/process/thread/event APIs are not compiled in.
+#       Already resolved at 1.1.4 in Cargo.lock (transitively via tempfile), so this
+#       promotes a vetted edge rather than widening the graph.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

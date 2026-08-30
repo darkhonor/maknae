@@ -42,6 +42,10 @@ files = [
   "crates/maknae-proto/src/bytes.rs",
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
+  # ADR-0009 confinement: every line is a refusal path, and the failure mode is
+  # exact — a wrong branch hands a subject an object outside its enrolled home,
+  # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
+  "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
   # Promoted from [[t3]] once it reached 100%. MEASURED ON BOTH LANES, because the
   # cfg(linux) openat2 block and the real probe are regions darwin never compiles and
@@ -171,7 +175,16 @@ mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic 
 
 [t2]
 floor_production_region = 90
-files = []
+# The client-plane descriptor adapter (ADR-0009). NOT T1, by the line-drawing rule
+# above and not by convenience: if this silently breaks, delegated descriptors are
+# LOST, and an absent descriptor is a `Deny` (ADR-0009 decision 2) -- it cannot yield
+# a Permit for an access policy denies. The queue is per-connection, so a mis-ordered
+# take stays within one subject, and the PDP decides on the path of whichever
+# descriptor is actually used (decision 6), so the verdict follows the object rather
+# than diverging from it. What IS at stake here is availability and descriptor
+# exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
+# CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
+files = ["crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs"]
 
 [project]
 # Cohort ratchet (ADR-0016 §4): the floor applies to ratchet_cohort ONLY —
@@ -207,6 +220,10 @@ lane = "darwin dev-host (clean worktree); ubuntu-latest CI authoritative on merg
 command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.yml build-and-gate"
 
 # ---- T3: report-only, per-file justification (never a blanket glob) --------
+
+[[t3]]
+path = "crates/maknae-plane/src/lib.rs"
+why = "module declarations and re-exports only; no production regions of its own — same treatment as maknae-io/src/lib.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
@@ -464,6 +481,17 @@ path = "crates/maknae-io/src/anchor.rs"
 anchor = "syscall::fstat(&afd).map_err"
 why = "fstat on an fd the kernel just returned cannot fail on a healthy FS; the arm is a pure errno passthrough with no decision"
 
+[[exception]]
+path = "crates/maknae-io/src/delegated.rs"
+anchor = "fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {"
+end_anchor = "        kind: crate::checks::kind_of_errno(e),"
+why = "The /proc/self/fd lane failing for a descriptor the caller already holds requires /proc to be absent from the process's mount namespace (a container built without it). That is a REAL deployment condition, not a theoretical one, and it is why the arm exists and why it maps to FdPathUnavailable -> ADR-0009 decision 8's unknown -> Deny rather than to any success. It is not constructible in-process: unsharing a mount namespace mid-test would apply to every thread of a parallel harness, and fork-then-unshare in a multithreaded process leaves only async-signal-safe operations available. The testable path is a re-exec of the test binary into `unshare -Urm` with /proc masked; that is a harness the crate does not have and would be the way to retire this exception. The arm itself carries NO decision -- it is a total mapping of any errno to one variant -- and its Display is separately asserted in error.rs (display_strings_the_crate_reasons_about), including that it names no false path."
+
+[[exception]]
+path = "crates/maknae-io/src/delegated.rs"
+anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))"
+why = "Identical in kind to the anchor.rs fstat exception above, and strictly weaker: this fstat runs on a descriptor whose /proc/self/fd entry resolved two lines earlier, so the fd is demonstrably valid and open at that instant. A pure errno passthrough with no decision."
+
 
 # The last three uncovered production regions in the crate's [t1] files, classified
 # rather than
@@ -501,13 +529,13 @@ why = "fstat on a dirfd the kernel just returned from openat cannot fail on a he
 # is an unclassified one, which is the state this gate exists to prevent.
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "                Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
-end_anchor = "                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
+anchor = "            Err(nix::errno::Errno::EINTR) => continue, // retry the probe"
+end_anchor = "                return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))"
 why = "the one-byte size probe's EINTR retry and its read-error arm. EINTR needs signal delivery mid-syscall; the error arm needs a read to fail on an fd whose fill loop just succeeded, i.e. EIO on a healthy FS. Neither is provokable from a unit test without a seam. The DECISION this loop feeds — size_verdict — is covered in all four quadrants on every platform, and its production wiring by the procfs (grew) and sysfs (shrank) fixtures"
 
 [[exception]]
 path = "crates/maknae-io/src/anchor.rs"
-anchor = "                Ok(0) => break,"
+anchor = "            Ok(0) => break,"
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"
 why = "the read loop's three non-progress arms, and ONLY those three — the covered progress arm below them is deliberately left in the denominator. Ok(0) requires the file to shrink between the fstat and the read; EINTR requires signal delivery mid-syscall; a mid-read Err is EIO on a healthy FS. None is provokable from a unit test without a seam, and all three are pure control flow — the decision on this path is the pre-size, covered by read_buffer_is_pre_sized_and_never_reallocates"
 

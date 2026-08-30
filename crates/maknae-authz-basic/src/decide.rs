@@ -105,6 +105,55 @@ fn canonical_violation(path: &str) -> Option<&'static str> {
     None
 }
 
+/// What OS discretionary access control says about a request naming an object.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OsDacGate {
+    /// The OS permits this subject this object. The policy decision proceeds.
+    Satisfied,
+    /// Refuse, with an audit-only reason distinguishing WHY from a policy denial.
+    Deny(&'static str),
+    /// OS DAC is not the applicable control on this lane. The operand contributes
+    /// nothing on this ground and the rest of the policy carries the decision.
+    NotApplicable,
+    /// Present but wrong-typed — failed-to-evaluate, never a fall-through to absent.
+    Indeterminate,
+}
+
+/// The OS-DAC gate over a request that names an object (ADR-0009 decision 8).
+///
+/// **Code-defined and unconfigurable.** No `authz.yaml` key enables, disables, or
+/// overrides it — the same class as `Role::Adversary`'s deny-all. Operator ruling:
+/// *"DAC permissions aren't something I should have to write a policy configuration
+/// for. Those are managed by the OS."*
+///
+/// The LANE is read first and it is load-bearing: it is the only thing separating
+/// *absent means unknown, so deny* (local — the OS could have been asked) from
+/// *absent means not applicable, so abstain* (remote — there is no uid, process, or
+/// descriptor on this host to ask about). Collapse the two and either every remote
+/// read denies the day the gateway lands, or every local read fails open.
+pub(crate) fn os_dac_gate(req: &SecRequest) -> OsDacGate {
+    let lane = match req.context.0.get(maknae_security::CONTEXT_DAC_LANE) {
+        Some(AttrValue::Str(s)) => s.as_str(),
+        // Absent, or present-but-wrong-typed. Either way the two meanings of a
+        // missing answer cannot be told apart, so neither may be assumed.
+        _ => return OsDacGate::Deny("dac lane absent"),
+    };
+    if lane == maknae_security::Lane::Remote.as_str() {
+        return OsDacGate::NotApplicable;
+    }
+    if lane != maknae_security::Lane::Local.as_str() {
+        return OsDacGate::Deny("dac lane unrecognised");
+    }
+    match req.resource.0.get(maknae_security::RESOURCE_OS_ACCESSIBLE) {
+        Some(AttrValue::Bool(true)) => OsDacGate::Satisfied,
+        Some(AttrValue::Bool(false)) => OsDacGate::Deny("os dac refuses this subject this object"),
+        Some(_) => OsDacGate::Indeterminate,
+        // ADR-0008 decision 4: no operand may fail open. On this lane the OS could
+        // have been asked, so silence is unknown — and unknown is never a permit.
+        None => OsDacGate::Deny("os accessibility unknown"),
+    }
+}
+
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
 pub(crate) fn decide_loaded(
     lp: &LoadedPolicy,
@@ -162,7 +211,20 @@ pub(crate) fn decide_loaded(
             // and makes unbuilt fs terms abstain (NotApplicable) rather than
             // report Indeterminate — which is a PDP-malfunction signal, not a
             // "this term has no behaviour yet" signal.
-            Some(Class::Fs) if req.action.0 == "fs.read" => decide_fs(lp, req),
+            // OS DAC first, and ONLY for terms that name an object: `liveness.ping`
+            // and `admin.whoami` name none, so discretionary access to an object is
+            // not a question they raise. `-basic` IS the DAC layer (ADR-0020 §5), and
+            // a DAC decision that ignores the OS's own discretionary controls is not
+            // a complete DAC decision (ADR-0009).
+            Some(Class::Fs) if req.action.0 == "fs.read" => match os_dac_gate(req) {
+                // Satisfied: the OS permits it, so the policy decides.
+                // NotApplicable: OS DAC is not this lane's control, so likewise.
+                OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req),
+                OsDacGate::Deny(why) => Verdict::Deny {
+                    reason: format!("os dac: {why}"),
+                },
+                OsDacGate::Indeterminate => Verdict::Indeterminate,
+            },
             Some(Class::Fs) => Verdict::NotApplicable,
             Some(Class::Session)
             | Some(Class::Terminal)
@@ -260,12 +322,122 @@ mod tests {
         if let Some(p) = path {
             r.insert(RESOURCE_PATH, AttrValue::Str(p.into()));
         }
+        // These vectors exercise the GRAMMAR, the globs and the role gates -- not OS
+        // DAC -- so give them a satisfied gate and each keeps testing the one thing it
+        // names. Unconditional, not path-keyed: the missing-path vector asserts an
+        // Indeterminate from the GRAMMAR, and it can only reach the grammar if the
+        // gate ahead of it is satisfied. `read_req` drives the gate itself.
+        r.insert(
+            maknae_security::RESOURCE_OS_ACCESSIBLE,
+            AttrValue::Bool(true),
+        );
+        let mut c = Attributes::new();
+        c.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            AttrValue::Str(maknae_security::Lane::Local.as_str().into()),
+        );
         SecRequest {
             subject: Subject(s),
             resource: Resource(r),
             action: Action(action.into()),
-            context: Context(Attributes::new()),
+            context: Context(c),
         }
+    }
+
+    /// Build a read request with an explicit lane and OS-DAC answer.
+    fn read_req(lane: Option<&str>, accessible: Option<AttrValue>) -> SecRequest {
+        let mut r = request(None, Some(501), "fs.read", Some("/home/operator/x"));
+        // request() stamps a satisfied gate for the grammar vectors; these tests own
+        // the gate's inputs outright, so start from a clean slate.
+        r.resource.0 = {
+            let mut fresh = Attributes::new();
+            fresh.insert(RESOURCE_PATH, AttrValue::Str("/home/operator/x".into()));
+            fresh
+        };
+        let mut c = Attributes::new();
+        if let Some(l) = lane {
+            c.insert(maknae_security::CONTEXT_DAC_LANE, AttrValue::Str(l.into()));
+        }
+        if let Some(a) = accessible {
+            r.resource
+                .0
+                .insert(maknae_security::RESOURCE_OS_ACCESSIBLE, a);
+        }
+        r.context = Context(c);
+        r
+    }
+
+    #[test]
+    fn local_with_os_access_satisfies_the_gate() {
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Bool(true)))),
+            OsDacGate::Satisfied
+        ));
+    }
+
+    /// The defect #186 was filed for: the OS refuses this subject this object, and
+    /// the daemon must refuse too or it is a path around the OS.
+    #[test]
+    fn local_without_os_access_denies() {
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Bool(false)))),
+            OsDacGate::Deny(_)
+        ));
+    }
+
+    /// ADR-0008 decision 4 applied: an operand that permits an object whose OS
+    /// accessibility it never evaluated is deciding on input it did not evaluate.
+    /// On the LOCAL lane the OS could have been asked, so silence is UNKNOWN.
+    #[test]
+    fn local_with_no_answer_denies_because_unknown_is_never_permit() {
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("local"), None)),
+            OsDacGate::Deny(_)
+        ));
+    }
+
+    /// NOT the same as unknown, and the distinction is the whole point of the lane:
+    /// a remote subject has no uid, process, or descriptor on this host (ADR-0006
+    /// D5/D7), so there is nothing to ask. The operand abstains and the rest of the
+    /// policy carries the decision. Collapse this into Deny and the remote lane can
+    /// never read anything the day the gateway lands.
+    #[test]
+    fn remote_is_not_applicable_because_there_is_no_uid_to_ask_about() {
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("remote"), None)),
+            OsDacGate::NotApplicable
+        ));
+    }
+
+    /// The lane is the ONLY thing separating "absent means Deny" from "absent means
+    /// abstain", so an absent or unrecognised lane cannot be treated as either.
+    #[test]
+    fn an_absent_or_unrecognised_lane_denies() {
+        assert!(matches!(
+            os_dac_gate(&read_req(None, None)),
+            OsDacGate::Deny(_)
+        ));
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("locaI"), Some(AttrValue::Bool(true)))),
+            OsDacGate::Deny(_)
+        ));
+    }
+
+    /// The crate's matcher invariant, applied here too: a PRESENT but wrong-typed
+    /// value is failed-to-evaluate, never a fall-through to "absent".
+    #[test]
+    fn a_wrong_typed_answer_is_indeterminate_never_a_fall_through() {
+        assert!(matches!(
+            os_dac_gate(&read_req(
+                Some("local"),
+                Some(AttrValue::Str("true".into()))
+            )),
+            OsDacGate::Indeterminate
+        ));
+        assert!(matches!(
+            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Int(1)))),
+            OsDacGate::Indeterminate
+        ));
     }
 
     const ALL_ACTIONS: &[&str] = &[

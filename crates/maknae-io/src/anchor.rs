@@ -121,6 +121,102 @@ pub struct Anchor {
     probed: Strategy,
 }
 
+/// Read a descriptor the caller has already resolved, under its named requirements.
+///
+/// Extracted from `Anchor::finish_read` so the anchored path and the ADR-0009
+/// delegated path run the SAME decision rather than two copies of it -- the crate's
+/// standing rule, stated on `size_verdict`: "the production path calls this function,
+/// so the tests hold the real decision and not a copy of it."
+pub(crate) fn read_checked_fd(
+    fd: &OwnedFd,
+    full: &Path,
+    target: &TargetRequired,
+) -> Result<Zeroizing<Vec<u8>>, IoError> {
+    let st = crate::syscall::fstat(&fd)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;
+    crate::checks::check_target(&st, full, target)?;
+
+    // Pre-size from st_size so the Zeroizing buffer never reallocates: an
+    // abandoned buffer is the one credential residual zeroize cannot reach
+    // ("cannot ensure that previous reallocations did not leave values on the
+    // heap"). with_capacity + read_to_end may still reserve.
+    // Typed AT THE DEFINITION SITE, not at the call. Wrapping at the call left a
+    // bare `usize` of each role in scope, so `size_verdict(Want(n), Have(want))`
+    // -- right wrappers, wrong values -- still compiled and still destroyed the
+    // direction signal. With no unwrapped counts in scope there is nothing to
+    // transpose.
+    let want = Want(st.st_size.max(0) as usize);
+    let mut buf = Zeroizing::new(vec![0u8; want.0]);
+    let mut n = Have(0);
+    while n.0 != want.0 {
+        match nix::unistd::read(fd, &mut buf[n.0..]) {
+            // The three non-progress arms are grouped FIRST and the covered
+            // progress arm goes last, so the coverage exception can span exactly
+            // these three and leave `Ok(k)` in the denominator. Ordering does the
+            // work; a `k > 0` guard would do it too but adds a comparison that
+            // cargo-mutants rewrites into a non-terminating loop.
+            Ok(0) => break,
+            // The manual loop loses read_to_end's built-in retry.
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
+            Ok(k) => n.0 += k,
+        }
+    }
+
+    // NOTE on `got`: both call sites below are asserted exactly, including this
+    // field, because it is the only part of the error that reports WHICH direction
+    // the size moved and PR B maps on it. Left unasserted, `n + 1` mutates to
+    // `n * 1` with the whole suite still green -- caught by cargo-mutants.
+    // Sizing the buffer from st_size means the read stops at the length the file
+    // had at the fstat. Both directions of a change in that window must be an
+    // ERROR, never a short `Ok`:
+    //
+    //   grew   -- bytes past st_size are dropped. On a policy file that is a rule
+    //             appended mid-read vanishing silently: a deny becoming a permit.
+    //             `std::fs::read`, which this crate replaces, reads to EOF and
+    //             cannot truncate this way, so staying silent would be a
+    //             REGRESSION against the call sites being migrated.
+    //   shrank -- `Ok(0)` breaks the loop early and we hold fewer bytes than the
+    //             checked inode claimed.
+    //
+    // One extra read detects the grew case: at n == want the file is at EOF iff
+    // it did not grow. EINTR is retried; any other errno is the file changing
+    // under us, which is the same refusal.
+    let mut probe = [0u8; 1];
+    let saw_extra = loop {
+        match nix::unistd::read(fd, &mut probe) {
+            Ok(0) => break false,
+            Ok(_) => break true,
+            Err(nix::errno::Errno::EINTR) => continue, // retry the probe
+
+            // A genuine read error is NOT a size change. Relabelling it would
+            // discard the errno that the fill loop above preserves and report
+            // e.g. EIO as "size changed under the read". Bound as `probe_err`
+            // rather than `e` so this line is textually distinct from the fill
+            // loop's identical arm -- the coverage gate anchors on whole lines
+            // and rejects an ambiguous one.
+            Err(probe_err) => {
+                return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))
+            }
+        }
+    };
+    // Deleting this line leaves the suite green, and unlike every other
+    // uncontrolled item in the crate that fact had no stated reason. One byte of
+    // file content lives in this buffer; whether it was wiped is not observable
+    // from a test without reading freed stack, so the control is review, not a
+    // test. Recorded so the set of "uncontrolled, and here is why" is complete.
+    zeroize::Zeroize::zeroize(&mut probe[..]);
+    if let Err(got) = size_verdict(want, n, saw_extra) {
+        return Err(IoError::SizeChanged {
+            path: full.to_path_buf(),
+            expected: want.0,
+            got,
+        });
+    }
+
+    Ok(buf)
+}
+
 impl Anchor {
     /// What the capability probe found, once, at construction.
     ///
@@ -514,90 +610,9 @@ impl Anchor {
         lane: Strategy,
         target: &TargetRequired,
     ) -> Result<Outcome<Zeroizing<Vec<u8>>>, IoError> {
-        let st = crate::syscall::fstat(&fd)
-            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, full))?;
-        crate::checks::check_target(&st, full, target)?;
-
-        // Pre-size from st_size so the Zeroizing buffer never reallocates: an
-        // abandoned buffer is the one credential residual zeroize cannot reach
-        // ("cannot ensure that previous reallocations did not leave values on the
-        // heap"). with_capacity + read_to_end may still reserve.
-        // Typed AT THE DEFINITION SITE, not at the call. Wrapping at the call left a
-        // bare `usize` of each role in scope, so `size_verdict(Want(n), Have(want))`
-        // -- right wrappers, wrong values -- still compiled and still destroyed the
-        // direction signal. With no unwrapped counts in scope there is nothing to
-        // transpose.
-        let want = Want(st.st_size.max(0) as usize);
-        let mut buf = Zeroizing::new(vec![0u8; want.0]);
-        let mut n = Have(0);
-        while n.0 != want.0 {
-            match nix::unistd::read(&fd, &mut buf[n.0..]) {
-                // The three non-progress arms are grouped FIRST and the covered
-                // progress arm goes last, so the coverage exception can span exactly
-                // these three and leave `Ok(k)` in the denominator. Ordering does the
-                // work; a `k > 0` guard would do it too but adds a comparison that
-                // cargo-mutants rewrites into a non-terminating loop.
-                Ok(0) => break,
-                // The manual loop loses read_to_end's built-in retry.
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),
-                Ok(k) => n.0 += k,
-            }
-        }
-
-        // NOTE on `got`: both call sites below are asserted exactly, including this
-        // field, because it is the only part of the error that reports WHICH direction
-        // the size moved and PR B maps on it. Left unasserted, `n + 1` mutates to
-        // `n * 1` with the whole suite still green -- caught by cargo-mutants.
-        // Sizing the buffer from st_size means the read stops at the length the file
-        // had at the fstat. Both directions of a change in that window must be an
-        // ERROR, never a short `Ok`:
-        //
-        //   grew   -- bytes past st_size are dropped. On a policy file that is a rule
-        //             appended mid-read vanishing silently: a deny becoming a permit.
-        //             `std::fs::read`, which this crate replaces, reads to EOF and
-        //             cannot truncate this way, so staying silent would be a
-        //             REGRESSION against the call sites being migrated.
-        //   shrank -- `Ok(0)` breaks the loop early and we hold fewer bytes than the
-        //             checked inode claimed.
-        //
-        // One extra read detects the grew case: at n == want the file is at EOF iff
-        // it did not grow. EINTR is retried; any other errno is the file changing
-        // under us, which is the same refusal.
-        let mut probe = [0u8; 1];
-        let saw_extra = loop {
-            match nix::unistd::read(&fd, &mut probe) {
-                Ok(0) => break false,
-                Ok(_) => break true,
-                Err(nix::errno::Errno::EINTR) => continue, // retry the probe
-
-                // A genuine read error is NOT a size change. Relabelling it would
-                // discard the errno that the fill loop above preserves and report
-                // e.g. EIO as "size changed under the read". Bound as `probe_err`
-                // rather than `e` so this line is textually distinct from the fill
-                // loop's identical arm -- the coverage gate anchors on whole lines
-                // and rejects an ambiguous one.
-                Err(probe_err) => {
-                    return Err(crate::checks::map_errno_no_disambiguation(probe_err, full))
-                }
-            }
-        };
-        // Deleting this line leaves the suite green, and unlike every other
-        // uncontrolled item in the crate that fact had no stated reason. One byte of
-        // file content lives in this buffer; whether it was wiped is not observable
-        // from a test without reading freed stack, so the control is review, not a
-        // test. Recorded so the set of "uncontrolled, and here is why" is complete.
-        zeroize::Zeroize::zeroize(&mut probe[..]);
-        if let Err(got) = size_verdict(want, n, saw_extra) {
-            return Err(IoError::SizeChanged {
-                path: full.to_path_buf(),
-                expected: want.0,
-                got,
-            });
-        }
-
+        let value = read_checked_fd(&fd, full, target)?;
         Ok(Outcome {
-            value: buf,
+            value,
             effective_strategy: lane,
         })
     }

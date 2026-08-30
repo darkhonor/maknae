@@ -29,7 +29,19 @@ concurrency:
 # second MUTANTS_PATHS: line anywhere in this file (multi-match = hard FAIL).
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
+# DARWIN_CRATES: the crates that build for macOS WITHOUT a macOS SDK — i.e. no
+# aws-lc-fips-sys and no ring. Consumed by both darwin jobs: the cross-check
+# passes them as `-p` flags, the native job derives `crates/<name>` for its
+# change gate. maknae-vault and everything above it are deliberately absent —
+# their build scripts need an SDK, so they can be neither cross-checked from
+# Linux nor (yet) built on a hosted runner. That exclusion is the honest scope
+# of macOS CI coverage, and packaging/macos/README.md says so.
+#
+# NOT gate-verified against any manifest, unlike MUTANTS_PATHS. Adding a crate
+# to the workspace does not automatically extend macOS coverage; extend this
+# list deliberately when a crate becomes SDK-free.
 env:
+  DARWIN_CRATES: "maknae-io maknae-plane maknae-security maknae-proto maknae-config"
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic"
 
 jobs:
@@ -139,3 +151,96 @@ jobs:
       - name: Mutation gate (zero missed; TIMEOUT = investigate)
         if: steps.gate.outputs.run == '1'
         run: bash ci/gates/coverage-tiers.sh --root . --mutants-all
+
+  # macOS is a DEPLOYMENT TARGET (packaging/isolation-contract.md). These two jobs
+  # are the only automated macOS coverage that exists; neither substitutes for the
+  # other, and both are honestly narrower than the platform.
+
+  darwin-cross:
+    # Free, no Mac required, and it pays for itself: adding this locally caught
+    # `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant
+    # maknae-io::recv_delegated did not compile there AT ALL. Off Linux a received
+    # descriptor arrives without close-on-exec and FD_CLOEXEC must be set
+    # explicitly — a security-relevant delta a Linux-only CI cannot see.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (pinned)
+        run: rustup show
+      - name: Add darwin targets
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+      - name: Cross-compile check (both darwin arches)
+        run: |
+          set -euo pipefail
+          pkgs=""
+          for c in $DARWIN_CRATES; do pkgs="$pkgs -p $c"; done
+          # Apple Silicon first: it is the fleet arch and the operator's own host.
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            echo "::group::cargo check --target $t"
+            cargo check $pkgs --target "$t" --all-targets
+            echo "::endgroup::"
+          done
+
+  darwin-native:
+    # Change-gated like `mutation`: always starts so it is required-check-safe,
+    # SKIPs unless a crate it actually covers changed. macOS minutes bill at a
+    # multiplier on a private repo, so running this on every unrelated PR is real
+    # money for no signal.
+    #
+    # A cross-compile check proves the code BUILDS for macOS. This proves it
+    # WORKS there — the difference that turns ADR-0009's F_GETPATH lane from
+    # written into verified.
+    # Pinned to a NAMED image, deliberately not `macos-latest`. macOS is a
+    # deployment target, so the runner is part of the evidence: `macos-latest`
+    # silently re-points as images roll, which would change what "verified on
+    # macOS" means without any commit saying so. Operator-selected image:
+    # https://github.com/actions/runner-images/releases/tag/macos-26/20260729.0423
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Change gate
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "run=1" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          changed="$(git diff --name-only "$base"...HEAD)"
+          run=0
+          for c in $DARWIN_CRATES; do
+            if printf '%s\n' "$changed" | grep -Eq "^crates/${c}(/|$)"; then run=1; fi
+          done
+          # The workflow itself changing must re-verify the job it defines.
+          if printf '%s\n' "$changed" | grep -Eq "^\.github/workflows/"; then run=1; fi
+          if [ "$run" = "0" ]; then echo "SKIP: no darwin-covered crate changed"; fi
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+      - name: Install toolchain (pinned)
+        if: steps.gate.outputs.run == '1'
+        run: rustup show
+      - name: Test the SDK-free crates natively
+        if: steps.gate.outputs.run == '1'
+        run: |
+          set -euo pipefail
+          pkgs=""
+          for c in $DARWIN_CRATES; do pkgs="$pkgs -p $c"; done
+          cargo test $pkgs
+      - name: Confirm the F_GETPATH lane actually ran
+        if: steps.gate.outputs.run == '1'
+        # The delegated suite is the macOS control for ADR-0009: on Linux it
+        # exercises /proc/self/fd, here it exercises fcntl(F_GETPATH). A green
+        # workspace that silently skipped it would prove nothing, so assert the
+        # tests were collected rather than trusting the exit code.
+        run: |
+          set -euo pipefail
+          out="$(cargo test -p maknae-io --lib delegated -- --list)"
+          printf '%s\n' "$out"
+          n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
+          [ "$n" -ge 15 ] || { echo "FAIL: expected the delegated suite, saw $n tests"; exit 1; }
+          echo "delegated suite present on macOS: $n tests"

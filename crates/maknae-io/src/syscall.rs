@@ -138,6 +138,57 @@ pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> 
 
 /// The crate's ONLY `fstat` call site, and it takes an fd — never a path. The
 /// spec:160 build requirement greps for exactly this.
+/// The path the KERNEL reports for an open descriptor (ADR-0009 decision 4).
+///
+/// This is the confinement primitive, and it is deliberately NOT a resolution of
+/// any caller-supplied name: it reads the daemon's OWN fd table, so it needs no
+/// permission on the object's directories at all. That is what lets a subject's
+/// `0700` home be served without granting the daemon `+x` or `+r` on it (#194).
+#[cfg(target_os = "linux")]
+pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    let link = format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd());
+    nix::fcntl::readlink(link.as_str()).map(std::path::PathBuf::from)
+}
+
+/// The macOS lane: `fcntl(fd, F_GETPATH)`, the platform equivalent of reading
+/// `/proc/self/fd`. Same property — it interrogates the process's OWN descriptor table
+/// and needs no permission on the object's directories.
+///
+/// **`F_GETPATH`, deliberately, not `F_GETPATH_NOFIRMLINK`.** On APFS `/Users` is a
+/// firmlink to `/System/Volumes/Data/Users`, and the two calls return the two forms.
+/// The user-visible form is the one an operator writes in `principal.home` and the one
+/// `realpath` reports, so it is the form the confinement prefix-check compares against.
+///
+/// **If that reasoning is wrong, the failure is fail-closed, not a bypass.** A form
+/// mismatch makes `strip_prefix` fail, which is `EscapesAnchor`, which denies — the
+/// same outcome macOS has today with no lane at all. A wrong-direction MATCH would
+/// need two roots in a prefix relationship across the firmlink boundary, which is a
+/// misconfiguration rather than a firmlink artifact.
+///
+/// **WRITTEN AND COMPILE-CHECKED FOR arm64-darwin; NEVER RUN.** CI is `ubuntu-latest`
+/// only and all three standing test hosts are Linux, so the only machine that can
+/// verify this is **Wrathion**, the operator's Apple Silicon host. macOS is a
+/// **deployment target** (isolation contract, corrected 2026-08-30), so that is a
+/// release-gating condition rather than a footnote.
+///
+/// Implementing it means the WHOLE existing delegated suite becomes the macOS control
+/// the moment it is built there — no mac-only test is needed, and none is added,
+/// because a test that cannot run is not a control.
+#[cfg(target_os = "macos")]
+pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
+    let mut buf = std::path::PathBuf::new();
+    nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETPATH(&mut buf))?;
+    Ok(buf)
+}
+
+/// Fail closed on any platform with no lane: the kernel cannot be asked, so the answer
+/// is UNKNOWN, and ADR-0009 decision 8 makes unknown deny.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
+    Err(nix::errno::Errno::ENOSYS)
+}
+
 pub(crate) fn fstat<F: AsFd>(fd: &F) -> nix::Result<FileStat> {
     nix::sys::stat::fstat(fd)
 }
