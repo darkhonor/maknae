@@ -323,6 +323,10 @@ pub async fn handle<S, E, P>(
     authorizer: Arc<P>,
     principal: Arc<Principal>,
     authz_decide_timeout: Duration,
+    // Which boundary accepted this connection. Supplied by the accept loop that owns
+    // the listener — never inferred here, and never readable from the request
+    // (ADR-0009 decision 8).
+    lane: maknae_security::Lane,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -511,7 +515,7 @@ pub async fn handle<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(&request.verb, peer_uid);
+    let sec_req = build_authz_request(&request.verb, peer_uid, lane);
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     let verdict = match authz_admission {
@@ -1258,6 +1262,14 @@ where
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer, principal, AUTHZ_DECIDE_TIMEOUT,
+                                                // THIS accept loop owns the on-host
+                                                // client listener, so every connection
+                                                // it yields is local by construction.
+                                                // When #114 splits listeners, the
+                                                // machine/gateway loop passes its own —
+                                                // the lane is a property of the door,
+                                                // not of anything read off the wire.
+                                                maknae_security::Lane::Local,
                                             )
                                             .await;
                                         }

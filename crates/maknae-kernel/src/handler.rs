@@ -221,7 +221,11 @@ pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 /// `name` token is door-stamped only for runtime-originated requests, and no
 /// runtime channel exists — post-#117). `Read` carries the client-supplied
 /// path as the resource `path` attribute; resource/context otherwise empty.
-pub fn build_authz_request(verb: &Verb, peer_uid: u32) -> maknae_security::Request {
+pub fn build_authz_request(
+    verb: &Verb,
+    peer_uid: u32,
+    lane: maknae_security::Lane,
+) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
@@ -229,11 +233,20 @@ pub fn build_authz_request(verb: &Verb, peer_uid: u32) -> maknae_security::Reque
     if let Verb::Read { path } = verb {
         resource.insert("path", AttrValue::Str(path.clone()));
     }
+    // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
+    // caller is the accept loop, which knows which listener accepted, and there is
+    // therefore no code path by which client-supplied content could reach it
+    // (ADR-0009 decision 8).
+    let mut context = Attributes::new();
+    context.insert(
+        maknae_security::CONTEXT_DAC_LANE,
+        AttrValue::Str(lane.as_str().to_string()),
+    );
     maknae_security::Request {
         subject: Subject(subject),
         resource: Resource(resource),
         action: Action(verb_to_action(verb).to_string()),
-        context: Context(Attributes::new()),
+        context: Context(context),
     }
 }
 
@@ -560,12 +573,12 @@ mod tests {
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0);
+        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
         );
-        let r = build_authz_request(&Verb::Whoami, u32::MAX);
+        let r = build_authz_request(&Verb::Whoami, u32::MAX, maknae_security::Lane::Local);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(i64::from(u32::MAX)))
@@ -574,10 +587,14 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501);
+        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local);
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
-        assert!(r.context.0.is_empty());
+        // Context is no longer empty: every request carries its lane (ADR-0009 D8).
+        assert_eq!(
+            r.context.0.get(maknae_security::CONTEXT_DAC_LANE),
+            Some(&maknae_security::AttrValue::Str("local".into()))
+        );
     }
 
     #[test]
@@ -587,11 +604,52 @@ mod tests {
                 path: "/home/op/n".into(),
             },
             501,
+            maknae_security::Lane::Local,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
             r.resource.0.get("path"),
             Some(&maknae_security::AttrValue::Str("/home/op/n".into()))
+        );
+    }
+
+    /// ADR-0009 decision 8's load-bearing control, and the ADR calls it the single
+    /// most important one in the design: **the lane comes from the ACCEPTING LISTENER
+    /// and from nothing else.**
+    ///
+    /// It is what separates *"absent means `Deny`"* (local — the OS could have been
+    /// asked and was not) from *"absent means not applicable"* (remote — there is no
+    /// uid on this host to ask about). So anything that lets a local request present
+    /// as remote escapes OS DAC entirely, and the client controls the verb.
+    #[test]
+    fn the_lane_comes_from_the_listener_and_client_content_cannot_change_it() {
+        use maknae_security::{AttrValue, Lane, CONTEXT_DAC_LANE};
+
+        // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
+        // be a function of anything the client sent.
+        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local);
+        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote);
+        assert_eq!(
+            local.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("local".into()))
+        );
+        assert_eq!(
+            remote.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("remote".into()))
+        );
+
+        // A client putting "remote" in the one field it controls gets nowhere.
+        let smuggled = build_authz_request(
+            &Verb::Read {
+                path: "/home/op/remote".into(),
+            },
+            501,
+            Lane::Local,
+        );
+        assert_eq!(
+            smuggled.context.0.get(CONTEXT_DAC_LANE),
+            Some(&AttrValue::Str("local".into())),
+            "client-supplied content must never influence the lane"
         );
     }
 
@@ -911,7 +969,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501);
+            let r = build_authz_request(&v, 501, maknae_security::Lane::Local);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),

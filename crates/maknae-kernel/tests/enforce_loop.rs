@@ -151,6 +151,7 @@ where
         authorizer,
         Arc::new(fx_principal.clone()),
         timeout,
+        maknae_security::Lane::Local,
     )
     .await;
     match tokio::time::timeout(

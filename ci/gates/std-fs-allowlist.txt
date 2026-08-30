@@ -78,11 +78,18 @@ crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Pe
 crates/maknae-vault/src/stream.rs:189|let _ = std::fs::remove_file(&self.path);
 crates/maknae-vault/src/stream.rs:228|let _ = std::fs::remove_file(path);
 
-# #77 read PEP (handler.rs::read_plan — the T1 decision half): OS DAC at the
-# TARGET is deliberate — the alias-planting boundary lives on the ANCHOR
-# (AnchorRequired owner+0o022), and the target names nlink_exactly_one +
-# regular_file + max_bytes. A target owner/mode requirement would refuse
-# legitimately-shared home files the operator's own modes expose; the PDP is
-# the authorization control (spec D5).
-crates/maknae-kernel/src/handler.rs:364|owner: None,
-crates/maknae-kernel/src/handler.rs:365|mode_mask: None,
+# #77 read PEP (handler.rs::read_plan — the T1 decision half). These two `None`s
+# are DELIBERATE and, since ADR-0009 (2026-08-30), load-bearing rather than merely
+# tolerated. The original justification here — "a target owner/mode requirement
+# would refuse legitimately-shared home files the operator's own modes expose" —
+# was true but weak, and is superseded: under ADR-0009 the subject opens the object
+# itself and delegates the descriptor, so **the descriptor IS the OS's answer**.
+# Populating owner/mode_mask here would mean recomputing the mode algebra daemon-side,
+# which ACLs, supplementary groups, SELinux and AppArmor make non-equivalent to what
+# the kernel decides — and which the operator explicitly forbade. The boundary
+# requirement lives on the ANCHOR (owner + 0o022); the target names
+# nlink_exactly_one + regular_file + max_bytes, and nlink is load-bearing three ways
+# (ADR-0009 decision 5). Do not "complete" these fields; #186 owed-bullet 1 was
+# corrected for exactly this reason.
+crates/maknae-kernel/src/handler.rs:377|owner: None,
+crates/maknae-kernel/src/handler.rs:378|mode_mask: None,
