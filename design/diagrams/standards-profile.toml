@@ -37,7 +37,7 @@ version = "1.2 floor"
 category = "Transport security"
 applies_to = "outbound to THIRD PARTIES: Vault leg today; model/MCP endpoints later"
 status = "enforced"
-evidence = "structural — rustls implements only 1.2 and 1.3; there is no older code path to disable"
+evidence = "rustls implements only 1.2/1.3 — no older path exists; suites FIPS-restricted either way via assert_fips_provider (client.rs:344)"
 
 [[standard]]
 name = "CNSA Suite"
