@@ -95,21 +95,32 @@ def linkage(binaries: list[str]) -> dict:
 
 
 def provenance() -> str:
-    """The source state these diagrams were derived FROM.
+    """The state of the INPUTS these diagrams were derived from.
 
-    Named "sources at <sha>" rather than a bare hash, because the two are not the
-    same thing: the commit that *carries* an SVG is necessarily one later than the
-    commit whose `lib.sh` and manifests it read. Stating which is meant makes the
-    stamp checkable instead of merely present.
+    Deliberately NOT `HEAD`. A HEAD-based stamp can never be correct for a
+    committed diagram: the commit that *carries* an SVG is necessarily one later
+    than the commit whose sources produced it, so the stamp chases itself and
+    "regenerate, then diff" can never come back clean. That is not a cosmetic
+    problem — it makes the artifact unverifiable, which is the one thing the
+    stamp exists to prevent. (Found by review on #202, after a first version
+    stamped HEAD and shipped a stale, dirty-worktree hash.)
 
-    `+UNCOMMITTED` is loud on purpose. A committed diagram must never carry it —
-    it means the artifact was produced from a worktree state that exists nowhere
-    in history, so a reader cannot reconstruct what produced it. Regenerate from
-    a clean tree before committing.
+    So the stamp names the last commit that touched an actual INPUT — `lib.sh`
+    and the manifests. Unrelated commits do not move it, regeneration is
+    idempotent, and a reviewer can check the claim by regenerating and getting
+    byte-identical files back.
     """
-    sha = sh("git", "rev-parse", "--short", "HEAD").strip()
-    dirty = " +UNCOMMITTED" if sh("git", "status", "--porcelain").strip() else ""
-    return f"sources at {sha}{dirty} · {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
+        str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
+    )
+    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
+    dirty = ""
+    if sh("git", "status", "--porcelain", "--", *inputs).strip():
+        # Loud on purpose: an input was edited but not committed, so these
+        # diagrams came from a state that exists nowhere in history.
+        dirty = " +UNCOMMITTED-INPUTS"
+    return f"inputs at {sha}{dirty} · {date}"
 
 
 # --- SVG primitives -------------------------------------------------------

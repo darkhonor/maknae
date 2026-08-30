@@ -19,15 +19,19 @@ is what `rust-audit-info` reads; both tools are already CI tooling
 
 Generated diagrams are refreshed **on demand** and **at release, alongside the
 documentation site**, so a published image is current as of the release it ships with.
-Between releases, the `sources at <sha>` stamp rendered on each generated diagram tells
+Between releases, the `inputs at <sha>` stamp rendered on each generated diagram tells
 you what state it was derived from.
 
-> **Regenerate from a CLEAN worktree before committing.** A dirty tree stamps
-> `+UNCOMMITTED`, which means the artifact came from a state that exists nowhere in
-> history — a reader cannot reconstruct what produced it, and the stamp's whole purpose
-> is that they can. The stamp names the commit whose `lib.sh` and manifests were read,
-> which is necessarily one earlier than the commit that carries the SVG; that is
-> expected and is why it reads "sources at" rather than a bare hash.
+> **The stamp names the INPUTS, not `HEAD`.** `inputs at <sha>` is the last commit that
+> touched `ci/gates/lib.sh` or a manifest — the things these diagrams actually read.
+> Unrelated commits do not move it, **regeneration is idempotent**, and a reviewer can
+> verify by regenerating and getting byte-identical files back.
+>
+> A `HEAD`-based stamp cannot work here: the commit that *carries* an SVG is always one
+> later than the one that produced it, so the stamp chases itself and "regenerate, then
+> diff" never comes back clean. `+UNCOMMITTED-INPUTS` means an input was edited but not
+> committed — the artifact then came from a state that exists nowhere in history, and
+> must not be committed.
 
 ## Conformance
 

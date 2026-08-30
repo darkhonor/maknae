@@ -163,5 +163,5 @@
   <text x="130" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● linked (privileged)</text>
   <text x="285" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#B3452F">✕ refused by gate</text>
   <text x="410" y="824" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not linked</text>
-  <text x="24" y="914" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + rust-audit-info · sources at 33cff0b · 2026-08-30</text><text x="638" y="914" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+  <text x="24" y="914" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + rust-audit-info · inputs at 855de07 · 2026-08-30</text><text x="638" y="914" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>
