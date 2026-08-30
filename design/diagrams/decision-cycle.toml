@@ -16,11 +16,11 @@ evidence = "crates/maknae-authz-basic/src/decide.rs"
 
 [[operand]]
 id = "dcs"
-name = "maknae-authz-dcs"
+name = "an ABAC backend"
 stereo = "«extension · optional»"
 status = "external"
-model = "ABAC — clearance, classification, releasability, compartments, need-to-know"
-evidence = "darkhonor/rust-dcs — reached only through the seam; NOT in this repo"
+model = "keys on attributes the core never declared — clearance, classification, releasability, compartments, need-to-know"
+evidence = "design/adr/ADR-0004-modular-authorization-architecture.md — an optional backend, reached only through the seam; not in this repo"
 
 [[operand]]
 id = "next"

@@ -1,0 +1,184 @@
+# The container architecture, manifested — a UML 2.5.1 deployment view of
+# design/container-architecture.md.
+#
+# Curated. Deliberately NOT an RMF artifact: the Microkosmos SV-1 diagrams this
+# borrows its visual grammar from were built for an Assess-Only package
+# submission, and carry authorization-boundary language, CNSSI 1253
+# categorization and the 800-37 control-inheritance taxonomy because they had a
+# package to answer for. Maknae has none yet, so importing that framing would
+# claim a posture it has not earned. Boundary boxes, labelled flows, an honest
+# planned/built distinction: borrowed. Accreditation apparatus: not.
+
+[scope]
+title = "Container architecture — deployment view"
+subtitle = "design/container-architecture.md, drawn. Eight containers, three planes. Solid is ratified; dashed is proposed."
+sans_dcs = "BASE DEPLOYMENT — RBAC. Authorization is decided by maknae-authz-basic behind the maknae-security seam. The seam exposes a versioned interface, and a backend behind it is a LINKED CRATE inside maknaed exactly as maknae-authz-basic is today — not a container. No box on this diagram changes when a backend is added or swapped; that is what the seam is for (ADR-0004)."
+evidence = "design/container-architecture.md · design/adr/ADR-0004-modular-authorization-architecture.md"
+
+[built]
+claim = "One image ships today: the kernel, FROM scratch on a static musl target, built with cargo auditable. Six of the eight containers are Proposed, and there is no Compose file or Kubernetes manifest in the tree."
+evidence = "packaging/oci/Dockerfile.maknaed · packaging/isolation-contract.md"
+
+# --- planes ---------------------------------------------------------------
+
+[[plane]]
+id = "interaction"
+label = "Interaction plane"
+note = "Accepts work; trusts nothing."
+row = 0
+
+[[plane]]
+id = "trust"
+label = "Trust plane"
+note = "The only trusted code. Nothing transits without it."
+row = 1
+
+[[plane]]
+id = "runtime"
+label = "Runtime plane"
+note = "Untrusted by design. Stateless: holds no durable state (§1.5)."
+row = 2
+
+# --- containers -----------------------------------------------------------
+
+[[container]]
+id = "gateway"
+name = "gateway"
+plane = "interaction"
+trust = "security-relevant"
+lang = "Go"
+status = "proposed"
+detail = "Channels + scheduler. Scoped task identities."
+
+[[container]]
+id = "webui"
+name = "web-ui"
+plane = "interaction"
+trust = "security-relevant"
+lang = "TypeScript"
+status = "post-mvp"
+detail = "Operator console. Deferred per roadmap."
+
+[[container]]
+id = "kernel"
+name = "kernel"
+plane = "trust"
+trust = "trusted"
+lang = "Rust"
+status = "ratified"
+detail = "Reference monitor, sole PDP. Skill registry and audit writer live here."
+
+[[container]]
+id = "egress"
+name = "egress-proxy"
+plane = "trust"
+trust = "trusted"
+lang = "Rust"
+status = "proposed"
+detail = "The only path out. Compromise here defeats the architecture (§1.1)."
+
+[[container]]
+id = "runtime"
+name = "runtime"
+plane = "runtime"
+trust = "untrusted"
+lang = "Python"
+status = "proposed"
+detail = "The agent. Does the work, under constraint."
+
+[[container]]
+id = "lake"
+name = "lake"
+plane = "runtime"
+trust = "untrusted"
+lang = "Python"
+status = "proposed"
+detail = "Knowledge Lake + memory. Policy information point, never a decision point."
+
+[[container]]
+id = "dreamer"
+name = "dreamer"
+plane = "runtime"
+trust = "untrusted"
+lang = "Python"
+status = "proposed"
+detail = "Out-of-band consolidation, scoped identity, no interactive privileges."
+
+[[container]]
+id = "vault"
+name = "vault-agent"
+plane = "trust"
+trust = "vendor"
+lang = "HashiCorp image"
+status = "ratified-pattern"
+detail = "Sidecar per service needing secrets. AppRole auto-auth → tmpfs sink."
+
+# --- volumes --------------------------------------------------------------
+
+[[volume]]
+id = "lakedata"
+name = "lake-data"
+note = "The governed corpus; git-backed"
+mounts = ["lake:rw", "dreamer:rw", "kernel:ro"]
+flag = "The frontmatter IS the tier state, and the two UNTRUSTED containers hold rw on it while the kernel is read-only. Open finding #2."
+
+[[volume]]
+id = "audit"
+name = "audit-log"
+note = "Append-only; export is a later kernel-mediated feature"
+mounts = ["kernel:append"]
+
+[[volume]]
+id = "skills"
+name = "skill-registry"
+note = "Signed manifests"
+mounts = ["kernel:rw", "runtime:ro"]
+
+[[volume]]
+id = "authority"
+name = "authority-config"
+note = "Tier 0. Changes arrive as signed commits, never writes"
+mounts = ["kernel:ro"]
+
+[[volume]]
+id = "persona"
+name = "persona-workspace"
+note = "Multi-file bundle, never runtime-flattened"
+mounts = ["runtime:rw", "gateway:ro"]
+
+[[volume]]
+id = "vaultsink"
+name = "vault-sink"
+note = "Per-service tmpfs. Never a named persistent volume"
+mounts = ["vault:rw"]
+
+# --- flows ----------------------------------------------------------------
+
+[[flow]]
+from = "gateway"
+to = "kernel"
+label = "requests a decision"
+[[flow]]
+from = "webui"
+to = "kernel"
+label = "operator console"
+[[flow]]
+from = "runtime"
+to = "kernel"
+label = "every action"
+[[flow]]
+from = "lake"
+to = "kernel"
+label = "PIP · informs only"
+[[flow]]
+from = "dreamer"
+to = "kernel"
+label = "PROPOSALS only"
+[[flow]]
+from = "runtime"
+to = "egress"
+label = "all outbound"
+[[flow]]
+from = "kernel"
+to = "egress"
+label = "allowlist"

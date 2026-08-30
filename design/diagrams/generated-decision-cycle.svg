@@ -15,10 +15,10 @@
 <text x="56" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">gate</text>
 <text x="592" y="172" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#B3452F">guarded_decide()</text>
 <rect x="44" y="230" width="560" height="64" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="5 4"/>
-<text x="56" y="248" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">maknae-authz-dcs</text>
+<text x="56" y="248" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#04342C">an ABAC backend</text>
 <text x="56" y="261" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">«extension · optional»</text>
-<text x="56" y="275" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ABAC — clearance, classification, releasability, compartments,</text>
-<text x="56" y="287" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">need-to-know</text>
+<text x="56" y="275" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">keys on attributes the core never declared — clearance,</text>
+<text x="56" y="287" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">classification, releasability, compartments, need-to-know</text>
 <text x="592" y="248" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#B3452F">guarded_decide()</text>
 <rect x="44" y="306" width="560" height="64" rx="6" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="56" y="324" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#5F5E5A">any conforming backend</text>
@@ -65,5 +65,5 @@
 <text x="686" y="487" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Deny-by-default. An empty operand vector cannot become a grant.</text>
 <text x="660" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">finalize() then maps the folded Verdict to a Decision at the boundary. NotApplicable becomes Deny:</text>
 <text x="660" y="549" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">an empty operand vector can never become a grant. (verdict.rs:47)</text>
-<text x="24" y="589" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/decision-cycle.toml@03dd31418d · maknae 855de07 · 2026-08-30</text><text x="1296" y="589" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="589" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/decision-cycle.toml@cb36d0c162 · maknae 855de07 · 2026-08-30</text><text x="1296" y="589" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

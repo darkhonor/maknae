@@ -1,0 +1,127 @@
+<svg width="1300" height="906" viewBox="0 0 1300 906" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae container architecture</title>
+  <desc>UML deployment view of the Maknae container architecture.</desc>
+  <rect x="0" y="0" width="1300" height="906" fill="#FFFFFF"/>
+<text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Container architecture — deployment view</text>
+<text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">design/container-architecture.md, drawn. Eight containers, three planes. Solid is ratified; dashed is proposed.</text>
+<text x="44" y="86" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Visual grammar borrowed from the Microkosmos SV-1 deployment views. Their RMF apparatus — authorization boundary, CNSSI 1253</text>
+<text x="44" y="100" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">categorization, control-inheritance taxonomy — is deliberately absent: those answer an Assess-Only package, and Maknae has none yet.</text>
+<defs><marker id="ca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#534AB7" stroke-width="1.3"/></marker></defs>
+<rect x="44" y="132" width="1212" height="116" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<text x="58" y="152" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Interaction plane</text>
+<text x="58" y="166" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Accepts work; trusts nothing.</text>
+<rect x="312" y="144" width="236" height="76" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="323" y="162" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#04342C">gateway</text>
+<text x="537" y="162" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">Go</text>
+<text x="323" y="175" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#0F6E56">«security-relevant» · proposed</text>
+<text x="323" y="189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Channels + scheduler. Scoped task</text>
+<text x="323" y="200" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">identities.</text>
+<rect x="566" y="144" width="236" height="76" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="577" y="162" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#04342C">web-ui</text>
+<text x="791" y="162" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">TypeScript</text>
+<text x="577" y="175" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#0F6E56">«security-relevant» · post-mvp</text>
+<text x="577" y="189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Operator console. Deferred per</text>
+<text x="577" y="200" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">roadmap.</text>
+<rect x="44" y="264" width="1212" height="116" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<text x="58" y="284" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Trust plane</text>
+<text x="58" y="298" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">The only trusted code. Nothing transits without it.</text>
+<rect x="312" y="276" width="236" height="76" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="323" y="294" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">kernel</text>
+<text x="537" y="294" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">Rust</text>
+<text x="323" y="307" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · ratified</text>
+<text x="323" y="321" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Reference monitor, sole PDP. Skill</text>
+<text x="323" y="332" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">registry and audit writer live here.</text>
+<rect x="566" y="276" width="236" height="76" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="577" y="294" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">egress-proxy</text>
+<text x="791" y="294" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">Rust</text>
+<text x="577" y="307" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · proposed</text>
+<text x="577" y="321" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The only path out. Compromise here</text>
+<text x="577" y="332" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">defeats the architecture (§1.1).</text>
+<rect x="820" y="276" width="236" height="76" rx="7" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="831" y="294" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#5F5E5A">vault-agent</text>
+<text x="1045" y="294" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">HashiCorp image</text>
+<text x="831" y="307" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«vendor» · ratified-pattern</text>
+<text x="831" y="321" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Sidecar per service needing secrets.</text>
+<text x="831" y="332" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">AppRole auto-auth → tmpfs sink.</text>
+<rect x="44" y="396" width="1212" height="116" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<text x="58" y="416" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Runtime plane</text>
+<text x="58" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Untrusted by design. Stateless: holds no durable state (§1.5).</text>
+<rect x="312" y="408" width="236" height="76" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="323" y="426" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">runtime</text>
+<text x="537" y="426" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#B3452F">Python</text>
+<text x="323" y="439" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
+<text x="323" y="453" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The agent. Does the work, under</text>
+<text x="323" y="464" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">constraint.</text>
+<rect x="566" y="408" width="236" height="76" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="577" y="426" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">lake</text>
+<text x="791" y="426" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#B3452F">Python</text>
+<text x="577" y="439" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
+<text x="577" y="453" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Knowledge Lake + memory. Policy</text>
+<text x="577" y="464" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">information point, never a decision</text>
+<text x="577" y="475" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">point.</text>
+<rect x="820" y="408" width="236" height="76" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="831" y="426" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">dreamer</text>
+<text x="1045" y="426" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#B3452F">Python</text>
+<text x="831" y="439" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
+<text x="831" y="453" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Out-of-band consolidation, scoped</text>
+<text x="831" y="464" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">identity, no interactive privileges.</text>
+<path d="M 430 220 C 430 248 430 248 430 276" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="430.0" y="240.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">requests a decision</text>
+<path d="M 684 220 C 684 248 430 248 430 276" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="557.0" y="251.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">operator console</text>
+<path d="M 430 408 C 430 380 430 380 430 352" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="430.0" y="394.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">every action</text>
+<path d="M 684 408 C 684 380 430 380 430 352" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="557.0" y="372.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">PIP · informs only</text>
+<path d="M 938 408 C 938 380 430 380 430 352" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="684.0" y="383.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">PROPOSALS only</text>
+<path d="M 430 408 C 430 380 684 380 684 352" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="557.0" y="394.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">all outbound</text>
+<path d="M 548 314 C 548 314 566 314 566 314" fill="none" stroke="#534AB7" stroke-width="1" stroke-dasharray="4 3" opacity="0.6" marker-end="url(#ca)"/>
+<text x="557.0" y="308.0" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">allowlist</text>
+<text x="44" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#26215C">Volumes — both deployment models</text>
+<rect x="44.0" y="552" width="394.6666666666667" height="86" rx="6" fill="#FFF6E6" stroke="#B3452F" stroke-width="0.75"/>
+<text x="55.0" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">lake-data</text>
+<text x="427.6666666666667" y="570" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="55.0" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">The governed corpus; git-backed</text>
+<text x="55.0" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#B3452F">lake rw</text>
+<text x="100.80000000000001" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#B3452F">dreamer rw</text>
+<text x="162.8" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel ro</text>
+<text x="55.0" y="614" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">The frontmatter IS the tier state, and the two UNTRUSTED</text>
+<text x="55.0" y="625" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">containers hold rw on it while the kernel is read-only. Open</text>
+<text x="55.0" y="636" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#B3452F">finding #2.</text>
+<rect x="452.6666666666667" y="552" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="463.6666666666667" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">audit-log</text>
+<text x="836.3333333333334" y="570" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="463.6666666666667" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Append-only; export is a later kernel-mediated feature</text>
+<text x="463.6666666666667" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel append</text>
+<rect x="861.3333333333334" y="552" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="872.3333333333334" y="570" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">skill-registry</text>
+<text x="1245.0" y="570" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="872.3333333333334" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Signed manifests</text>
+<text x="872.3333333333334" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel rw</text>
+<text x="928.9333333333334" y="599" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">runtime ro</text>
+<rect x="44.0" y="648" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="55.0" y="666" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">authority-config</text>
+<text x="427.6666666666667" y="666" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="55.0" y="679" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Tier 0. Changes arrive as signed commits, never writes</text>
+<text x="55.0" y="695" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel ro</text>
+<rect x="452.6666666666667" y="648" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="463.6666666666667" y="666" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">persona-workspace</text>
+<text x="836.3333333333334" y="666" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="463.6666666666667" y="679" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Multi-file bundle, never runtime-flattened</text>
+<text x="463.6666666666667" y="695" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#B3452F">runtime rw</text>
+<text x="525.6666666666667" y="695" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">gateway ro</text>
+<rect x="861.3333333333334" y="648" width="394.6666666666667" height="86" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="872.3333333333334" y="666" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">vault-sink</text>
+<text x="1245.0" y="666" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact»</text>
+<text x="872.3333333333334" y="679" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Per-service tmpfs. Never a named persistent volume</text>
+<text x="872.3333333333334" y="695" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">vault-agent rw</text>
+<rect x="44" y="754" width="1212" height="68" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="58" y="776" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#26215C">BASE DEPLOYMENT — RBAC. Authorization is decided by maknae-authz-basic behind the maknae-security seam. The seam exposes a versioned interface, and</text>
+<text x="58" y="790" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">a backend behind it is a LINKED CRATE inside maknaed exactly as maknae-authz-basic is today — not a container. No box on this diagram changes when a</text>
+<text x="58" y="804" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">backend is added or swapped; that is what the seam is for (ADR-0004).</text>
+<text x="44" y="836" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">One image ships today: the kernel, FROM scratch on a static musl target, built with cargo auditable. Six of the eight containers are Proposed, and</text>
+<text x="44" y="849" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">there is no Compose file or Kubernetes manifest in the tree.</text>
+<text x="24" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/container-architecture.toml@6a0b1ba07f · maknae 855de07 · 2026-08-30</text><text x="1276" y="890" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+</svg>
