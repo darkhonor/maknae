@@ -100,6 +100,14 @@ merely describes it:
 | Members, binaries | `cargo metadata` | a hardcoded list |
 | Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
 
+### Generation is a manual step, by standing operator decision
+
+Nothing in CI runs `generate.py`, and nothing should. These are built **on demand** —
+before a release, or when an input changes — not on every pipeline run. The consequence
+is understood and accepted: `check_evidence` and byte-stable regeneration fire for
+whoever regenerates, so a stale diagram can be committed and no gate will object.
+Regenerate with the command above and commit the result; that is the whole contract.
+
 ### Two products are curated, not derived
 
 `standards-profile.toml` and `read-path.toml` are hand-maintained inputs. Neither a

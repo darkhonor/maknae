@@ -40,9 +40,9 @@ stereo = "«DAC authority»"
 kind = "os"
 
 [[participant]]
-id = "pdp"
-label = "PDP"
-stereo = "«trusted»"
+id = "authz"
+label = "maknae-authz-basic"
+stereo = "«authz backend»"
 kind = "trusted"
 
 [[participant]]
@@ -95,7 +95,7 @@ to = "daemon"
 kind = "self"
 label = "lexical_pregate(path)"
 evidence = "crates/maknae-kernel/src/run.rs:488"
-note = "A malformed path is BadRequest — the PDP is never consulted for it."
+note = "A malformed path is BadRequest — no authorization decision is reached at all."
 
 [[step]]
 from = "daemon"
@@ -114,25 +114,33 @@ evidence = "confinement beneath home, nlink == 1, owner and mode"
 
 [[step]]
 from = "daemon"
-to = "pdp"
-kind = "call"
+to = "daemon"
+kind = "self"
 label = "build_authz_request(verb, uid, lane, os_path)"
 evidence = "crates/maknae-kernel/src/run.rs:544"
-note = "The PDP decides on the KERNEL-REPORTED path, never the string the client sent — so the deny list evaluates the object, not an alias for it (ADR-0009 D6)."
+note = "Built on the KERNEL-REPORTED path, never the string the client sent — so the deny list evaluates the object, not an alias for it (ADR-0009 D6)."
 
 [[step]]
-from = "pdp"
-to = "pdp"
-kind = "self"
-label = "combine([guarded_decide]) + finalize"
-evidence = "crates/maknae-kernel/src/run.rs:565 · crates/maknae-security/src/compose.rs"
-note = "Deny-overrides. No descriptor, or one that fails verification, is a Deny here — never a daemon-side open."
+from = "daemon"
+to = "authz"
+kind = "call"
+label = "guarded_decide(&dyn Authorizer, &Request)"
+evidence = "crates/maknae-security/src/compose.rs:70 · crates/maknae-kernel/src/run.rs:565"
+note = "THE SEAM, and the only crossing on this diagram that is not a process boundary — an in-process trait-object call on a spawn_blocking worker. maknae-authz-basic is what a deployment swaps to change the decision model (ADR-0004); maknae-authz-dcs would sit here."
 
 [[step]]
-from = "pdp"
+from = "authz"
 to = "daemon"
 kind = "reply"
 label = "Verdict :: Permit | Deny"
+
+[[step]]
+from = "daemon"
+to = "daemon"
+kind = "self"
+label = "combine([...]) + finalize"
+evidence = "crates/maknae-security/src/compose.rs:20 · crates/maknae-security/src/verdict.rs:47"
+note = "Composition runs in the KERNEL, not the backend: deny-overrides is the daemon's rule, so no backend can waive another's Deny. An absent or unverifiable descriptor is a Deny here — never a daemon-side open."
 
 [[step]]
 from = "daemon"
