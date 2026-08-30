@@ -12,22 +12,39 @@ use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
 use crate::error::AuditError;
 use crate::record::{canonical_json, AuditRecord};
 use std::fs::File;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditOpenKind {
+    Existing,
+    CreateExclusive,
+}
+
+fn open_flags_for(kind: AuditOpenKind) -> (bool, bool) {
+    match kind {
+        AuditOpenKind::Existing => (false, false),
+        AuditOpenKind::CreateExclusive => (true, true),
+    }
+}
+
 #[cfg(unix)]
-fn open_options() -> std::fs::OpenOptions {
+fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
     use std::os::unix::fs::OpenOptionsExt;
+    let (create, create_new) = open_flags_for(kind);
     let mut opts = std::fs::OpenOptions::new();
     // `O_NOFOLLOW`: if the final path component is a symlink, `open()` fails with
     // ELOOP rather than following it — a symlink at the audit path must never
     // redirect privileged appends elsewhere. `custom_flags` is safe (no `unsafe`).
     opts.append(true)
-        .create(true)
-        .mode(0o640)
+        .create(create)
+        .create_new(create_new)
         .custom_flags(nix::libc::O_NOFOLLOW);
+    if matches!(kind, AuditOpenKind::CreateExclusive) {
+        opts.mode(0o640);
+    }
     opts
 }
 
@@ -74,10 +91,40 @@ fn validate_secure_audit_file(file: &File, path: &Path) -> Result<(), AuditError
 }
 
 #[cfg(not(unix))]
-fn open_options() -> std::fs::OpenOptions {
+fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
+    let (create, create_new) = open_flags_for(kind);
     let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
+    opts.append(true).create(create).create_new(create_new);
     opts
+}
+
+fn open_audit_file(path: &Path) -> Result<File, AuditError> {
+    let open = |kind| open_options(kind).open(path);
+
+    match open(AuditOpenKind::Existing) {
+        Ok(file) => return Ok(file),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(AuditError::OpenPrimary {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            });
+        }
+    }
+
+    match open(AuditOpenKind::CreateExclusive) {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            open(AuditOpenKind::Existing).map_err(|e| AuditError::OpenPrimary {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            })
+        }
+        Err(e) => Err(AuditError::OpenPrimary {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        }),
+    }
 }
 
 /// The append-only JSONL audit sink: single-writer, off-runtime blocking I/O.
@@ -89,16 +136,13 @@ pub struct AuditSink {
 }
 
 impl AuditSink {
-    /// Open the primary JSONL sink (`O_APPEND|O_CREATE`, mode 0640 on unix).
+    /// Open the primary JSONL sink. Steady state opens existing files with
+    /// `O_APPEND` and no create flag; first-create retries use exclusive create
+    /// with mode 0640 on unix.
     /// Fails closed: an unopenable primary sink is an `Err`, never a silent
     /// no-op sink.
     pub fn open(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
-        let file = open_options()
-            .open(&cfg.jsonl_path)
-            .map_err(|e| AuditError::OpenPrimary {
-                path: cfg.jsonl_path.clone(),
-                detail: e.to_string(),
-            })?;
+        let file = open_audit_file(&cfg.jsonl_path)?;
         // Validate the OPENED fd (not the path) — fail closed on an insecure or
         // symlinked pre-existing audit file (AU-9). A symlink already failed the
         // open above via O_NOFOLLOW; this catches perms / ownership / non-regular.
@@ -333,6 +377,28 @@ mod tests {
 
     // ---- fail-closed audit-file integrity (O_NOFOLLOW + fstat) --------------
 
+    #[cfg(unix)]
+    #[test]
+    fn existing_sink_open_flag_plan_excludes_create() {
+        let (create, create_new) = open_flags_for(AuditOpenKind::Existing);
+        assert!(
+            !create,
+            "steady-state existing audit open must not pass O_CREAT"
+        );
+        assert!(
+            !create_new,
+            "steady-state existing audit open must not pass O_EXCL"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_create_flag_plan_is_exclusive() {
+        let (create, create_new) = open_flags_for(AuditOpenKind::CreateExclusive);
+        assert!(create, "first-create retry must pass O_CREAT");
+        assert!(create_new, "first-create retry must pass O_EXCL");
+    }
+
     // (a) A fresh path opens, and the created file is a regular file, owned by us,
     // and NOT group/world-writable (mode 0o640 & ~umask — the security mask the
     // validator enforces). The umask may tighten below 0o640; it never loosens it.
@@ -353,6 +419,28 @@ mod tests {
         assert_eq!(meta.uid(), nix::unistd::geteuid().as_raw(), "owned by us");
         assert_eq!(meta.mode() & 0o037, 0, "not group/world-writable");
         assert_eq!(meta.mode() & 0o600, 0o600, "owner can read+write");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_first_create_race_opens_both_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let left_cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let right_cfg = left_cfg.clone();
+
+        let (left, right) = tokio::join!(
+            tokio::task::spawn_blocking(move || AuditSink::open(&left_cfg)),
+            tokio::task::spawn_blocking(move || AuditSink::open(&right_cfg)),
+        );
+
+        assert!(left.unwrap().is_ok());
+        assert!(right.unwrap().is_ok());
+        assert!(path.is_file());
     }
 
     // (b) A pre-existing world-writable file is refused — another user must not be
