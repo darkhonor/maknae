@@ -137,7 +137,9 @@ This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admi
 
 ## Consequences
 
-- The migration contract for Phase 2 is: add the behaviour behind the arm that already decides. Grants written today keep their meaning; what changes is what a permit produces. The `NoBehaviour` pin is what makes that a decision rather than a side effect — **and it has now done so once**, for `admin.config.show` (decision 15). It still covers `admin.status` and `admin.subject.list`.
+- Building a remaining term means adding behaviour behind the arm that already decides. The `NoBehaviour` pin is what makes that a decision rather than a side effect — **and it has now done so once**, for `admin.config.show` (decision 15). It still covers `admin.status` and `admin.subject.list`.
+
+  > *Corrected 2026-09-01: this bullet called that a "migration contract" and reasoned about grants "written today keeping their meaning". **Nobody has written any.** Maknae is pre-release in a private repo with no users, no deployments, and no `roles:` key in anything shipped — so there is nothing to migrate and no compatibility to preserve. That framing is the breaking-change topic the operator ruled out (see AGENTS.md), reappearing in different words. The grammar and this design can be changed outright, by whoever needs to, without a migration story.*
 - Adding a fourth grantable term is a code change (`GRANTABLE_ACTIONS`), a `grantable` row in `verb-manifest.txt`, **and** an `action` row for the same term — the gate enforces `grantable ⊆ action`, so a grant cannot name something no request will ever carry. All three are gated; none can be forgotten quietly.
 - The shipped `packaging/common/authz.yaml` gains no `roles:` key: nothing ships granted. The three terms' `action` rows read `not-granted-but-grantable`, distinguishing them from `admin.contain` and its siblings, which are `not-granted` and can never be granted at all — an auditor reading the primary row must not get the wrong answer.
 - `roles:` is a fourth closed vocabulary in `verb-vocabulary-drift`, inventoried exactly in both directions like the other three.
