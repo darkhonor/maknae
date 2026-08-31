@@ -1,12 +1,30 @@
 # ADR-0010: Action-scoped grants — the `roles:` surface, its precedence, and what Phase 1 deliberately withholds
 
-- **Status:** Proposed (2026-08-31) — **awaiting operator ratification.** Every
-  neighbouring agent-authored ADR (0008, 0009, 0020) carries `operator-ratified`
-  or `operator-directed` with the ruling date; this one has had no such ruling,
-  and recording `Accepted` on the author's own authority is the drift those
-  labels exist to prevent.
+- **Status:** **Proposed — and staying Proposed** (operator ruling 2026-08-31).
+  Not a pending signature: this ADR is **expected to change as the rest of the
+  verb vocabulary is built**, and it is deliberately not being accepted until it
+  has been tested against terms that are not disclosure-only. Three of roughly
+  sixty verbs are grantable today; the decisions below were reasoned from those
+  three, which is a narrow base for a contract that will eventually govern all
+  of them.
 - **Date:** 2026-08-31
-- **Author:** implementing agent (#162) · **Ratifier:** pending
+- **Author:** implementing agent (#162) · **Ratifier:** deferred by operator ruling
+
+> **Read this before building on anything below.** The decisions here are
+> **provisional**, not settled constraints. State-changing terms
+> (`admin.contain`, `admin.credential.broker`, `admin.policy.reload`), the
+> `session.*`, `terminal.*` and `mcp.*` classes, and any term that takes an
+> operand will each test assumptions that three read-only `admin.*` terms could
+> not. Where one of them breaks a decision here, **the decision is what gives
+> way** — correct it in place with a date, per the discipline `AGENTS.md` sets
+> for itself. Do not treat a numbered decision below as a reason not to change
+> the design; treat it as the reasoning that was available when only three
+> terms existed.
+>
+> What is NOT provisional is the shipped behaviour: deny-overrides composition,
+> containment preceding the class match, the deny reason staying off the wire,
+> and Phase 1 disclosing nothing. Those are enforced by gates and tests, not by
+> this document.
 
 ## Context
 
@@ -54,7 +72,9 @@ roles:
 
 **13. The Phase-2 schema-shape hazard is recorded here because it is a boot-refusal cliff, not a preference.**
 
-The brief sketched `roles.<role>.{allow, deny}`; this ships `roles.<role>.actions.{allow, deny}`, one level deeper. Because `check_known_keys` refuses unknown keys at **every** level, a Phase 2 that adopts the brief's flatter shape does not migrate — it turns every Phase-1 policy file into a hard boot refusal on `UnknownKey("allow")`. The `actions:` level is therefore load-bearing and stays: it is the seam where a future `paths:` or `resources:` sibling can be added without touching what operators have already written. **Changing the shape is a superseding decision with a migration path, never a refactor.**
+The brief sketched `roles.<role>.{allow, deny}`; this ships `roles.<role>.actions.{allow, deny}`, one level deeper. Because `check_known_keys` refuses unknown keys at **every** level, a Phase 2 that adopts the brief's flatter shape does not migrate — it turns every Phase-1 policy file into a hard boot refusal on `UnknownKey("allow")`. The `actions:` level is therefore load-bearing and stays: it is the seam where a future `paths:` or `resources:` sibling can be added without touching what operators have already written. **Changing the shape is a superseding decision with a migration path, never a refactor** — *once operators have written policy files with it.*
+
+**Today the migration cost is zero, and that will not last.** Nothing ships a `roles:` key: not `packaging/common/authz.yaml`, not any fixture outside the test suite. So the window in which this shape can be changed for free is open now and closes the first time an operator writes one. If the remaining vocabulary shows the nesting is wrong — a term that needs an operand, or a class that wants `paths:` beside `actions:` — **change it now rather than honouring a contract nobody has yet relied on.**
 
 **14. Two grant surfaces now ship, and one of them is still role-blind. Recorded as a deviation, not a win.**
 

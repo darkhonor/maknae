@@ -19,7 +19,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |
 | 0008 | Authorization composition contract — non-removable `-basic` baseline, extensions decide by their own model and may grant, no operand fails open, unknown vocabulary denies at the composition layer | Accepted (operator-ratified 2026-08-29) |
 | 0009 | Subject-side OS DAC evaluation — fd delegation on the local lane, confinement from the daemon's own fd table, lane-conditional applicability | Accepted (operator-ratified 2026-08-30) |
-| 0010 | Action-scoped grants — the `roles:` surface, role-keyed and code-bounded; deny-overrides unchanged | **Proposed (2026-08-31)** — awaiting operator ratification |
+| 0010 | Action-scoped grants — the `roles:` surface, role-keyed and code-bounded; deny-overrides unchanged | **Proposed (2026-08-31)** — held Proposed by operator ruling; expected to change as the verb vocabulary is built out |
 | 0016 | Risk-tiered test coverage — tiers, mutation, fail-closed gate | Accepted (2026-08-04) |
 | 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
 | 0019 | Audit record model — AU-3-complete content now, crypto integrity/non-repudiation deferred to ADR-0007 | Accepted (2026-08-11) |
