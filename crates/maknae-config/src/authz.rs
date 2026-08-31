@@ -19,6 +19,16 @@
 //! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
 //! verb's PEP.)*
 //!
+//! *(Corrected 2026-08-31: the header above describes `authz.yaml` as the
+//! capability grammar alone, which has been incomplete since #85. The file now
+//! carries **three independent surfaces**, and each answers a different
+//! question: `permissions:` decides PATHS by capability pattern; `bindings:`
+//! decides IDENTITY→role (#85); `roles:` decides ACTIONS per role, per term
+//! (#162, [ADR-0010]). They do not compose with one another here — each is
+//! parsed structurally and handed to `maknae-authz-basic` to decide. Prose
+//! elsewhere that treats `authz.yaml` as "the capability grammar" is describing
+//! one of the three.)*
+//!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
 //! specified precisely (spec §7) and pinned exhaustively by test.

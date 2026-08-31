@@ -73,15 +73,28 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// `admin.whoami` must NEVER join [`GRANTABLE_ACTIONS`]. It has its own arm and
+/// is permitted unconditionally for admins; routing it through grants would
+/// make an operator's empty `roles:` block revoke it -- a silent downgrade of
+/// working behaviour, from a file that says nothing about `whoami`.
+///
+/// Enforced at COMPILE time, so the mistake cannot reach a test run.
+///
+/// Written as a DESTRUCTURING rather than a `while` loop, deliberately. A loop
+/// carries a bound, and `cargo mutants` weakens bounds: `<` to `==` or `>` both
+/// make the pin check fewer terms -- or none -- while still compiling, and both
+/// were reported MISSED, because compile-time code is unreachable from a test
+/// run and no assertion can observe it. There is no bound here to weaken. The
+/// array's LENGTH is in its type, so this destructuring is exhaustive by
+/// construction: adding a fourth term makes it fail to compile (E0527) and
+/// demands the fourth assertion, which is the failure mode an unrolled check
+/// would otherwise have had.
 const _: () = {
-    let mut i = 0;
-    while i < GRANTABLE_ACTIONS.len() {
-        assert!(
-            !str_eq(GRANTABLE_ACTIONS[i], "admin.whoami"),
-            "admin.whoami is unconditional for admins and must not be grantable"
-        );
-        i += 1;
-    }
+    let [a, b, c] = GRANTABLE_ACTIONS;
+    const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
+    assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(c, "admin.whoami"), "{}", WHY);
 };
 
 /// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
@@ -869,6 +882,50 @@ mod tests {
             assert!(!str_eq(t, "admin.whoami"));
         }
         assert!(str_eq(GRANTABLE_ACTIONS[0], "admin.status"));
+    }
+
+    /// The arm's guard is a SECOND lock, and this is what proves it locks.
+    ///
+    /// `validate_grants` already refuses a term outside `GRANTABLE_ACTIONS` at
+    /// load, so in production the map can only hold grantable terms -- which
+    /// makes the guard look redundant, and a mutation that weakens it to `true`
+    /// behaviourally identical. It is not redundant: it is the reason the arm
+    /// does not have to TRUST the map's contents. Here the map is built past
+    /// the validator, holding a term the arm must never honour.
+    #[test]
+    fn the_arm_does_not_trust_a_grant_map_holding_an_ungrantable_term() {
+        let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
+            "admin".to_string(),
+            (
+                vec![ActionTerm::validated("admin.contain".into())],
+                Vec::new(),
+            ),
+        )]));
+        let mut lp = lp_with_grants("", GRANT_UIDS);
+        lp.action_grants = forged;
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &request(None, Some(1001), "admin.contain", None)
+            ),
+            Verdict::NotApplicable,
+            "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
+             somehow reaches the grant map"
+        );
+    }
+
+    /// The same property the compile-time pin holds, held again at runtime so
+    /// it is carried by a KILLABLE test. The const block is unreachable from a
+    /// test run by construction, so on its own it is a control nothing can
+    /// prove fires except by breaking the build on purpose.
+    #[test]
+    fn admin_whoami_is_not_in_the_grantable_set() {
+        assert!(
+            !GRANTABLE_ACTIONS.contains(&"admin.whoami"),
+            "admin.whoami is unconditional for admins; granting it would let an \
+             empty roles: block revoke working behaviour"
+        );
     }
 
     // ---- action-scoped grants: the decide arm (#162 step 4) ----
