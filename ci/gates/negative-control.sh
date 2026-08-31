@@ -562,10 +562,13 @@ cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
   cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
 const DISCLOSABLE: &[&str] = &[
     "transport.socket_path",
+    "audit.jsonl_path",
+    "principal.name",
     ${3:-}
 ];
 const SUPPRESSED: &[&str] = &[
     "vault.insecure_plaintext_secret_path",
+    "core.handling",
 ];
 FIX
   # The field is declared MULTI-LINE-parser style deliberately: the shape that
@@ -576,16 +579,21 @@ pub struct TransportConfig {
     ${2:-}
 }
 FIX
+  # Each stub carries at least one field: the gate now REFUSES a surface entry
+  # that contributes nothing, so an empty struct is not a valid fixture.
   cat > "$fixture/crates/maknae-config/src/audit_cfg.rs" <<'FIX'
 pub struct AuditConfig {
+    pub jsonl_path: PathBuf,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/principal.rs" <<'FIX'
 pub struct Principal {
+    pub name: String,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/ceiling.rs" <<'FIX'
 pub struct Ceiling {
+    pub classification: String,
 }
 FIX
   cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
@@ -598,7 +606,10 @@ FIX
 }
 
 CFG_OK='disclose	transport.socket_path	the socket the daemon listens on
+disclose	audit.jsonl_path	the log the operator is looking for
+disclose	principal.name	readable via getpwuid anyway
 omit	vault.insecure_plaintext_secret_path	presence is the finding
+omit	core.handling	presence says an above-baseline ceiling is configured
 '
 
 # REJECT: a NEW config struct field with no recorded decision. This is the miss
@@ -614,23 +625,42 @@ expect_reject "config-disclosure-drift/hyphenated-entry-with-no-decision" "$fx/c
 
 # REJECT: a manifest row carrying a path but no rationale. "Decide it" is what
 # the gate's own failure text demands; a bare path is not a decision.
-fx="$(cfg_fixture 'disclose	transport.socket_path	the socket the daemon listens on
-omit	vault.insecure_plaintext_secret_path	presence is the finding
-disclose	core.undecided
-')"
+fx="$(cfg_fixture "${CFG_OK%\'}disclose	core.undecided
+")"
 expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: two contradictory decisions for one path.
-fx="$(cfg_fixture 'disclose	transport.socket_path	the socket the daemon listens on
-omit	vault.insecure_plaintext_secret_path	presence is the finding
-mask	transport.socket_path	contradicts the row above
-')"
+fx="$(cfg_fixture "${CFG_OK}mask	transport.socket_path	contradicts the row above
+")"
 expect_reject "config-disclosure-drift/duplicate-contradictory-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SURFACE entry whose struct no longer exists under that name.
+# THE FAIL-OPEN THAT SURVIVED TWO EXTRACTION REWRITES. A missing anchor yields
+# zero rows and a green gate: renaming TransportConfig silently removed five
+# fields from the decision requirement while the gate still printed "all
+# decided". Note the asymmetry that hid it -- renaming a CODE-side anchor
+# (DISCLOSABLE) fails CLOSED through the 4a diff, so only the safe half had
+# ever been probed.
+fx="$(cfg_fixture "$CFG_OK")"
+sed -i.bak 's/^pub struct TransportConfig {/pub struct TransportSettings {/' \
+  "$fx/crates/maknae-config/src/transport.rs"
+expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: a rustfmt-COLLAPSED const array still extracts. `cargo fmt --check`
+# is itself a CI gate, so a short list WILL be collapsed onto one line; an
+# anchored, first-literal-only reader emitted zero rows for it and then told
+# the reader to delete manifest rows that were correct.
+fx="$(cfg_fixture "$CFG_OK")"
+cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
+const DISCLOSABLE: &[&str] = &["transport.socket_path", "audit.jsonl_path", "principal.name"];
+const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling"];
+FIX
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "5 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" "2 paths decided, 2 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" "5 paths decided, 5 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

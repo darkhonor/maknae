@@ -37,8 +37,17 @@ SURFACE=(
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit"
   "crates/maknae-config/src/principal.rs|Principal|principal"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault"
+  # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
+  # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
+  # (`parse_handling` accepts exactly those two keys), so the synthesised
+  # `core.handling.ceiling.accreditation_ref` is a path no config can contain.
+  # That is harmless ONLY because `core.handling` is suppressed by prefix, which
+  # covers both spellings -- and the check below enforces that precondition
+  # rather than leaving it as an assumption.
   "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling"
 )
+# The Ceiling entry's approximate paths are safe only under this suppression.
+CEILING_REQUIRES_SUPPRESSED="core.handling"
 
 for f in "$DOC" "$MANIFEST"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
@@ -55,21 +64,58 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 #    containing a capital or a hyphen -- both idiomatic in YAML -- produced no
 #    row and was invisible to the diff below. A non-conforming path must SURFACE
 #    as a mismatch, never be silently skipped.
-awk '/^const DISCLOSABLE/{f=1} f && /^    "/{ if (match($0, /"[^"]+"/)) print "disclose\t" substr($0,RSTART+1,RLENGTH-2) } f && /^\];/{f=0}' \
-  "$DOC" | sort -u > "$tmp/code"
-awk '/^const SUPPRESSED/{f=1} f && /^    "/{ if (match($0, /"[^"]+"/)) print "omit\t" substr($0,RSTART+1,RLENGTH-2) } f && /^\];/{f=0}' \
-  "$DOC" | sort -u >> "$tmp/code"
+# Every quoted literal on every line of the range, not just the first, and not
+# only lines matching `^    "`. rustfmt collapses a short const array onto one
+# line -- and `cargo fmt --check` is itself a CI gate -- so an anchored,
+# first-literal-only reader emits ZERO rows for a collapsed list and never sees
+# its `];` terminator either, leaking state into the rest of the file. It then
+# reports the paths as "recorded in the manifest, absent from the code" and
+# instructs the reader to DELETE manifest rows that are in fact correct.
+extract() { # <const-name> <kind>
+  awk -v want="const $1" -v kind="$2" '
+    index($0, want) == 1 { f=1 }
+    # Skip comment lines: these lists carry their rationale inline, and the
+    # rationale contains quoted prose ("carried as-is", "SCIF-B7"). Dropping
+    # the old `^    "` anchor to tolerate a rustfmt-collapsed array meant
+    # picking those up as paths.
+    f && /^[[:space:]]*\/\// { next }
+    f { line=$0
+        while (match(line, /"[^"]+"/)) {
+          print kind "\t" substr(line, RSTART+1, RLENGTH-2)
+          line = substr(line, RSTART+RLENGTH)
+        }
+      }
+    f && /\];/ { f=0 }
+    f && /^const / && index($0, want) != 1 { f=0 }
+  ' "$DOC"
+}
+{ extract DISCLOSABLE disclose; extract SUPPRESSED omit; } | sort -u > "$tmp/code"
 sort -u "$tmp/code" -o "$tmp/code"
 
 # 2. Every config STRUCT FIELD, as a dotted path.
 : > "$tmp/fields"
 for entry in "${SURFACE[@]}"; do
   IFS='|' read -r f st sec <<< "$entry"
+  before=$(wc -l < "$tmp/fields")
   awk -v s="pub struct $st {" -v p="$sec" '
     index($0, s) { f=1; next }
     f && /^}/ { f=0 }
     f && match($0, /pub [a-z0-9_]+:/) { print p "." substr($0, RSTART+4, RLENGTH-5) }
   ' "$f" >> "$tmp/fields"
+  # A SURFACE entry that contributes NOTHING must FAIL, never pass quietly.
+  # This is the fail-open the previous two extractions both had: a missing
+  # anchor yields zero rows and a green gate. Renaming `TransportConfig` to
+  # `TransportSettings` silently dropped all five transport fields from the
+  # decision requirement and the gate still exited 0 -- after which a new
+  # field could be added with no manifest row and CI stayed green. Note the
+  # asymmetry that hid it: renaming a CODE-side anchor (`DISCLOSABLE`) fails
+  # CLOSED via the 4a diff, so only the safe half had ever been probed.
+  if [ "$(wc -l < "$tmp/fields")" -eq "$before" ]; then
+    echo "FAIL: SURFACE entry '$entry' matched no 'pub struct $st {' in $f."
+    echo "  Renamed, moved, made generic, or turned into a tuple struct?"
+    echo "  A surface that contributes no fields is not a covered surface."
+    exit 1
+  fi
 done
 sort -u "$tmp/fields" -o "$tmp/fields"
 
@@ -118,6 +164,15 @@ if [ -n "$undecided" ]; then
   echo "  Add a row to $MANIFEST. 'mask' is a valid decision — but decide it:"
   echo "  deny-by-default masks a VALUE and does NOT hide a KEY whose presence"
   echo "  is itself the disclosure."
+  exit 1
+fi
+
+if ! grep -qP "^omit\t$CEILING_REQUIRES_SUPPRESSED\t" "$MANIFEST"; then
+  echo "FAIL: '$CEILING_REQUIRES_SUPPRESSED' is no longer omitted."
+  echo "  The Ceiling SURFACE entry synthesises approximate paths (its"
+  echo "  accreditation_ref field is a YAML sibling of \`ceiling\`, not a child),"
+  echo "  which is only safe while that whole subtree is prefix-suppressed."
+  echo "  Re-derive the Ceiling entry's paths before changing this."
   exit 1
 fi
 
