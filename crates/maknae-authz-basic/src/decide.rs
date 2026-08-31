@@ -51,21 +51,29 @@ pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.s
 /// Enforced at COMPILE time, so the mistake cannot reach a test run. Written as
 /// a `while` loop over bytes because `[&str]::contains` is not usable here:
 /// `PartialEq::eq` for `&str` is not a `const fn` (E0015).
-const _: () = {
-    const fn str_eq(a: &str, b: &str) -> bool {
-        let (a, b) = (a.as_bytes(), b.as_bytes());
-        if a.len() != b.len() {
+/// Byte-wise `&str` equality usable in a `const` context.
+///
+/// `PartialEq::eq` for `&str` is not a `const fn` (E0015), so the compile-time
+/// pin below cannot use `==` or `[&str]::contains`. Hoisted to module scope
+/// rather than nested inside the const block so it can be TESTED: the pin
+/// asserts `!str_eq(term, "admin.whoami")`, which a `str_eq` that always
+/// returned `false` would satisfy vacuously while still compiling.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
             return false;
         }
-        let mut i = 0;
-        while i < a.len() {
-            if a[i] != b[i] {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        i += 1;
     }
+    true
+}
+
+const _: () = {
     let mut i = 0;
     while i < GRANTABLE_ACTIONS.len() {
         assert!(
@@ -836,6 +844,31 @@ mod tests {
                 "{action} must NOT permit off the admin class arm"
             );
         }
+    }
+
+    /// `str_eq` is what makes the compile-time pin mean something. The pin
+    /// reads `!str_eq(term, "admin.whoami")`, so a `str_eq` that always
+    /// returned `false` would satisfy it vacuously and still compile -- the
+    /// assertion would be green while asserting nothing. These cases are the
+    /// ones that distinguish a real comparison from a constant `false`.
+    #[test]
+    fn str_eq_actually_compares() {
+        assert!(str_eq("admin.whoami", "admin.whoami"), "equal strings");
+        assert!(str_eq("", ""), "both empty");
+        assert!(
+            !str_eq("admin.whoami", "admin.status"),
+            "same length, differ"
+        );
+        assert!(
+            !str_eq("admin.status", "admin.status2"),
+            "prefix, differing length"
+        );
+        assert!(!str_eq("", "a"), "empty vs non-empty");
+        // The exact comparison the pin performs, both ways round.
+        for t in GRANTABLE_ACTIONS {
+            assert!(!str_eq(t, "admin.whoami"));
+        }
+        assert!(str_eq(GRANTABLE_ACTIONS[0], "admin.status"));
     }
 
     // ---- action-scoped grants: the decide arm (#162 step 4) ----
