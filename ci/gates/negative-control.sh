@@ -811,6 +811,15 @@ p.write_text(s)
 PY
 expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a field typed with THIS CRATE'S OWN `Value`. It is a map-bearing
+# enum (`value.rs`: `Map(Vec<(String, Value)>)`), so `pub extra: Value` is an
+# open-ended deployer-authored subtree -- and `use crate::Value` is already in
+# scope in every file SURFACE reads. It sat on the scalar skip list, where it
+# was DEAD for its apparent purpose: `serde_json::Value` is intercepted by the
+# map case first, so the entry was live only for the hazardous spelling.
+fx="$(cfg_fixture "$CFG_OK" 'pub extra: Value,')"
+expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"

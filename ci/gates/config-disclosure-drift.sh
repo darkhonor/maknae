@@ -195,8 +195,14 @@ for entry in "${SURFACE[@]}"; do
   # left a bare `session_token_path: PathBuf,` contributing zero rows and no
   # count change. The prefix is optional now, which is what the rationale
   # already said it should be.
-  awk -v s="pub struct $st {" -v p="$sec" '
-    index($0, s) { f=1; next }
+  # The STRUCT anchor takes any visibility too, matching the type lookup below.
+  # It was `pub struct` and fails CLOSED (zero rows trips the exact count), but
+  # the zero-row diagnostic never mentioned visibility -- so a maintainer who
+  # declared a new SURFACE struct `pub(crate)`, which is house style here, got a
+  # correct refusal with the wrong cause. Two anchors for one property should
+  # not disagree; that disagreement is how the last recurrence happened.
+  awk -v st="$st" -v p="$sec" '
+    $0 ~ ("^(pub([[:space:]]|\\([^)]*\\)[[:space:]]))?struct " st "[[:space:]]*[<{]") { f=1; next }
     f && /^}/ { f=0 }
     # Comment skip is REQUIRED now that the visibility prefix is optional:
     # doc-comment prose containing `something:` would otherwise be read as a
@@ -258,6 +264,7 @@ for entry in "${SURFACE[@]}"; do
     echo "FAIL: SURFACE entry '$entry' yielded $got field(s), expected $want."
     if [ "$got" -eq 0 ]; then
       echo "  Zero: renamed, moved, made generic, or turned into a tuple struct?"
+      echo "  (Visibility is NOT the cause — any visibility, or none, is matched.)"
     else
       echo "  Fields were added or removed. Classify each one in $MANIFEST,"
       echo "  then update the count in this entry — deliberately, not to go green."
@@ -290,8 +297,19 @@ while IFS=$'\t' read -r fpath fty; do
   case "$fty" in
     *HashMap\<*|*BTreeMap\<*|*serde_json::Value*|*Map\<*) bare="__DYNAMIC_MAP__" ;;
   esac
+  # THIS CRATE'S OWN `Value` IS A MAP-BEARING ENUM, not a scalar
+  # (`value.rs`: `Map(Vec<(String, Value)>)`), so a `pub extra: Value`
+  # pass-through block is an unenumerable deployer-authored subtree -- the
+  # identical condition that moved `audit.au3_1` and then `lake` to SUPPRESSED.
+  # It was on the scalar skip list below, where it was DEAD for its apparent
+  # purpose: `serde_json::Value` is intercepted by the map case above and never
+  # reaches that list, so the entry was live only for the hazardous native
+  # spelling. `crate::Value` and `maknae_config::Value` reduce to the same token.
   case "$bare" in
-    ''|bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|Value|str) continue ;;
+    Value) bare="__DYNAMIC_MAP__" ;;
+  esac
+  case "$bare" in
+    ''|bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|str) continue ;;
   esac
   # ANY visibility, or none -- `pub(crate) struct` and bare `struct` are live
   # house style in this workspace, including inside the very crate SURFACE
@@ -301,7 +319,10 @@ while IFS=$'\t' read -r fpath fty; do
   # Visibility is irrelevant to disclosure at both levels, for one reason:
   # `flatten` walks the parsed `Value`, not the Rust item.
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
-    grep -rqE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct $bare([[:space:]<{]|$)" crates/ 2>/dev/null || continue
+    # `struct` OR `enum`: an enum can carry a map variant just as a struct can
+    # carry map fields, and matching only `struct` would leave every
+    # workspace enum a leaf by default.
+    grep -rqE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?(struct|enum) $bare([[:space:]<{(]|$)" crates/ 2>/dev/null || continue
   fi
   covered=""
   for entry in "${SURFACE[@]}"; do
