@@ -1,0 +1,39 @@
+# admin.config.show disclosure manifest (#162).
+# decision<TAB>path<TAB>rationale
+#
+# THE SURFACE IS A UNION, which is why this file exists rather than a comment
+# pointing at one artifact: docs/configuration.md §4/§5 (core, lake), the
+# section parsers (transport.rs, audit_cfg.rs, principal.rs,
+# maknae-vault/config.rs), and boot.rs's SectionSpec list.
+#
+# Three decisions, and 'mask' is the common and correct one:
+#   disclose  the value ships in the clear
+#   mask      the value is withheld; the KEY still appears (<value set>)
+#   omit      the key does not appear at all — its EXISTENCE is the disclosure
+#
+# 'disclose' and 'omit' rows must match DISCLOSABLE/SUPPRESSED in document.rs
+# exactly, both directions. 'mask' rows are the default and appear in neither.
+disclose	core.deployment_id	baked into every plane leaf's URI SAN; any peer completing a handshake already has it
+disclose	core.schema_version	deployment shape; carried verbatim, named by no parser (docs/configuration.md §4)
+disclose	core.identity.instance_id	deployment shape (§4)
+disclose	core.identity.name	deployment shape (§4)
+disclose	core.identity.domain	deployment shape (§4)
+disclose	core.identity.urn_root	deployment shape (§4)
+disclose	vault.addr	WHERE vault is, never a credential
+disclose	vault.approle_mount	mount name, never a credential
+disclose	vault.pki_int_mount	mount name, never a credential
+disclose	vault.deployment_id	the supported fallback spelling of core.deployment_id
+disclose	audit.jsonl_path	the log the operator is trying to find
+disclose	principal.name	readable by any local process via getpwuid
+disclose	principal.uid	readable by any local process via getpwuid
+disclose	principal.home	readable by any local process via getpwuid
+disclose	transport.socket_path	the socket the daemon is listening on
+disclose	transport.max_connections	transport shape
+disclose	transport.frame_max_bytes	transport shape
+disclose	transport.handshake_timeout_ms	transport shape
+disclose	transport.read_timeout_ms	transport shape
+omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRole SecretID in plaintext on disk
+omit	core.handling	PRESENCE says this deployment configured an above-baseline classification ceiling (prefix)
+omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)
+mask	audit.siem	an offload endpoint with no schema, no validator and no consumer; common shapes embed a credential in the URL
+mask	lake	the Knowledge Lake's schema, not Maknae's; no parser here reads it

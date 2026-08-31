@@ -547,6 +547,61 @@ grantable	session.ghost	grantable-not-granted	NO action term behind it
 expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
+# ---- config-disclosure-drift (#162): the admin.config.show surface ----
+# Five review rounds found the completeness of this control resting on a prose
+# instruction, and found that instruction wrong twice. These fixtures are why
+# the gate replaced it.
+cfg_fixture() { # <manifest-body> [extra-vault-parser-line] — a minimal repo
+  local fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
+           "$fixture/crates/maknae-vault/src"
+  cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
+  cat > "$fixture/crates/maknae-config/src/document.rs" <<'FIX'
+const DISCLOSABLE: &[&str] = &[
+    "vault.addr",
+];
+const SUPPRESSED: &[&str] = &[
+    "vault.insecure_plaintext_secret_path",
+];
+FIX
+  : > "$fixture/crates/maknae-config/src/transport.rs"
+  : > "$fixture/crates/maknae-config/src/audit_cfg.rs"
+  : > "$fixture/crates/maknae-config/src/principal.rs"
+  cat > "$fixture/crates/maknae-vault/src/config.rs" <<FIX
+fn f() {
+    let a = get_str(vault, "addr");
+    let b = get_str(vault, "insecure_plaintext_secret_path");
+    ${2:-}
+}
+FIX
+  printf '%s' "$1" > "$fixture/ci/gates/config-disclosure-manifest.txt"
+  echo "$fixture"
+}
+
+# REJECT: a path classified in code with no recorded decision.
+fx="$(cfg_fixture 'disclose	vault.addr	where vault is
+omit	vault.insecure_plaintext_secret_path	presence is the finding
+disclose	vault.undeclared	NOT in the code
+')"
+expect_reject "config-disclosure-drift/code-and-manifest-disagree" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a parser reads a key nobody classified. THIS is the miss the review
+# loop kept finding — deny-by-default masks the VALUE and does nothing about a
+# key whose presence is itself the disclosure, so "it fails safe" is false here.
+fx="$(cfg_fixture 'disclose	vault.addr	where vault is
+omit	vault.insecure_plaintext_secret_path	presence is the finding
+' '    let c = get_str(vault, "hsm_pin_path");')"
+expect_reject "config-disclosure-drift/parser-key-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: the clean fixture passes and reports its count. Without this every
+# rejection above would stay green against a gate that refuses everything.
+fx="$(cfg_fixture 'disclose	vault.addr	where vault is
+omit	vault.insecure_plaintext_secret_path	presence is the finding
+')"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 2 paths, all decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
+
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
 # The wording IS the control here, so the fixture is a wording fixture.
 ea_fixture() { # <line> — a bare dir (not a repo) holding one normative doc

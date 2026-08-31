@@ -72,7 +72,7 @@ files = [
   "crates/maknae-config/src/lib.rs",
   # cycle ②a: the document model + extension registry. loader.rs is the
   # permission gate + merge/precedence (a mis-parse loads the wrong policy or a
-  # weakened ceiling → T1). document.rs has executable regions (section() scan).
+  # weakened ceiling → T1). document.rs holds the admin.config.show disclosure classifier (#162) plus the section() scan.
   # In [t1].files ONLY — NOT ratchet_cohort (each clears its own 95% floor; the
   # 99 aggregate is the seam+cycle-① cohort, ADR-0016 §4).
   "crates/maknae-config/src/document.rs",

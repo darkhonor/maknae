@@ -124,7 +124,11 @@ impl Document {
         section: &str,
         fields: &[(&str, Option<String>)],
     ) {
-        let entry = view.entry(section.to_string()).or_default();
+        // Built locally and merged only if non-empty. `entry().or_default()`
+        // materialises the section BEFORE the loop, so an all-suppressed field
+        // list would leave `{}` behind -- the same presence bit the file lane
+        // was just fixed to stop emitting. Two lanes, one invariant.
+        let mut local: BTreeMap<String, String> = BTreeMap::new();
         for (path, value) in fields {
             // SUPPRESSION FIRST, then absence. The file lane composes
             // `Omit -> Null -> Clear/Mask`: `flatten` filters `Omit` before it
@@ -155,16 +159,19 @@ impl Document {
             // credential-bearing. An `Option` makes the state unrepresentable
             // rather than merely discouraged.
             let Some(value) = value else {
-                entry.insert((*path).to_string(), NOT_SET.to_string());
+                local.insert((*path).to_string(), NOT_SET.to_string());
                 continue;
             };
             // The SAME classifier the file walk uses — a resolved default is
             // not privileged for having come from code.
             match classify(section, path, DISCLOSABLE) {
                 Disclosure::Omit => unreachable!("filtered above"),
-                Disclosure::Clear => entry.insert((*path).to_string(), value.clone()),
-                Disclosure::Mask => entry.insert((*path).to_string(), MASK.to_string()),
+                Disclosure::Clear => local.insert((*path).to_string(), value.clone()),
+                Disclosure::Mask => local.insert((*path).to_string(), MASK.to_string()),
             };
+        }
+        if !local.is_empty() {
+            view.entry(section.to_string()).or_default().extend(local);
         }
     }
 }
@@ -218,11 +225,23 @@ const DISCLOSABLE: &[&str] = &[
     // any peer completing a handshake has it; withholding it here would hide
     // it from the operator and from nobody else.
     "core.deployment_id",
-    // The rest of `core`, per the schema reference (`docs/configuration.md`
-    // §4) -- NOT per this crate's parsers, which is how they were missed. Only
-    // `core.handling` is type-read here; `schema_version` and `identity.*` are
-    // carried verbatim for their consumers, so no Rust parser in this crate
-    // names them and an allowlist built by reading parsers cannot see them.
+    // The rest of `core`, per `docs/configuration.md` §4.
+    //
+    // THE AUTHORITY IS THE UNION, and getting that wrong is what produced two
+    // separate misses. Reading only the parsers missed these: §4 says
+    // `schema_version` and `identity.*` are "carried as-is" for their
+    // consumers, so no parser in this crate names them. Then reading only
+    // `docs/configuration.md` would miss twelve of the entries below --
+    // it documents `core` (§4) and `lake` (§5) and nothing else, while
+    // `boot.rs` registers `vault`, `transport`, `audit` and `principal` too,
+    // and §6 still calls extension sections "not yet supported".
+    //
+    // So the surface to classify is: `docs/configuration.md` §4/§5, PLUS
+    // `transport.rs`, `audit_cfg.rs`, `principal.rs` and
+    // `maknae-vault/src/config.rs`, PLUS `boot.rs`'s SectionSpec list. The
+    // `config-disclosure-drift` gate enumerates it so this comment is not the
+    // control -- prose telling an author where to look has now been wrong
+    // twice.
     // Same class of deployment-shape fact as `deployment_id`, and the
     // documented minimal config consists of little else -- masking them
     // reproduces "the operator sees almost nothing" on the shape the docs
@@ -269,8 +288,10 @@ const DISCLOSABLE: &[&str] = &[
     // from the list" and "considered and withheld" are different states and
     // only one of them survives a review:
     //
-    //   audit.au3_1 -- operator-authored free-form JSON. Whatever a deployer
-    //     put there has been reviewed by nobody, so it masks.
+    //   audit.au3_1 -- SUPPRESSED, not masked; see the list above. Masking was
+    //     the first decision and it was wrong for the reason `MASK`'s doc now
+    //     records: the sub-key NAMES are deployer-authored and a path allowlist
+    //     cannot classify what it cannot enumerate.
     //
     //   audit.siem -- an offload ENDPOINT, not a path, with no schema, no
     //     validator, and today no consumer at all. The dominant real-world
@@ -315,6 +336,17 @@ const SUPPRESSED: &[&str] = &[
     // Its PRESENCE is the finding. Absent on a correctly-enrolled host, so its
     // absence from the view is not itself a signal.
     "vault.insecure_plaintext_secret_path",
+    // The deployer's AU-3(1) extension object, and everything under it.
+    //
+    // Masking was the recorded decision and it applied the VALUE rule to a KEY
+    // problem -- the same confusion `MASK`'s own corrected doc warns about. The
+    // paths under `au3_1` are deployer-authored strings with NO schema
+    // (`audit_cfg::to_json` accepts an arbitrary map), so a code-declared path
+    // allowlist is structurally incapable of classifying them: "unclassified
+    // therefore withheld" silently degrades to "unclassified therefore the key
+    // name ships" for exactly this subtree. `audit: { au3_1: { enclave:
+    // "SCIF-B7" } }` put `au3_1.enclave` on the wire. Prefix-suppressed.
+    "audit.au3_1",
     // The classification ceiling, and everything under it (prefix match).
     //
     // Masking these was not enough, and the reason is the same one that earned
@@ -390,6 +422,12 @@ fn flatten(
         _ => {
             if prefix.is_empty() {
                 // A section whose whole body is a scalar: name it by section.
+                // NOTE the CLASSIFIER path is `<section>.<section>` (doubled),
+                // not `<section>`. An author disclosing such a section must
+                // write `"lonely.lonely"`; a bare `"lonely"` on DISCLOSABLE
+                // matches nothing and the field silently masks. (Suppression is
+                // unaffected -- the prefix rule makes a bare section name work,
+                // which is the safe direction.)
                 if classify(section, section, disclosable) == Disclosure::Omit {
                     return;
                 }
@@ -654,7 +692,6 @@ mod tests {
         let d = doc(vec![("vault", map(vec![("addr", Value::Null)]))]);
         let v = d.disclosable_view();
         assert_eq!(v["vault"]["addr"], NOT_SET);
-        assert_ne!(v["vault"]["addr"], MASK);
     }
     /// Every `Value` shape, against a test allowlist. The real [`DISCLOSABLE`]
     /// holds one string field, so these arms are otherwise unreachable -- and
@@ -846,9 +883,9 @@ mod tests {
         );
         assert_eq!(
             v["audit"]["siem"], NOT_SET,
-            "an unset offload endpoint must not read as configured"
+            "an unset offload endpoint must not read as configured (and NOT_SET \
+             is a distinct constant from MASK, so this pins the distinction)"
         );
-        assert_ne!(v["audit"]["siem"], MASK);
         // A SET one is still withheld -- absence handling must not become a
         // disclosure route for the value.
         let audit_set = crate::AuditConfig {
