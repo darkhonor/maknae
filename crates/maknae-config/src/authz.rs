@@ -48,7 +48,7 @@ use std::path::Path;
 // ============================================================================
 
 /// One role's action grants as they appear on disk (#162): the `allow` and
-/// `deny` lists under `roles.<name>.actions`. **Raw strings, deliberately** —
+/// `deny` lists under `roles.<name>`. **Raw strings, deliberately** —
 /// whether `"admin"` names a real role and whether `"admin.status"` names a
 /// real term are `maknae-authz-basic`'s questions, and answering them here
 /// would put policy semantics in the parser. This crate owns grammar.
@@ -469,7 +469,7 @@ fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
     }
 }
 
-/// A `roles.<name>.actions.{allow,deny}` term list: a sequence of strings,
+/// A `roles.<name>.{allow,deny}` term list: a sequence of strings,
 /// refused otherwise with a roles-specific message. **Not `str_seq`** — whose
 /// text reads "permissions list entries must be strings" and would send an
 /// operator debugging a `roles:` typo to the wrong section of the file. Same
@@ -580,31 +580,19 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
                     Value::Map(m) => m,
                     _ => {
                         return Err(AuthzError::Yaml(
-                            "roles entries must be a map with an `actions` key".into(),
+                            "roles entries must be a map of allow/deny".into(),
                         ))
                     }
                 };
-                check_known_keys(rb, &["actions"])?;
-                let (allow, deny) = match get(rb, "actions") {
-                    None => (Vec::new(), Vec::new()),
-                    Some(Value::Map(am)) => {
-                        check_known_keys(am, &["allow", "deny"])?;
-                        let allow = get(am, "allow")
-                            .map(roles_term_list)
-                            .transpose()?
-                            .unwrap_or_default();
-                        let deny = get(am, "deny")
-                            .map(roles_term_list)
-                            .transpose()?
-                            .unwrap_or_default();
-                        (allow, deny)
-                    }
-                    Some(_) => {
-                        return Err(AuthzError::Yaml(
-                            "roles actions section must be a map of allow/deny".into(),
-                        ))
-                    }
-                };
+                check_known_keys(rb, &["allow", "deny"])?;
+                let allow = get(rb, "allow")
+                    .map(roles_term_list)
+                    .transpose()?
+                    .unwrap_or_default();
+                let deny = get(rb, "deny")
+                    .map(roles_term_list)
+                    .transpose()?
+                    .unwrap_or_default();
                 // `insert` is last-wins, and that is SAFE only because a
                 // duplicate role key never reaches here: `crate::load_str`
                 // refuses the document with `DuplicateKey` before this runs.
@@ -1529,7 +1517,7 @@ mod tests {
     #[test]
     fn roles_parse_allow_and_deny_term_lists() {
         let body = format!(
-            "{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      deny: [\"admin.config.show\"]\n"
+            "{PREAMBLE}roles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n"
         );
         let p = parse_authz(&body, None).unwrap();
         let g = p.action_grants.get("admin").expect("admin entry");
@@ -1538,21 +1526,10 @@ mod tests {
     }
 
     #[test]
-    fn roles_entry_with_empty_actions_parses_to_empty_lists() {
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: {{}}\n");
-        let p = parse_authz(&body, None).unwrap();
-        assert_eq!(
-            p.action_grants.get("admin"),
-            Some(&RawActionGrants::default())
-        );
-    }
-
-    #[test]
-    fn roles_entry_with_no_actions_key_parses_to_empty_lists() {
-        // The fourth shape: `admin: {}` is a MAP (so it is not the refused
-        // Null), carries no `actions`, and takes the None arm. Distinct from
-        // `actions: {}` above, which takes the Some(Map) arm with both keys
-        // absent -- two different code paths reaching the same empty grant.
+    fn roles_entry_with_no_lists_parses_to_empty_lists() {
+        // `admin: {}` is a MAP, so it is not the refused Null, and neither
+        // `allow` nor `deny` is present. One shape, one arm -- flattening the
+        // grammar collapsed what were two distinct paths to the same result.
         let body = format!("{PREAMBLE}roles:\n  admin: {{}}\n");
         let p = parse_authz(&body, None).unwrap();
         assert_eq!(
@@ -1563,9 +1540,10 @@ mod tests {
 
     #[test]
     fn roles_unknown_key_under_role_refused() {
-        // `roles.<name>` allows exactly `actions` — a `permissions:` typo here
-        // must not be silently accepted as a second, unenforced grant surface.
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n      allow: []\n");
+        // `roles.<name>` allows exactly `allow` and `deny` — a `permissions:`
+        // typo here must not be silently accepted as a second, unenforced
+        // grant surface.
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n    allow: []\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::UnknownKey(k) if k == "permissions"),
@@ -1574,9 +1552,8 @@ mod tests {
     }
 
     #[test]
-    fn roles_unknown_key_under_actions_refused() {
-        let body =
-            format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allwo: [\"admin.status\"]\n");
+    fn roles_typod_allow_key_refused() {
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    allwo: [\"admin.status\"]\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::UnknownKey(k) if k == "allwo"),
@@ -1588,7 +1565,7 @@ mod tests {
     fn roles_non_string_term_refused_with_roles_message() {
         // NOT str_seq's "permissions list entries must be strings" — an
         // operator debugging a roles typo must not be sent to the wrong section.
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [1001]\n");
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    allow: [1001]\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles") && !m.contains("permissions list")),
@@ -1600,7 +1577,7 @@ mod tests {
     fn roles_null_term_list_refused_with_roles_message() {
         // A bare `allow:` parses Null, not an empty sequence. Refuse; do not
         // silently treat as empty — same fail-closed stance as bindings.
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allow:\n");
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    allow:\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
@@ -1629,8 +1606,8 @@ mod tests {
     }
 
     #[test]
-    fn roles_actions_non_map_refused() {
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: [admin.status]\n");
+    fn roles_entry_that_is_a_sequence_refused() {
+        let body = format!("{PREAMBLE}roles:\n  admin: [admin.status]\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
@@ -1652,7 +1629,7 @@ mod tests {
     #[test]
     fn roles_duplicate_role_key_refused_by_the_loader() {
         let body = format!(
-            "{PREAMBLE}roles:\n  admin:\n    actions:\n      deny: [\"admin.status\"]\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n"
+            "{PREAMBLE}roles:\n  admin:\n    deny: [\"admin.status\"]\n  admin:\n    allow: [\"admin.status\"]\n"
         );
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
@@ -1662,13 +1639,13 @@ mod tests {
     }
 
     /// The same invariant one level down: a duplicate `allow:` inside one
-    /// role's `actions:` block. `get()` returns the FIRST match, so last-wins
+    /// role's block. `get()` returns the FIRST match, so last-wins
     /// is not even the failure here -- an operator's second list would be
     /// silently ignored.
     #[test]
     fn roles_duplicate_allow_key_refused_by_the_loader() {
         let body = format!(
-            "{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      allow: [\"admin.config.show\"]\n"
+            "{PREAMBLE}roles:\n  admin:\n    allow: [\"admin.status\"]\n    allow: [\"admin.config.show\"]\n"
         );
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
@@ -1681,7 +1658,7 @@ mod tests {
     fn roles_does_not_disturb_bindings_or_permissions() {
         // The two additive surfaces are independent; parsing one must not
         // suppress or alter the other.
-        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n";
+        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
         let p = parse_authz(body, Some(Path::new("/home/operator"))).unwrap();
         assert_eq!(p.allow.len(), 1);
         assert_eq!(

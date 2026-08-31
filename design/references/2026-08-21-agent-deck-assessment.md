@@ -40,6 +40,8 @@ This is the single most transferable artifact. Every rule in the deck's `CLAUDE.
 - **Fit to Maknae:** the DNA already exists in the ADRs (ADR-0016's line-drawing rule is exactly this instinct), but ADRs are decision-point snapshots; the deck captures **drift and correction over time**. Adopting the "corrected on DATE, here is what was wrong and how it was measured" pattern — and standing up a Maknae `CLAUDE.md` in this style — is the recommended first move if any activity follows.
 
 ### 3.2 Daemon↔client protocol-contract discipline (their Rule 12) — LEARN FROM / candidate for `maknae-proto`.
+> **Maknae has ruled the opposite, 2026-08-31.** Nothing is a breaking change while we are still building; break-notes are not written here and the two that existed are deleted. This paragraph describes what the DECK requires and is retained as provenance only — per the registry's authority rule, an external project's practice is never authoritative for Maknae. Do not adopt it.
+
 The deck requires that **any change to the daemon or TUI↔daemon protocol** either bump `PROTOCOL_VERSION` or add a `.breaking.md` fragment, **plus** a manual old-daemon/new-client cross-version test — and it explicitly counts a **semantic break behind a stable wire** (a field whose *meaning* shifts under an unchanged shape) as breaking.
 - **Problem it solves that Maknae will hit:** Maknae has `maknaed` + `maknae` CLI + `maknae-proto`. A re-interpreted protocol field on a policy path is precisely the kind of silent semantic break that could turn a deny into a permit while every type-check stays green. The deck names and gates exactly this hazard.
 

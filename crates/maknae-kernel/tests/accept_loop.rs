@@ -202,6 +202,7 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
             std::sync::Arc::new(fixture_principal()),
+            std::sync::Arc::new(Default::default()),
         )
         .await;
     });
@@ -338,6 +339,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
             std::sync::Arc::new(fixture_principal()),
+            std::sync::Arc::new(Default::default()),
         )
         .await;
     });
@@ -430,6 +432,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
             std::sync::Arc::new(fixture_principal()),
+            std::sync::Arc::new(Default::default()),
         )
         .await;
     });
@@ -485,6 +488,7 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             supervisor,
             std::sync::Arc::new(common::AlwaysPermit),
             std::sync::Arc::new(fixture_principal()),
+            std::sync::Arc::new(Default::default()),
         ),
     )
     .await
@@ -532,6 +536,7 @@ async fn shutdown_signal_yields_graceful_outcome() {
         pending_supervisor(),
         std::sync::Arc::new(common::AlwaysPermit),
         std::sync::Arc::new(fixture_principal()),
+        std::sync::Arc::new(Default::default()),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)

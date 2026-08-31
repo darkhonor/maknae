@@ -99,6 +99,32 @@ pub struct WhereCtx {
     pub au3_1: serde_json::Value,
 }
 
+/// The effective configuration as `admin.config.show` may disclose it:
+/// section → (dotted field path → rendered value).
+///
+/// **Computed ONCE at boot, already redacted** by
+/// `maknae_config::effective_view` — which is the file walk
+/// (`Document::disclosable_view`) PLUS the resolved-defaults folds, and is the
+/// whole of what the wire carries. Following the pointer to `disclosable_view`
+/// alone would miss the folds, `NOT_SET`, and `Disclosure::Omit`. The
+/// unredacted `Document` is not reachable from the request path.
+///
+/// **That is the whole of the claim, and it is narrower than it looks.**
+/// `handle` still holds raw configuration in the same scope as the arm that
+/// answers `admin.config.show`: `cfg` (the whole `transport` section --
+/// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
+/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). A future
+/// `admin.status` arm wanting "which socket am I on?" finds `cfg.socket_path`
+/// sitting right there. **Any new arm that reaches for one of those owes the
+/// same disclosure argument this one made** -- the boot-time redaction protects
+/// the `Document`, not the request path in general.
+///
+/// It is also a BOOT SNAPSHOT. The authz policy is deliberately re-read per
+/// request; this is not. When a config reload lands, this reports stale
+/// settings until restart.
+pub type ConfigView =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
 const COMPONENT: &str = "kernel";
 
 /// Bounded depth of the at-capacity audit offload channel (codex round-4 P2). The
@@ -323,6 +349,7 @@ pub async fn handle<S, E, P>(
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
     principal: Arc<Principal>,
+    config_view: Arc<ConfigView>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -728,7 +755,7 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::Pong | Dispatch::WhoamiRequested => {
+        Dispatch::Pong | Dispatch::WhoamiRequested | Dispatch::ConfigShowRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -753,6 +780,9 @@ pub async fn handle<S, E, P>(
             let payload = match dispatch_verb(&request.verb) {
                 Dispatch::Pong => Payload::Pong,
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
+                // Already redacted at boot; this arm only hands it over. No
+                // redaction happens here, deliberately -- see `ConfigView`.
+                Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };
@@ -763,6 +793,29 @@ pub async fn handle<S, E, P>(
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
             if let Ok(bytes) = encode_response(&response) {
+                // SIZE-BOUNDED, like the read path. `ConfigView` is the only
+                // payload here that scales with input (one entry per config
+                // leaf); `Pong` and `Whoami` never approach the cap, so the
+                // check is free for them and load-bearing for the third.
+                //
+                // Without it the daemon writes an oversized frame that the
+                // client's own `read_frame(frame_max_bytes)` refuses as a
+                // framing `Oversize` — an authorized request failing with an
+                // undiagnosable transport error, after its audit record already
+                // said "permit / authorized". The read PEP's stance applies
+                // unchanged: a PERMIT whose delivery is refused is refused
+                // EXPLICITLY, never truncated and never silently oversized.
+                if bytes.len() > cfg.frame_max_bytes {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::TooLarge,
+                        "response exceeds the configured frame limit",
+                    )
+                    .await;
+                    close_bounded(&mut stream).await;
+                    return;
+                }
                 let _ = tokio::time::timeout(
                     Duration::from_millis(cfg.read_timeout_ms),
                     write_frame(&mut stream, &bytes),
@@ -1152,6 +1205,7 @@ pub async fn accept_loop<A, E, P>(
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
     principal: Arc<Principal>,
+    config_view: Arc<ConfigView>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1250,6 +1304,7 @@ where
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
                                 let principal = Arc::clone(&principal);
+                                let config_view = Arc::clone(&config_view);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1337,7 +1392,9 @@ where
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
-                                                authorizer, principal, AUTHZ_DECIDE_TIMEOUT,
+                                                authorizer, principal,
+                                                config_view,
+                                                AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
                                                 // it yields is local by construction.
@@ -1829,6 +1886,22 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
+    // The fold lives in `maknae-config::effective_view`, not here: this file is
+    // T3 and mutation-excluded, and "which fields to fold, and what to present
+    // for an absent one" is a disclosure decision that earns a gated crate.
+    // Built before `transport` is moved.
+    let config_view = {
+        let vc = maknae_vault::vault_config_from_document(boot.document()).ok();
+        Arc::new(maknae_config::effective_view(
+            boot.document(),
+            &maknae_config::ResolvedSettings {
+                transport: &transport,
+                audit: &audit_cfg,
+                vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
+                vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
+            },
+        ))
+    };
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -1839,6 +1912,9 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         supervisor,
         Arc::clone(&authorizer),
         Arc::clone(&principal),
+        // Redact ONCE, here, at boot. The run loop receives only the view;
+        // the unredacted Document does not travel with it.
+        config_view,
     )
     .await;
 
@@ -1866,6 +1942,8 @@ async fn serve_after_mint(
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<maknae_authz_basic::BasicAuthorizer>,
     principal: Arc<Principal>,
+    // Already redacted at boot — the raw Document never reaches the run loop.
+    config_view: Arc<ConfigView>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -1901,6 +1979,7 @@ async fn serve_after_mint(
         supervisor,
         authorizer,
         principal,
+        config_view,
     )
     .await;
     Ok(outcome)

@@ -21,6 +21,9 @@ pub enum Dispatch {
     /// The peer asked to read a file; the path is the VERB's own datum
     /// (client-supplied, canonical-pre-gated by the PEP), not a peer fact.
     ReadRequested(String),
+    /// The peer asked for the effective configuration (#162 Phase 2). Carries
+    /// no datum: the config is the daemon's own, never client-supplied.
+    ConfigShowRequested,
 }
 
 /// Resolve a verb to its dispatch. `Ping → Pong`, `Whoami → WhoamiRequested`.
@@ -31,8 +34,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::Read { path } => Dispatch::ReadRequested(path.clone()),
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
         // compile error until someone decides what it dispatches to.
+        Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
         Verb::AdminStatus
-        | Verb::AdminConfigShow
         | Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectList
@@ -478,26 +481,34 @@ mod tests {
         assert_eq!(dispatch_verb(&Verb::Whoami), Dispatch::WhoamiRequested);
     }
 
-    /// The three grantable disclosure terms (#162) dispatch to NO BEHAVIOUR.
+    /// `admin.status` and `admin.subject.list` still dispatch to NO BEHAVIOUR.
     ///
-    /// Phase 1 ships the DECISION path, not the capability: an operator who
-    /// grants `admin.status` gets a genuine Permit and then `NotImplemented`,
-    /// disclosing nothing. Pinned here so Phase 2 cannot wire a dispatch
-    /// without this test turning red and forcing the disclosure question to be
-    /// answered deliberately. Exempt from red-first -- it pins what already is.
+    /// This test was written in Phase 1 over all THREE grantable terms, so that
+    /// none could gain a dispatch without someone answering the disclosure
+    /// question deliberately. It has now done that job once: adding
+    /// `admin.config.show`'s arm turned it red, and it is narrowed here against
+    /// the operator ruling that settled what that term may disclose. The other
+    /// two keep the pin, and narrowing it again requires the same ruling.
     #[test]
-    fn the_grantable_admin_terms_have_no_behaviour_yet() {
-        for v in [
-            Verb::AdminStatus,
-            Verb::AdminConfigShow,
-            Verb::AdminSubjectList,
-        ] {
+    fn the_remaining_grantable_terms_have_no_behaviour_yet() {
+        for v in [Verb::AdminStatus, Verb::AdminSubjectList] {
             assert_eq!(
                 dispatch_verb(&v),
                 Dispatch::NoBehaviour,
-                "{v:?} is grantable but must still disclose nothing in Phase 1"
+                "{v:?} is grantable but must still disclose nothing"
             );
         }
+    }
+
+    /// `admin.config.show` DOES dispatch now (#162 Phase 2). Its response
+    /// carries the already-redacted view; the redaction rule itself is
+    /// `maknae_config::Document::disclosable_view` and is tested there.
+    #[test]
+    fn config_show_dispatches_to_its_own_arm() {
+        assert_eq!(
+            dispatch_verb(&Verb::AdminConfigShow),
+            Dispatch::ConfigShowRequested
+        );
     }
 
     #[test]

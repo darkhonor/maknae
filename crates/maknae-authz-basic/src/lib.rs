@@ -537,8 +537,7 @@ mod tests {
     /// mode this whole surface exists to avoid.
     #[test]
     fn roles_unknown_role_refuses_construction_naming_the_key() {
-        let p =
-            parse_with_roles("roles:\n  admn:\n    actions:\n      allow: [\"admin.status\"]\n");
+        let p = parse_with_roles("roles:\n  admn:\n    allow: [\"admin.status\"]\n");
         let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
         assert!(
             matches!(got, Err(AuthzBasicError::UnknownRole(ref k)) if k == "admn"),
@@ -554,7 +553,7 @@ mod tests {
     fn roles_real_but_ungrantable_role_refuses_with_its_own_variant() {
         for key in ["user", "guest", "adversary"] {
             let p = parse_with_roles(&format!(
-                "roles:\n  {key}:\n    actions:\n      allow: [\"admin.status\"]\n"
+                "roles:\n  {key}:\n    allow: [\"admin.status\"]\n"
             ));
             let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
             assert!(
@@ -576,9 +575,7 @@ mod tests {
             "admin.stauts",
             "fs.read",
         ] {
-            let p = parse_with_roles(&format!(
-                "roles:\n  admin:\n    actions:\n      allow: [\"{term}\"]\n"
-            ));
+            let p = parse_with_roles(&format!("roles:\n  admin:\n    allow: [\"{term}\"]\n"));
             let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
             assert!(
                 matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == term),
@@ -592,8 +589,7 @@ mod tests {
     /// the worst outcome on a policy surface, and invisible without this test.
     #[test]
     fn roles_ungrantable_term_in_deny_list_also_refuses() {
-        let p =
-            parse_with_roles("roles:\n  admin:\n    actions:\n      deny: [\"admin.contain\"]\n");
+        let p = parse_with_roles("roles:\n  admin:\n    deny: [\"admin.contain\"]\n");
         let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
         assert!(
             matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.contain"),
@@ -607,7 +603,7 @@ mod tests {
     #[test]
     fn roles_valid_grant_block_constructs() {
         let p = parse_with_roles(
-            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\", \"admin.config.show\"]\n      deny: [\"admin.subject.list\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\"]\n    deny: [\"admin.subject.list\"]\n",
         );
         BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p)
             .expect("every role key and term is in vocabulary");
@@ -636,7 +632,7 @@ mod tests {
         // the bytes is hermetic. Nothing about the validation is stubbed.
         let v = auth.decide_with_loader(&liveness_req(None, Some(501)), |_| {
             maknae_config::parse_authz(
-                &format!("{GRANT_PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.contain\"]\n"),
+                &format!("{GRANT_PREAMBLE}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
                 None,
             )
         });

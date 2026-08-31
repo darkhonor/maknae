@@ -51,7 +51,9 @@ pub use authz::{
     RawActionGrants, Request,
 };
 pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
-pub use document::{Document, Override, SectionSpec, Source};
+pub use document::{
+    effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
+};
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;

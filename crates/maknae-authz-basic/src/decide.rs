@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn granted_admin_term_permits_and_ungranted_siblings_do_not() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\"]\n",
             GRANT_UIDS,
         );
         let req = |a: &str| request(None, Some(1001), a, None);
@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn denied_admin_term_denies_naming_the_source_even_when_also_allowed() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\", \"admin.config.show\"]\n      deny: [\"admin.status\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\"]\n    deny: [\"admin.status\"]\n",
             GRANT_UIDS,
         );
         assert_eq!(
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn admin_grants_do_not_leak_to_other_roles() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\"]\n",
             GRANT_UIDS,
         );
         for (uid, role) in [(1002u32, "user"), (1003, "guest")] {
@@ -1129,7 +1129,7 @@ mod tests {
     /// testable rather than merely asserted.
     #[test]
     fn empty_roles_block_leaves_the_three_terms_not_applicable() {
-        for block in ["", "roles: {}\n", "roles:\n  admin:\n    actions: {}\n"] {
+        for block in ["", "roles: {}\n", "roles:\n  admin: {}\n"] {
             let lp = lp_with_grants(block, GRANT_UIDS);
             for t in GRANTABLE_ACTIONS {
                 assert_eq!(
