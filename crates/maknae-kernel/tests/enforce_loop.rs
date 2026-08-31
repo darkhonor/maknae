@@ -146,7 +146,17 @@ where
     if let Ok(f) = std::fs::File::open(delegate) {
         fds.push(std::os::fd::OwnedFd::from(f));
     }
-    drive_with(fx_principal, authorizer, emit, peer_uid, verb, timeout, fds).await
+    drive_with(
+        fx_principal,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        fds,
+        Arc::new(Default::default()),
+    )
+    .await
 }
 
 /// Drive one request through `handle()` with the given authorizer; return
@@ -170,6 +180,7 @@ where
         verb,
         timeout,
         maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
     )
     .await
 }
@@ -183,6 +194,9 @@ async fn drive_with<P>(
     verb: maknae_proto::Verb,
     timeout: Duration,
     delegated: maknae_io::DelegatedFds,
+    // The already-redacted effective config the daemon would hold. Default
+    // (empty) for every verb that is not `admin.config.show`.
+    config_view: Arc<maknae_kernel::ConfigView>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -202,6 +216,7 @@ where
         serde_json::json!({}),
         authorizer,
         Arc::new(fx_principal.clone()),
+        Arc::clone(&config_view),
         timeout,
         maknae_security::Lane::Local,
         delegated,
@@ -1019,6 +1034,95 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
             other => panic!("expected Unauthorized for {verb:?}, got {other:?}"),
         }
     }
+}
+
+/// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,
+/// and a real redacted disclosure on the wire (#162 Phase 2).
+///
+/// The secret is planted in the view the daemon holds and asserted ABSENT from
+/// the response bytes, not merely from the decoded payload -- a redaction that
+/// holds after decoding but leaks in the frame is not a redaction.
+#[tokio::test]
+async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
+    let fx = Fixture::new("cfgshow-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+    );
+    // What the daemon would hold after boot-time redaction: shape disclosed,
+    // value masked. `hvs.THE-SECRET` stands in for anything that must not ship.
+    let mut vault = std::collections::BTreeMap::new();
+    vault.insert("addr".to_string(), "<value set>".to_string());
+    vault.insert("root_token".to_string(), "<value set>".to_string());
+    let mut view = maknae_kernel::ConfigView::new();
+    view.insert("vault".to_string(), vault);
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+
+    assert!(
+        !String::from_utf8_lossy(&frame).contains("hvs."),
+        "no secret material may appear in the response FRAME"
+    );
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::ConfigView(v)) => {
+            assert_eq!(v["vault"]["root_token"], "<value set>");
+            assert!(v["vault"].contains_key("addr"), "shape is disclosed: {v:?}");
+        }
+        other => panic!("expected a ConfigView payload, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.config.show");
+    assert_eq!(req.outcome.result, "permit");
+    assert_ne!(
+        req.outcome.posture, "not-implemented",
+        "the term has behaviour now; the audit posture must say so"
+    );
+}
+
+/// Without the grant, nothing is disclosed. This is what makes the test above
+/// mean something: the authorization decision, not the dispatch, is the gate.
+#[tokio::test]
+async fn config_show_without_a_grant_discloses_nothing() {
+    let fx = Fixture::new("cfgshow-nogrant");
+    fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+    let mut vault = std::collections::BTreeMap::new();
+    vault.insert("addr".to_string(), "<value set>".to_string());
+    let mut view = maknae_kernel::ConfigView::new();
+    view.insert("vault".to_string(), vault);
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("an ungranted config.show must disclose NOTHING, got {other:?}"),
+    }
+    assert!(
+        !String::from_utf8_lossy(&frame).contains("vault"),
+        "not even the section NAMES may leak without a grant"
+    );
+    assert_eq!(request_record(&emit.records()).outcome.result, "deny");
 }
 
 /// The `roles:` grant crosses the SEAM (#162 step 7).

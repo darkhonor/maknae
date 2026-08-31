@@ -77,7 +77,7 @@ impl Document {
         let mut out = BTreeMap::new();
         for (name, value, _) in &self.sections {
             let mut flat = BTreeMap::new();
-            flatten(name, "", value, &mut flat);
+            flatten(DISCLOSABLE, name, "", value, &mut flat);
             out.insert(name.clone(), flat);
         }
         out
@@ -110,7 +110,17 @@ const DISCLOSABLE: &[&str] = &[
     "core.deployment_id",
 ];
 
-fn flatten(section: &str, prefix: &str, v: &Value, out: &mut BTreeMap<String, String>) {
+/// `disclosable` is a PARAMETER, not a direct read of [`DISCLOSABLE`], so the
+/// rule can be exercised against every `Value` shape without widening the real
+/// allowlist to make types reachable. Production has exactly one caller and it
+/// passes [`DISCLOSABLE`].
+fn flatten(
+    disclosable: &[&str],
+    section: &str,
+    prefix: &str,
+    v: &Value,
+    out: &mut BTreeMap<String, String>,
+) {
     match v {
         Value::Map(entries) => {
             for (k, sub) in entries {
@@ -119,28 +129,31 @@ fn flatten(section: &str, prefix: &str, v: &Value, out: &mut BTreeMap<String, St
                 } else {
                     format!("{prefix}.{k}")
                 };
-                flatten(section, &next, sub, out);
+                flatten(disclosable, section, &next, sub, out);
             }
         }
         _ => {
             if prefix.is_empty() {
                 // A section whose whole body is a scalar: name it by section.
-                out.insert(section.to_string(), render(section, section, v));
+                out.insert(
+                    section.to_string(),
+                    render(disclosable, section, section, v),
+                );
                 return;
             }
-            out.insert(prefix.to_string(), render(section, prefix, v));
+            out.insert(prefix.to_string(), render(disclosable, section, prefix, v));
         }
     }
 }
 
-fn render(section: &str, path: &str, v: &Value) -> String {
+fn render(disclosable: &[&str], section: &str, path: &str, v: &Value) -> String {
     // Absence is reported before disclosure is even considered: a key with no
     // value has nothing to leak, and the operator needs to see it is unset.
     if matches!(v, Value::Null) {
         return NOT_SET.to_string();
     }
     let full = format!("{section}.{path}");
-    if !DISCLOSABLE.contains(&full.as_str()) {
+    if !disclosable.contains(&full.as_str()) {
         return MASK.to_string();
     }
     match v {
@@ -183,12 +196,8 @@ mod tests {
         assert_eq!(doc.overrides().len(), 1);
         assert_eq!(doc.overrides()[0].section, "authz");
     }
-}
 
-#[cfg(test)]
-mod disclosure_tests {
-    use super::*;
-    use crate::Value;
+    // ---- `admin.config.show` disclosure rule (#162 Phase 2) ----
 
     fn doc(sections: Vec<(&str, Value)>) -> Document {
         Document::new(
@@ -275,7 +284,7 @@ mod disclosure_tests {
         assert_eq!(
             v["some_future_section"]["innocuous_looking_count"], MASK,
             "even an int in an unknown section is masked -- the classifier is the \
-             PATH, not the type, and 'it looks harmless' is not a control"
+                 PATH, not the type, and 'it looks harmless' is not a control"
         );
     }
 
@@ -301,5 +310,67 @@ mod disclosure_tests {
         let v = d.disclosable_view();
         assert_eq!(v["vault"]["addr"], NOT_SET);
         assert_ne!(v["vault"]["addr"], MASK);
+    }
+    /// Every `Value` shape, against a test allowlist. The real [`DISCLOSABLE`]
+    /// holds one string field, so these arms are otherwise unreachable -- and
+    /// widening the real list to make them reachable would disclose fields
+    /// nobody argued for, which is the opposite of the point.
+    #[test]
+    fn a_declared_field_renders_every_scalar_type_and_masks_every_collection() {
+        let allow: &[&str] = &["s.b", "s.i", "s.f", "s.t", "s.seq", "s.map", "s.null"];
+        let mut out = BTreeMap::new();
+        flatten(
+            allow,
+            "s",
+            "",
+            &map(vec![
+                ("b", Value::Bool(true)),
+                ("i", Value::Int(-7)),
+                ("f", Value::Float(1.5)),
+                ("t", Value::Str("plain".into())),
+                ("seq", Value::Seq(vec![Value::Str("hidden".into())])),
+                ("null", Value::Null),
+            ]),
+            &mut out,
+        );
+        assert_eq!(out["b"], "true");
+        assert_eq!(out["i"], "-7");
+        assert_eq!(out["f"], "1.5");
+        assert_eq!(out["t"], "plain");
+        // DECLARED but a collection: still masked. The declaration was made
+        // about a scalar, and widening it silently would disclose elements
+        // nobody classified -- `hidden` must not appear.
+        assert_eq!(out["seq"], MASK);
+        assert!(!format!("{out:?}").contains("hidden"), "{out:?}");
+        assert_eq!(out["null"], NOT_SET);
+    }
+
+    /// A section whose entire body is a scalar is keyed by the section name,
+    /// not dropped. Without this arm such a section would vanish from the
+    /// view -- an operator would see no evidence the setting exists.
+    #[test]
+    fn a_scalar_section_is_keyed_by_its_section_name() {
+        let d = doc(vec![("lonely", Value::Str("value".into()))]);
+        let v = d.disclosable_view();
+        assert_eq!(v["lonely"]["lonely"], MASK, "present, and masked: {v:?}");
+    }
+
+    /// The allowlist is matched on the FULL `section.path`, so the same leaf
+    /// name in a different section is not disclosed by accident.
+    #[test]
+    fn the_allowlist_matches_the_full_path_not_the_leaf_name() {
+        let allow: &[&str] = &["core.deployment_id"];
+        let mut out = BTreeMap::new();
+        flatten(
+            allow,
+            "vault",
+            "",
+            &map(vec![("deployment_id", Value::Str("leak".into()))]),
+            &mut out,
+        );
+        assert_eq!(
+            out["deployment_id"], MASK,
+            "leaf-name collision must not disclose"
+        );
     }
 }

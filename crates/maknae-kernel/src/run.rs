@@ -99,6 +99,16 @@ pub struct WhereCtx {
     pub au3_1: serde_json::Value,
 }
 
+/// The effective configuration as `admin.config.show` may disclose it:
+/// section → (dotted field path → rendered value).
+///
+/// **Computed ONCE at boot, already redacted** (`maknae_config::Document::
+/// disclosable_view`). The request path therefore never holds raw configuration
+/// values at all -- there is nothing here for a future arm to accidentally
+/// disclose, because the unredacted `Document` is not reachable from it.
+pub type ConfigView =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
 const COMPONENT: &str = "kernel";
 
 /// Bounded depth of the at-capacity audit offload channel (codex round-4 P2). The
@@ -323,6 +333,7 @@ pub async fn handle<S, E, P>(
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
     principal: Arc<Principal>,
+    config_view: Arc<ConfigView>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -728,7 +739,7 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::Pong | Dispatch::WhoamiRequested => {
+        Dispatch::Pong | Dispatch::WhoamiRequested | Dispatch::ConfigShowRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -753,6 +764,9 @@ pub async fn handle<S, E, P>(
             let payload = match dispatch_verb(&request.verb) {
                 Dispatch::Pong => Payload::Pong,
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
+                // Already redacted at boot; this arm only hands it over. No
+                // redaction happens here, deliberately -- see `ConfigView`.
+                Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };
@@ -1152,6 +1166,7 @@ pub async fn accept_loop<A, E, P>(
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
     principal: Arc<Principal>,
+    config_view: Arc<ConfigView>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1250,6 +1265,7 @@ where
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
                                 let principal = Arc::clone(&principal);
+                                let config_view = Arc::clone(&config_view);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1337,7 +1353,9 @@ where
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 emit, session_id, cfg, wctx.au3_1,
-                                                authorizer, principal, AUTHZ_DECIDE_TIMEOUT,
+                                                authorizer, principal,
+                                                config_view,
+                                                AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
                                                 // it yields is local by construction.
@@ -1839,6 +1857,9 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         supervisor,
         Arc::clone(&authorizer),
         Arc::clone(&principal),
+        // Redact ONCE, here, at boot. The run loop receives only the view;
+        // the unredacted Document does not travel with it.
+        Arc::new(boot.document().disclosable_view()),
     )
     .await;
 
@@ -1866,6 +1887,8 @@ async fn serve_after_mint(
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<maknae_authz_basic::BasicAuthorizer>,
     principal: Arc<Principal>,
+    // Already redacted at boot — the raw Document never reaches the run loop.
+    config_view: Arc<ConfigView>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -1901,6 +1924,7 @@ async fn serve_after_mint(
         supervisor,
         authorizer,
         principal,
+        config_view,
     )
     .await;
     Ok(outcome)
