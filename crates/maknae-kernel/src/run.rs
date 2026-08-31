@@ -793,6 +793,29 @@ pub async fn handle<S, E, P>(
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
             if let Ok(bytes) = encode_response(&response) {
+                // SIZE-BOUNDED, like the read path. `ConfigView` is the only
+                // payload here that scales with input (one entry per config
+                // leaf); `Pong` and `Whoami` never approach the cap, so the
+                // check is free for them and load-bearing for the third.
+                //
+                // Without it the daemon writes an oversized frame that the
+                // client's own `read_frame(frame_max_bytes)` refuses as a
+                // framing `Oversize` — an authorized request failing with an
+                // undiagnosable transport error, after its audit record already
+                // said "permit / authorized". The read PEP's stance applies
+                // unchanged: a PERMIT whose delivery is refused is refused
+                // EXPLICITLY, never truncated and never silently oversized.
+                if bytes.len() > cfg.frame_max_bytes {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::TooLarge,
+                        "response exceeds the configured frame limit",
+                    )
+                    .await;
+                    close_bounded(&mut stream).await;
+                    return;
+                }
                 let _ = tokio::time::timeout(
                     Duration::from_millis(cfg.read_timeout_ms),
                     write_frame(&mut stream, &bytes),

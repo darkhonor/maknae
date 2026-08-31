@@ -1036,6 +1036,59 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// An oversized `ConfigView` is refused EXPLICITLY, not written oversized.
+///
+/// `ConfigView` is the only payload on that arm whose size scales with input --
+/// one entry per config leaf. Without a bound the daemon writes a frame the
+/// client's own `read_frame(frame_max_bytes)` then refuses as a framing
+/// `Oversize`: an authorized request failing with an undiagnosable transport
+/// error, after its audit record already said "permit / authorized". The read
+/// PEP's stance applies unchanged -- a PERMIT whose delivery is refused is
+/// refused explicitly.
+///
+/// Raised independently by an external reviewer after three internal rounds had
+/// flagged it and it was deferred each time.
+#[tokio::test]
+async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() {
+    let fx = Fixture::new("cfgshow-toolarge");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+    );
+    // Enough leaves to exceed the default frame cap. Values are already
+    // redacted; it is the KEY COUNT that grows the frame.
+    let mut section = std::collections::BTreeMap::new();
+    for i in 0..20_000 {
+        section.insert(format!("key_{i:06}"), maknae_config::MASK.to_string());
+    }
+    let mut view = maknae_kernel::ConfigView::new();
+    view.insert("vault".to_string(), section);
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+
+    let cfg = maknae_config::transport_from_section(None).unwrap();
+    assert!(
+        frame.len() <= cfg.frame_max_bytes + 64,
+        "the daemon must not emit a frame its own client cannot read: {} bytes",
+        frame.len()
+    );
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::TooLarge),
+        other => panic!("expected an explicit TooLarge refusal, got {other:?}"),
+    }
+}
+
 /// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,
 /// and a real redacted disclosure on the wire (#162 Phase 2).
 ///
