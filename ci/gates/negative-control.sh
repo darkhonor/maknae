@@ -566,6 +566,13 @@ const VAULT_SECTION: &str = "vault";
 const TRANSPORT_SECTION: &str = "transport";
 const AUDIT_SECTION: &str = "audit";
 const PRINCIPAL_SECTION: &str = "principal";
+    let specs = [
+        SectionSpec { name: LAKE_SECTION.to_string(), required: false },
+        SectionSpec { name: VAULT_SECTION.to_string(), required: false },
+        SectionSpec { name: TRANSPORT_SECTION.to_string(), required: false },
+        SectionSpec { name: AUDIT_SECTION.to_string(), required: false },
+        SectionSpec { name: PRINCIPAL_SECTION.to_string(), required: false },
+    ];
 FIX
   cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
   cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
@@ -647,6 +654,7 @@ disclose	principal	readable via getpwuid anyway
 disclose	audit.jsonl_path	the log the operator is looking for
 omit	vault.insecure_plaintext_secret_path	presence is the finding
 omit	core.handling	presence says an above-baseline ceiling is configured
+mask	lake	the Knowledge Lake schema, not ours
 '
 
 # REJECT: a NEW config struct field with no recorded decision. This is the miss
@@ -692,7 +700,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "11 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -700,7 +708,12 @@ expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "11 p
 # list right, and is it all of them?". A new config section shipped both its
 # field names on the wire with nobody asked the omit-vs-mask question.
 fx="$(cfg_fixture "$CFG_OK")"
-printf 'const ENCLAVE_SECTION: &str = "enclave";\n' >> "$fx/crates/maknae-kernel/src/boot.rs"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+const ENCLAVE_SECTION: &str = "enclave";
+    let more = [
+        SectionSpec { name: ENCLAVE_SECTION.to_string(), required: false },
+    ];
+FIX
 expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a pub(crate) field. Visibility is irrelevant to disclosure -- flatten
@@ -715,10 +728,30 @@ expect_reject "config-disclosure-drift/pub-crate-field-not-counted" "$fx/ci/gate
 fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
 expect_reject "config-disclosure-drift/raw-identifier-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a SectionSpec registered with a STRING LITERAL name. boot.rs's own
+# grammar accepts it, and keying the cross-check on `[A-Z_]+_SECTION` const
+# NAMES could not see it -- exit 0 over an uncovered section, with the pinned
+# counts unchanged so nothing else fired either.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let specs = [
+        SectionSpec { name: "enclave".to_string(), required: false },
+    ];
+FIX
+expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NON-pub struct field. Visibility is irrelevant to disclosure --
+# `flatten` walks the parsed Value, not the struct -- and the regex kept
+# keying on it, so a bare `session_token_path: PathBuf,` contributed zero rows
+# and no count change. This sits beside the pub(crate) fixture deliberately:
+# the two are the same property, one keyword apart.
+fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
+expect_reject "config-disclosure-drift/private-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" "11 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" "12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: the gate's own summary counts are pinned.

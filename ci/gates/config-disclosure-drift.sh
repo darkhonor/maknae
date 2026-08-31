@@ -76,16 +76,63 @@ done
 # gate exited 0 and both its field names shipped on the wire with nobody ever
 # asked the omit-vs-mask question. `std-fs-drift` sets the precedent -- an
 # exact-inventory gate rejects stale exemptions as well as new calls.
-registered=$(grep -oE '[A-Z_]+_SECTION' crates/maknae-kernel/src/boot.rs | sort -u)
-for c in $registered; do
-  sec=$(grep -rhoE "const $c: &str = \"[a-z0-9_]+\"" crates/ | grep -oE '"[a-z0-9_]+"' | tr -d '"' | head -1)
-  [ -n "$sec" ] || { echo "FAIL: cannot resolve section constant $c"; exit 1; }
+# EVERY EXTRACTION IS COUNTED AGAINST AN INDEPENDENT TALLY. That is the rule
+# this gate kept failing: an anchor a legitimate declaration form can omit
+# yields no rows, no count change, and a green build. Keying on `[A-Z_]+_SECTION`
+# const NAMES was defeated three ways -- a `name: "enclave".to_string()` string
+# literal (the form boot.rs's own grammar accepts), a digit in the const name
+# (`ENCLAVE2_SECTION`), and a renamed const -- each exiting 0 over an
+# uncovered section whose key names then ship on the wire.
+#
+# So: read each SectionSpec's `name:` operand, resolve identifiers through the
+# const table and take string literals verbatim, then assert the number
+# resolved equals the number of SectionSpec blocks. A `name:` form this cannot
+# read is now a HARD FAILURE, not a silent zero.
+BOOT=crates/maknae-kernel/src/boot.rs
+spec_count=$(grep -c 'SectionSpec {' "$BOOT" || true)
+[ "$spec_count" -gt 0 ] || { echo "FAIL: no SectionSpec blocks found in $BOOT"; exit 1; }
+operands=$(sed -n '/SectionSpec {/,/}/p' "$BOOT" | grep -oE 'name:[[:space:]]*[^,]+' | sed 's/name:[[:space:]]*//' || true)
+registered=""
+resolved=0
+while read -r op; do
+  [ -n "$op" ] || continue
+  case "$op" in
+    \"*\"*)  sec=$(printf '%s' "$op" | grep -oE '"[^"]+"' | head -1 | tr -d '"') ;;
+    *)        c=$(printf '%s' "$op" | grep -oE '^[A-Za-z0-9_]+' | head -1)
+              sec=$(grep -rhoE "const $c: &str = \"[^\"]+\"" crates/ 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | head -1 || true) ;;
+  esac
+  if [ -z "$sec" ]; then
+    echo "FAIL: cannot resolve SectionSpec name operand: $op"
+    echo "  Every registered section must be resolvable to a section name, or"
+    echo "  the gate is silently covering fewer sections than boot.rs registers."
+    exit 1
+  fi
+  registered="$registered $sec"
+  resolved=$((resolved+1))
+done <<< "$operands"
+if [ "$resolved" -ne "$spec_count" ]; then
+  echo "FAIL: resolved $resolved section name(s) from $spec_count SectionSpec block(s) in $BOOT."
+  echo "  A registration form this gate cannot read is an uncovered section."
+  exit 1
+fi
+for sec in $registered; do
   covered=""
   for entry in "${SURFACE[@]}"; do
     IFS='|' read -r _ _ p _ <<< "$entry"
     case "$p" in "$sec"|"$sec".*) covered=1;; esac
   done
-  case " $NO_STRUCT_SECTIONS " in *" $sec "*) covered=1;; esac
+  case " $NO_STRUCT_SECTIONS " in
+    *" $sec "*)
+      # Declaring a section struct-less is not a way to silence it: it must
+      # still carry a decision. Without this the list is an escape hatch.
+      if ! awk -F'\t' -v s="$sec" '$2==s || index($2, s ".")==1 {found=1} END{exit found?0:1}' "$MANIFEST"; then
+        echo "FAIL: section '$sec' is on NO_STRUCT_SECTIONS but has no manifest row."
+        echo "  Struct-less means its keys are carried verbatim, not that its"
+        echo "  disclosure is undecided."
+        exit 1
+      fi
+      covered=1 ;;
+  esac
   if [ -z "$covered" ]; then
     echo "FAIL: section '$sec' is registered in boot.rs but has no SURFACE entry"
     echo "  and is not on NO_STRUCT_SECTIONS. Every registered section's fields"
@@ -134,23 +181,37 @@ sort -u "$tmp/code" -o "$tmp/code"
 for entry in "${SURFACE[@]}"; do
   IFS='|' read -r f st sec want <<< "$entry"
   before=$(wc -l < "$tmp/fields")
-  # `pub`, `pub(crate)`, `pub(super)`, raw identifiers, and EVERY field on a
-  # line. The previous regex was `pub [a-z0-9_]+:` -- it missed `pub(crate)`
-  # (live house style in this repo), `r#type` (a keyword is an idiomatic YAML
-  # key), and any capital. Visibility is irrelevant to disclosure: `flatten`
-  # walks the parsed `Value`, not the struct, so a `pub(crate)` field is on the
-  # wire exactly like a `pub` one.
+  # Fields with ANY visibility or none: `pub`, `pub(crate)`, `pub(super)`, or
+  # bare. Raw identifiers, capitals, and every field on a line.
+  #
+  # Visibility is IRRELEVANT to disclosure -- `flatten` walks the parsed
+  # `Value`, not the struct -- and the regex kept keying on it anyway. It was
+  # widened from `pub` to `pub(...)` for the instance one review named, which
+  # left a bare `session_token_path: PathBuf,` contributing zero rows and no
+  # count change. The prefix is optional now, which is what the rationale
+  # already said it should be.
   awk -v s="pub struct $st {" -v p="$sec" '
     index($0, s) { f=1; next }
     f && /^}/ { f=0 }
+    # Comment skip is REQUIRED now that the visibility prefix is optional:
+    # doc-comment prose containing `something:` would otherwise be read as a
+    # field. `extract()` above already needed the same guard for the same
+    # reason -- the asymmetry between the two extractors is how this recurred.
+    f && /^[[:space:]]*\/\// { next }
     f { line=$0
-        while (match(line, /pub(\([^)]*\))?[[:space:]]+(r#)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/)) {
+        while (match(line, /(pub(\([^)]*\))?[[:space:]]+)?(r#)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/)) {
           tok = substr(line, RSTART, RLENGTH)
+          rest = substr(line, RSTART+RLENGTH)
           sub(/^pub(\([^)]*\))?[[:space:]]+/, "", tok)
           sub(/[[:space:]]*:$/, "", tok)
           sub(/^r#/, "", tok)
-          print p "." tok
-          line = substr(line, RSTART+RLENGTH)
+          # `::` is a PATH separator, not a field. Dropping the mandatory `pub`
+          # prefix made `serde_json::Value` match as a field named
+          # `serde_json` -- caught immediately by the exact field count, which
+          # is the whole argument for counting the yield rather than trusting
+          # the pattern.
+          if (rest !~ /^:/) print p "." tok
+          line = rest
         }
       }
   ' "$f" >> "$tmp/fields"
