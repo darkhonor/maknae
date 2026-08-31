@@ -94,7 +94,16 @@ impl Document {
         for (name, value, _) in &self.sections {
             let mut flat = BTreeMap::new();
             flatten(DISCLOSABLE, name, "", value, &mut flat);
-            out.insert(name.clone(), flat);
+            // An all-suppressed section emits NOTHING, not an empty map. An
+            // empty `core: {}` is distinguishable on the wire from both a
+            // populated one and an absent one, and today the only suppressible
+            // thing under `core` is `handling` -- so `core: {}` would mean
+            // "this deployment has an above-baseline ceiling", which is the
+            // exact inference the suppression exists to deny. Omission has to
+            // be total to be omission.
+            if !flat.is_empty() {
+                out.insert(name.clone(), flat);
+            }
         }
         out
     }
@@ -117,8 +126,23 @@ impl Document {
     ) {
         let entry = view.entry(section.to_string()).or_default();
         for (path, value) in fields {
-            // ABSENCE IS CHECKED FIRST, before classification -- the same
-            // ordering `render` uses for `Value::Null`, and for the same reason.
+            // SUPPRESSION FIRST, then absence. The file lane composes
+            // `Omit -> Null -> Clear/Mask`: `flatten` filters `Omit` before it
+            // ever calls `render`, which is the only reason `render`'s early
+            // `Null` return is safe. This lane has no outer filter, so the
+            // order has to be written here.
+            //
+            // An earlier version checked absence first and claimed parity with
+            // `render`. It did not have it: folding a suppressed path with
+            // `None` -- say `vault.insecure_plaintext_secret_path`, an
+            // `Option<PathBuf>` sitting one line from the two mounts that ARE
+            // folded -- would have emitted the SUPPRESSED KEY as `<not set>` on
+            // every correctly-enrolled host, and omitted it on a
+            // plaintext-enrolled one. That is round 2's leak with the polarity
+            // inverted: the posture disclosed by absence instead of presence.
+            if classify(section, path, DISCLOSABLE) == Disclosure::Omit {
+                continue;
+            }
             //
             // The earlier signature took a bare `String`, so a caller wanting to
             // say "this resolved to nothing" had to invent a sentinel; the
@@ -134,10 +158,10 @@ impl Document {
                 entry.insert((*path).to_string(), NOT_SET.to_string());
                 continue;
             };
-            // Otherwise the SAME classifier the file walk uses — a resolved
-            // default is not privileged for having come from code.
+            // The SAME classifier the file walk uses — a resolved default is
+            // not privileged for having come from code.
             match classify(section, path, DISCLOSABLE) {
-                Disclosure::Omit => continue,
+                Disclosure::Omit => unreachable!("filtered above"),
                 Disclosure::Clear => entry.insert((*path).to_string(), value.clone()),
                 Disclosure::Mask => entry.insert((*path).to_string(), MASK.to_string()),
             };
@@ -194,6 +218,20 @@ const DISCLOSABLE: &[&str] = &[
     // any peer completing a handshake has it; withholding it here would hide
     // it from the operator and from nobody else.
     "core.deployment_id",
+    // The rest of `core`, per the schema reference (`docs/configuration.md`
+    // §4) -- NOT per this crate's parsers, which is how they were missed. Only
+    // `core.handling` is type-read here; `schema_version` and `identity.*` are
+    // carried verbatim for their consumers, so no Rust parser in this crate
+    // names them and an allowlist built by reading parsers cannot see them.
+    // Same class of deployment-shape fact as `deployment_id`, and the
+    // documented minimal config consists of little else -- masking them
+    // reproduces "the operator sees almost nothing" on the shape the docs
+    // actually tell operators to write.
+    "core.schema_version",
+    "core.identity.instance_id",
+    "core.identity.name",
+    "core.identity.domain",
+    "core.identity.urn_root",
     // Vault WHERE and WHICH MOUNT -- never a credential. `vault_config_from_
     // document` accepts `vault.deployment_id` as a fallback spelling for the
     // `core` one, so it is classified identically; omitting it would make the
@@ -249,6 +287,12 @@ const DISCLOSABLE: &[&str] = &[
     //     fact that most helps an attacker choose a target, and on a DoD
     //     deployment the ceiling is frequently itself classified. Deny-by-
     //     default breaks the tie: masked until the operator rules otherwise.
+    //
+    //   lake -- a registered section (`boot.rs`) whose schema is the Knowledge
+    //     Lake's, not Maknae's, and which no parser in this crate reads. It
+    //     masks by default; named here so its absence from the allowlist is a
+    //     recorded decision rather than an oversight, and so ADR-0010's claim
+    //     that the reasons live beside this list is true of it too.
     //
     //   every future field, in every future section.
 ];
@@ -396,8 +440,12 @@ fn render(disclosable: &[&str], section: &str, path: &str, v: &Value) -> String 
 pub struct ResolvedSettings<'a> {
     pub transport: &'a crate::TransportConfig,
     pub audit: &'a crate::AuditConfig,
-    /// `None` when the vault config could not be resolved at all; the inner
-    /// `Option` distinguishes "resolved to nothing" from "not resolved".
+    /// `None` means "resolved to nothing" and renders [`NOT_SET`]. It does NOT
+    /// mean "the vault config failed to resolve" — `vault_config_from_document`
+    /// defaults both mounts, and the caller has already `?`'d it before this
+    /// point, so an unresolvable config never reaches here. Passing `None` for
+    /// a field the daemon is actually defaulting would report `<not set>` for a
+    /// mount in active use, which is the MASK/NOT_SET conflation inverted.
     pub vault_approle_mount: Option<String>,
     pub vault_pki_int_mount: Option<String>,
 }
@@ -751,8 +799,9 @@ mod tests {
         // configured an above-baseline ceiling, so the key appearing at all --
         // even masked -- is the finding.
         assert!(
-            v["core"].is_empty(),
-            "the ceiling must not appear even as a masked key: {v:?}"
+            !v.contains_key("core"),
+            "an all-suppressed section must not appear AT ALL -- an empty `core: {{}}` \
+             is itself the signal that a ceiling is configured: {v:?}"
         );
         assert!(!format!("{v:?}").contains("SECRET"), "{v:?}");
     }
@@ -869,6 +918,47 @@ mod tests {
         );
     }
 
+    /// Folding a SUPPRESSED path with `None` must still omit it. The absence
+    /// path is a second insertion site inside `merge_resolved`, and an earlier
+    /// ordering checked absence first -- which would have emitted the
+    /// suppressed KEY as `<not set>` on every host that does NOT have the
+    /// plaintext secret, and omitted it on every host that does. Round 2's leak
+    /// with the polarity inverted: the posture disclosed by absence.
+    #[test]
+    fn merge_resolved_omits_a_suppressed_path_even_when_it_resolves_to_nothing() {
+        let mut v: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        Document::merge_resolved(
+            &mut v,
+            "vault",
+            &[
+                ("addr", Some("https://v:8200".into())),
+                ("insecure_plaintext_secret_path", None),
+            ],
+        );
+        assert!(
+            !v["vault"].contains_key("insecure_plaintext_secret_path"),
+            "a suppressed path must be omitted whether it resolves to a value or \
+             to nothing -- otherwise its ABSENCE becomes the disclosure: {v:?}"
+        );
+        assert!(v["vault"].contains_key("addr"), "{v:?}");
+    }
+
+    /// The prefix rule must not OVER-match a sibling. `core.handling_notes`
+    /// shares a prefix with `core.handling` as a string but is a different
+    /// field, and suppressing it would be silent over-withholding.
+    #[test]
+    fn the_prefix_rule_does_not_swallow_a_sibling_key() {
+        let d = doc(vec![(
+            "core",
+            map(vec![("handling_notes", Value::Str("free text".into()))]),
+        )]);
+        let v = d.disclosable_view();
+        assert_eq!(
+            v["core"]["handling_notes"], MASK,
+            "a sibling of a suppressed prefix is masked, not omitted: {v:?}"
+        );
+    }
+
     /// Suppression is a PREFIX rule, so a leaf added under `core.handling`
     /// later is suppressed without anyone remembering to list it.
     #[test]
@@ -891,7 +981,7 @@ mod tests {
         )]);
         let v = d.disclosable_view();
         assert!(
-            v["core"].is_empty(),
+            !v.contains_key("core"),
             "the whole handling subtree must be omitted, including leaves nobody listed: {v:?}"
         );
         assert!(!format!("{v:?}").contains("ATO-123"), "{v:?}");

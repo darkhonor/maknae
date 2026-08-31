@@ -261,8 +261,9 @@ pub enum Payload {
     /// section → (dotted field path → rendered value).
     ///
     /// **Values arrive here ALREADY REDACTED.** The disclosure rule lives in
-    /// `maknae_config::Document::disclosable_view` (deny-by-default over a
-    /// code-declared allowlist), and this type deliberately carries none of it:
+    /// `maknae_config::effective_view` — deny-by-default over a code-declared
+    /// allowlist, three states (disclosed / masked / omitted-entirely) plus a
+    /// `<not set>` marker — and this type deliberately carries none of it:
     /// a second redaction implementation on the wire side is a second thing to
     /// drift. Never construct this from raw configuration.
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),

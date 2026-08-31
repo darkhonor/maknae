@@ -102,9 +102,12 @@ pub struct WhereCtx {
 /// The effective configuration as `admin.config.show` may disclose it:
 /// section → (dotted field path → rendered value).
 ///
-/// **Computed ONCE at boot, already redacted** (`maknae_config::Document::
-/// disclosable_view`), so the unredacted `Document` is not reachable from the
-/// request path.
+/// **Computed ONCE at boot, already redacted** by
+/// `maknae_config::effective_view` — which is the file walk
+/// (`Document::disclosable_view`) PLUS the resolved-defaults folds, and is the
+/// whole of what the wire carries. Following the pointer to `disclosable_view`
+/// alone would miss the folds, `NOT_SET`, and `Disclosure::Omit`. The
+/// unredacted `Document` is not reachable from the request path.
 ///
 /// **That is the whole of the claim, and it is narrower than it looks.**
 /// `handle` still holds raw configuration in the same scope as the arm that
