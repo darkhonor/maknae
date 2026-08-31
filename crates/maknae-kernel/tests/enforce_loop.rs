@@ -1042,7 +1042,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
 async fn a_roles_granted_term_permits_through_the_real_pdp_and_still_discloses_nothing() {
     let fx = Fixture::new("roles-grant");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
     let emit = RecEmit::new();
     let frame = drive(
@@ -1108,7 +1108,7 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
 async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
     let fx = Fixture::new("roles-deny");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      deny: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.status\"]\n",
     );
     let emit = RecEmit::new();
     let frame = drive(

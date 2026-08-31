@@ -9,6 +9,11 @@
   of them.
 - **Date:** 2026-08-31
 - **Author:** implementing agent (#162) · **Ratifier:** deferred by operator ruling
+- **Operator rulings recorded 2026-08-31:** decisions **4** (admin-only, and the
+  correction to why), **13** (no `actions:` level), **14** (`permissions:` stays
+  separate) and **15** (`admin.config.show` discloses the full effective
+  configuration with secret values masked). Held Proposed regardless — these
+  settle four questions, not the design.
 
 > **Read this before building on anything below.** The decisions here are
 > **provisional**, not settled constraints. State-changing terms
@@ -41,9 +46,8 @@ Three `admin.*` terms are disclosure-only: `admin.status`, `admin.config.show`, 
 ```yaml
 roles:
   admin:
-    actions:
-      allow: ["admin.status"]
-      deny:  ["admin.config.show"]
+    allow: ["admin.status"]
+    deny:  ["admin.config.show"]
 ```
 
 `permissions:` keeps deciding paths and `bindings:` keeps deciding identity→role. An operator asking "who may do what" now has one place to look per question, and the three questions stay separable. Merging actions into `permissions:` was rejected: its entries are capability-over-glob patterns (`Read(~/**)`), and an action term is neither a capability nor a glob. It would have meant either a `Pattern` variant that matches no path, or overloading the existing ones — and `Pattern` is the type the path matcher exhausts.
@@ -52,7 +56,13 @@ roles:
 
 **3. The surface is role-keyed at its root, so a role-independent grant is ungrammatical.** The brief asked for no global grant block; this is stronger than a convention against one. There is no position in the grammar where a grant can be written without naming the role it belongs to, and `ActionGrants::evaluate3_action` takes the role key as its first argument for the same reason — a one-argument form would let a future `Role::User` arm receive admin's grants by omission, which is the same flattening one layer further down, where no test would see it.
 
-**4. Phase 1 grants for `admin` only, and refuses the other roles by NAME.** `user`, `guest` and `adversary` are real roles; `Role::from_key` returns `Some` for each. Writing one into `roles:` gets `RoleNotSupportedYet`, not `UnknownRole` — collapsing the two would tell an operator their correct spelling was a typo. What lifts the restriction is a decision about what a non-admin role may disclose, not an implementation detail; the check is one match arm.
+**4. `admin.*` terms stay admin-only** (operator ruling 2026-08-31). `user`, `guest` and `adversary` are real roles; `Role::from_key` returns `Some` for each, so the admin-only rule is a second check. Writing one into `roles:` gets `RoleNotSupportedYet`, not `UnknownRole` — collapsing the two would tell an operator their correct spelling was a typo.
+
+A site that wants a person to hold `admin.*` **moves that person into the admin role**; it does not grant admin terms to `user`. That is the intended path, and it is simpler than a per-role disclosure matrix.
+
+> **The framing this ADR originally gave decision 4 was wrong, and the correction matters more than the decision.** It said the restriction is lifted by "a decision about what a non-admin role may disclose." That assumes the four roles are the model. They are not: **`admin` / `user` / `guest` / `adversary` are the DEFAULT SHIPPED roles, not the universe of roles.** The end state is site-defined roles, and this issue's code makes the role vocabulary arbitrary — `Role::from_key` is a closed four-arm match, and `RoleNotSupportedYet` exists only because of it.
+>
+> **So what this constrains is not who may disclose what; it is sites defining their own roles.** That constraint is a Phase-1 artifact and is expected to go. When it does, `Role::from_key`, `UnknownRole` and `RoleNotSupportedYet` all change shape together, and decision 3's role-keying is what makes that survivable — grants are already keyed by role name rather than by a hard-wired enum position.
 
 **5. The grantable set is code-defined and unconfigurable.** `GRANTABLE_ACTIONS` is a constant in `decide.rs`. A term outside it refuses at load with the term named. `roles:` can therefore never reach a verb the decide arm does not consult, and an operator cannot grant a term the system has no arm for and then reasonably believe it took effect.
 
@@ -70,15 +80,30 @@ roles:
 
 **12. Phase 1 ships the decision path and zero operator-visible capability.** `dispatch_verb` returns `NoBehaviour` for all three terms, so a granted `admin.status` produces a genuine `Permit`, a genuine audit record with `posture: "not-implemented"`, and discloses nothing. This is pinned by test, so Phase 2 cannot wire a disclosure without the pin turning red and forcing the question — what may a given role actually see — to be answered deliberately rather than inherited from the grant that already exists.
 
-**13. The Phase-2 schema-shape hazard is recorded here because it is a boot-refusal cliff, not a preference.**
+**13. There is no `actions:` level. The grammar is `roles.<role>.{allow, deny}`** (operator ruling 2026-08-31).
 
-The brief sketched `roles.<role>.{allow, deny}`; this ships `roles.<role>.actions.{allow, deny}`, one level deeper. Because `check_known_keys` refuses unknown keys at **every** level, a Phase 2 that adopts the brief's flatter shape does not migrate — it turns every Phase-1 policy file into a hard boot refusal on `UnknownKey("allow")`. The `actions:` level is therefore load-bearing and stays: it is the seam where a future `paths:` or `resources:` sibling can be added without touching what operators have already written. **Changing the shape is a superseding decision with a migration path, never a refactor** — *once operators have written policy files with it.*
+The level was introduced speculatively, to leave room for a `paths:` or `resources:` sibling beside `actions:`. Decision 14 rules that universal path permissions stay in `permissions:`, which removes the only sibling it was reserving space for. A nesting level held open for a guest who is not coming is verbosity every operator pays for and no one spends.
 
-**Today the migration cost is zero, and that will not last.** Nothing ships a `roles:` key: not `packaging/common/authz.yaml`, not any fixture outside the test suite. So the window in which this shape can be changed for free is open now and closes the first time an operator writes one. If the remaining vocabulary shows the nesting is wrong — a term that needs an operand, or a class that wants `paths:` beside `actions:` — **change it now rather than honouring a contract nobody has yet relied on.**
+Removing it also collapsed two parse paths into one: an entry with no lists and an entry with an empty list block were distinct arms reaching the same empty grant, and are now a single arm with a single test.
+
+```yaml
+roles:
+  admin:
+    allow: ["admin.status"]
+    deny:  ["admin.config.show"]
+```
 
 **14. Two grant surfaces now ship, and one of them is still role-blind. Recorded as a deviation, not a win.**
 
-Decision 3 says a role-independent grant is ungrammatical, and that is true of `roles:`. It is **not** true of the file: `permissions:` remains a live, global, role-blind grant surface — `Read(~/**)` applies to every role that reaches the `fs.read` arm. So against brief §6's "no global block", the system as shipped has one. `roles:` does not fix that; it declines to add a second. Unifying path grants under `roles:` is the obvious next step and is deliberately **not** taken here: it would change the meaning of every existing `permissions:` block, which is a migration, not an extension.
+Decision 3 says a role-independent grant is ungrammatical, and that is true of `roles:`. It is **not** true of the file: `permissions:` remains a live, global, role-blind grant surface — `Read(~/**)` applies to every role that reaches the `fs.read` arm. So against brief §6's "no global block", the system as shipped has one.
+
+**Operator ruling 2026-08-31: leave them separate.** A *universal* permission — one that holds for every role, by construction, with no per-role list to audit — is a solid use case in its own right, not merely the state we happen to be in. Folding path grants into `roles:` would lose that property and would change the meaning of every existing `permissions:` block. Revisitable; not now.
+
+**15. `admin.config.show` discloses the FULL effective configuration, with secret VALUES masked** (operator ruling 2026-08-31). Not a curated subset: the effective composed settings as the daemon actually resolved them, which is what makes the term worth having for an operator debugging a deployment.
+
+Secret values are replaced by a presence marker — `<value set>` or equivalent — so the disclosure says **that** a secret is configured without saying **what** it is. Presence is operationally necessary (an unset credential is the bug being debugged); the value never is.
+
+This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admin.status`'s and `admin.subject.list`'s response shapes remain open, and neither is a disclosure question of the same weight.
 
 ## Consequences
 
