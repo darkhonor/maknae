@@ -605,6 +605,14 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
                         ))
                     }
                 };
+                // `insert` is last-wins, and that is SAFE only because a
+                // duplicate role key never reaches here: `crate::load_str`
+                // refuses the document with `DuplicateKey` before this runs.
+                // The invariant is cross-module, so it is pinned from this
+                // layer by `roles_duplicate_role_key_refused_by_the_loader` --
+                // without that test, swapping the loader for a last-wins one
+                // would turn a written `deny:` into a silent permit, and
+                // nothing here would notice.
                 out.insert(role.clone(), RawActionGrants { allow, deny });
             }
             out
@@ -1626,6 +1634,45 @@ mod tests {
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
+    }
+
+    /// A duplicate role key REFUSES the document. Reading `parse_policy` alone
+    /// this looks last-wins (`out.insert`), which would mean a first `admin:`
+    /// block carrying an explicit `deny:` could be nullified by a later
+    /// duplicate carrying an `allow:` -- a written denial silently becoming a
+    /// permit. It cannot happen, because `crate::load_str` refuses duplicate
+    /// keys before the map reaches this function.
+    ///
+    /// That defense lives in another module, so this pins it from here. An
+    /// external reviewer raised exactly this fail-open against `out.insert`;
+    /// the concern was sound and the mechanism it assumed was absent, and the
+    /// gap it actually found was that nothing at this layer held the invariant.
+    #[test]
+    fn roles_duplicate_role_key_refused_by_the_loader() {
+        let body = format!(
+            "{PREAMBLE}roles:\n  admin:\n    actions:\n      deny: [\"admin.status\"]\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n"
+        );
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
+            "a second `admin:` block must refuse the document, not overwrite the first: {e:?}"
+        );
+    }
+
+    /// The same invariant one level down: a duplicate `allow:` inside one
+    /// role's `actions:` block. `get()` returns the FIRST match, so last-wins
+    /// is not even the failure here -- an operator's second list would be
+    /// silently ignored.
+    #[test]
+    fn roles_duplicate_allow_key_refused_by_the_loader() {
+        let body = format!(
+            "{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      allow: [\"admin.config.show\"]\n"
+        );
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
             "{e:?}"
         );
     }
