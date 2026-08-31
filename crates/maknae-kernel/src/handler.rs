@@ -478,6 +478,28 @@ mod tests {
         assert_eq!(dispatch_verb(&Verb::Whoami), Dispatch::WhoamiRequested);
     }
 
+    /// The three grantable disclosure terms (#162) dispatch to NO BEHAVIOUR.
+    ///
+    /// Phase 1 ships the DECISION path, not the capability: an operator who
+    /// grants `admin.status` gets a genuine Permit and then `NotImplemented`,
+    /// disclosing nothing. Pinned here so Phase 2 cannot wire a dispatch
+    /// without this test turning red and forcing the disclosure question to be
+    /// answered deliberately. Exempt from red-first -- it pins what already is.
+    #[test]
+    fn the_grantable_admin_terms_have_no_behaviour_yet() {
+        for v in [
+            Verb::AdminStatus,
+            Verb::AdminConfigShow,
+            Verb::AdminSubjectList,
+        ] {
+            assert_eq!(
+                dispatch_verb(&v),
+                Dispatch::NoBehaviour,
+                "{v:?} is grantable but must still disclose nothing in Phase 1"
+            );
+        }
+    }
+
     #[test]
     fn may_respond_true_only_when_audit_ok() {
         assert!(may_respond(true));

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact-inventory gate over the action vocabulary (#67, spec R7).
 #
-# Three closed vocabularies must each match the manifest exactly, BOTH
+# Four closed vocabularies must each match the manifest exactly, BOTH
 # directions: a term with no manifest entry fails, and a manifest entry with no
 # term fails. The gate asserts a DECISION WAS RECORDED for every term — it never
 # asserts a grant exists; "not-granted" is a valid and usually correct entry.
@@ -10,9 +10,13 @@ cd "$(dirname "$0")/../.."
 
 HANDLER=crates/maknae-kernel/src/handler.rs
 AUTHZ=crates/maknae-config/src/authz.rs
+DECIDE=crates/maknae-authz-basic/src/decide.rs
 MANIFEST=ci/gates/verb-manifest.txt
 
-for f in "$HANDLER" "$AUTHZ" "$MANIFEST"; do
+# $DECIDE joins this loop, not just the input list: without the existence
+# check a missing file makes awk abort under `set -euo pipefail` with exit 2
+# and no FAIL line, which expect_reject reports as "crash, not a rejection".
+for f in "$HANDLER" "$AUTHZ" "$DECIDE" "$MANIFEST"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 
@@ -30,6 +34,17 @@ awk '/^pub const KERNEL_ACTIONS/{ while (match($0, /"[a-z0-9_.]+"/)) { print "ke
 awk '/fn parse_pattern/{f=1} f && /^        "[A-Z]/{ if (match($0, /"[A-Za-z]+"/)) { s=substr($0,RSTART+1,RLENGTH-2); print "capability\t" s } } f && /^}/{f=0}' \
   "$AUTHZ" | sort -u >> "$tmp/code"
 
+# 4. grantable action terms — the GRANTABLE_ACTIONS constant (#162)
+#
+# The anchor ESCAPES the parens: awk is ERE, so an unescaped `(crate)` is a
+# group and would match `pubcrate`, never the real constant. Unanchored
+# `/GRANTABLE_ACTIONS/` is also wrong — it picks up the const-pin's own
+# `admin.whoami` literal and inventories a term that is deliberately NOT
+# grantable. The constant carries #[rustfmt::skip] and is declared on one
+# line because this reads terms only off the matched line.
+awk '/^pub\(crate\) const GRANTABLE_ACTIONS/{ while (match($0, /"[a-z0-9_.]+"/)) { print "grantable\t" substr($0,RSTART+1,RLENGTH-2); $0=substr($0,RSTART+RLENGTH) } }' \
+  "$DECIDE" | sort -u >> "$tmp/code"
+
 sort -u "$tmp/code" -o "$tmp/code"
 grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' | cut -f1,2 | sort -u > "$tmp/manifest"
 
@@ -40,6 +55,21 @@ if ! diff -u "$tmp/manifest" "$tmp/code" > "$tmp/diff"; then
   echo "  Every term needs an entry. 'not-granted' is a valid disposition — the"
   echo "  gate requires a DECISION, not a grant."
   sed -n '3,$p' "$tmp/diff"
+  exit 1
+fi
+
+# grantable MUST be a subset of `action` (#162). A grantable term with no Verb
+# variant behind it is a grant an operator can write, that validates, that boots
+# -- and that decides nothing, because no request ever carries that action. The
+# manifest exactness above does NOT catch it: both kinds would simply carry
+# their own rows and agree with the code.
+awk -F'\t' '$1=="grantable"{print $2}' "$tmp/code" | sort -u > "$tmp/grantable"
+awk -F'\t' '$1=="action"{print $2}' "$tmp/code" | sort -u > "$tmp/actions"
+if [ -s "$tmp/grantable" ] && ! orphans=$(comm -23 "$tmp/grantable" "$tmp/actions") || [ -n "${orphans:-}" ]; then
+  echo "FAIL: grantable term(s) with no matching action term:"
+  printf '  %s\n' $orphans
+  echo "  A grantable term must name a real action, or an operator can grant"
+  echo "  something no request will ever carry."
   exit 1
 fi
 

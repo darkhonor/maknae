@@ -19,6 +19,16 @@
 //! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
 //! verb's PEP.)*
 //!
+//! *(Corrected 2026-08-31: the header above describes `authz.yaml` as the
+//! capability grammar alone, which has been incomplete since #85. The file now
+//! carries **three independent surfaces**, and each answers a different
+//! question: `permissions:` decides PATHS by capability pattern; `bindings:`
+//! decides IDENTITY→role (#85); `roles:` decides ACTIONS per role, per term
+//! (#162, [ADR-0010]). They do not compose with one another here — each is
+//! parsed structurally and handed to `maknae-authz-basic` to decide. Prose
+//! elsewhere that treats `authz.yaml` as "the capability grammar" is describing
+//! one of the three.)*
+//!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
 //! specified precisely (spec §7) and pinned exhaustively by test.
@@ -37,6 +47,17 @@ use std::path::Path;
 // Public policy schema
 // ============================================================================
 
+/// One role's action grants as they appear on disk (#162): the `allow` and
+/// `deny` lists under `roles.<name>.actions`. **Raw strings, deliberately** —
+/// whether `"admin"` names a real role and whether `"admin.status"` names a
+/// real term are `maknae-authz-basic`'s questions, and answering them here
+/// would put policy semantics in the parser. This crate owns grammar.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RawActionGrants {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
+
 /// The parsed `permissions:` wrapper (spec §7): an allow list and a deny list
 /// of patterns. Deny beats allow; anything matching neither is denied
 /// (default-deny) — see [`AuthzPolicy::evaluate`].
@@ -50,6 +71,13 @@ pub struct AuthzPolicy {
     /// role-name semantics belong to `maknae-authz-basic`, never this crate
     /// (grammar, not decision).
     pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Role → action-term grants from the additive `roles:` key (#162).
+    /// **A plain map, NOT an `Option`** — unlike `bindings`, an absent `roles:`
+    /// and an empty one behave identically under the additivity ruling, so an
+    /// `Option` would make the `None`↔`Some(empty)` mutant undetectable by
+    /// construction: reported MISSED with no killable test available, and the
+    /// T1 zero-missed gate goes red with nothing to write.
+    pub action_grants: std::collections::BTreeMap<String, RawActionGrants>,
     /// Original entry text for each `allow`/`deny` pattern, index-aligned
     /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
     /// the audit record. Private — provenance is not a matching input, and
@@ -441,6 +469,30 @@ fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
     }
 }
 
+/// A `roles.<name>.actions.{allow,deny}` term list: a sequence of strings,
+/// refused otherwise with a roles-specific message. **Not `str_seq`** — whose
+/// text reads "permissions list entries must be strings" and would send an
+/// operator debugging a `roles:` typo to the wrong section of the file. Same
+/// reasoning as [`bindings_member_list`], and the same reason it is a third
+/// function rather than a shared one with a passed-in noun: the message is the
+/// diagnostic, so it is written out where a reader can see it.
+fn roles_term_list(v: &Value) -> Result<Vec<String>, AuthzError> {
+    match v {
+        Value::Seq(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(s) => Ok(s.clone()),
+                _ => Err(AuthzError::Yaml(
+                    "roles action entries must be strings (quote every term; #162)".into(),
+                )),
+            })
+            .collect(),
+        _ => Err(AuthzError::Yaml(
+            "roles action list must be a sequence (write `allow: []` for empty)".into(),
+        )),
+    }
+}
+
 /// Public pure parse (#85, spec §6a.3): already-read authz YAML text →
 /// [`AuthzPolicy`], no file I/O and no ownership requirement — the hermetic
 /// door for the PDP backend's proofs. Production loading stays [`load_authz`]
@@ -459,7 +511,10 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
-    check_known_keys(&map, &["schema_version", "permissions", "bindings"])?;
+    check_known_keys(
+        &map,
+        &["schema_version", "permissions", "bindings", "roles"],
+    )?;
 
     // Missing or non-integer schema_version is represented by the sentinel 0
     // (valid versions start at 1) so both cases refuse via the same variant.
@@ -513,10 +568,67 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         }
     };
 
+    let action_grants = match get(&map, "roles") {
+        None => std::collections::BTreeMap::new(),
+        Some(Value::Map(rm)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (role, body) in rm {
+                // A bare `admin:` parses Null, not an empty map. Refuse rather
+                // than silently treating it as "no grants" — fail-closed, and
+                // the same stance `bindings` takes on a bare member list.
+                let rb = match body {
+                    Value::Map(m) => m,
+                    _ => {
+                        return Err(AuthzError::Yaml(
+                            "roles entries must be a map with an `actions` key".into(),
+                        ))
+                    }
+                };
+                check_known_keys(rb, &["actions"])?;
+                let (allow, deny) = match get(rb, "actions") {
+                    None => (Vec::new(), Vec::new()),
+                    Some(Value::Map(am)) => {
+                        check_known_keys(am, &["allow", "deny"])?;
+                        let allow = get(am, "allow")
+                            .map(roles_term_list)
+                            .transpose()?
+                            .unwrap_or_default();
+                        let deny = get(am, "deny")
+                            .map(roles_term_list)
+                            .transpose()?
+                            .unwrap_or_default();
+                        (allow, deny)
+                    }
+                    Some(_) => {
+                        return Err(AuthzError::Yaml(
+                            "roles actions section must be a map of allow/deny".into(),
+                        ))
+                    }
+                };
+                // `insert` is last-wins, and that is SAFE only because a
+                // duplicate role key never reaches here: `crate::load_str`
+                // refuses the document with `DuplicateKey` before this runs.
+                // The invariant is cross-module, so it is pinned from this
+                // layer by `roles_duplicate_role_key_refused_by_the_loader` --
+                // without that test, swapping the loader for a last-wins one
+                // would turn a written `deny:` into a silent permit, and
+                // nothing here would notice.
+                out.insert(role.clone(), RawActionGrants { allow, deny });
+            }
+            out
+        }
+        Some(_) => {
+            return Err(AuthzError::Yaml(
+                "roles section must be a map of role to action grants".into(),
+            ))
+        }
+    };
+
     Ok(AuthzPolicy {
         allow,
         deny,
         bindings,
+        action_grants,
         allow_sources: allow_raw,
         deny_sources: deny_raw,
     })
@@ -1394,5 +1506,191 @@ mod tests {
         let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
         let e = parse_authz(body, None).unwrap_err();
         assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
+    }
+
+    // ---- `roles:` action grants — STRUCTURAL parse only (#162) ----
+    //
+    // No term or role-name validation lives here. This crate owns grammar, not
+    // decision: whether "admin" is a real role and whether "admin.status" is a
+    // real term are `maknae-authz-basic`'s questions, and answering them here
+    // would put policy semantics in the parser.
+
+    const PREAMBLE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+
+    #[test]
+    fn roles_key_absent_is_empty_map() {
+        // Plain map, NOT Option: absent and `roles: {}` are behaviourally
+        // identical under the additivity ruling, so an Option would make the
+        // None<->Some(empty) mutant undetectable by construction.
+        let p = parse_authz(PREAMBLE, None).unwrap();
+        assert!(p.action_grants.is_empty());
+    }
+
+    #[test]
+    fn roles_parse_allow_and_deny_term_lists() {
+        let body = format!(
+            "{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      deny: [\"admin.config.show\"]\n"
+        );
+        let p = parse_authz(&body, None).unwrap();
+        let g = p.action_grants.get("admin").expect("admin entry");
+        assert_eq!(g.allow, vec!["admin.status".to_string()]);
+        assert_eq!(g.deny, vec!["admin.config.show".to_string()]);
+    }
+
+    #[test]
+    fn roles_entry_with_empty_actions_parses_to_empty_lists() {
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: {{}}\n");
+        let p = parse_authz(&body, None).unwrap();
+        assert_eq!(
+            p.action_grants.get("admin"),
+            Some(&RawActionGrants::default())
+        );
+    }
+
+    #[test]
+    fn roles_entry_with_no_actions_key_parses_to_empty_lists() {
+        // The fourth shape: `admin: {}` is a MAP (so it is not the refused
+        // Null), carries no `actions`, and takes the None arm. Distinct from
+        // `actions: {}` above, which takes the Some(Map) arm with both keys
+        // absent -- two different code paths reaching the same empty grant.
+        let body = format!("{PREAMBLE}roles:\n  admin: {{}}\n");
+        let p = parse_authz(&body, None).unwrap();
+        assert_eq!(
+            p.action_grants.get("admin"),
+            Some(&RawActionGrants::default())
+        );
+    }
+
+    #[test]
+    fn roles_unknown_key_under_role_refused() {
+        // `roles.<name>` allows exactly `actions` — a `permissions:` typo here
+        // must not be silently accepted as a second, unenforced grant surface.
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n      allow: []\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::UnknownKey(k) if k == "permissions"),
+            "must name the offending key: {e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_unknown_key_under_actions_refused() {
+        let body =
+            format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allwo: [\"admin.status\"]\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::UnknownKey(k) if k == "allwo"),
+            "a typo'd allow must refuse, not parse to an empty grant: {e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_non_string_term_refused_with_roles_message() {
+        // NOT str_seq's "permissions list entries must be strings" — an
+        // operator debugging a roles typo must not be sent to the wrong section.
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [1001]\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles") && !m.contains("permissions list")),
+            "error must name roles: {e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_null_term_list_refused_with_roles_message() {
+        // A bare `allow:` parses Null, not an empty sequence. Refuse; do not
+        // silently treat as empty — same fail-closed stance as bindings.
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allow:\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_null_role_body_refused_with_roles_message() {
+        let body = format!("{PREAMBLE}roles:\n  admin:\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_non_map_refused() {
+        let body = format!("{PREAMBLE}roles: [admin]\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_actions_non_map_refused() {
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: [admin.status]\n");
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
+    }
+
+    /// A duplicate role key REFUSES the document. Reading `parse_policy` alone
+    /// this looks last-wins (`out.insert`), which would mean a first `admin:`
+    /// block carrying an explicit `deny:` could be nullified by a later
+    /// duplicate carrying an `allow:` -- a written denial silently becoming a
+    /// permit. It cannot happen, because `crate::load_str` refuses duplicate
+    /// keys before the map reaches this function.
+    ///
+    /// That defense lives in another module, so this pins it from here. An
+    /// external reviewer raised exactly this fail-open against `out.insert`;
+    /// the concern was sound and the mechanism it assumed was absent, and the
+    /// gap it actually found was that nothing at this layer held the invariant.
+    #[test]
+    fn roles_duplicate_role_key_refused_by_the_loader() {
+        let body = format!(
+            "{PREAMBLE}roles:\n  admin:\n    actions:\n      deny: [\"admin.status\"]\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n"
+        );
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
+            "a second `admin:` block must refuse the document, not overwrite the first: {e:?}"
+        );
+    }
+
+    /// The same invariant one level down: a duplicate `allow:` inside one
+    /// role's `actions:` block. `get()` returns the FIRST match, so last-wins
+    /// is not even the failure here -- an operator's second list would be
+    /// silently ignored.
+    #[test]
+    fn roles_duplicate_allow_key_refused_by_the_loader() {
+        let body = format!(
+            "{PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      allow: [\"admin.config.show\"]\n"
+        );
+        let e = parse_authz(&body, None).unwrap_err();
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn roles_does_not_disturb_bindings_or_permissions() {
+        // The two additive surfaces are independent; parsing one must not
+        // suppress or alter the other.
+        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n";
+        let p = parse_authz(body, Some(Path::new("/home/operator"))).unwrap();
+        assert_eq!(p.allow.len(), 1);
+        assert_eq!(
+            p.bindings.as_ref().and_then(|b| b.get("admin")),
+            Some(&vec!["alex".to_string()])
+        );
+        assert_eq!(
+            p.action_grants["admin"].allow,
+            vec!["admin.status".to_string()]
+        );
     }
 }
