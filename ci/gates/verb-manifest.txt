@@ -4,11 +4,11 @@
 # grant exists. 'not-granted' is valid and is correct for most terms.
 action	liveness.ping	granted	shipped; permitted to every bound role
 action	admin.whoami	granted	shipped; the ONE admin term the class arm keys on
-action	admin.status	not-granted	enumerated, decided, answers NotImplemented
-action	admin.config.show	not-granted	enumerated, decided, answers NotImplemented
+action	admin.status	not-granted-but-grantable	enumerated, decided, answers NotImplemented; operator MAY grant per-role (#162) — see the grantable row
+action	admin.config.show	not-granted-but-grantable	enumerated, decided, answers NotImplemented; operator MAY grant per-role (#162) — see the grantable row
 action	admin.audit.tail	not-granted	enumerated, decided, answers NotImplemented
 action	admin.policy.reload	not-granted	enumerated, decided, answers NotImplemented
-action	admin.subject.list	not-granted	enumerated, decided, answers NotImplemented
+action	admin.subject.list	not-granted-but-grantable	enumerated, decided, answers NotImplemented; operator MAY grant per-role (#162) — see the grantable row
 action	admin.subject.bind	not-granted	enumerated, decided, answers NotImplemented
 action	admin.subject.unbind	not-granted	enumerated, decided, answers NotImplemented
 action	admin.contain	not-granted	enumerated, decided, answers NotImplemented

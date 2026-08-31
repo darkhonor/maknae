@@ -463,9 +463,9 @@ fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
 FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
-  cat > "$fixture/crates/maknae-authz-basic/src/decide.rs" <<'FIX'
-pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.show", "admin.subject.list"];
-FIX
+  # $2 overrides the grantable constant, for the subset control below.
+  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\"];}" \
+    > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
   echo "$fixture"
 }
@@ -511,8 +511,7 @@ action	admin.status	not-granted	enumerated
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only capability
 grantable	admin.status	grantable-not-granted	per-role via roles:
-grantable	admin.config.show	grantable-not-granted	per-role via roles:
-')"
+' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "admin.config.show"];')"
 expect_reject "verb-vocabulary-drift/grantable-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # ACCEPT: the clean fixture passes, and reports the full count. Without this
@@ -520,15 +519,32 @@ expect_reject "verb-vocabulary-drift/grantable-with-no-disposition" "$fx/ci/gate
 # EVERYTHING — including a correct repo. The count is asserted with its
 # leading ": " and trailing " terms," because a bare `7 terms` also matches
 # `17 terms`. Seven = 2 actions + kernel.contain + Read + 3 grantable.
+# The grantable set is narrowed to the fixture's OWN action vocabulary. The
+# shared handler.rs heredoc defines two actions, so admin.status is the only
+# grantable term that has an action behind it -- and the subset rule added for
+# #162 means a fixture claiming the other two is not clean. It caught this
+# fixture the moment it was written, which is the control working.
+# Five = 2 actions + kernel.contain + Read + 1 grantable.
 fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
 action	admin.status	not-granted	enumerated
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only capability
 grantable	admin.status	grantable-not-granted	per-role via roles:
-grantable	admin.config.show	grantable-not-granted	per-role via roles:
-grantable	admin.subject.list	grantable-not-granted	per-role via roles:
-')"
-expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 7 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT: a grantable term with no matching `action` term (#162). Manifest
+# exactness alone does NOT catch this -- both kinds carry their own rows and
+# agree with the code. The failure it prevents: an operator writes a grant that
+# parses, validates and boots, for an action no request will ever carry.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+action	admin.status	not-granted	enumerated
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only capability
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	session.ghost	grantable-not-granted	NO action term behind it
+' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "session.ghost"];')"
+expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

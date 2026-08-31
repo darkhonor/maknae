@@ -1021,10 +1021,6 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
-/// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
-/// and only then refused. Driven with a permissive authorizer because the real
-/// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's
-/// ordering, not a decision.
 /// The `roles:` grant crosses the SEAM (#162 step 7).
 ///
 /// Every other test of the grant path sits on one side of it, and the existing
@@ -1091,9 +1087,11 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_ne!(
+        // The code that was OBSERVED, not merely "not NotImplemented" -- which
+        // would also pass for Internal, Timeout, or any code added later.
+        RespResult::Err(e) => assert_eq!(
             e.code,
-            ProtoErrCode::NotImplemented,
+            ProtoErrCode::Unauthorized,
             "without a grant this must be refused by authz, never reach dispatch"
         ),
         other => panic!("expected an error, got {other:?}"),
@@ -1141,6 +1139,10 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
     );
 }
 
+/// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
+/// and only then refused. Driven with a permissive authorizer because the real
+/// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's
+/// ordering, not a decision.
 #[tokio::test]
 async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     let fx = Fixture::new("noop-permit");

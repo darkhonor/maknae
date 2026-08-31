@@ -43,14 +43,6 @@ pub(crate) struct LoadedPolicy {
 #[rustfmt::skip]
 pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.show", "admin.subject.list"];
 
-/// `admin.whoami` must NEVER join [`GRANTABLE_ACTIONS`]. It has its own arm and
-/// is permitted unconditionally for admins; routing it through grants would
-/// make an operator's empty `roles:` block revoke it -- a silent downgrade of
-/// working behaviour, from a file that says nothing about `whoami`.
-///
-/// Enforced at COMPILE time, so the mistake cannot reach a test run. Written as
-/// a `while` loop over bytes because `[&str]::contains` is not usable here:
-/// `PartialEq::eq` for `&str` is not a `const fn` (E0015).
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
 /// `PartialEq::eq` for `&str` is not a `const fn` (E0015), so the compile-time
@@ -600,9 +592,16 @@ mod tests {
         ));
     }
 
+    /// A SUPERSET of the golden matrix's columns, not the same list. The loops
+    /// over this (adversary-denies-everything, guest-and-user-permit-only-
+    /// liveness) must exercise the three grantable terms too, so a future
+    /// permissive arm for them turns those tests red as well as the matrix.
     const ALL_ACTIONS: &[&str] = &[
         "liveness.ping",
         "admin.whoami",
+        "admin.status",
+        "admin.config.show",
+        "admin.subject.list",
         "session.prompt",
         "fs.read",
         "terminal.create",
@@ -919,6 +918,28 @@ mod tests {
     /// it is carried by a KILLABLE test. The const block is unreachable from a
     /// test run by construction, so on its own it is a control nothing can
     /// prove fires except by breaking the build on purpose.
+    /// Every grantable term must be in `Class::Admin` -- the arm's OTHER
+    /// precondition, and until this test the unenforced one.
+    ///
+    /// `validate_grants` admits a term on membership in `GRANTABLE_ACTIONS`
+    /// alone, but the arm also requires `class_of(action) == Some(Class::Admin)`
+    /// to be reached at all. Add `session.list` to the constant and everything
+    /// passes -- the const pin (it only excludes `admin.whoami`), validation,
+    /// the drift gate with a manifest row, boot -- and the request routes to
+    /// `Some(Class::Session) => NotApplicable`. The grant parses, passes, and
+    /// does nothing: exactly the "accepted but inert" outcome the spec claims
+    /// is impossible by construction. It was impossible by one check, not two.
+    #[test]
+    fn every_grantable_term_is_in_the_admin_class() {
+        for t in GRANTABLE_ACTIONS {
+            assert_eq!(
+                class_of(t),
+                Some(Class::Admin),
+                "`{t}` is grantable but would never reach the arm that consults grants"
+            );
+        }
+    }
+
     #[test]
     fn admin_whoami_is_not_in_the_grantable_set() {
         assert!(
@@ -1021,10 +1042,57 @@ mod tests {
         );
     }
 
-    /// A grant to `admin` reaches ONLY admin. This is what the two-argument
-    /// `evaluate3_action` buys: with a one-argument form, a Phase-2 `Role::User`
-    /// arm would call it and silently receive admin's grants -- the flattening
-    /// the spec forbids, hidden one layer down where no test would see it.
+    /// `evaluate3_action` keys on the ROLE, tested DIRECTLY.
+    ///
+    /// This has to be a unit test on the function. The end-to-end version
+    /// (`admin_grants_do_not_leak_to_other_roles`, below) cannot reach it:
+    /// `Role::Guest | Role::User` returns `NotApplicable` for every non-liveness
+    /// class before the `Role::Admin` block that holds the only call site. So
+    /// `evaluate3_action` could ignore `role_key` entirely -- taking the first
+    /// value in the map -- and the whole suite stayed green. Measured, not
+    /// supposed: that mutation was applied and 58/58 still passed.
+    ///
+    /// This is what the two-argument form buys, and until now nothing bought it.
+    /// A Phase-2 `Role::User` arm calling a one-argument version would silently
+    /// receive admin's grants, one layer below where any end-to-end test looks.
+    #[test]
+    fn evaluate3_action_answers_per_role_not_per_map() {
+        let grants = ActionGrants::from_validated(std::collections::BTreeMap::from([(
+            "admin".to_string(),
+            (
+                vec![ActionTerm::validated("admin.status".into())],
+                vec![ActionTerm::validated("admin.config.show".into())],
+            ),
+        )]));
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.status"),
+            maknae_config::Match3::AllowMatch
+        );
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.config.show"),
+            maknae_config::Match3::DenyMatch {
+                source: "admin.config.show".into()
+            }
+        );
+        // The whole point: a DIFFERENT role gets nothing from admin's entry --
+        // not the allow, and not the deny either.
+        for role in ["user", "guest", "adversary", "", "Admin"] {
+            assert_eq!(
+                grants.evaluate3_action(role, "admin.status"),
+                maknae_config::Match3::NoMatch,
+                "role `{role}` must not read admin's allow list"
+            );
+            assert_eq!(
+                grants.evaluate3_action(role, "admin.config.show"),
+                maknae_config::Match3::NoMatch,
+                "role `{role}` must not read admin's deny list either"
+            );
+        }
+    }
+
+    /// The end-to-end companion. It pins that the Guest/User arms abstain and
+    /// that containment precedes the class match -- NOT that `evaluate3_action`
+    /// keys on the role, which it never reaches. See the test above for that.
     #[test]
     fn admin_grants_do_not_leak_to_other_roles() {
         let lp = lp_with_grants(
@@ -1117,10 +1185,13 @@ mod tests {
         let na = || Verdict::NotApplicable;
 
         // (action, path) x (admin 1001, user 1002, guest 1003, adversary 1004)
-        // (action, path, admin, user, guest, adversary) -- named because the
-        // shape is the table's contract, not incidental.
-        type Row<'a> = (&'a str, Option<&'a str>, Verdict, Verdict, Verdict, Verdict);
-        let matrix: &[Row] = &[
+        // The literal tuple type, NOT a `type Row` alias. clippy::type_complexity
+        // fires here and is allowed rather than satisfied: this table's docstring
+        // and the plan both say no line of it is ever edited, and an alias
+        // extracted for lint comfort makes that claim false the first time
+        // someone checks the diff. The shape IS the contract.
+        #[allow(clippy::type_complexity)]
+        let matrix: &[(&str, Option<&str>, Verdict, Verdict, Verdict, Verdict)] = &[
             (
                 "liveness.ping",
                 None,

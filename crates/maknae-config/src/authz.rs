@@ -71,11 +71,6 @@ pub struct AuthzPolicy {
     /// role-name semantics belong to `maknae-authz-basic`, never this crate
     /// (grammar, not decision).
     pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
-    /// Original entry text for each `allow`/`deny` pattern, index-aligned
-    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
-    /// the audit record. Private — provenance is not a matching input, and
-    /// keeping it un-constructible outside the parser means the pair can
-    /// never drift out of alignment.
     /// Role → action-term grants from the additive `roles:` key (#162).
     /// **A plain map, NOT an `Option`** — unlike `bindings`, an absent `roles:`
     /// and an empty one behave identically under the additivity ruling, so an
@@ -83,6 +78,11 @@ pub struct AuthzPolicy {
     /// construction: reported MISSED with no killable test available, and the
     /// T1 zero-missed gate goes red with nothing to write.
     pub action_grants: std::collections::BTreeMap<String, RawActionGrants>,
+    /// Original entry text for each `allow`/`deny` pattern, index-aligned
+    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
+    /// the audit record. Private — provenance is not a matching input, and
+    /// keeping it un-constructible outside the parser means the pair can
+    /// never drift out of alignment.
     allow_sources: Vec<String>,
     deny_sources: Vec<String>,
 }
@@ -1532,6 +1532,20 @@ mod tests {
     #[test]
     fn roles_entry_with_empty_actions_parses_to_empty_lists() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: {{}}\n");
+        let p = parse_authz(&body, None).unwrap();
+        assert_eq!(
+            p.action_grants.get("admin"),
+            Some(&RawActionGrants::default())
+        );
+    }
+
+    #[test]
+    fn roles_entry_with_no_actions_key_parses_to_empty_lists() {
+        // The fourth shape: `admin: {}` is a MAP (so it is not the refused
+        // Null), carries no `actions`, and takes the None arm. Distinct from
+        // `actions: {}` above, which takes the Some(Map) arm with both keys
+        // absent -- two different code paths reaching the same empty grant.
+        let body = format!("{PREAMBLE}roles:\n  admin: {{}}\n");
         let p = parse_authz(&body, None).unwrap();
         assert_eq!(
             p.action_grants.get("admin"),

@@ -1,8 +1,12 @@
 # ADR-0010: Action-scoped grants — the `roles:` surface, its precedence, and what Phase 1 deliberately withholds
 
-- **Status:** Accepted (2026-08-31)
+- **Status:** Proposed (2026-08-31) — **awaiting operator ratification.** Every
+  neighbouring agent-authored ADR (0008, 0009, 0020) carries `operator-ratified`
+  or `operator-directed` with the ruling date; this one has had no such ruling,
+  and recording `Accepted` on the author's own authority is the drift those
+  labels exist to prevent.
 - **Date:** 2026-08-31
-- **Deciders:** Alex Ackerman (operator)
+- **Author:** implementing agent (#162) · **Ratifier:** pending
 
 ## Context
 
@@ -47,6 +51,14 @@ roles:
 **11. Downgrade is a fail-closed cliff, and that is the intended behaviour.** A policy file containing `roles:` refuses to load on any daemon predating this change: `check_known_keys` is an unknown-key gate at every level. An operator who writes grants and then downgrades gets a boot refusal naming `roles`, not a daemon that runs while silently ignoring their grants. This is the correct direction to fail, and it is the reason the unknown-key gate exists.
 
 **12. Phase 1 ships the decision path and zero operator-visible capability.** `dispatch_verb` returns `NoBehaviour` for all three terms, so a granted `admin.status` produces a genuine `Permit`, a genuine audit record with `posture: "not-implemented"`, and discloses nothing. This is pinned by test, so Phase 2 cannot wire a disclosure without the pin turning red and forcing the question — what may a given role actually see — to be answered deliberately rather than inherited from the grant that already exists.
+
+**13. The Phase-2 schema-shape hazard is recorded here because it is a boot-refusal cliff, not a preference.**
+
+The brief sketched `roles.<role>.{allow, deny}`; this ships `roles.<role>.actions.{allow, deny}`, one level deeper. Because `check_known_keys` refuses unknown keys at **every** level, a Phase 2 that adopts the brief's flatter shape does not migrate — it turns every Phase-1 policy file into a hard boot refusal on `UnknownKey("allow")`. The `actions:` level is therefore load-bearing and stays: it is the seam where a future `paths:` or `resources:` sibling can be added without touching what operators have already written. **Changing the shape is a superseding decision with a migration path, never a refactor.**
+
+**14. Two grant surfaces now ship, and one of them is still role-blind. Recorded as a deviation, not a win.**
+
+Decision 3 says a role-independent grant is ungrammatical, and that is true of `roles:`. It is **not** true of the file: `permissions:` remains a live, global, role-blind grant surface — `Read(~/**)` applies to every role that reaches the `fs.read` arm. So against brief §6's "no global block", the system as shipped has one. `roles:` does not fix that; it declines to add a second. Unifying path grants under `roles:` is the obvious next step and is deliberately **not** taken here: it would change the meaning of every existing `permissions:` block, which is a migration, not an extension.
 
 ## Consequences
 

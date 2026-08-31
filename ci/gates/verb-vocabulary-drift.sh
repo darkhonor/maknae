@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact-inventory gate over the action vocabulary (#67, spec R7).
 #
-# Three closed vocabularies must each match the manifest exactly, BOTH
+# Four closed vocabularies must each match the manifest exactly, BOTH
 # directions: a term with no manifest entry fails, and a manifest entry with no
 # term fails. The gate asserts a DECISION WAS RECORDED for every term — it never
 # asserts a grant exists; "not-granted" is a valid and usually correct entry.
@@ -55,6 +55,21 @@ if ! diff -u "$tmp/manifest" "$tmp/code" > "$tmp/diff"; then
   echo "  Every term needs an entry. 'not-granted' is a valid disposition — the"
   echo "  gate requires a DECISION, not a grant."
   sed -n '3,$p' "$tmp/diff"
+  exit 1
+fi
+
+# grantable MUST be a subset of `action` (#162). A grantable term with no Verb
+# variant behind it is a grant an operator can write, that validates, that boots
+# -- and that decides nothing, because no request ever carries that action. The
+# manifest exactness above does NOT catch it: both kinds would simply carry
+# their own rows and agree with the code.
+awk -F'\t' '$1=="grantable"{print $2}' "$tmp/code" | sort -u > "$tmp/grantable"
+awk -F'\t' '$1=="action"{print $2}' "$tmp/code" | sort -u > "$tmp/actions"
+if [ -s "$tmp/grantable" ] && ! orphans=$(comm -23 "$tmp/grantable" "$tmp/actions") || [ -n "${orphans:-}" ]; then
+  echo "FAIL: grantable term(s) with no matching action term:"
+  printf '  %s\n' $orphans
+  echo "  A grantable term must name a real action, or an operator can grant"
+  echo "  something no request will ever carry."
   exit 1
 fi
 
