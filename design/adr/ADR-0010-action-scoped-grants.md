@@ -113,7 +113,19 @@ Secret values are replaced by a presence marker — `<value set>` — so the dis
 >
 > **Also corrected: settings the daemon resolved but the file never stated.** `transport:` is absent from the shipped skeleton, so it is absent from the `Document` — while the daemon is very much running on its defaults. Reporting no `transport` section tells an operator those settings do not exist, which is worse than masking them. Resolved values are folded in at boot (`Document::merge_resolved`) under the same classification. "As the daemon actually resolved them" is the phrase in this ruling, and the first implementation did not honour it.
 
-`audit.au3_1` is deliberately NOT classified: it is operator-authored free-form JSON, so whatever a deployer put there has been reviewed by nobody and it masks.
+**The view has THREE disclosure states, not two** — a distinction added 2026-09-01 after review, and the reason this decision could not be read correctly before:
+
+| state | rendering | when |
+|---|---|---|
+| disclosed | the value | the path is on `DISCLOSABLE` |
+| **masked** | `<value set>` | a value withheld, but the key's presence is unremarkable |
+| **omitted** | *the key does not appear at all* | the field's mere EXISTENCE is the disclosure (`SUPPRESSED`) |
+
+plus `<not set>` for a field that is present-but-valueless or resolved to nothing — distinct from masked, because "not configured" and "configured, not shown" are different answers to the operator's question.
+
+**Omission exists because masking was not enough.** `vault.insecure_plaintext_secret_path` appears only on a host enrolled with `--insecure-plaintext-secret`; showing its key while masking its value still discloses that the host keeps an AppRole SecretID in plaintext on disk. `core.handling.*` is the same shape: the ceiling block is absent unless a deployment configured an above-baseline one, so a masked key announces that it did. Both are omitted, by prefix, so a leaf added under them later is covered without anyone remembering.
+
+**Withheld, each with its reason** (recorded next to the list in `document.rs`, because "absent from the list" and "considered and withheld" are different states and only one survives review): `audit.au3_1` — operator-authored free-form JSON nobody has reviewed. `audit.siem` — an offload endpoint with no schema, no validator and no consumer, whose common real-world shapes embed a credential in the URL. `core.handling.*` — omitted, above. `lake` — registered but unclassified; masks by default, and named here so its absence from the allowlist is a decision rather than an oversight.
 
 This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admin.status`'s and `admin.subject.list`'s response shapes remain open, and neither is a disclosure question of the same weight.
 

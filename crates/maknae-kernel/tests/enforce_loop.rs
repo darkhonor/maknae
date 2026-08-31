@@ -1055,7 +1055,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     // asserted the secret was absent from the frame. The secret was never in
     // the input, so no mutation of the redaction rule, the boot wiring, or the
     // wire could make that assertion fail. It proved the author could type
-    // "<value set>". Now `disclosable_view` runs, and widening DISCLOSABLE or
+    // maknae_config::MASK. Now `disclosable_view` runs, and widening DISCLOSABLE or
     // inverting render's allowlist check turns this red.
     let doc = maknae_config::Document::from_sections_for_test(vec![(
         "vault".to_string(),
@@ -1072,7 +1072,8 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     )]);
     let view = doc.disclosable_view();
     assert_eq!(
-        view["vault"]["root_token"], "<value set>",
+        view["vault"]["root_token"],
+        maknae_config::MASK,
         "precondition: the redaction masked it before the wire ever saw it"
     );
 
@@ -1097,7 +1098,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     );
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Ok(maknae_proto::Payload::ConfigView(v)) => {
-            assert_eq!(v["vault"]["root_token"], "<value set>");
+            assert_eq!(v["vault"]["root_token"], maknae_config::MASK);
             assert!(v["vault"].contains_key("addr"), "shape is disclosed: {v:?}");
         }
         other => panic!("expected a ConfigView payload, got {other:?}"),
@@ -1119,7 +1120,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
     let fx = Fixture::new("cfgshow-nogrant");
     fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
     let mut vault = std::collections::BTreeMap::new();
-    vault.insert("addr".to_string(), "<value set>".to_string());
+    vault.insert("addr".to_string(), maknae_config::MASK.to_string());
     let mut view = maknae_kernel::ConfigView::new();
     view.insert("vault".to_string(), vault);
 

@@ -113,12 +113,29 @@ impl Document {
     pub fn merge_resolved(
         view: &mut BTreeMap<String, BTreeMap<String, String>>,
         section: &str,
-        fields: &[(&str, String)],
+        fields: &[(&str, Option<String>)],
     ) {
         let entry = view.entry(section.to_string()).or_default();
         for (path, value) in fields {
-            // The SAME classifier the file walk uses — a resolved default is
-            // not privileged for having come from code.
+            // ABSENCE IS CHECKED FIRST, before classification -- the same
+            // ordering `render` uses for `Value::Null`, and for the same reason.
+            //
+            // The earlier signature took a bare `String`, so a caller wanting to
+            // say "this resolved to nothing" had to invent a sentinel; the
+            // `Mask` arm then DISCARDED it and inserted `MASK`. `audit.siem` is
+            // withheld, so on the shipped skeleton -- which sets no `siem` --
+            // the view reported `<value set>` for an external audit-offload
+            // endpoint that does not exist. `MASK` means "configured, not
+            // shown"; saying it about an unset field is the exact collapse
+            // `NOT_SET` exists to prevent, on a field the same review flagged as
+            // credential-bearing. An `Option` makes the state unrepresentable
+            // rather than merely discouraged.
+            let Some(value) = value else {
+                entry.insert((*path).to_string(), NOT_SET.to_string());
+                continue;
+            };
+            // Otherwise the SAME classifier the file walk uses — a resolved
+            // default is not privileged for having come from code.
             match classify(section, path, DISCLOSABLE) {
                 Disclosure::Omit => continue,
                 Disclosure::Clear => entry.insert((*path).to_string(), value.clone()),
@@ -128,9 +145,22 @@ impl Document {
     }
 }
 
-/// Rendered in place of a value this crate has not declared disclosable. Says
-/// THAT the setting is configured, never what it is -- presence is what an
-/// operator debugging an unset credential needs; the value never is.
+/// Rendered in place of a VALUE this crate has not declared disclosable.
+///
+/// > **Corrected in place 2026-09-01.** This doc previously read "Says THAT the
+/// > setting is configured, never what it is" as an unqualified statement, and
+/// > that is **true of a value and false of a key**. Where a field's mere
+/// > EXISTENCE is the disclosure -- `vault.insecure_plaintext_secret_path`,
+/// > `core.handling.*` -- masking is not enough and the path belongs on
+/// > [`SUPPRESSED`], which omits it entirely. The correction was first written
+/// > on `SUPPRESSED` instead of here, which left the wrong claim on the item a
+/// > reader actually hovers when deciding MASK-vs-SUPPRESSED for a new field --
+/// > and that decision is exactly how the plaintext-path leak happened.
+///
+/// So: this says that the setting **is set** and is not being shown. Reserve it
+/// for fields whose presence is unremarkable. For "not set at all", see
+/// [`NOT_SET`] -- and never emit this for an absent value, which is a claim
+/// that something is configured when it is not.
 pub const MASK: &str = "<value set>";
 
 /// Rendered for a key that is present but has no value. Deliberately distinct
@@ -175,8 +205,19 @@ const DISCLOSABLE: &[&str] = &[
     // Audit destination. A path, and the operator already needs it to find the
     // log they are debugging.
     "audit.jsonl_path",
-    // The enrolled principal. The operator IS this principal; hiding their own
-    // uid and home from them serves nobody.
+    // The enrolled principal.
+    //
+    // The reason is NOT "the operator is reading their own record" -- that was
+    // the recorded rationale and it names the wrong audience. The reader is
+    // whoever holds an `admin` binding, and `bindings:` maps any resolvable
+    // local identity into that role, the reserved `agent` token included. So
+    // the audience can be the untrusted agent runtime.
+    //
+    // Disclosed anyway, deliberately: a uid, a login name and a home path are
+    // facts any local process can read from `/etc/passwd`. Withholding them
+    // from a subject that can call `getpwuid` buys nothing. That argument is
+    // about the FACTS, not about who is asking, which is why it survives the
+    // audience being wrong.
     "principal.name",
     "principal.uid",
     "principal.home",
@@ -212,10 +253,6 @@ const DISCLOSABLE: &[&str] = &[
     //   every future field, in every future section.
 ];
 
-/// `disclosable` is a PARAMETER, not a direct read of [`DISCLOSABLE`], so the
-/// rule can be exercised against every `Value` shape without widening the real
-/// allowlist to make types reachable. Production has exactly one caller and it
-/// passes [`DISCLOSABLE`].
 /// Paths whose **KEY ITSELF** must not be disclosed — omitted from the view
 /// entirely, not masked.
 ///
@@ -234,6 +271,21 @@ const SUPPRESSED: &[&str] = &[
     // Its PRESENCE is the finding. Absent on a correctly-enrolled host, so its
     // absence from the view is not itself a signal.
     "vault.insecure_plaintext_secret_path",
+    // The classification ceiling, and everything under it (prefix match).
+    //
+    // Masking these was not enough, and the reason is the same one that earned
+    // this list its first entry. `ceiling_from_core` returns the PUBLIC
+    // baseline when `handling` is absent and only parses a ceiling when it is
+    // present; neither the shipped skeleton nor `maknae enroll` writes one. So
+    // `core.handling.ceiling.classification: <value set>` in the view says,
+    // unambiguously: *this deployment has an explicitly configured,
+    // above-baseline ceiling*. That is a presence signal, on the field this
+    // module's own comments call the single fact that most helps an attacker
+    // choose a target and which is frequently itself classified.
+    //
+    // The asymmetry is the point: for a VALUE, deny-by-default masking is
+    // enough. For a field whose mere EXISTENCE is the disclosure, it is not.
+    "core.handling",
 ];
 
 #[derive(PartialEq, Debug)]
@@ -251,7 +303,14 @@ enum Disclosure {
 /// of a second redaction implementation; it applies inside this crate too.
 fn classify(section: &str, path: &str, disclosable: &[&str]) -> Disclosure {
     let full = format!("{section}.{path}");
-    if SUPPRESSED.contains(&full.as_str()) {
+    // PREFIX match, not exact. `core.handling` has seven leaves; listing them
+    // one by one means the eighth, added later, is disclosed by default --
+    // which is the denylist failure this whole module rejects, reintroduced
+    // inside the suppression list itself.
+    if SUPPRESSED
+        .iter()
+        .any(|p| full == *p || full.starts_with(&format!("{p}.")))
+    {
         return Disclosure::Omit;
     }
     if disclosable.contains(&full.as_str()) {
@@ -260,6 +319,12 @@ fn classify(section: &str, path: &str, disclosable: &[&str]) -> Disclosure {
     Disclosure::Mask
 }
 
+/// `disclosable` is a PARAMETER rather than a direct read of [`DISCLOSABLE`],
+/// so the rule can be exercised against every `Value` shape without widening
+/// the real allowlist to make a type reachable. Both production call sites --
+/// [`Document::disclosable_view`] and [`Document::merge_resolved`] -- pass
+/// [`DISCLOSABLE`]. ([`SUPPRESSED`] is NOT parameterised: `classify` reads it
+/// directly, so suppression cannot be relaxed by a caller.)
 fn flatten(
     disclosable: &[&str],
     section: &str,
@@ -324,6 +389,80 @@ fn render(disclosable: &[&str], section: &str, path: &str, v: &Value) -> String 
         Value::Seq(_) | Value::Null => MASK.to_string(),
         Value::Map(_) => unreachable!("flatten recurses into maps; render sees leaves only"),
     }
+}
+
+/// Everything the daemon RESOLVED that the file may not have stated. Passed as
+/// primitives so this crate keeps no dependency on `maknae-vault`.
+pub struct ResolvedSettings<'a> {
+    pub transport: &'a crate::TransportConfig,
+    pub audit: &'a crate::AuditConfig,
+    /// `None` when the vault config could not be resolved at all; the inner
+    /// `Option` distinguishes "resolved to nothing" from "not resolved".
+    pub vault_approle_mount: Option<String>,
+    pub vault_pki_int_mount: Option<String>,
+}
+
+/// The complete `admin.config.show` view: the file walk, plus every resolved
+/// default folded in under the same classification.
+///
+/// **Extracted from the daemon's boot path deliberately.** It lived inline in
+/// `maknae-kernel::run`, which is T3 and mutation-excluded, so the decision of
+/// *which fields to fold and what to present for an absent one* had no test and
+/// no mutation coverage — and a defect there (an unset `audit.siem` reported as
+/// `<value set>`) shipped through two review rounds unseen. That is a
+/// disclosure decision, so it belongs in a gated crate, next to the rule it
+/// composes with.
+pub fn effective_view(
+    doc: &Document,
+    r: &ResolvedSettings<'_>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut v = doc.disclosable_view();
+    Document::merge_resolved(
+        &mut v,
+        "audit",
+        &[
+            ("jsonl_path", Some(r.audit.jsonl_path.display().to_string())),
+            // `None` when unset -- NOT a sentinel string. `siem` is withheld,
+            // so a masked rendering here would claim an external offload
+            // endpoint exists on every deployment that has none.
+            ("siem", r.audit.siem.clone()),
+        ],
+    );
+    Document::merge_resolved(
+        &mut v,
+        "vault",
+        &[
+            ("approle_mount", r.vault_approle_mount.clone()),
+            ("pki_int_mount", r.vault_pki_int_mount.clone()),
+        ],
+    );
+    Document::merge_resolved(
+        &mut v,
+        "transport",
+        &[
+            (
+                "socket_path",
+                Some(r.transport.socket_path.display().to_string()),
+            ),
+            (
+                "max_connections",
+                Some(r.transport.max_connections.to_string()),
+            ),
+            (
+                "frame_max_bytes",
+                Some(r.transport.frame_max_bytes.to_string()),
+            ),
+            (
+                "handshake_timeout_ms",
+                Some(r.transport.handshake_timeout_ms.to_string()),
+            ),
+            (
+                "read_timeout_ms",
+                Some(r.transport.read_timeout_ms.to_string()),
+            ),
+        ],
+    );
+    v
 }
 
 #[cfg(test)]
@@ -513,8 +652,8 @@ mod tests {
             &mut view,
             "transport",
             &[
-                ("socket_path", "/run/maknae/maknaed.sock".to_string()),
-                ("a_future_transport_field", "unclassified".to_string()),
+                ("socket_path", Some("/run/maknae/maknaed.sock".to_string())),
+                ("a_future_transport_field", Some("unclassified".to_string())),
             ],
         );
         assert_eq!(view["transport"]["socket_path"], "/run/maknae/maknaed.sock");
@@ -607,10 +746,155 @@ mod tests {
             "an endpoint may carry a credential"
         );
         assert!(!format!("{v:?}").contains("token=SECRET"), "{v:?}");
-        assert_eq!(
-            v["core"]["handling.ceiling.classification"], MASK,
-            "a deployment's classification ceiling is not disclosed by default"
+        // A withheld PRESENCE SIGNAL is omitted outright, which is strictly
+        // stronger than masking. `handling` is absent unless a deployment
+        // configured an above-baseline ceiling, so the key appearing at all --
+        // even masked -- is the finding.
+        assert!(
+            v["core"].is_empty(),
+            "the ceiling must not appear even as a masked key: {v:?}"
         );
+        assert!(!format!("{v:?}").contains("SECRET"), "{v:?}");
+    }
+
+    /// THE REGRESSION TEST. An unset `audit.siem` must read `<not set>`, never
+    /// `<value set>`.
+    ///
+    /// The shipped skeleton sets no `siem`. The first fold took a bare `String`,
+    /// so the caller invented a sentinel and the `Mask` arm discarded it and
+    /// inserted `MASK` -- telling every operator, on every deployment, that an
+    /// external audit-offload endpoint was configured when none was. On the one
+    /// field the same review flagged as credential-bearing. It survived two
+    /// review rounds because the fold lived in a T3, mutation-excluded file
+    /// with no test; it lives here now for exactly that reason.
+    #[test]
+    fn an_unset_resolved_field_reads_not_set_not_masked() {
+        let doc = Document::new(
+            vec![(
+                "audit".to_string(),
+                map(vec![(
+                    "jsonl_path",
+                    Value::Str("/var/log/maknae/audit.jsonl".into()),
+                )]),
+                Source::Base,
+            )],
+            Vec::new(),
+        );
+        let transport = crate::TransportConfig::default();
+        let audit = crate::AuditConfig {
+            jsonl_path: "/var/log/maknae/audit.jsonl".into(),
+            siem: None, // the shipped skeleton
+            au3_1: serde_json::json!({}),
+        };
+        let v = effective_view(
+            &doc,
+            &ResolvedSettings {
+                transport: &transport,
+                audit: &audit,
+                vault_approle_mount: None,
+                vault_pki_int_mount: None,
+            },
+        );
+        assert_eq!(
+            v["audit"]["siem"], NOT_SET,
+            "an unset offload endpoint must not read as configured"
+        );
+        assert_ne!(v["audit"]["siem"], MASK);
+        // A SET one is still withheld -- absence handling must not become a
+        // disclosure route for the value.
+        let audit_set = crate::AuditConfig {
+            siem: Some("https://splunk:8088?token=SECRET".into()),
+            ..audit
+        };
+        let v2 = effective_view(
+            &doc,
+            &ResolvedSettings {
+                transport: &transport,
+                audit: &audit_set,
+                vault_approle_mount: None,
+                vault_pki_int_mount: None,
+            },
+        );
+        assert_eq!(v2["audit"]["siem"], MASK);
+        assert!(!format!("{v2:?}").contains("token=SECRET"), "{v2:?}");
+    }
+
+    /// Resolved defaults the FILE never stated still appear -- the reason the
+    /// fold exists. All three sections, not just the one a review named.
+    #[test]
+    fn every_section_with_resolved_defaults_is_folded() {
+        let doc = Document::new(Vec::new(), Vec::new()); // an empty file
+        let transport = crate::TransportConfig::default();
+        let audit = crate::AuditConfig {
+            jsonl_path: "/var/log/maknae/audit.jsonl".into(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let v = effective_view(
+            &doc,
+            &ResolvedSettings {
+                transport: &transport,
+                audit: &audit,
+                vault_approle_mount: Some("maknae-approle".into()),
+                vault_pki_int_mount: Some("maknae-pki-int".into()),
+            },
+        );
+        assert_eq!(v["transport"]["frame_max_bytes"], "65536");
+        assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
+        assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
+        assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
+    }
+
+    /// A suppressed path stays suppressed on the RESOLVED lane too. Without
+    /// this, `merge_resolved`'s `Omit` arm is the one insertion site of three
+    /// that suppression reaches only in theory.
+    #[test]
+    fn merge_resolved_omits_a_suppressed_path() {
+        let mut v: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        Document::merge_resolved(
+            &mut v,
+            "vault",
+            &[
+                ("addr", Some("https://v:8200".into())),
+                (
+                    "insecure_plaintext_secret_path",
+                    Some("/etc/maknaed/secret-id".into()),
+                ),
+            ],
+        );
+        assert!(v["vault"].contains_key("addr"));
+        assert!(
+            !v["vault"].contains_key("insecure_plaintext_secret_path"),
+            "suppression must hold on the resolved lane too: {v:?}"
+        );
+    }
+
+    /// Suppression is a PREFIX rule, so a leaf added under `core.handling`
+    /// later is suppressed without anyone remembering to list it.
+    #[test]
+    fn suppression_covers_every_leaf_under_a_suppressed_prefix() {
+        let d = doc(vec![(
+            "core",
+            map(vec![(
+                "handling",
+                map(vec![
+                    ("accreditation_ref", Value::Str("ATO-123".into())),
+                    (
+                        "ceiling",
+                        map(vec![
+                            ("classification", Value::Str("SECRET".into())),
+                            ("a_leaf_invented_later", Value::Str("x".into())),
+                        ]),
+                    ),
+                ]),
+            )]),
+        )]);
+        let v = d.disclosable_view();
+        assert!(
+            v["core"].is_empty(),
+            "the whole handling subtree must be omitted, including leaves nobody listed: {v:?}"
+        );
+        assert!(!format!("{v:?}").contains("ATO-123"), "{v:?}");
     }
 
     /// A MAP-valued entry on the allowlist matches nothing -- it is a silent

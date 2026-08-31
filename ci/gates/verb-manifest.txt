@@ -5,7 +5,7 @@
 action	liveness.ping	granted	shipped; permitted to every bound role
 action	admin.whoami	granted	shipped; the ONE admin term the class arm keys on
 action	admin.status	not-granted-but-grantable	enumerated, decided, answers NotImplemented; operator MAY grant per-role (#162) — see the grantable row
-action	admin.config.show	not-granted-but-grantable	BUILT (#162 Phase 2): returns the boot-redacted ConfigView — deny-by-default allowlist, values masked to <value set>. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	admin.config.show	not-granted-but-grantable	DAEMON-SIDE BUILT (#162 Phase 2), no client subcommand yet: returns the boot-redacted ConfigView — deny-by-default allowlist; values masked to <value set>, presence-signal keys omitted entirely. Ungranted by default; operator MAY grant per-role — see the grantable row
 action	admin.audit.tail	not-granted	enumerated, decided, answers NotImplemented
 action	admin.policy.reload	not-granted	enumerated, decided, answers NotImplemented
 action	admin.subject.list	not-granted-but-grantable	enumerated, decided, answers NotImplemented; operator MAY grant per-role (#162) — see the grantable row
