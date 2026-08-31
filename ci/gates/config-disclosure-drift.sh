@@ -32,11 +32,20 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # file | struct | section prefix for its fields. A file may appear twice with
 # two structs; the section is DECLARED, never inferred from the basename --
 # maknae-vault/src/config.rs reads keys from both `vault` and `core`.
+# file | struct | section prefix | EXPECTED FIELD COUNT.
+#
+# The count is the point. Three consecutive review rounds found a fail-open in
+# this gate, and each fix closed the instance that was named while preserving
+# the property: an anchor that yields no rows yields a green gate. R6 changed
+# WHAT was matched; R7 added a floor at zero rows per entry. Neither asked the
+# prior question -- is the anchor list right, and is it ALL of them? A count
+# per entry answers it: a dropped field, a dropped entry, or a field the
+# extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
-  "crates/maknae-config/src/transport.rs|TransportConfig|transport"
-  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit"
-  "crates/maknae-config/src/principal.rs|Principal|principal"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault"
+  "crates/maknae-config/src/transport.rs|TransportConfig|transport|5"
+  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3"
+  "crates/maknae-config/src/principal.rs|Principal|principal|3"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -44,8 +53,13 @@ SURFACE=(
   # That is harmless ONLY because `core.handling` is suppressed by prefix, which
   # covers both spellings -- and the check below enforces that precondition
   # rather than leaving it as an assumption.
-  "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling"
+  "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling|7"
 )
+
+# Registered sections (boot.rs) that legitimately have NO config struct: their
+# keys are carried verbatim for consumers. Each needs a manifest row, and this
+# list is what stops a NEW section from being silently uncovered.
+NO_STRUCT_SECTIONS="core lake"
 # The Ceiling entry's approximate paths are safe only under this suppression.
 CEILING_REQUIRES_SUPPRESSED="core.handling"
 
@@ -55,6 +69,29 @@ done
 for entry in "${SURFACE[@]}"; do
   f="${entry%%|*}"
   [ -f "$f" ] || { echo "FAIL: missing $f (declared in SURFACE)"; exit 1; }
+done
+
+# --- The SURFACE inventory itself must cover every registered section. A new
+# `maknae.yaml` section with a new config struct was previously invisible: the
+# gate exited 0 and both its field names shipped on the wire with nobody ever
+# asked the omit-vs-mask question. `std-fs-drift` sets the precedent -- an
+# exact-inventory gate rejects stale exemptions as well as new calls.
+registered=$(grep -oE '[A-Z_]+_SECTION' crates/maknae-kernel/src/boot.rs | sort -u)
+for c in $registered; do
+  sec=$(grep -rhoE "const $c: &str = \"[a-z0-9_]+\"" crates/ | grep -oE '"[a-z0-9_]+"' | tr -d '"' | head -1)
+  [ -n "$sec" ] || { echo "FAIL: cannot resolve section constant $c"; exit 1; }
+  covered=""
+  for entry in "${SURFACE[@]}"; do
+    IFS='|' read -r _ _ p _ <<< "$entry"
+    case "$p" in "$sec"|"$sec".*) covered=1;; esac
+  done
+  case " $NO_STRUCT_SECTIONS " in *" $sec "*) covered=1;; esac
+  if [ -z "$covered" ]; then
+    echo "FAIL: section '$sec' is registered in boot.rs but has no SURFACE entry"
+    echo "  and is not on NO_STRUCT_SECTIONS. Every registered section's fields"
+    echo "  must be enumerated, or the section declared struct-less with a reason."
+    exit 1
+  fi
 done
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -73,7 +110,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # instructs the reader to DELETE manifest rows that are in fact correct.
 extract() { # <const-name> <kind>
   awk -v want="const $1" -v kind="$2" '
-    index($0, want) == 1 { f=1 }
+    index($0, want ":") == 1 { f=1 }
     # Skip comment lines: these lists carry their rationale inline, and the
     # rationale contains quoted prose ("carried as-is", "SCIF-B7"). Dropping
     # the old `^    "` anchor to tolerate a rustfmt-collapsed array meant
@@ -86,7 +123,7 @@ extract() { # <const-name> <kind>
         }
       }
     f && /\];/ { f=0 }
-    f && /^const / && index($0, want) != 1 { f=0 }
+    f && /^const / && index($0, want ":") != 1 { f=0 }
   ' "$DOC"
 }
 { extract DISCLOSABLE disclose; extract SUPPRESSED omit; } | sort -u > "$tmp/code"
@@ -95,12 +132,27 @@ sort -u "$tmp/code" -o "$tmp/code"
 # 2. Every config STRUCT FIELD, as a dotted path.
 : > "$tmp/fields"
 for entry in "${SURFACE[@]}"; do
-  IFS='|' read -r f st sec <<< "$entry"
+  IFS='|' read -r f st sec want <<< "$entry"
   before=$(wc -l < "$tmp/fields")
+  # `pub`, `pub(crate)`, `pub(super)`, raw identifiers, and EVERY field on a
+  # line. The previous regex was `pub [a-z0-9_]+:` -- it missed `pub(crate)`
+  # (live house style in this repo), `r#type` (a keyword is an idiomatic YAML
+  # key), and any capital. Visibility is irrelevant to disclosure: `flatten`
+  # walks the parsed `Value`, not the struct, so a `pub(crate)` field is on the
+  # wire exactly like a `pub` one.
   awk -v s="pub struct $st {" -v p="$sec" '
     index($0, s) { f=1; next }
     f && /^}/ { f=0 }
-    f && match($0, /pub [a-z0-9_]+:/) { print p "." substr($0, RSTART+4, RLENGTH-5) }
+    f { line=$0
+        while (match(line, /pub(\([^)]*\))?[[:space:]]+(r#)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/)) {
+          tok = substr(line, RSTART, RLENGTH)
+          sub(/^pub(\([^)]*\))?[[:space:]]+/, "", tok)
+          sub(/[[:space:]]*:$/, "", tok)
+          sub(/^r#/, "", tok)
+          print p "." tok
+          line = substr(line, RSTART+RLENGTH)
+        }
+      }
   ' "$f" >> "$tmp/fields"
   # A SURFACE entry that contributes NOTHING must FAIL, never pass quietly.
   # This is the fail-open the previous two extractions both had: a missing
@@ -110,10 +162,19 @@ for entry in "${SURFACE[@]}"; do
   # field could be added with no manifest row and CI stayed green. Note the
   # asymmetry that hid it: renaming a CODE-side anchor (`DISCLOSABLE`) fails
   # CLOSED via the 4a diff, so only the safe half had ever been probed.
-  if [ "$(wc -l < "$tmp/fields")" -eq "$before" ]; then
-    echo "FAIL: SURFACE entry '$entry' matched no 'pub struct $st {' in $f."
-    echo "  Renamed, moved, made generic, or turned into a tuple struct?"
-    echo "  A surface that contributes no fields is not a covered surface."
+  got=$(( $(wc -l < "$tmp/fields") - before ))
+  # EXACT, not "at least one". A nonzero-ness test measures "did this entry
+  # contribute anything", never "did it contribute everything" -- so a
+  # partially-extracted struct passed silently, which is how `pub(crate)` and
+  # raw-identifier fields went unclassified.
+  if [ "$got" -ne "$want" ]; then
+    echo "FAIL: SURFACE entry '$entry' yielded $got field(s), expected $want."
+    if [ "$got" -eq 0 ]; then
+      echo "  Zero: renamed, moved, made generic, or turned into a tuple struct?"
+    else
+      echo "  Fields were added or removed. Classify each one in $MANIFEST,"
+      echo "  then update the count in this entry — deliberately, not to go green."
+    fi
     exit 1
   fi
 done
@@ -167,7 +228,7 @@ if [ -n "$undecided" ]; then
   exit 1
 fi
 
-if ! grep -qP "^omit\t$CEILING_REQUIRES_SUPPRESSED\t" "$MANIFEST"; then
+if ! grep -qF -- "$(printf 'omit\t%s\t' "$CEILING_REQUIRES_SUPPRESSED")" "$MANIFEST"; then
   echo "FAIL: '$CEILING_REQUIRES_SUPPRESSED' is no longer omitted."
   echo "  The Ceiling SURFACE entry synthesises approximate paths (its"
   echo "  accreditation_ref field is a YAML sibling of \`ceiling\`, not a child),"

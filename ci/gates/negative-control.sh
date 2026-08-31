@@ -557,13 +557,26 @@ cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
-           "$fixture/crates/maknae-vault/src"
+           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src"
+  # The gate cross-checks its SURFACE list against the section registry, so a
+  # fixture needs one.
+  cat > "$fixture/crates/maknae-kernel/src/boot.rs" <<'FIX'
+const LAKE_SECTION: &str = "lake";
+const VAULT_SECTION: &str = "vault";
+const TRANSPORT_SECTION: &str = "transport";
+const AUDIT_SECTION: &str = "audit";
+const PRINCIPAL_SECTION: &str = "principal";
+FIX
   cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
   cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
 const DISCLOSABLE: &[&str] = &[
-    "transport.socket_path",
+    "transport",
+    "vault.addr",
+    "vault.approle_mount",
+    "vault.pki_int_mount",
+    "vault.deployment_id",
     "audit.jsonl_path",
-    "principal.name",
+    "principal",
     ${3:-}
 ];
 const SUPPRESSED: &[&str] = &[
@@ -576,6 +589,10 @@ FIX
   cat > "$fixture/crates/maknae-config/src/transport.rs" <<FIX
 pub struct TransportConfig {
     pub socket_path: PathBuf,
+    pub max_connections: u32,
+    pub frame_max_bytes: usize,
+    pub handshake_timeout_ms: u64,
+    pub read_timeout_ms: u64,
     ${2:-}
 }
 FIX
@@ -584,20 +601,34 @@ FIX
   cat > "$fixture/crates/maknae-config/src/audit_cfg.rs" <<'FIX'
 pub struct AuditConfig {
     pub jsonl_path: PathBuf,
+    pub siem: Option<String>,
+    pub au3_1: serde_json::Value,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/principal.rs" <<'FIX'
 pub struct Principal {
     pub name: String,
+    pub uid: u32,
+    pub home: PathBuf,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/ceiling.rs" <<'FIX'
 pub struct Ceiling {
     pub classification: String,
+    pub sci: bool,
+    pub releasable_to: Vec<String>,
+    pub cui_permitted: bool,
+    pub cui_categories_permitted: Vec<String>,
+    pub dissemination_permitted: Vec<String>,
+    pub accreditation_ref: Option<String>,
 }
 FIX
   cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
 pub struct VaultConfig {
+    pub addr: String,
+    pub approle_mount: String,
+    pub pki_int_mount: String,
+    pub deployment_id: String,
     pub insecure_plaintext_secret_path: Option<PathBuf>,
 }
 FIX
@@ -605,9 +636,15 @@ FIX
   echo "$fixture"
 }
 
-CFG_OK='disclose	transport.socket_path	the socket the daemon listens on
+CFG_OK='disclose	transport	transport shape, all fields
+disclose	vault.addr	where vault is
+mask	audit.siem	endpoint, no schema
+mask	audit.au3_1	deployer-authored
+disclose	vault.approle_mount	mount name
+disclose	vault.pki_int_mount	mount name
+disclose	vault.deployment_id	fallback spelling
+disclose	principal	readable via getpwuid anyway
 disclose	audit.jsonl_path	the log the operator is looking for
-disclose	principal.name	readable via getpwuid anyway
 omit	vault.insecure_plaintext_secret_path	presence is the finding
 omit	core.handling	presence says an above-baseline ceiling is configured
 '
@@ -630,7 +667,7 @@ fx="$(cfg_fixture "${CFG_OK%\'}disclose	core.undecided
 expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: two contradictory decisions for one path.
-fx="$(cfg_fixture "${CFG_OK}mask	transport.socket_path	contradicts the row above
+fx="$(cfg_fixture "${CFG_OK}mask	vault.addr	contradicts the row above
 ")"
 expect_reject "config-disclosure-drift/duplicate-contradictory-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
@@ -652,15 +689,44 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 # the reader to delete manifest rows that were correct.
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
-const DISCLOSABLE: &[&str] = &["transport.socket_path", "audit.jsonl_path", "principal.name"];
+const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "5 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "11 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
+# fail-open, and the one that closes the PROPERTY rather than an instance: the
+# previous two fixes asked "does this anchor match?" and never "is the anchor
+# list right, and is it all of them?". A new config section shipped both its
+# field names on the wire with nobody asked the omit-vs-mask question.
+fx="$(cfg_fixture "$CFG_OK")"
+printf 'const ENCLAVE_SECTION: &str = "enclave";\n' >> "$fx/crates/maknae-kernel/src/boot.rs"
+expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a pub(crate) field. Visibility is irrelevant to disclosure -- flatten
+# walks the parsed Value, not the struct -- and `pub(crate)` is live house
+# style here, so the old `pub [a-z0-9_]+:` regex left such a field unclassified
+# while the count stayed put.
+fx="$(cfg_fixture "$CFG_OK" 'pub(crate) session_token_path: PathBuf,')"
+expect_reject "config-disclosure-drift/pub-crate-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a raw-identifier field. `type` is a Rust keyword and an entirely
+# ordinary YAML key.
+fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
+expect_reject "config-disclosure-drift/raw-identifier-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" "5 paths decided, 5 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" "11 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+
+
+# ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
+# Round 8's probes all showed up first as a silent change to these two numbers
+# (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
+# control; asserting it here means any future silent shrink is a red build.
+expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
+  "24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
