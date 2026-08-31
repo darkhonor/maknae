@@ -820,6 +820,15 @@ expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/c
 fx="$(cfg_fixture "$CFG_OK" 'pub extra: Value,')"
 expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a repeated entry in DISCLOSABLE. Harmless at runtime -- `classify` is
+# boolean membership -- but the classification inventory is the artifact a
+# reviewer reads to answer "what does this disclose", and a list that repeats
+# itself is a list nobody has checked. The manifest side has refused duplicates
+# since it was written; the code side did not, because the `sort -u` that makes
+# the 4a diff work also hid them.
+fx="$(cfg_fixture "$CFG_OK" '' '"vault.addr",')"
+expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"

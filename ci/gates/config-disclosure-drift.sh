@@ -178,7 +178,24 @@ extract() { # <const-name> <kind>
     f && /^const / && index($0, want ":") != 1 { f=0 }
   ' "$DOC"
 }
-{ extract DISCLOSABLE disclose; extract SUPPRESSED omit; } | sort -u > "$tmp/code"
+# RAW first, deduped second. The `sort -u` is what makes the 4a diff work and
+# it is also what hides a repeated entry, so the duplicate check has to see the
+# extraction BEFORE it -- writing the check after the deduping pipeline is a
+# check that cannot fail, which is a mistake this branch has made before.
+{ extract DISCLOSABLE disclose; extract SUPPRESSED omit; } > "$tmp/code_raw"
+sort -u "$tmp/code_raw" > "$tmp/code"
+# CODE-SIDE DUPLICATES, before the sort hides them. `sort -u` is what makes the
+# 4a diff work, and it is also what makes a repeated DISCLOSABLE entry
+# invisible -- the manifest side has refused duplicates since it was written,
+# and the code side did not. Harmless at runtime (`classify` is boolean
+# membership) but the classification inventory is the artifact a reviewer reads
+# to answer "what does this disclose", and a list that repeats itself is a list
+# nobody has checked.
+if ! dupes=$(sort "$tmp/code_raw" | uniq -d) || [ -n "${dupes:-}" ]; then
+  echo "FAIL: duplicate entr(ies) in DISCLOSABLE/SUPPRESSED:"
+  printf '%s\n' "$dupes" | sed 's/^/  /'
+  exit 1
+fi
 sort -u "$tmp/code" -o "$tmp/code"
 
 # 2. Every config STRUCT FIELD, as a dotted path.
