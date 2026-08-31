@@ -702,6 +702,99 @@ mod tests {
     /// Each new class RESOLVES (so this cannot pass merely because `class_of`
     /// returns None, as it would have before the rename) and ABSTAINS. Adding
     /// a permissive arm for any of them turns this red.
+    /// GOLDEN MATRIX (#162 step 0) — 4 roles x 8 (action, path) columns, written
+    /// BEFORE the action-grant surface exists and never edited after.
+    ///
+    /// Its whole value is that it predates the change: every cell here must be
+    /// byte-identical once `roles:` lands, because this fixture is `lp_with`,
+    /// which hard-wires `shipped_policy()` — and that has no `roles:` key, so
+    /// the grant map stays empty and the three grant-sensitive terms keep
+    /// answering `NotApplicable`. The grant path is asserted separately, against
+    /// its own fixture. **If you find yourself editing a cell below, stop.**
+    ///
+    /// Full `Verdict` equality, never `matches!`: the variant alone collapses
+    /// adversary-deny, policy-deny and OS-DAC deny into one cell, and a pin that
+    /// cannot tell them apart cannot detect the regression it exists for.
+    #[test]
+    fn golden_matrix_pins_every_role_against_every_class() {
+        let lp = lp_with(
+            Some(&[
+                ("admin", &["alex"][..]),
+                ("user", &["ursula"][..]),
+                ("guest", &["gwen"][..]),
+                ("adversary", &["adam"][..]),
+            ]),
+            // Distinct names AND distinct uids: `resolve` refuses a repeated name,
+            // and `by_uid` is uid-keyed, so a shared uid would silently overwrite.
+            &[
+                ("alex", 1001),
+                ("ursula", 1002),
+                ("gwen", 1003),
+                ("adam", 1004),
+            ],
+        );
+
+        let permit = || Verdict::Permit {
+            obligations: vec![audit_obligation()],
+        };
+        let contained = || Verdict::Deny {
+            reason: "subject contained: role=adversary".into(),
+        };
+        let policy_deny = || Verdict::Deny {
+            reason: "denied by policy entry Read(~/.ssh/**)".into(),
+        };
+        let na = || Verdict::NotApplicable;
+
+        // (action, path) x (admin 1001, user 1002, guest 1003, adversary 1004)
+        let matrix: &[(&str, Option<&str>, Verdict, Verdict, Verdict, Verdict)] = &[
+            (
+                "liveness.ping",
+                None,
+                permit(),
+                permit(),
+                permit(),
+                contained(),
+            ),
+            ("admin.whoami", None, permit(), na(), na(), contained()),
+            ("admin.status", None, na(), na(), na(), contained()),
+            ("admin.config.show", None, na(), na(), na(), contained()),
+            ("admin.subject.list", None, na(), na(), na(), contained()),
+            (
+                "fs.read",
+                Some("/home/operator/x"),
+                permit(),
+                na(),
+                na(),
+                contained(),
+            ),
+            (
+                "fs.read",
+                Some("/home/operator/.ssh/k"),
+                policy_deny(),
+                na(),
+                na(),
+                contained(),
+            ),
+            ("unknown.thing", None, na(), na(), na(), contained()),
+        ];
+
+        for (action, path, adm, usr, gst, adv) in matrix {
+            for (uid, role, expected) in [
+                (1001i64, "admin", adm),
+                (1002, "user", usr),
+                (1003, "guest", gst),
+                (1004, "adversary", adv),
+            ] {
+                let req = request(None, Some(uid), action, *path);
+                assert_eq!(
+                    &decide_loaded(&lp, &principal(), &req),
+                    expected,
+                    "role={role} action={action} path={path:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_new_class_resolves_and_abstains() {
         let lp = lp_with(None, &[]);

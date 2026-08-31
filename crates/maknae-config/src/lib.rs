@@ -47,7 +47,8 @@ pub use authz::load_authz_with_requirement;
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
-    load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern, Request,
+    load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern,
+    RawActionGrants, Request,
 };
 pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
 pub use document::{Document, Override, SectionSpec, Source};
