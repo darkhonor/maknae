@@ -63,8 +63,8 @@ Decision 3 says a role-independent grant is ungrammatical, and that is true of `
 ## Consequences
 
 - The migration contract for Phase 2 is: add the behaviour behind the arm that already decides. Grants written today keep their meaning; what changes is what a permit produces. The `NoBehaviour` pin is what makes that a decision rather than a side effect.
-- Adding a fourth grantable term is a code change (`GRANTABLE_ACTIONS`) plus a `verb-manifest.txt` row. Both are gated, so neither can be forgotten quietly.
-- The shipped `packaging/common/authz.yaml` gains no `roles:` key. Nothing ships granted, and the manifest's `action` rows keep `not-granted`.
+- Adding a fourth grantable term is a code change (`GRANTABLE_ACTIONS`), a `grantable` row in `verb-manifest.txt`, **and** an `action` row for the same term — the gate enforces `grantable ⊆ action`, so a grant cannot name something no request will ever carry. All three are gated; none can be forgotten quietly.
+- The shipped `packaging/common/authz.yaml` gains no `roles:` key: nothing ships granted. The three terms' `action` rows read `not-granted-but-grantable`, distinguishing them from `admin.contain` and its siblings, which are `not-granted` and can never be granted at all — an auditor reading the primary row must not get the wrong answer.
 - `roles:` is a fourth closed vocabulary in `verb-vocabulary-drift`, inventoried exactly in both directions like the other three.
 - Granting `user` or `guest` requires superseding decision 4 — deliberately, since it is a disclosure decision and not an implementation one.
 
