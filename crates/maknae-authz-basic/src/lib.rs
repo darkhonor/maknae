@@ -39,6 +39,17 @@ pub enum AuthzBasicError {
     /// The `bindings:` block is semantically invalid (unknown role, dual
     /// membership, duplicate, unresolvable username).
     Bindings(String),
+    /// A `roles:` key names something that is not a role in the closed
+    /// vocabulary (#162). Carries the offending key.
+    UnknownRole(String),
+    /// A `roles:` key names a real role that Phase 1 does not grant for
+    /// (`user`, `guest`, `adversary`). Distinct from `UnknownRole` on purpose:
+    /// "not yet" and "never" are different operator problems, and collapsing
+    /// them would tell an operator their correct spelling was a typo.
+    RoleNotSupportedYet(String),
+    /// A `roles:` allow/deny list names a term outside `GRANTABLE_ACTIONS`
+    /// (#162). Carries the offending term.
+    UnknownActionTerm(String),
 }
 
 impl std::fmt::Display for AuthzBasicError {
@@ -46,6 +57,18 @@ impl std::fmt::Display for AuthzBasicError {
         match self {
             AuthzBasicError::Load(m) => write!(f, "authz policy load refused: {m}"),
             AuthzBasicError::Bindings(m) => write!(f, "authz bindings invalid: {m}"),
+            AuthzBasicError::UnknownRole(k) => {
+                write!(f, "authz roles: unknown role `{k}`")
+            }
+            AuthzBasicError::RoleNotSupportedYet(k) => write!(
+                f,
+                "authz roles: role `{k}` is not grantable yet (Phase 1 grants `admin` only)"
+            ),
+            AuthzBasicError::UnknownActionTerm(t) => write!(
+                f,
+                "authz roles: `{t}` is not a grantable action term (#162 Phase 1: {})",
+                decide::GRANTABLE_ACTIONS.join(", ")
+            ),
         }
     }
 }
@@ -94,6 +117,10 @@ impl BasicAuthorizer {
         // requests).
         binding::resolve(&policy.bindings, &uid_map)
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
+        // Grants validate eagerly for the same reason bindings do: an operator
+        // who mistypes a term learns it at boot, in the journal, with the token
+        // named -- not by wondering why a grant they wrote does nothing.
+        validate_grants(&policy.action_grants)?;
         Ok(Self {
             policy_path,
             principal,
@@ -128,7 +155,51 @@ impl BasicAuthorizer {
 /// maps it to `Indeterminate`).
 fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<LoadedPolicy, ()> {
     let roles = binding::resolve(&policy.bindings, uid_map).map_err(|_| ())?;
-    Ok(LoadedPolicy { policy, roles })
+    // Anonymous on this lane by design: `finish_new` names the offending term
+    // for the operator at boot; a per-request refusal tells a caller only
+    // `Indeterminate`. Both refuse -- only the diagnostic differs.
+    let action_grants = validate_grants(&policy.action_grants).map_err(|_| ())?;
+    Ok(LoadedPolicy {
+        policy,
+        roles,
+        action_grants,
+    })
+}
+
+/// Validate the raw `roles:` grants against the closed vocabularies (#162).
+///
+/// Two separate checks, because `Role::from_key` answers only the first:
+/// `"user"` IS a role, so it passes `from_key` and must still be refused --
+/// Phase 1 grants `admin` alone. Gates **both** `allow` and `deny`, so a
+/// typo'd deny cannot be silently accepted as an unenforced denial.
+///
+/// Keyed by the literal `"admin"`; `role.rs` is untouched, since this is a
+/// grant surface over the existing vocabulary, not an addition to it.
+fn validate_grants(
+    raw: &std::collections::BTreeMap<String, maknae_config::RawActionGrants>,
+) -> Result<decide::ActionGrants, AuthzBasicError> {
+    let mut out = std::collections::BTreeMap::new();
+    for (key, grants) in raw {
+        match role::Role::from_key(key) {
+            None => return Err(AuthzBasicError::UnknownRole(key.clone())),
+            Some(role::Role::Admin) => {}
+            Some(_) => return Err(AuthzBasicError::RoleNotSupportedYet(key.clone())),
+        }
+        let check = |terms: &Vec<String>| -> Result<Vec<decide::ActionTerm>, AuthzBasicError> {
+            terms
+                .iter()
+                .map(|t| {
+                    if decide::GRANTABLE_ACTIONS.contains(&t.as_str()) {
+                        Ok(decide::ActionTerm::validated(t.clone()))
+                    } else {
+                        Err(AuthzBasicError::UnknownActionTerm(t.clone()))
+                    }
+                })
+                .collect()
+        };
+        out.insert(key.clone(), (check(&grants.allow)?, check(&grants.deny)?));
+    }
+    Ok(decide::ActionGrants::from_validated(out))
 }
 
 /// getpwnam every bound username once (the reserved `agent` token excluded).
@@ -309,6 +380,7 @@ mod tests {
         let lp = decide::LoadedPolicy {
             policy,
             roles: binding::resolve(&None, &UidMap::new()).unwrap(),
+            action_grants: decide::ActionGrants::default(),
         };
         // Enrolled uid → admin: admin verb permitted; deny-list still denies.
         let admin_whoami = decide::decide_loaded(&lp, &principal(), &{
@@ -448,6 +520,147 @@ mod tests {
         assert!(
             matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
         );
+    }
+
+    // ---- `roles:` action grants: refusal at boot (#162) ----
+
+    const GRANT_PREAMBLE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+
+    fn parse_with_roles(roles_block: &str) -> maknae_config::AuthzPolicy {
+        maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}{roles_block}"), None)
+            .expect("grammar is valid; the SEMANTIC refusal is what is under test")
+    }
+
+    /// A `roles:` key outside the role vocabulary refuses CONSTRUCTION, and the
+    /// error names the offending key. Not a warning, not a skipped entry: a
+    /// grant an operator wrote and the daemon silently ignored is the failure
+    /// mode this whole surface exists to avoid.
+    #[test]
+    fn roles_unknown_role_refuses_construction_naming_the_key() {
+        let p =
+            parse_with_roles("roles:\n  admn:\n    actions:\n      allow: [\"admin.status\"]\n");
+        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        assert!(
+            matches!(got, Err(AuthzBasicError::UnknownRole(ref k)) if k == "admn"),
+            "expected UnknownRole(\"admn\"), got {got:?}"
+        );
+    }
+
+    /// A REAL role that Phase 1 does not grant for gets its own variant.
+    /// `Role::from_key("user")` returns `Some`, so this is a second check --
+    /// and it must not collapse into `UnknownRole`, which would tell an
+    /// operator their correct spelling was a typo.
+    #[test]
+    fn roles_real_but_ungrantable_role_refuses_with_its_own_variant() {
+        for key in ["user", "guest", "adversary"] {
+            let p = parse_with_roles(&format!(
+                "roles:\n  {key}:\n    actions:\n      allow: [\"admin.status\"]\n"
+            ));
+            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            assert!(
+                matches!(got, Err(AuthzBasicError::RoleNotSupportedYet(ref k)) if k == key),
+                "role `{key}`: expected RoleNotSupportedYet, got {got:?}"
+            );
+        }
+    }
+
+    /// A term outside `GRANTABLE_ACTIONS` refuses, whether it is a real verb
+    /// this phase withholds (`admin.contain`) or nonexistent (`admin.stauts`).
+    /// Both are `UnknownActionTerm`: the grantable list is the vocabulary here,
+    /// and "exists elsewhere in the system" earns no standing.
+    #[test]
+    fn roles_ungrantable_term_refuses_construction_naming_the_term() {
+        for term in [
+            "admin.contain",
+            "admin.policy.reload",
+            "admin.stauts",
+            "fs.read",
+        ] {
+            let p = parse_with_roles(&format!(
+                "roles:\n  admin:\n    actions:\n      allow: [\"{term}\"]\n"
+            ));
+            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            assert!(
+                matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == term),
+                "term `{term}`: expected UnknownActionTerm, got {got:?}"
+            );
+        }
+    }
+
+    /// Validation gates the DENY list too. A typo'd deny that parsed silently
+    /// would read to an operator as a denial in force while denying nothing --
+    /// the worst outcome on a policy surface, and invisible without this test.
+    #[test]
+    fn roles_ungrantable_term_in_deny_list_also_refuses() {
+        let p =
+            parse_with_roles("roles:\n  admin:\n    actions:\n      deny: [\"admin.contain\"]\n");
+        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        assert!(
+            matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.contain"),
+            "deny lists are gated identically to allow lists, got {got:?}"
+        );
+    }
+
+    /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
+    /// against a validator that refuses everything, so this is the assertion
+    /// that keeps them honest.
+    #[test]
+    fn roles_valid_grant_block_constructs() {
+        let p = parse_with_roles(
+            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\", \"admin.config.show\"]\n      deny: [\"admin.subject.list\"]\n",
+        );
+        BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p)
+            .expect("every role key and term is in vocabulary");
+    }
+
+    /// The per-request path refuses too, and refuses ANONYMOUSLY.
+    ///
+    /// "Same discriminant at both entry points" is not achievable and is not
+    /// the goal: `assemble` returns `Result<_, ()>`, so there is no discriminant
+    /// to assert. The contract is asymmetric on purpose -- boot NAMES the bad
+    /// term in the journal where an operator is reading, while a per-request
+    /// refusal stays `Indeterminate`, telling a caller nothing about why. What
+    /// must hold at both ends is that neither one proceeds.
+    ///
+    /// This is the case where the file is edited to something invalid AFTER
+    /// construction, which is reachable precisely because `decide` re-reads
+    /// per request (the Zero Trust ruling) rather than holding a snapshot.
+    #[test]
+    fn roles_invalid_grants_edited_in_after_boot_are_indeterminate_per_request() {
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: UidMap::new(),
+        };
+        // The injected loader IS the per-request re-read; only the source of
+        // the bytes is hermetic. Nothing about the validation is stubbed.
+        let v = auth.decide_with_loader(&liveness_req(None, Some(501)), |_| {
+            maknae_config::parse_authz(
+                &format!("{GRANT_PREAMBLE}roles:\n  admin:\n    actions:\n      allow: [\"admin.contain\"]\n"),
+                None,
+            )
+        });
+        assert_eq!(
+            v,
+            Verdict::Indeterminate,
+            "an invalid grant block must fail the request closed, not fall through to the arms"
+        );
+    }
+
+    /// Every error variant renders its offending token. An operator reading a
+    /// boot refusal in the journal gets the token, not just a category.
+    #[test]
+    fn roles_error_display_names_the_offending_token() {
+        assert!(AuthzBasicError::UnknownRole("admn".into())
+            .to_string()
+            .contains("admn"));
+        assert!(AuthzBasicError::RoleNotSupportedYet("user".into())
+            .to_string()
+            .contains("user"));
+        let d = AuthzBasicError::UnknownActionTerm("admin.contain".into()).to_string();
+        assert!(d.contains("admin.contain"), "{d}");
+        // ...and lists what IS grantable, so the fix is in the message.
+        assert!(d.contains("admin.status"), "{d}");
     }
 
     #[test]

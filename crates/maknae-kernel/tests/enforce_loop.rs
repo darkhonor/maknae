@@ -1021,6 +1021,124 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// The `roles:` grant crosses the SEAM (#162 step 7).
+///
+/// Every other test of the grant path sits on one side of it, and the existing
+/// end-to-end permit drives `AlwaysPermit` -- a stub. This one runs a real
+/// `HermeticAuthorizer` over a real on-disk `authz.yaml` carrying a real
+/// `roles:` block, so the Permit that reaches the kernel is a genuine PDP
+/// verdict rather than a design intention.
+///
+/// The policy carries `bindings: { admin: ["root"] }` and the request is driven
+/// with `peer_uid = 0`. Without a `bindings:` key the defaults apply and Admin
+/// is granted only when `peer_uid == principal.uid`, which `Fixture::new` sets
+/// to `geteuid()` -- so the grant and the binding that reaches it have to sit
+/// in one hand-written file.
+///
+/// It ends at `NotImplemented`, and that is the point: Phase 1 ships the
+/// DECISION, not the capability. `dispatch_verb` still returns `NoBehaviour`,
+/// so a granted `admin.status` discloses nothing.
+#[tokio::test]
+async fn a_roles_granted_term_permits_through_the_real_pdp_and_still_discloses_nothing() {
+    let fx = Fixture::new("roles-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
+        other => panic!("expected NotImplemented, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.status");
+    assert_eq!(
+        req.outcome.result, "permit",
+        "the grant must produce a real permit, not a fallthrough"
+    );
+    assert_eq!(req.outcome.posture, "not-implemented");
+}
+
+/// The same file WITHOUT the grant refuses. This is what makes the test above
+/// mean something: without it, a permit that came from anywhere else in the
+/// policy would read identically.
+#[tokio::test]
+async fn the_same_policy_without_the_grant_does_not_permit() {
+    let fx = Fixture::new("roles-nogrant");
+    fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        // The code that was OBSERVED, not merely "not NotImplemented" -- which
+        // would also pass for Internal, Timeout, or any code added later.
+        RespResult::Err(e) => assert_eq!(
+            e.code,
+            ProtoErrCode::Unauthorized,
+            "without a grant this must be refused by authz, never reach dispatch"
+        ),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+}
+
+/// An explicit `deny:` refuses -- and the reason NAMES the term in the audit
+/// trail while the WIRE receives only the static "not authorized". The new
+/// deny reason must not leak to a caller: the same hazard `decide.rs` warns
+/// about for the path operand, where the reason carries a filesystem path.
+#[tokio::test]
+async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
+    let fx = Fixture::new("roles-deny");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      deny: [\"admin.status\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    let err = match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => e,
+        other => panic!("expected an error, got {other:?}"),
+    };
+    assert!(
+        !err.message.contains("admin.status") && !err.message.contains("role grant"),
+        "the deny reason must not reach the wire: {:?}",
+        err.message
+    );
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome.reason.contains("admin.status"),
+        "the audit trail MUST name the term that denied: {:?}",
+        req.outcome.reason
+    );
+}
+
 /// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
 /// and only then refused. Driven with a permissive authorizer because the real
 /// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's

@@ -25,6 +25,128 @@ pub(crate) const RESOURCE_PATH: &str = "path";
 pub(crate) struct LoadedPolicy {
     pub(crate) policy: maknae_config::AuthzPolicy,
     pub(crate) roles: ResolvedBindings,
+    pub(crate) action_grants: ActionGrants,
+}
+
+/// The `admin.*` terms an operator may grant or deny per-role (#162 Phase 1).
+///
+/// Code-defined and unconfigurable: a term absent from this list is refused at
+/// load, so `roles:` can never reach a verb the arm below does not consult.
+/// These three are disclosure-only -- status, config display, subject listing
+/// -- and deliberately NOT `admin.contain`, `admin.credential.broker` or
+/// `admin.policy.reload`, which change state and are Phase 2's question.
+//
+// ONE LINE, deliberately: the drift gate's extractor scans only the matched
+// line, and this declaration is 108 chars against rustfmt's default
+// max_width=100, so without the skip rustfmt wraps it and the gate extracts
+// ZERO terms -- green, inventorying nothing.
+#[rustfmt::skip]
+pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.show", "admin.subject.list"];
+
+/// Byte-wise `&str` equality usable in a `const` context.
+///
+/// `PartialEq::eq` for `&str` is not a `const fn` (E0015), so the compile-time
+/// pin below cannot use `==` or `[&str]::contains`. Hoisted to module scope
+/// rather than nested inside the const block so it can be TESTED: the pin
+/// asserts `!str_eq(term, "admin.whoami")`, which a `str_eq` that always
+/// returned `false` would satisfy vacuously while still compiling.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// `admin.whoami` must NEVER join [`GRANTABLE_ACTIONS`]. It has its own arm and
+/// is permitted unconditionally for admins; routing it through grants would
+/// make an operator's empty `roles:` block revoke it -- a silent downgrade of
+/// working behaviour, from a file that says nothing about `whoami`.
+///
+/// Enforced at COMPILE time, so the mistake cannot reach a test run.
+///
+/// Written as a DESTRUCTURING rather than a `while` loop, deliberately. A loop
+/// carries a bound, and `cargo mutants` weakens bounds: `<` to `==` or `>` both
+/// make the pin check fewer terms -- or none -- while still compiling, and both
+/// were reported MISSED, because compile-time code is unreachable from a test
+/// run and no assertion can observe it. There is no bound here to weaken. The
+/// array's LENGTH is in its type, so this destructuring is exhaustive by
+/// construction: adding a fourth term makes it fail to compile (E0527) and
+/// demands the fourth assertion, which is the failure mode an unrolled check
+/// would otherwise have had.
+const _: () = {
+    let [a, b, c] = GRANTABLE_ACTIONS;
+    const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
+    assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(c, "admin.whoami"), "{}", WHY);
+};
+
+/// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
+/// A newtype rather than a bare `String` so the type system carries the
+/// validation -- an unvalidated term cannot be constructed here by accident.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct ActionTerm(String);
+
+impl ActionTerm {
+    /// Only `validate_grants` calls this, and only after checking membership
+    /// in [`GRANTABLE_ACTIONS`]. The name states the precondition the type
+    /// exists to carry.
+    pub(crate) fn validated(term: String) -> Self {
+        ActionTerm(term)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Validated per-role action grants: role key → (allow terms, deny terms).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct ActionGrants(
+    pub(crate) std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+);
+
+impl ActionGrants {
+    /// Construct from already-validated parts. Private to the crate, and the
+    /// only constructor besides `Default`, so every `ActionTerm` inside has
+    /// been through `validate_grants`.
+    pub(crate) fn from_validated(
+        m: std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+    ) -> Self {
+        ActionGrants(m)
+    }
+
+    /// Three-valued lookup for one role's grants on one action.
+    ///
+    /// **Takes the role key.** A one-argument form would be the flattening the
+    /// spec forbids, hidden one layer down: a Phase-2 `Role::User` arm would
+    /// call it and silently receive admin's grants.
+    ///
+    /// Deny beats allow within the role, matching `AuthzPolicy::evaluate3`'s
+    /// stance -- and the composition layer above is deny-overrides regardless,
+    /// so a grant here can never waive a mandatory deny.
+    pub(crate) fn evaluate3_action(&self, role_key: &str, action: &str) -> maknae_config::Match3 {
+        let Some((allow, deny)) = self.0.get(role_key) else {
+            return maknae_config::Match3::NoMatch;
+        };
+        if let Some(t) = deny.iter().find(|t| t.as_str() == action) {
+            return maknae_config::Match3::DenyMatch {
+                source: t.as_str().to_string(),
+            };
+        }
+        if allow.iter().any(|t| t.as_str() == action) {
+            return maknae_config::Match3::AllowMatch;
+        }
+        maknae_config::Match3::NoMatch
+    }
 }
 
 /// The closed action-class vocabulary (spec §5).
@@ -202,6 +324,32 @@ pub(crate) fn decide_loaded(
             // #67's spec D3 names as the thing that must not land. Individual
             // decidability for the rest is D3's implementation obligation.
             Some(Class::Admin) if req.action.0 == "admin.whoami" => permit_with_audit(),
+            // The three disclosure terms are decided per-ACTION by the operator's
+            // `roles:` grants (#162), never by the class. The guard keys on the
+            // CONSTANT, not on membership in the grant map: keying on the map
+            // would make a term the operator explicitly DENIED fall through to
+            // the NotApplicable arm below, and an explicit deny would silently
+            // become an absence. Nothing falls through -- all three answers are
+            // produced inside this arm.
+            //
+            // `"admin"` is a literal because the arm sits inside `Role::Admin`,
+            // so the role is statically known here. A Phase-2 `Role::User` arm
+            // must pass its own key; it cannot inherit admin's grants by
+            // omitting the argument.
+            Some(Class::Admin) if GRANTABLE_ACTIONS.contains(&req.action.0.as_str()) => {
+                match lp.action_grants.evaluate3_action("admin", &req.action.0) {
+                    maknae_config::Match3::AllowMatch => permit_with_audit(),
+                    // Names the term, matching what `decide_fs` does for a path
+                    // entry: an audit record that says WHICH entry decided.
+                    maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
+                        reason: format!("denied by role grant {source}"),
+                    },
+                    // No grant is an ABSENCE, not a refusal: deny-by-default
+                    // happens once, at `finalize`, with "no grant" kept
+                    // distinguishable from an explicit deny.
+                    maknae_config::Match3::NoMatch => Verdict::NotApplicable,
+                }
+            }
             Some(Class::Admin) => Verdict::NotApplicable,
             // Keyed like the admin arm above, and for the same reason. Without
             // it, safety rests on a remote `if let Verb::Read` in another crate:
@@ -302,6 +450,10 @@ mod tests {
         LoadedPolicy {
             policy: shipped_policy(),
             roles: resolve(&b, &lookup).unwrap(),
+            // Grants are a SEPARATE fixture (`lp_with_grants`). All 16 call
+            // sites of `lp_with` -- the golden matrix among them -- must keep
+            // seeing an empty grant map, or the pin stops pinning.
+            action_grants: ActionGrants::default(),
         }
     }
 
@@ -440,9 +592,16 @@ mod tests {
         ));
     }
 
+    /// A SUPERSET of the golden matrix's columns, not the same list. The loops
+    /// over this (adversary-denies-everything, guest-and-user-permit-only-
+    /// liveness) must exercise the three grantable terms too, so a future
+    /// permissive arm for them turns those tests red as well as the matrix.
     const ALL_ACTIONS: &[&str] = &[
         "liveness.ping",
         "admin.whoami",
+        "admin.status",
+        "admin.config.show",
+        "admin.subject.list",
         "session.prompt",
         "fs.read",
         "terminal.create",
@@ -696,6 +855,388 @@ mod tests {
                 Verdict::NotApplicable,
                 "{action} must NOT permit off the admin class arm"
             );
+        }
+    }
+
+    /// `str_eq` is what makes the compile-time pin mean something. The pin
+    /// reads `!str_eq(term, "admin.whoami")`, so a `str_eq` that always
+    /// returned `false` would satisfy it vacuously and still compile -- the
+    /// assertion would be green while asserting nothing. These cases are the
+    /// ones that distinguish a real comparison from a constant `false`.
+    #[test]
+    fn str_eq_actually_compares() {
+        assert!(str_eq("admin.whoami", "admin.whoami"), "equal strings");
+        assert!(str_eq("", ""), "both empty");
+        assert!(
+            !str_eq("admin.whoami", "admin.status"),
+            "same length, differ"
+        );
+        assert!(
+            !str_eq("admin.status", "admin.status2"),
+            "prefix, differing length"
+        );
+        assert!(!str_eq("", "a"), "empty vs non-empty");
+        // The exact comparison the pin performs, both ways round.
+        for t in GRANTABLE_ACTIONS {
+            assert!(!str_eq(t, "admin.whoami"));
+        }
+        assert!(str_eq(GRANTABLE_ACTIONS[0], "admin.status"));
+    }
+
+    /// The arm's guard is a SECOND lock, and this is what proves it locks.
+    ///
+    /// `validate_grants` already refuses a term outside `GRANTABLE_ACTIONS` at
+    /// load, so in production the map can only hold grantable terms -- which
+    /// makes the guard look redundant, and a mutation that weakens it to `true`
+    /// behaviourally identical. It is not redundant: it is the reason the arm
+    /// does not have to TRUST the map's contents. Here the map is built past
+    /// the validator, holding a term the arm must never honour.
+    #[test]
+    fn the_arm_does_not_trust_a_grant_map_holding_an_ungrantable_term() {
+        let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
+            "admin".to_string(),
+            (
+                vec![ActionTerm::validated("admin.contain".into())],
+                Vec::new(),
+            ),
+        )]));
+        let mut lp = lp_with_grants("", GRANT_UIDS);
+        lp.action_grants = forged;
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &request(None, Some(1001), "admin.contain", None)
+            ),
+            Verdict::NotApplicable,
+            "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
+             somehow reaches the grant map"
+        );
+    }
+
+    /// The same property the compile-time pin holds, held again at runtime so
+    /// it is carried by a KILLABLE test. The const block is unreachable from a
+    /// test run by construction, so on its own it is a control nothing can
+    /// prove fires except by breaking the build on purpose.
+    /// Every grantable term must be in `Class::Admin` -- the arm's OTHER
+    /// precondition, and until this test the unenforced one.
+    ///
+    /// `validate_grants` admits a term on membership in `GRANTABLE_ACTIONS`
+    /// alone, but the arm also requires `class_of(action) == Some(Class::Admin)`
+    /// to be reached at all. Add `session.list` to the constant and everything
+    /// passes -- the const pin (it only excludes `admin.whoami`), validation,
+    /// the drift gate with a manifest row, boot -- and the request routes to
+    /// `Some(Class::Session) => NotApplicable`. The grant parses, passes, and
+    /// does nothing: exactly the "accepted but inert" outcome the spec claims
+    /// is impossible by construction. It was impossible by one check, not two.
+    #[test]
+    fn every_grantable_term_is_in_the_admin_class() {
+        for t in GRANTABLE_ACTIONS {
+            assert_eq!(
+                class_of(t),
+                Some(Class::Admin),
+                "`{t}` is grantable but would never reach the arm that consults grants"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_whoami_is_not_in_the_grantable_set() {
+        assert!(
+            !GRANTABLE_ACTIONS.contains(&"admin.whoami"),
+            "admin.whoami is unconditional for admins; granting it would let an \
+             empty roles: block revoke working behaviour"
+        );
+    }
+
+    // ---- action-scoped grants: the decide arm (#162 step 4) ----
+
+    /// A SEPARATE fixture, so none of `lp_with`'s 16 call sites -- the golden
+    /// matrix among them -- ever sees a non-empty grant map. Grants are built
+    /// by the REAL validator over REAL parsed YAML: a hand-built `ActionGrants`
+    /// would prove the arm and hide the parse-and-validate path feeding it.
+    fn lp_with_grants(roles_block: &str, uid_map: &[(&str, u32)]) -> LoadedPolicy {
+        let body = format!(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gwen\"]\n  adversary: [\"adam\"]\n{roles_block}"
+        );
+        let policy =
+            maknae_config::parse_authz(&body, Some(std::path::Path::new("/home/operator")))
+                .unwrap();
+        let lookup: UidMap = uid_map.iter().map(|(n, u)| (n.to_string(), *u)).collect();
+        LoadedPolicy {
+            roles: resolve(&policy.bindings, &lookup).unwrap(),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            policy,
+        }
+    }
+
+    const GRANT_UIDS: &[(&str, u32)] = &[
+        ("alex", 1001),
+        ("ursula", 1002),
+        ("gwen", 1003),
+        ("adam", 1004),
+    ];
+
+    /// A granted term permits, and ONLY that term. The other two grantable
+    /// terms stay `NotApplicable` -- the arm keys on the action, so one grant
+    /// is one grant, not a class-granular opening of `admin.*`.
+    #[test]
+    fn granted_admin_term_permits_and_ungranted_siblings_do_not() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+            GRANT_UIDS,
+        );
+        let req = |a: &str| request(None, Some(1001), a, None);
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req("admin.status")),
+            Verdict::Permit {
+                obligations: vec![audit_obligation()]
+            }
+        );
+        for other in ["admin.config.show", "admin.subject.list"] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req(other)),
+                Verdict::NotApplicable,
+                "granting one term must not grant `{other}`"
+            );
+        }
+        // And the term that was never grantable is untouched by any of this.
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req("admin.whoami")),
+            Verdict::Permit {
+                obligations: vec![audit_obligation()]
+            },
+            "admin.whoami keeps its own arm; it is not routed through grants"
+        );
+    }
+
+    /// An explicit deny beats an explicit allow within the role, and the
+    /// verdict NAMES the term that denied it -- so the audit record says which
+    /// entry decided, not merely that something did.
+    #[test]
+    fn denied_admin_term_denies_naming_the_source_even_when_also_allowed() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\", \"admin.config.show\"]\n      deny: [\"admin.status\"]\n",
+            GRANT_UIDS,
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &request(None, Some(1001), "admin.status", None)
+            ),
+            Verdict::Deny {
+                reason: "denied by role grant admin.status".into()
+            }
+        );
+        // The co-listed allow is unaffected -- deny is per-term, not per-role.
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &request(None, Some(1001), "admin.config.show", None)
+            ),
+            Verdict::Permit {
+                obligations: vec![audit_obligation()]
+            }
+        );
+    }
+
+    /// `evaluate3_action` keys on the ROLE, tested DIRECTLY.
+    ///
+    /// This has to be a unit test on the function. The end-to-end version
+    /// (`admin_grants_do_not_leak_to_other_roles`, below) cannot reach it:
+    /// `Role::Guest | Role::User` returns `NotApplicable` for every non-liveness
+    /// class before the `Role::Admin` block that holds the only call site. So
+    /// `evaluate3_action` could ignore `role_key` entirely -- taking the first
+    /// value in the map -- and the whole suite stayed green. Measured, not
+    /// supposed: that mutation was applied and 58/58 still passed.
+    ///
+    /// This is what the two-argument form buys, and until now nothing bought it.
+    /// A Phase-2 `Role::User` arm calling a one-argument version would silently
+    /// receive admin's grants, one layer below where any end-to-end test looks.
+    #[test]
+    fn evaluate3_action_answers_per_role_not_per_map() {
+        let grants = ActionGrants::from_validated(std::collections::BTreeMap::from([(
+            "admin".to_string(),
+            (
+                vec![ActionTerm::validated("admin.status".into())],
+                vec![ActionTerm::validated("admin.config.show".into())],
+            ),
+        )]));
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.status"),
+            maknae_config::Match3::AllowMatch
+        );
+        assert_eq!(
+            grants.evaluate3_action("admin", "admin.config.show"),
+            maknae_config::Match3::DenyMatch {
+                source: "admin.config.show".into()
+            }
+        );
+        // The whole point: a DIFFERENT role gets nothing from admin's entry --
+        // not the allow, and not the deny either.
+        for role in ["user", "guest", "adversary", "", "Admin"] {
+            assert_eq!(
+                grants.evaluate3_action(role, "admin.status"),
+                maknae_config::Match3::NoMatch,
+                "role `{role}` must not read admin's allow list"
+            );
+            assert_eq!(
+                grants.evaluate3_action(role, "admin.config.show"),
+                maknae_config::Match3::NoMatch,
+                "role `{role}` must not read admin's deny list either"
+            );
+        }
+    }
+
+    /// The end-to-end companion. It pins that the Guest/User arms abstain and
+    /// that containment precedes the class match -- NOT that `evaluate3_action`
+    /// keys on the role, which it never reaches. See the test above for that.
+    #[test]
+    fn admin_grants_do_not_leak_to_other_roles() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+            GRANT_UIDS,
+        );
+        for (uid, role) in [(1002u32, "user"), (1003, "guest")] {
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &request(None, Some(uid as i64), "admin.status", None)
+                ),
+                Verdict::NotApplicable,
+                "role `{role}` must not inherit admin's grant"
+            );
+        }
+        // Containment is upstream of the class match and stays unconditional.
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &request(None, Some(1004), "admin.status", None)
+            ),
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            },
+            "a grant can never reach a contained subject"
+        );
+    }
+
+    /// An empty `roles:` block behaves exactly as an absent one. This is the
+    /// assertion that makes the plain-map-not-Option decision in maknae-config
+    /// testable rather than merely asserted.
+    #[test]
+    fn empty_roles_block_leaves_the_three_terms_not_applicable() {
+        for block in ["", "roles: {}\n", "roles:\n  admin:\n    actions: {}\n"] {
+            let lp = lp_with_grants(block, GRANT_UIDS);
+            for t in GRANTABLE_ACTIONS {
+                assert_eq!(
+                    decide_loaded(&lp, &principal(), &request(None, Some(1001), t, None)),
+                    Verdict::NotApplicable,
+                    "block {block:?}, term {t}"
+                );
+            }
+        }
+    }
+
+    /// GOLDEN MATRIX (#162 step 0) — 4 roles x 8 (action, path) columns, written
+    /// BEFORE the action-grant surface exists and never edited after.
+    ///
+    /// Its whole value is that it predates the change: every cell here must be
+    /// byte-identical once `roles:` lands, because this fixture is `lp_with`,
+    /// which hard-wires `shipped_policy()` — and that has no `roles:` key, so
+    /// the grant map stays empty and the three grant-sensitive terms keep
+    /// answering `NotApplicable`. The grant path is asserted separately, against
+    /// its own fixture. **If you find yourself editing a cell below, stop.**
+    ///
+    /// Full `Verdict` equality, never `matches!`: the variant alone collapses
+    /// adversary-deny, policy-deny and OS-DAC deny into one cell, and a pin that
+    /// cannot tell them apart cannot detect the regression it exists for.
+    #[test]
+    fn golden_matrix_pins_every_role_against_every_class() {
+        let lp = lp_with(
+            Some(&[
+                ("admin", &["alex"][..]),
+                ("user", &["ursula"][..]),
+                ("guest", &["gwen"][..]),
+                ("adversary", &["adam"][..]),
+            ]),
+            // Distinct names AND distinct uids: `resolve` refuses a repeated name,
+            // and `by_uid` is uid-keyed, so a shared uid would silently overwrite.
+            &[
+                ("alex", 1001),
+                ("ursula", 1002),
+                ("gwen", 1003),
+                ("adam", 1004),
+            ],
+        );
+
+        let permit = || Verdict::Permit {
+            obligations: vec![audit_obligation()],
+        };
+        let contained = || Verdict::Deny {
+            reason: "subject contained: role=adversary".into(),
+        };
+        let policy_deny = || Verdict::Deny {
+            reason: "denied by policy entry Read(~/.ssh/**)".into(),
+        };
+        let na = || Verdict::NotApplicable;
+
+        // (action, path) x (admin 1001, user 1002, guest 1003, adversary 1004)
+        // The literal tuple type, NOT a `type Row` alias. clippy::type_complexity
+        // fires here and is allowed rather than satisfied: this table's docstring
+        // and the plan both say no line of it is ever edited, and an alias
+        // extracted for lint comfort makes that claim false the first time
+        // someone checks the diff. The shape IS the contract.
+        #[allow(clippy::type_complexity)]
+        let matrix: &[(&str, Option<&str>, Verdict, Verdict, Verdict, Verdict)] = &[
+            (
+                "liveness.ping",
+                None,
+                permit(),
+                permit(),
+                permit(),
+                contained(),
+            ),
+            ("admin.whoami", None, permit(), na(), na(), contained()),
+            ("admin.status", None, na(), na(), na(), contained()),
+            ("admin.config.show", None, na(), na(), na(), contained()),
+            ("admin.subject.list", None, na(), na(), na(), contained()),
+            (
+                "fs.read",
+                Some("/home/operator/x"),
+                permit(),
+                na(),
+                na(),
+                contained(),
+            ),
+            (
+                "fs.read",
+                Some("/home/operator/.ssh/k"),
+                policy_deny(),
+                na(),
+                na(),
+                contained(),
+            ),
+            ("unknown.thing", None, na(), na(), na(), contained()),
+        ];
+
+        for (action, path, adm, usr, gst, adv) in matrix {
+            for (uid, role, expected) in [
+                (1001i64, "admin", adm),
+                (1002, "user", usr),
+                (1003, "guest", gst),
+                (1004, "adversary", adv),
+            ] {
+                let req = request(None, Some(uid), action, *path);
+                assert_eq!(
+                    &decide_loaded(&lp, &principal(), &req),
+                    expected,
+                    "role={role} action={action} path={path:?}"
+                );
+            }
         }
     }
 
