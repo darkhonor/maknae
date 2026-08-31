@@ -748,6 +748,52 @@ expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx
 fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
 expect_reject "config-disclosure-drift/private-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a scalar field turned into a config STRUCT. The silent variant of
+# the depth-blind tally: the field count does not change, so nothing else in
+# the gate fires, while the nested field NAMES reach the wire undecided.
+# document.rs itself anticipates this exact change for `audit.siem`.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-config/src/audit_cfg.rs"
+s = p.read_text()
+s = s.replace("pub struct AuditConfig {",
+              "pub struct SiemConfig {\n    pub url: String,\n    pub auth_token_path: PathBuf,\n}\n\npub struct AuditConfig {", 1)
+s = s.replace("    pub siem: Option<String>,", "    pub siem: SiemConfig,", 1)
+p.write_text(s)
+PY
+expect_reject "config-disclosure-drift/struct-typed-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SectionSpec whose `name:` operand the extractor cannot resolve.
+# Round 9's headline control, previously unprobed: the resolved-count tally is
+# what turns an unreadable registration form into a hard failure instead of a
+# silent gap, and AGENTS.md is explicit that a gate never observed failing
+# proves nothing.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let more = [
+        SectionSpec { name: principal_section_name(), required: false },
+    ];
+FIX
+expect_reject "config-disclosure-drift/unresolvable-section-operand" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SectionSpec block the operand scan misses entirely -- here because
+# `required:` precedes `name:`. The resolved-vs-registered tally is the only
+# thing that catches it; the coverage loop alone would see one fewer section
+# and pass.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let more = [
+        SectionSpec { required: false, nome: LAKE_SECTION.to_string() },
+    ];
+FIX
+expect_reject "config-disclosure-drift/section-block-with-unreadable-name" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NO_STRUCT_SECTIONS entry with no manifest row. Struct-less means
+# the keys are carried verbatim, not that the disclosure is undecided.
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^mask	lake")")"
+expect_reject "config-disclosure-drift/no-struct-section-without-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"

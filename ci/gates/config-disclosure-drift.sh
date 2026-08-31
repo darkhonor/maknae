@@ -56,9 +56,14 @@ SURFACE=(
   "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling|7"
 )
 
-# Registered sections (boot.rs) that legitimately have NO config struct: their
-# keys are carried verbatim for consumers. Each needs a manifest row, and this
-# list is what stops a NEW section from being silently uncovered.
+# Sections with NO config struct: their keys are carried verbatim for their
+# consumers. Each still needs a manifest row -- struct-less means the keys pass
+# through, not that the disclosure is undecided.
+#
+# `core` is listed for completeness of the record, not because the coverage
+# loop reaches it: `loader.rs::validate_specs` REJECTS `core` as a SectionSpec,
+# so it is never in `registered`. Its rows are held by the 4a code-vs-manifest
+# diff instead.
 NO_STRUCT_SECTIONS="core lake"
 # The Ceiling entry's approximate paths are safe only under this suppression.
 CEILING_REQUIRES_SUPPRESSED="core.handling"
@@ -210,7 +215,18 @@ for entry in "${SURFACE[@]}"; do
           # `serde_json` -- caught immediately by the exact field count, which
           # is the whole argument for counting the yield rather than trusting
           # the pattern.
-          if (rest !~ /^:/) print p "." tok
+          # Emit `path<TAB>type`. The type matters: a field whose type is
+          # itself a config struct is a SUBTREE, not a leaf, and counting it as
+          # one row is the depth-blind tally -- `pub siem: SiemConfig` would
+          # keep the count at 3 while `siem.url` and `siem.auth_token_path`
+          # both reach the wire undecided.
+          if (rest !~ /^:/) {
+            ty = rest
+            sub(/^[[:space:]]*/, "", ty)
+            sub(/[,{].*$/, "", ty)
+            gsub(/[[:space:]]+$/, "", ty)
+            print p "." tok "\t" ty
+          }
           line = rest
         }
       }
@@ -240,6 +256,41 @@ for entry in "${SURFACE[@]}"; do
   fi
 done
 sort -u "$tmp/fields" -o "$tmp/fields"
+
+# --- DEPTH. A field whose type is a config struct declared in this workspace
+# is a subtree: its own fields become real YAML paths. Counting it as one leaf
+# is the fifth instance of the same fail-open -- and the SILENT variant, since
+# turning a scalar into a struct (`pub siem: Option<String>` -> `SiemConfig`,
+# which document.rs itself anticipates) changes NO count at all.
+#
+# Precedent already in the table: `Ceiling` has its own SURFACE entry. Nothing
+# enforced that it must.
+while IFS=$'\t' read -r fpath fty; do
+  [ -n "$fty" ] || continue
+  bare=$(printf '%s' "$fty" | sed -E 's/^(Option|Box|Arc|Vec)<//; s/>+$//' | sed 's/.*:://')
+  case "$bare" in
+    ''|bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|Value|str) continue ;;
+  esac
+  grep -rqE "^pub struct $bare([[:space:]<{]|$)" crates/ 2>/dev/null || continue
+  covered=""
+  for entry in "${SURFACE[@]}"; do
+    IFS='|' read -r _ _ p _ <<< "$entry"
+    [ "$p" = "$fpath" ] && covered=1
+  done
+  while read -r m; do
+    [ -n "$m" ] || continue
+    case "$fpath" in "$m"|"$m".*) covered=1; break;; esac
+  done < <(awk -F'\t' '$1=="omit"{print $2}' "$MANIFEST")
+  if [ -z "$covered" ]; then
+    echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
+    echo "  Its own fields become config paths and none of them is decided."
+    echo "  Give it a SURFACE entry with prefix '$fpath', or an 'omit' manifest"
+    echo "  row covering it. Counting a subtree as one field is how a scalar"
+    echo "  turning into a struct passes with no count change at all."
+    exit 1
+  fi
+done < "$tmp/fields"
+cut -f1 "$tmp/fields" | sort -u > "$tmp/fieldpaths"
 
 # 3. The manifest. Every row needs three tab fields with a non-empty rationale:
 #    a bare path is not a decision, and the gate's own advice says "decide it".
@@ -279,7 +330,7 @@ while read -r path; do
     case "$path" in "$m"|"$m".*) ok=1; break;; esac
   done < "$tmp/man_paths"
   [ -n "$ok" ] || undecided="$undecided $path"
-done < "$tmp/fields"
+done < "$tmp/fieldpaths"
 if [ -n "$undecided" ]; then
   echo "FAIL: config field(s) with NO recorded disclosure decision:"
   printf '  %s\n' $undecided
@@ -298,4 +349,4 @@ if ! grep -qF -- "$(printf 'omit\t%s\t' "$CEILING_REQUIRES_SUPPRESSED")" "$MANIF
   exit 1
 fi
 
-echo "config-disclosure-drift: $(wc -l < "$tmp/man_paths" | tr -d ' ') paths decided, $(wc -l < "$tmp/fields" | tr -d ' ') struct fields covered"
+echo "config-disclosure-drift: $(wc -l < "$tmp/man_paths" | tr -d ' ') paths decided, $(wc -l < "$tmp/fieldpaths" | tr -d ' ') struct fields covered"

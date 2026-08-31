@@ -58,6 +58,8 @@ Revisions present at the pin, under `docs/specification/`:
 
 **Only a dual-era implementation interoperates with both.** Two of seven combinations fail outright.
 
+> **Updated 2026-09-01.** The AGENTS.md clause cited below no longer exists: by operator ruling nothing is a breaking change while Maknae is still building, and the operator is **sole governance** on protocol and wire semantics. The observation about the external protocol stands on its own; the citation does not. Pointer repaired in place per this repo's convention for superseded text — not a proposal to restore anything.
+>
 **The `Modern → Legacy` failure mode is the dangerous one for a security product**: a legacy server *"may even process an era-ambiguous method under legacy semantics."* A request can be **acted on under semantics the caller did not intend**, silently. That is precisely the *"semantic break behind a stable wire"* AGENTS.md's protocol-discipline rule names — *"on a policy protocol, that is how a deny silently becomes a permit."*
 
 ### Era detection
