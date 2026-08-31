@@ -1048,13 +1048,33 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
     );
-    // What the daemon would hold after boot-time redaction: shape disclosed,
-    // value masked. `hvs.THE-SECRET` stands in for anything that must not ship.
-    let mut vault = std::collections::BTreeMap::new();
-    vault.insert("addr".to_string(), "<value set>".to_string());
-    vault.insert("root_token".to_string(), "<value set>".to_string());
-    let mut view = maknae_kernel::ConfigView::new();
-    view.insert("vault".to_string(), vault);
+    // The view is produced by the REAL redaction over a REAL Document holding a
+    // REAL secret -- not hand-written to look redacted.
+    //
+    // The earlier version of this test built the masked view itself and then
+    // asserted the secret was absent from the frame. The secret was never in
+    // the input, so no mutation of the redaction rule, the boot wiring, or the
+    // wire could make that assertion fail. It proved the author could type
+    // "<value set>". Now `disclosable_view` runs, and widening DISCLOSABLE or
+    // inverting render's allowlist check turns this red.
+    let doc = maknae_config::Document::from_sections_for_test(vec![(
+        "vault".to_string(),
+        maknae_config::Value::Map(vec![
+            (
+                "addr".to_string(),
+                maknae_config::Value::Str("https://vault.example:8200".into()),
+            ),
+            (
+                "root_token".to_string(),
+                maknae_config::Value::Str("hvs.THE-SECRET".into()),
+            ),
+        ]),
+    )]);
+    let view = doc.disclosable_view();
+    assert_eq!(
+        view["vault"]["root_token"], "<value set>",
+        "precondition: the redaction masked it before the wire ever saw it"
+    );
 
     let emit = RecEmit::new();
     let frame = drive_with(
@@ -1072,7 +1092,8 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
 
     assert!(
         !String::from_utf8_lossy(&frame).contains("hvs."),
-        "no secret material may appear in the response FRAME"
+        "no secret material may appear in the response FRAME -- the secret is \
+         genuinely present in the source Document, so this can fail"
     );
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Ok(maknae_proto::Payload::ConfigView(v)) => {
@@ -1084,9 +1105,10 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.action, "admin.config.show");
     assert_eq!(req.outcome.result, "permit");
-    assert_ne!(
-        req.outcome.posture, "not-implemented",
-        "the term has behaviour now; the audit posture must say so"
+    assert_eq!(
+        req.outcome.posture, "authorized",
+        "the term has behaviour now; assert the posture it MUST have, not merely \
+         one it must not -- `assert_ne` passes for any other string"
     );
 }
 

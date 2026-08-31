@@ -103,9 +103,22 @@ pub struct WhereCtx {
 /// section → (dotted field path → rendered value).
 ///
 /// **Computed ONCE at boot, already redacted** (`maknae_config::Document::
-/// disclosable_view`). The request path therefore never holds raw configuration
-/// values at all -- there is nothing here for a future arm to accidentally
-/// disclose, because the unredacted `Document` is not reachable from it.
+/// disclosable_view`), so the unredacted `Document` is not reachable from the
+/// request path.
+///
+/// **That is the whole of the claim, and it is narrower than it looks.**
+/// `handle` still holds raw configuration in the same scope as the arm that
+/// answers `admin.config.show`: `cfg` (the whole `transport` section --
+/// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
+/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). A future
+/// `admin.status` arm wanting "which socket am I on?" finds `cfg.socket_path`
+/// sitting right there. **Any new arm that reaches for one of those owes the
+/// same disclosure argument this one made** -- the boot-time redaction protects
+/// the `Document`, not the request path in general.
+///
+/// It is also a BOOT SNAPSHOT. The authz policy is deliberately re-read per
+/// request; this is not. When a config reload lands, this reports stale
+/// settings until restart.
 pub type ConfigView =
     std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
 
@@ -1847,6 +1860,26 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
+    // Built before `transport` is moved: the resolved settings are folded in
+    // here, so the view reports what the daemon actually runs on.
+    let config_view = {
+        let mut v = boot.document().disclosable_view();
+        maknae_config::Document::merge_resolved(
+            &mut v,
+            "transport",
+            &[
+                ("socket_path", transport.socket_path.display().to_string()),
+                ("max_connections", transport.max_connections.to_string()),
+                ("frame_max_bytes", transport.frame_max_bytes.to_string()),
+                (
+                    "handshake_timeout_ms",
+                    transport.handshake_timeout_ms.to_string(),
+                ),
+                ("read_timeout_ms", transport.read_timeout_ms.to_string()),
+            ],
+        );
+        Arc::new(v)
+    };
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -1859,7 +1892,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         Arc::clone(&principal),
         // Redact ONCE, here, at boot. The run loop receives only the view;
         // the unredacted Document does not travel with it.
-        Arc::new(boot.document().disclosable_view()),
+        config_view,
     )
     .await;
 

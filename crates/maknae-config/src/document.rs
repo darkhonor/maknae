@@ -36,6 +36,22 @@ pub struct Document {
 }
 
 impl Document {
+    /// Build a `Document` from sections directly, for tests that need a REAL
+    /// one without the ownership-gated file load. Feature-gated and non-default
+    /// (the `hermetic-test-seam` pattern used by `load_authz`): the code path
+    /// under test -- [`Document::disclosable_view`] -- is the production one,
+    /// only the source of the sections is hermetic.
+    #[cfg(feature = "hermetic-test-seam")]
+    pub fn from_sections_for_test(sections: Vec<(String, Value)>) -> Self {
+        Document {
+            sections: sections
+                .into_iter()
+                .map(|(n, v)| (n, v, Source::Base))
+                .collect(),
+            overrides: Vec::new(),
+        }
+    }
+
     /// Loader-only constructor.
     pub(crate) fn new(sections: Vec<(String, Value, Source)>, overrides: Vec<Override>) -> Self {
         Document {
@@ -82,6 +98,34 @@ impl Document {
         }
         out
     }
+
+    /// Fold a subsystem's RESOLVED settings into a view.
+    ///
+    /// The ruling is "the effective composed settings **as the daemon actually
+    /// resolved them**", and a `Document` cannot satisfy that alone: a section
+    /// absent from the file -- `transport:` in the shipped skeleton -- is
+    /// absent from the `Document` too, while the daemon is very much running on
+    /// its defaults. Reporting no `transport` section would tell an operator
+    /// the settings do not exist, which is worse than masking them.
+    ///
+    /// The caller supplies already-resolved values at boot; classification is
+    /// unchanged, so an unclassified resolved field still masks.
+    pub fn merge_resolved(
+        view: &mut BTreeMap<String, BTreeMap<String, String>>,
+        section: &str,
+        fields: &[(&str, String)],
+    ) {
+        let entry = view.entry(section.to_string()).or_default();
+        for (path, value) in fields {
+            let full = format!("{section}.{path}");
+            let shown = if DISCLOSABLE.contains(&full.as_str()) {
+                value.clone()
+            } else {
+                MASK.to_string()
+            };
+            entry.insert((*path).to_string(), shown);
+        }
+    }
 }
 
 /// Rendered in place of a value this crate has not declared disclosable. Says
@@ -103,11 +147,50 @@ pub const NOT_SET: &str = "<not set>";
 /// for `admin.config.show`. The bar is that the value is deployment SHAPE an
 /// operator cannot debug without, and is not itself a credential, a secret
 /// location, or a fact that materially helps an attacker choose a target.
+/// **Deny-by-default is the MECHANISM; the operator's ruling is the OUTCOME,
+/// and they are not in tension once the classification work is actually done.**
+/// The ruling was "the full effective set of configuration settings, with
+/// secrets masked". Shipping a one-entry list would have honoured the mechanism
+/// and quietly failed the ruling -- an operator would see almost nothing. So
+/// every field the schema defines today is classified here, deliberately, one
+/// at a time; what deny-by-default still buys is that a field added TOMORROW is
+/// masked until someone does the same for it.
+///
+/// None of these carry secret material. Maknae's secrets are not in
+/// `maknae.yaml` at all -- they arrive via `$CREDENTIALS_DIRECTORY` and sealed
+/// files under `private/`, which this view never reads.
 const DISCLOSABLE: &[&str] = &[
     // Deployment identity. Already baked into every plane leaf's URI SAN, so
     // any peer completing a handshake has it; withholding it here would hide
     // it from the operator and from nobody else.
     "core.deployment_id",
+    // Vault WHERE and WHICH MOUNT -- never a credential. `vault_config_from_
+    // document` accepts `vault.deployment_id` as a fallback spelling for the
+    // `core` one, so it is classified identically; omitting it would make the
+    // term's usefulness depend on which supported spelling a site chose.
+    "vault.addr",
+    "vault.approle_mount",
+    "vault.pki_int_mount",
+    "vault.deployment_id",
+    // Audit destination. A path, and the operator already needs it to find the
+    // log they are debugging.
+    "audit.jsonl_path",
+    "audit.siem",
+    // The enrolled principal. The operator IS this principal; hiding their own
+    // uid and home from them serves nobody.
+    "principal.name",
+    "principal.uid",
+    "principal.home",
+    // Transport shape, as resolved -- see `merge_resolved_defaults`.
+    "transport.socket_path",
+    "transport.max_connections",
+    "transport.frame_max_bytes",
+    "transport.handshake_timeout_ms",
+    "transport.read_timeout_ms",
+    // NOT classified, deliberately:
+    //   audit.au3_1 -- operator-authored free-form JSON. Whatever a deployer
+    //     put in there, nobody has reviewed it, so it masks.
+    //   every future field, in every future section.
 ];
 
 /// `disclosable` is a PARAMETER, not a direct read of [`DISCLOSABLE`], so the
@@ -161,10 +244,17 @@ fn render(disclosable: &[&str], section: &str, path: &str, v: &Value) -> String 
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Str(s) => s.clone(),
-        // A declared field holding a collection is NOT rendered element-wise:
+        // A declared field holding a SEQUENCE is not rendered element-wise:
         // the declaration was made about a scalar, and silently widening it to
         // a list would disclose values nobody classified.
-        Value::Seq(_) | Value::Map(_) | Value::Null => MASK.to_string(),
+        //
+        // `Value::Map` never arrives here -- `flatten` recurses into maps and
+        // only calls `render` from its non-map arm. So a MAP-VALUED entry on
+        // [`DISCLOSABLE`] (`"vault.approle"`) matches NOTHING: it is a silent
+        // no-op, not a mask, because each leaf below it is classified on its
+        // own full path. Declare the leaves, never the branch.
+        Value::Seq(_) | Value::Null => MASK.to_string(),
+        Value::Map(_) => unreachable!("flatten recurses into maps; render sees leaves only"),
     }
 }
 
@@ -317,7 +407,7 @@ mod tests {
     /// nobody argued for, which is the opposite of the point.
     #[test]
     fn a_declared_field_renders_every_scalar_type_and_masks_every_collection() {
-        let allow: &[&str] = &["s.b", "s.i", "s.f", "s.t", "s.seq", "s.map", "s.null"];
+        let allow: &[&str] = &["s.b", "s.i", "s.f", "s.t", "s.seq", "s.null"];
         let mut out = BTreeMap::new();
         flatten(
             allow,
@@ -343,6 +433,52 @@ mod tests {
         assert_eq!(out["seq"], MASK);
         assert!(!format!("{out:?}").contains("hidden"), "{out:?}");
         assert_eq!(out["null"], NOT_SET);
+    }
+
+    /// `merge_resolved` applies the SAME classification as the file path. A
+    /// resolved default is not privileged for having come from code -- an
+    /// unclassified one masks exactly as an unclassified file value does.
+    #[test]
+    fn resolved_defaults_are_classified_like_everything_else() {
+        let mut view: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        Document::merge_resolved(
+            &mut view,
+            "transport",
+            &[
+                ("socket_path", "/run/maknae/maknaed.sock".to_string()),
+                ("a_future_transport_field", "unclassified".to_string()),
+            ],
+        );
+        assert_eq!(view["transport"]["socket_path"], "/run/maknae/maknaed.sock");
+        assert_eq!(
+            view["transport"]["a_future_transport_field"], MASK,
+            "coming from code rather than the file earns no disclosure"
+        );
+    }
+
+    /// A MAP-valued entry on the allowlist matches nothing -- it is a silent
+    /// no-op, and the leaves below it are classified on their own full paths.
+    /// Pinned because the natural reading of "declared fields are disclosed"
+    /// is that declaring a branch discloses the branch, and it does not.
+    #[test]
+    fn a_map_valued_allowlist_entry_discloses_nothing() {
+        let allow: &[&str] = &["s.approle"]; // the BRANCH, not its leaves
+        let mut out = BTreeMap::new();
+        flatten(
+            allow,
+            "s",
+            "",
+            &map(vec![(
+                "approle",
+                map(vec![("role_id", Value::Str("leak-me".into()))]),
+            )]),
+            &mut out,
+        );
+        assert_eq!(
+            out["approle.role_id"], MASK,
+            "declaring the branch must not disclose the leaf"
+        );
+        assert!(!format!("{out:?}").contains("leak-me"), "{out:?}");
     }
 
     /// A section whose entire body is a scalar is keyed by the section name,

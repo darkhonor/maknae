@@ -101,7 +101,15 @@ Decision 3 says a role-independent grant is ungrammatical, and that is true of `
 
 **15. `admin.config.show` discloses the FULL effective configuration, with secret VALUES masked** (operator ruling 2026-08-31). Not a curated subset: the effective composed settings as the daemon actually resolved them, which is what makes the term worth having for an operator debugging a deployment.
 
-Secret values are replaced by a presence marker — `<value set>` or equivalent — so the disclosure says **that** a secret is configured without saying **what** it is. Presence is operationally necessary (an unset credential is the bug being debugged); the value never is.
+Secret values are replaced by a presence marker — `<value set>` — so the disclosure says **that** a setting is configured without saying **what** it is.
+
+**How that is implemented, and the correction that got it there.** The mechanism is deny-by-default over a code-declared allowlist (`DISCLOSABLE`), not a denylist of names that look secret: a denylist defaults every FUTURE field to disclosed and depends on whoever adds one remembering to classify it, which is the `~/.ssh/id_*` shape this project has already rejected once.
+
+> **Corrected 2026-08-31, after review.** The first implementation shipped that mechanism with a ONE-ENTRY allowlist, which honoured the mechanism and quietly failed this ruling — an operator would have seen `core.deployment_id` and nothing else, from a decision that says "full effective set". Deny-by-default and the ruling are only in tension if the classification work is skipped. Every field the schema defines today is now classified individually; none of them carry secret material, because Maknae's secrets are not in `maknae.yaml` at all (they arrive via `$CREDENTIALS_DIRECTORY` and sealed files under `private/`, which this view never reads). What deny-by-default still buys is that a field added *tomorrow* masks until someone classifies it too.
+>
+> **Also corrected: settings the daemon resolved but the file never stated.** `transport:` is absent from the shipped skeleton, so it is absent from the `Document` — while the daemon is very much running on its defaults. Reporting no `transport` section tells an operator those settings do not exist, which is worse than masking them. Resolved values are folded in at boot (`Document::merge_resolved`) under the same classification. "As the daemon actually resolved them" is the phrase in this ruling, and the first implementation did not honour it.
+
+`audit.au3_1` is deliberately NOT classified: it is operator-authored free-form JSON, so whatever a deployer put there has been reviewed by nobody and it masks.
 
 This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admin.status`'s and `admin.subject.list`'s response shapes remain open, and neither is a disclosure question of the same weight.
 
