@@ -309,11 +309,9 @@ const DISCLOSABLE: &[&str] = &[
     //     deployment the ceiling is frequently itself classified. Deny-by-
     //     default breaks the tie: masked until the operator rules otherwise.
     //
-    //   lake -- a registered section (`boot.rs`) whose schema is the Knowledge
-    //     Lake's, not Maknae's, and which no parser in this crate reads. It
-    //     masks by default; named here so its absence from the allowlist is a
-    //     recorded decision rather than an oversight, and so ADR-0010's claim
-    //     that the reasons live beside this list is true of it too.
+    //   lake -- SUPPRESSED, not masked; see the list above. "No parser reads
+    //     it" was offered as a reason to mask, and it is the premise of the
+    //     opposite conclusion: unread means unvalidated means unenumerable.
     //
     //   every future field, in every future section.
 ];
@@ -344,9 +342,23 @@ const SUPPRESSED: &[&str] = &[
     // (`audit_cfg::to_json` accepts an arbitrary map), so a code-declared path
     // allowlist is structurally incapable of classifying them: "unclassified
     // therefore withheld" silently degrades to "unclassified therefore the key
-    // name ships" for exactly this subtree. `audit: { au3_1: { enclave:
+    // name ships". `lake` is the other subtree in that condition -- see above;
+    // an earlier version of this comment said "for exactly this subtree" and
+    // that wording is what let the sibling case sit unfixed. `audit: { au3_1: { enclave:
     // "SCIF-B7" } }` put `au3_1.enclave` on the wire. Prefix-suppressed.
     "audit.au3_1",
+    // The `lake` section, and everything under it.
+    //
+    // The SAME structural condition as `audit.au3_1`, and it was carried as a
+    // mask while the comment three lines below claimed the key-name leak
+    // applied to that subtree "alone". `docs/configuration.md` §5: `lake` is
+    // registered but INERT -- "neither the keys nor the shape are validated,
+    // and nothing is forwarded anywhere". Unvalidated, deployer-authored,
+    // unenumerable: a code-declared path allowlist cannot classify it, so
+    // masking put `corpus_topology.<whatever-they-named-it>` on the wire.
+    // Reclassify per-key when the memory subsystem lands and the shape is
+    // pinned -- the same condition set for `audit.siem`.
+    "lake",
     // The classification ceiling, and everything under it (prefix match).
     //
     // Masking these was not enough, and the reason is the same one that earned

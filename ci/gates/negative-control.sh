@@ -589,6 +589,7 @@ const DISCLOSABLE: &[&str] = &[
 const SUPPRESSED: &[&str] = &[
     "vault.insecure_plaintext_secret_path",
     "core.handling",
+    "audit.au3_1",
 ];
 FIX
   # The field is declared MULTI-LINE-parser style deliberately: the shape that
@@ -646,7 +647,7 @@ FIX
 CFG_OK='disclose	transport	transport shape, all fields
 disclose	vault.addr	where vault is
 mask	audit.siem	endpoint, no schema
-mask	audit.au3_1	deployer-authored
+omit	audit.au3_1	deployer-authored, unenumerable
 disclose	vault.approle_mount	mount name
 disclose	vault.pki_int_mount	mount name
 disclose	vault.deployment_id	fallback spelling
@@ -698,9 +699,9 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
-const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling"];
+const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" "12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -794,10 +795,26 @@ expect_reject "config-disclosure-drift/section-block-with-unreadable-name" "$fx/
 fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^mask	lake")")"
 expect_reject "config-disclosure-drift/no-struct-section-without-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a subtree whose struct is declared `pub(crate)`. The depth check was
+# anchored `^pub struct` and so re-introduced, eighty lines below the fix, the
+# exact visibility mistake the FIELD extractor had already been corrected for
+# twice. `pub(crate) struct` is live house style in this workspace.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-config/src/audit_cfg.rs"
+s = p.read_text()
+s = s.replace("pub struct AuditConfig {",
+              "pub(crate) struct SiemConfig {\n    pub(crate) url: String,\n}\n\npub struct AuditConfig {", 1)
+s = s.replace("    pub siem: Option<String>,", "    pub(crate) siem: SiemConfig,", 1)
+p.write_text(s)
+PY
+expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" "12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
@@ -805,7 +822,7 @@ expect_accept "config-disclosure-drift/clean-fixture-passes" "12 paths decided, 
 # (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
 # control; asserting it here means any future silent shrink is a red build.
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  "24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

@@ -223,7 +223,17 @@ for entry in "${SURFACE[@]}"; do
           if (rest !~ /^:/) {
             ty = rest
             sub(/^[[:space:]]*/, "", ty)
-            sub(/[,{].*$/, "", ty)
+            # Cut at the first comma or brace at ANGLE-BRACKET DEPTH ZERO.
+            # A flat `sub(/[,{].*$/)` truncated `BTreeMap<String, SiemConfig>`
+            # to `BTreeMap<String`, which matched no type and hid a subtree.
+            depth = 0; cut = length(ty) + 1
+            for (i = 1; i <= length(ty); i++) {
+              ch = substr(ty, i, 1)
+              if (ch == "<") depth++
+              else if (ch == ">") depth--
+              else if ((ch == "," || ch == "{") && depth <= 0) { cut = i; break }
+            }
+            ty = substr(ty, 1, cut - 1)
             gsub(/[[:space:]]+$/, "", ty)
             print p "." tok "\t" ty
           }
@@ -267,11 +277,32 @@ sort -u "$tmp/fields" -o "$tmp/fields"
 # enforced that it must.
 while IFS=$'\t' read -r fpath fty; do
   [ -n "$fty" ] || continue
-  bare=$(printf '%s' "$fty" | sed -E 's/^(Option|Box|Arc|Vec)<//; s/>+$//' | sed 's/.*:://')
+  # Strip wrappers to FIXPOINT: a single pass left `Option<Box<SiemConfig>>` as
+  # `Box<SiemConfig` and matched nothing. `Vec` is deliberately NOT stripped --
+  # `flatten` never recurses into `Value::Seq` and `render` masks it whole, so a
+  # sequence genuinely IS a leaf and demanding coverage for it would block
+  # legitimate work with a wrong diagnosis.
+  bare=$(printf '%s' "$fty" | sed -E ':a; s/^(Option|Box|Arc)<//; ta' | sed -E 's/>+$//' | sed 's/.*:://')
+  # A dynamic-key map is a subtree whose keys nobody can enumerate -- the same
+  # structural condition that moved `audit.au3_1` from mask to omit. Demand the
+  # same coverage rather than letting a typed map ship its deployer-authored
+  # key names.
+  case "$fty" in
+    *HashMap\<*|*BTreeMap\<*|*serde_json::Value*|*Map\<*) bare="__DYNAMIC_MAP__" ;;
+  esac
   case "$bare" in
     ''|bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|Value|str) continue ;;
   esac
-  grep -rqE "^pub struct $bare([[:space:]<{]|$)" crates/ 2>/dev/null || continue
+  # ANY visibility, or none -- `pub(crate) struct` and bare `struct` are live
+  # house style in this workspace, including inside the very crate SURFACE
+  # reads (`loader.rs::Registry`, `builder.rs::Builder`). This anchor was
+  # written `^pub struct` and so re-introduced, eighty lines below the fix, the
+  # exact mistake the FIELD extractor had already been corrected for twice.
+  # Visibility is irrelevant to disclosure at both levels, for one reason:
+  # `flatten` walks the parsed `Value`, not the Rust item.
+  if [ "$bare" != "__DYNAMIC_MAP__" ]; then
+    grep -rqE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct $bare([[:space:]<{]|$)" crates/ 2>/dev/null || continue
+  fi
   covered=""
   for entry in "${SURFACE[@]}"; do
     IFS='|' read -r _ _ p _ <<< "$entry"
@@ -282,7 +313,11 @@ while IFS=$'\t' read -r fpath fty; do
     case "$fpath" in "$m"|"$m".*) covered=1; break;; esac
   done < <(awk -F'\t' '$1=="omit"{print $2}' "$MANIFEST")
   if [ -z "$covered" ]; then
-    echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
+    if [ "$bare" = "__DYNAMIC_MAP__" ]; then
+      echo "FAIL: '$fpath' is a dynamic-key MAP — a subtree whose keys nobody can enumerate."
+    else
+      echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
+    fi
     echo "  Its own fields become config paths and none of them is decided."
     echo "  Give it a SURFACE entry with prefix '$fpath', or an 'omit' manifest"
     echo "  row covering it. Counting a subtree as one field is how a scalar"
