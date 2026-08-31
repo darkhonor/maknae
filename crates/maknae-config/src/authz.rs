@@ -501,7 +501,10 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
-    check_known_keys(&map, &["schema_version", "permissions", "bindings", "roles"])?;
+    check_known_keys(
+        &map,
+        &["schema_version", "permissions", "bindings", "roles"],
+    )?;
 
     // Missing or non-integer schema_version is represented by the sentinel 0
     // (valid versions start at 1) so both cases refuse via the same variant.
@@ -1520,7 +1523,10 @@ mod tests {
     fn roles_entry_with_empty_actions_parses_to_empty_lists() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: {{}}\n");
         let p = parse_authz(&body, None).unwrap();
-        assert_eq!(p.action_grants.get("admin"), Some(&RawActionGrants::default()));
+        assert_eq!(
+            p.action_grants.get("admin"),
+            Some(&RawActionGrants::default())
+        );
     }
 
     #[test]
@@ -1564,28 +1570,40 @@ mod tests {
         // silently treat as empty — same fail-closed stance as bindings.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    actions:\n      allow:\n");
         let e = parse_authz(&body, None).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("roles")), "{e:?}");
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn roles_null_role_body_refused_with_roles_message() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n");
         let e = parse_authz(&body, None).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("roles")), "{e:?}");
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn roles_non_map_refused() {
         let body = format!("{PREAMBLE}roles: [admin]\n");
         let e = parse_authz(&body, None).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("roles")), "{e:?}");
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn roles_actions_non_map_refused() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    actions: [admin.status]\n");
         let e = parse_authz(&body, None).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("roles")), "{e:?}");
+        assert!(
+            matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -1599,6 +1617,9 @@ mod tests {
             p.bindings.as_ref().and_then(|b| b.get("admin")),
             Some(&vec!["alex".to_string()])
         );
-        assert_eq!(p.action_grants["admin"].allow, vec!["admin.status".to_string()]);
+        assert_eq!(
+            p.action_grants["admin"].allow,
+            vec!["admin.status".to_string()]
+        );
     }
 }
