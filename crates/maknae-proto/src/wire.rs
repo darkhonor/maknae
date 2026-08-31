@@ -257,6 +257,16 @@ pub enum Payload {
     /// File content for a permitted `Read` — byte-string on the wire,
     /// zeroize-on-drop, redacting Debug (see [`crate::Bytes`]).
     ReadContent(crate::Bytes),
+    /// The effective configuration for a permitted `admin.config.show`:
+    /// section → (dotted field path → rendered value).
+    ///
+    /// **Values arrive here ALREADY REDACTED.** The disclosure rule lives in
+    /// `maknae_config::effective_view` — deny-by-default over a code-declared
+    /// allowlist, three states (disclosed / masked / omitted-entirely) plus a
+    /// `<not set>` marker — and this type deliberately carries none of it:
+    /// a second redaction implementation on the wire side is a second thing to
+    /// drift. Never construct this from raw configuration.
+    ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

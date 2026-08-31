@@ -146,7 +146,17 @@ where
     if let Ok(f) = std::fs::File::open(delegate) {
         fds.push(std::os::fd::OwnedFd::from(f));
     }
-    drive_with(fx_principal, authorizer, emit, peer_uid, verb, timeout, fds).await
+    drive_with(
+        fx_principal,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        fds,
+        Arc::new(Default::default()),
+    )
+    .await
 }
 
 /// Drive one request through `handle()` with the given authorizer; return
@@ -170,6 +180,7 @@ where
         verb,
         timeout,
         maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
     )
     .await
 }
@@ -183,6 +194,9 @@ async fn drive_with<P>(
     verb: maknae_proto::Verb,
     timeout: Duration,
     delegated: maknae_io::DelegatedFds,
+    // The already-redacted effective config the daemon would hold. Default
+    // (empty) for every verb that is not `admin.config.show`.
+    config_view: Arc<maknae_kernel::ConfigView>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -202,6 +216,7 @@ where
         serde_json::json!({}),
         authorizer,
         Arc::new(fx_principal.clone()),
+        Arc::clone(&config_view),
         timeout,
         maknae_security::Lane::Local,
         delegated,
@@ -1021,6 +1036,173 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// An oversized `ConfigView` is refused EXPLICITLY, not written oversized.
+///
+/// `ConfigView` is the only payload on that arm whose size scales with input --
+/// one entry per config leaf. Without a bound the daemon writes a frame the
+/// client's own `read_frame(frame_max_bytes)` then refuses as a framing
+/// `Oversize`: an authorized request failing with an undiagnosable transport
+/// error, after its audit record already said "permit / authorized". The read
+/// PEP's stance applies unchanged -- a PERMIT whose delivery is refused is
+/// refused explicitly.
+///
+/// Raised independently by an external reviewer after three internal rounds had
+/// flagged it and it was deferred each time.
+#[tokio::test]
+async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() {
+    let fx = Fixture::new("cfgshow-toolarge");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+    );
+    // Enough leaves to exceed the default frame cap. Values are already
+    // redacted; it is the KEY COUNT that grows the frame.
+    let mut section = std::collections::BTreeMap::new();
+    for i in 0..20_000 {
+        section.insert(format!("key_{i:06}"), maknae_config::MASK.to_string());
+    }
+    let mut view = maknae_kernel::ConfigView::new();
+    view.insert("vault".to_string(), section);
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+
+    let cfg = maknae_config::transport_from_section(None).unwrap();
+    assert!(
+        frame.len() <= cfg.frame_max_bytes + 64,
+        "the daemon must not emit a frame its own client cannot read: {} bytes",
+        frame.len()
+    );
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::TooLarge),
+        other => panic!("expected an explicit TooLarge refusal, got {other:?}"),
+    }
+}
+
+/// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,
+/// and a real redacted disclosure on the wire (#162 Phase 2).
+///
+/// The secret is planted in the view the daemon holds and asserted ABSENT from
+/// the response bytes, not merely from the decoded payload -- a redaction that
+/// holds after decoding but leaks in the frame is not a redaction.
+#[tokio::test]
+async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
+    let fx = Fixture::new("cfgshow-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+    );
+    // The view is produced by the REAL redaction over a REAL Document holding a
+    // REAL secret -- not hand-written to look redacted.
+    //
+    // The earlier version of this test built the masked view itself and then
+    // asserted the secret was absent from the frame. The secret was never in
+    // the input, so no mutation of the redaction rule, the boot wiring, or the
+    // wire could make that assertion fail. It proved the author could type
+    // maknae_config::MASK. Now `disclosable_view` runs, and widening DISCLOSABLE or
+    // inverting render's allowlist check turns this red.
+    let doc = maknae_config::Document::from_sections_for_test(vec![(
+        "vault".to_string(),
+        maknae_config::Value::Map(vec![
+            (
+                "addr".to_string(),
+                maknae_config::Value::Str("https://vault.example:8200".into()),
+            ),
+            (
+                "root_token".to_string(),
+                maknae_config::Value::Str("hvs.THE-SECRET".into()),
+            ),
+        ]),
+    )]);
+    let view = doc.disclosable_view();
+    assert_eq!(
+        view["vault"]["root_token"],
+        maknae_config::MASK,
+        "precondition: the redaction masked it before the wire ever saw it"
+    );
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+
+    assert!(
+        !String::from_utf8_lossy(&frame).contains("hvs."),
+        "no secret material may appear in the response FRAME -- the secret is \
+         genuinely present in the source Document, so this can fail"
+    );
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::ConfigView(v)) => {
+            assert_eq!(v["vault"]["root_token"], maknae_config::MASK);
+            assert!(v["vault"].contains_key("addr"), "shape is disclosed: {v:?}");
+        }
+        other => panic!("expected a ConfigView payload, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.config.show");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(
+        req.outcome.posture, "authorized",
+        "the term has behaviour now; assert the posture it MUST have, not merely \
+         one it must not -- `assert_ne` passes for any other string"
+    );
+}
+
+/// Without the grant, nothing is disclosed. This is what makes the test above
+/// mean something: the authorization decision, not the dispatch, is the gate.
+#[tokio::test]
+async fn config_show_without_a_grant_discloses_nothing() {
+    let fx = Fixture::new("cfgshow-nogrant");
+    fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+    let mut vault = std::collections::BTreeMap::new();
+    vault.insert("addr".to_string(), maknae_config::MASK.to_string());
+    let mut view = maknae_kernel::ConfigView::new();
+    view.insert("vault".to_string(), vault);
+
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(view),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("an ungranted config.show must disclose NOTHING, got {other:?}"),
+    }
+    // NOTE: no "the section names are absent from the frame" assertion here.
+    // One was written, and it could not fail: the deny path returns before the
+    // `config_view` binding is ever reached, so no mutation of the redaction
+    // rule, the allowlist or the view could turn it red. It read like a control
+    // and was decoration. The two assertions that remain -- Unauthorized on the
+    // wire, `deny` in the audit record -- are the real ones.
+    assert_eq!(request_record(&emit.records()).outcome.result, "deny");
+}
+
 /// The `roles:` grant crosses the SEAM (#162 step 7).
 ///
 /// Every other test of the grant path sits on one side of it, and the existing
@@ -1042,7 +1224,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
 async fn a_roles_granted_term_permits_through_the_real_pdp_and_still_discloses_nothing() {
     let fx = Fixture::new("roles-grant");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
     let emit = RecEmit::new();
     let frame = drive(
@@ -1108,7 +1290,7 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
 async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
     let fx = Fixture::new("roles-deny");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    actions:\n      allow: [\"admin.status\"]\n      deny: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.status\"]\n",
     );
     let emit = RecEmit::new();
     let frame = drive(

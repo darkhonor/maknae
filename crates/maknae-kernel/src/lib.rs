@@ -22,7 +22,7 @@ pub use handler::{
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
 };
-pub use run::{accept_loop, handle, run, Conn, PlaneAccept, WhereCtx};
+pub use run::{accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

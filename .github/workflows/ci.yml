@@ -96,6 +96,8 @@ jobs:
         run: ci/gates/isolation-contract-lint.sh
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
+      - name: Gate — config-disclosure drift (#162)
+        run: ci/gates/config-disclosure-drift.sh
       - name: External-authority lint (#34 — no Maknae rule rests on a foreign ADR)
         run: ci/gates/external-authority-lint.sh
       - name: Coverage tooling (llvm-tools + cargo-llvm-cov pinned)

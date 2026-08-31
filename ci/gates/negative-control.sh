@@ -547,6 +547,302 @@ grantable	session.ghost	grantable-not-granted	NO action term behind it
 expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
+# ---- config-disclosure-drift (#162): the admin.config.show surface ----
+# Five review rounds found this control's completeness resting on prose, and
+# found the prose wrong twice. The gate replaced it -- and then the FIRST gate
+# repeated the mistake, extracting parser keys with a regex over assumed call
+# shapes that matched zero of the real multi-line `bounded_*` sites. These
+# fixtures are the probes that defeated that version.
+cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
+  local fixture
+  fixture="$(mktemp -d)"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
+           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src"
+  # The gate cross-checks its SURFACE list against the section registry, so a
+  # fixture needs one.
+  cat > "$fixture/crates/maknae-kernel/src/boot.rs" <<'FIX'
+const LAKE_SECTION: &str = "lake";
+const VAULT_SECTION: &str = "vault";
+const TRANSPORT_SECTION: &str = "transport";
+const AUDIT_SECTION: &str = "audit";
+const PRINCIPAL_SECTION: &str = "principal";
+    let specs = [
+        SectionSpec { name: LAKE_SECTION.to_string(), required: false },
+        SectionSpec { name: VAULT_SECTION.to_string(), required: false },
+        SectionSpec { name: TRANSPORT_SECTION.to_string(), required: false },
+        SectionSpec { name: AUDIT_SECTION.to_string(), required: false },
+        SectionSpec { name: PRINCIPAL_SECTION.to_string(), required: false },
+    ];
+FIX
+  cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
+  cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
+const DISCLOSABLE: &[&str] = &[
+    "transport",
+    "vault.addr",
+    "vault.approle_mount",
+    "vault.pki_int_mount",
+    "vault.deployment_id",
+    "audit.jsonl_path",
+    "principal",
+    ${3:-}
+];
+const SUPPRESSED: &[&str] = &[
+    "vault.insecure_plaintext_secret_path",
+    "core.handling",
+    "audit.au3_1",
+];
+FIX
+  # The field is declared MULTI-LINE-parser style deliberately: the shape that
+  # defeated the regex extraction is exactly what must be covered now.
+  cat > "$fixture/crates/maknae-config/src/transport.rs" <<FIX
+pub struct TransportConfig {
+    pub socket_path: PathBuf,
+    pub max_connections: u32,
+    pub frame_max_bytes: usize,
+    pub handshake_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    ${2:-}
+}
+FIX
+  # Each stub carries at least one field: the gate now REFUSES a surface entry
+  # that contributes nothing, so an empty struct is not a valid fixture.
+  cat > "$fixture/crates/maknae-config/src/audit_cfg.rs" <<'FIX'
+pub struct AuditConfig {
+    pub jsonl_path: PathBuf,
+    pub siem: Option<String>,
+    pub au3_1: serde_json::Value,
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/principal.rs" <<'FIX'
+pub struct Principal {
+    pub name: String,
+    pub uid: u32,
+    pub home: PathBuf,
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/ceiling.rs" <<'FIX'
+pub struct Ceiling {
+    pub classification: String,
+    pub sci: bool,
+    pub releasable_to: Vec<String>,
+    pub cui_permitted: bool,
+    pub cui_categories_permitted: Vec<String>,
+    pub dissemination_permitted: Vec<String>,
+    pub accreditation_ref: Option<String>,
+}
+FIX
+  cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
+pub struct VaultConfig {
+    pub addr: String,
+    pub approle_mount: String,
+    pub pki_int_mount: String,
+    pub deployment_id: String,
+    pub insecure_plaintext_secret_path: Option<PathBuf>,
+}
+FIX
+  printf '%s' "$1" > "$fixture/ci/gates/config-disclosure-manifest.txt"
+  echo "$fixture"
+}
+
+CFG_OK='disclose	transport	transport shape, all fields
+disclose	vault.addr	where vault is
+mask	audit.siem	endpoint, no schema
+omit	audit.au3_1	deployer-authored, unenumerable
+disclose	vault.approle_mount	mount name
+disclose	vault.pki_int_mount	mount name
+disclose	vault.deployment_id	fallback spelling
+disclose	principal	readable via getpwuid anyway
+disclose	audit.jsonl_path	the log the operator is looking for
+omit	vault.insecure_plaintext_secret_path	presence is the finding
+omit	core.handling	presence says an above-baseline ceiling is configured
+mask	lake	the Knowledge Lake schema, not ours
+'
+
+# REJECT: a NEW config struct field with no recorded decision. This is the miss
+# the whole loop kept finding, and the shape the regex extraction could not see.
+fx="$(cfg_fixture "$CFG_OK" 'pub debug_core_dump_path: PathBuf,')"
+expect_reject "config-disclosure-drift/struct-field-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a path classified in code with no manifest row -- and it is HYPHENATED,
+# because the first gate's charset filter dropped such entries silently instead
+# of surfacing them.
+fx="$(cfg_fixture "$CFG_OK" '' '"vault.pki-int-alias",')"
+expect_reject "config-disclosure-drift/hyphenated-entry-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a manifest row carrying a path but no rationale. "Decide it" is what
+# the gate's own failure text demands; a bare path is not a decision.
+fx="$(cfg_fixture "${CFG_OK%\'}disclose	core.undecided
+")"
+expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: two contradictory decisions for one path.
+fx="$(cfg_fixture "${CFG_OK}mask	vault.addr	contradicts the row above
+")"
+expect_reject "config-disclosure-drift/duplicate-contradictory-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SURFACE entry whose struct no longer exists under that name.
+# THE FAIL-OPEN THAT SURVIVED TWO EXTRACTION REWRITES. A missing anchor yields
+# zero rows and a green gate: renaming TransportConfig silently removed five
+# fields from the decision requirement while the gate still printed "all
+# decided". Note the asymmetry that hid it -- renaming a CODE-side anchor
+# (DISCLOSABLE) fails CLOSED through the 4a diff, so only the safe half had
+# ever been probed.
+fx="$(cfg_fixture "$CFG_OK")"
+sed -i.bak 's/^pub struct TransportConfig {/pub struct TransportSettings {/' \
+  "$fx/crates/maknae-config/src/transport.rs"
+expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: a rustfmt-COLLAPSED const array still extracts. `cargo fmt --check`
+# is itself a CI gate, so a short list WILL be collapsed onto one line; an
+# anchored, first-literal-only reader emitted zero rows for it and then told
+# the reader to delete manifest rows that were correct.
+fx="$(cfg_fixture "$CFG_OK")"
+cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
+const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
+const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
+FIX
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
+# fail-open, and the one that closes the PROPERTY rather than an instance: the
+# previous two fixes asked "does this anchor match?" and never "is the anchor
+# list right, and is it all of them?". A new config section shipped both its
+# field names on the wire with nobody asked the omit-vs-mask question.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+const ENCLAVE_SECTION: &str = "enclave";
+    let more = [
+        SectionSpec { name: ENCLAVE_SECTION.to_string(), required: false },
+    ];
+FIX
+expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a pub(crate) field. Visibility is irrelevant to disclosure -- flatten
+# walks the parsed Value, not the struct -- and `pub(crate)` is live house
+# style here, so the old `pub [a-z0-9_]+:` regex left such a field unclassified
+# while the count stayed put.
+fx="$(cfg_fixture "$CFG_OK" 'pub(crate) session_token_path: PathBuf,')"
+expect_reject "config-disclosure-drift/pub-crate-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a raw-identifier field. `type` is a Rust keyword and an entirely
+# ordinary YAML key.
+fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
+expect_reject "config-disclosure-drift/raw-identifier-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SectionSpec registered with a STRING LITERAL name. boot.rs's own
+# grammar accepts it, and keying the cross-check on `[A-Z_]+_SECTION` const
+# NAMES could not see it -- exit 0 over an uncovered section, with the pinned
+# counts unchanged so nothing else fired either.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let specs = [
+        SectionSpec { name: "enclave".to_string(), required: false },
+    ];
+FIX
+expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NON-pub struct field. Visibility is irrelevant to disclosure --
+# `flatten` walks the parsed Value, not the struct -- and the regex kept
+# keying on it, so a bare `session_token_path: PathBuf,` contributed zero rows
+# and no count change. This sits beside the pub(crate) fixture deliberately:
+# the two are the same property, one keyword apart.
+fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
+expect_reject "config-disclosure-drift/private-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a scalar field turned into a config STRUCT. The silent variant of
+# the depth-blind tally: the field count does not change, so nothing else in
+# the gate fires, while the nested field NAMES reach the wire undecided.
+# document.rs itself anticipates this exact change for `audit.siem`.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-config/src/audit_cfg.rs"
+s = p.read_text()
+s = s.replace("pub struct AuditConfig {",
+              "pub struct SiemConfig {\n    pub url: String,\n    pub auth_token_path: PathBuf,\n}\n\npub struct AuditConfig {", 1)
+s = s.replace("    pub siem: Option<String>,", "    pub siem: SiemConfig,", 1)
+p.write_text(s)
+PY
+expect_reject "config-disclosure-drift/struct-typed-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SectionSpec whose `name:` operand the extractor cannot resolve.
+# Round 9's headline control, previously unprobed: the resolved-count tally is
+# what turns an unreadable registration form into a hard failure instead of a
+# silent gap, and AGENTS.md is explicit that a gate never observed failing
+# proves nothing.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let more = [
+        SectionSpec { name: principal_section_name(), required: false },
+    ];
+FIX
+expect_reject "config-disclosure-drift/unresolvable-section-operand" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SectionSpec block the operand scan misses entirely -- here because
+# `required:` precedes `name:`. The resolved-vs-registered tally is the only
+# thing that catches it; the coverage loop alone would see one fewer section
+# and pass.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-kernel/src/boot.rs" <<'FIX'
+    let more = [
+        SectionSpec { required: false, nome: LAKE_SECTION.to_string() },
+    ];
+FIX
+expect_reject "config-disclosure-drift/section-block-with-unreadable-name" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NO_STRUCT_SECTIONS entry with no manifest row. Struct-less means
+# the keys are carried verbatim, not that the disclosure is undecided.
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^mask	lake")")"
+expect_reject "config-disclosure-drift/no-struct-section-without-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a subtree whose struct is declared `pub(crate)`. The depth check was
+# anchored `^pub struct` and so re-introduced, eighty lines below the fix, the
+# exact visibility mistake the FIELD extractor had already been corrected for
+# twice. `pub(crate) struct` is live house style in this workspace.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-config/src/audit_cfg.rs"
+s = p.read_text()
+s = s.replace("pub struct AuditConfig {",
+              "pub(crate) struct SiemConfig {\n    pub(crate) url: String,\n}\n\npub struct AuditConfig {", 1)
+s = s.replace("    pub siem: Option<String>,", "    pub(crate) siem: SiemConfig,", 1)
+p.write_text(s)
+PY
+expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a field typed with THIS CRATE'S OWN `Value`. It is a map-bearing
+# enum (`value.rs`: `Map(Vec<(String, Value)>)`), so `pub extra: Value` is an
+# open-ended deployer-authored subtree -- and `use crate::Value` is already in
+# scope in every file SURFACE reads. It sat on the scalar skip list, where it
+# was DEAD for its apparent purpose: `serde_json::Value` is intercepted by the
+# map case first, so the entry was live only for the hazardous spelling.
+fx="$(cfg_fixture "$CFG_OK" 'pub extra: Value,')"
+expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a repeated entry in DISCLOSABLE. Harmless at runtime -- `classify` is
+# boolean membership -- but the classification inventory is the artifact a
+# reviewer reads to answer "what does this disclose", and a list that repeats
+# itself is a list nobody has checked. The manifest side has refused duplicates
+# since it was written; the code side did not, because the `sort -u` that makes
+# the 4a diff work also hid them.
+fx="$(cfg_fixture "$CFG_OK" '' '"vault.addr",')"
+expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: the clean fixture passes and reports both counts. Without this every
+# rejection above would stay green against a gate that refuses everything.
+fx="$(cfg_fixture "$CFG_OK")"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+
+
+# ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
+# Round 8's probes all showed up first as a silent change to these two numbers
+# (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
+# control; asserting it here means any future silent shrink is a red build.
+expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
+  ": 24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
+
+
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
 # The wording IS the control here, so the fixture is a wording fixture.
 ea_fixture() { # <line> — a bare dir (not a repo) holding one normative doc
