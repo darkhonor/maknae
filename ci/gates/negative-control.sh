@@ -548,58 +548,89 @@ expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/
 
 
 # ---- config-disclosure-drift (#162): the admin.config.show surface ----
-# Five review rounds found the completeness of this control resting on a prose
-# instruction, and found that instruction wrong twice. These fixtures are why
-# the gate replaced it.
-cfg_fixture() { # <manifest-body> [extra-vault-parser-line] — a minimal repo
+# Five review rounds found this control's completeness resting on prose, and
+# found the prose wrong twice. The gate replaced it -- and then the FIRST gate
+# repeated the mistake, extracting parser keys with a regex over assumed call
+# shapes that matched zero of the real multi-line `bounded_*` sites. These
+# fixtures are the probes that defeated that version.
+cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
            "$fixture/crates/maknae-vault/src"
   cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
-  cat > "$fixture/crates/maknae-config/src/document.rs" <<'FIX'
+  cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
 const DISCLOSABLE: &[&str] = &[
-    "vault.addr",
+    "transport.socket_path",
+    ${3:-}
 ];
 const SUPPRESSED: &[&str] = &[
     "vault.insecure_plaintext_secret_path",
 ];
 FIX
-  : > "$fixture/crates/maknae-config/src/transport.rs"
-  : > "$fixture/crates/maknae-config/src/audit_cfg.rs"
-  : > "$fixture/crates/maknae-config/src/principal.rs"
-  cat > "$fixture/crates/maknae-vault/src/config.rs" <<FIX
-fn f() {
-    let a = get_str(vault, "addr");
-    let b = get_str(vault, "insecure_plaintext_secret_path");
+  # The field is declared MULTI-LINE-parser style deliberately: the shape that
+  # defeated the regex extraction is exactly what must be covered now.
+  cat > "$fixture/crates/maknae-config/src/transport.rs" <<FIX
+pub struct TransportConfig {
+    pub socket_path: PathBuf,
     ${2:-}
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/audit_cfg.rs" <<'FIX'
+pub struct AuditConfig {
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/principal.rs" <<'FIX'
+pub struct Principal {
+}
+FIX
+  cat > "$fixture/crates/maknae-config/src/ceiling.rs" <<'FIX'
+pub struct Ceiling {
+}
+FIX
+  cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
+pub struct VaultConfig {
+    pub insecure_plaintext_secret_path: Option<PathBuf>,
 }
 FIX
   printf '%s' "$1" > "$fixture/ci/gates/config-disclosure-manifest.txt"
   echo "$fixture"
 }
 
-# REJECT: a path classified in code with no recorded decision.
-fx="$(cfg_fixture 'disclose	vault.addr	where vault is
+CFG_OK='disclose	transport.socket_path	the socket the daemon listens on
 omit	vault.insecure_plaintext_secret_path	presence is the finding
-disclose	vault.undeclared	NOT in the code
+'
+
+# REJECT: a NEW config struct field with no recorded decision. This is the miss
+# the whole loop kept finding, and the shape the regex extraction could not see.
+fx="$(cfg_fixture "$CFG_OK" 'pub debug_core_dump_path: PathBuf,')"
+expect_reject "config-disclosure-drift/struct-field-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a path classified in code with no manifest row -- and it is HYPHENATED,
+# because the first gate's charset filter dropped such entries silently instead
+# of surfacing them.
+fx="$(cfg_fixture "$CFG_OK" '' '"vault.pki-int-alias",')"
+expect_reject "config-disclosure-drift/hyphenated-entry-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a manifest row carrying a path but no rationale. "Decide it" is what
+# the gate's own failure text demands; a bare path is not a decision.
+fx="$(cfg_fixture 'disclose	transport.socket_path	the socket the daemon listens on
+omit	vault.insecure_plaintext_secret_path	presence is the finding
+disclose	core.undecided
 ')"
-expect_reject "config-disclosure-drift/code-and-manifest-disagree" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# REJECT: a parser reads a key nobody classified. THIS is the miss the review
-# loop kept finding — deny-by-default masks the VALUE and does nothing about a
-# key whose presence is itself the disclosure, so "it fails safe" is false here.
-fx="$(cfg_fixture 'disclose	vault.addr	where vault is
+# REJECT: two contradictory decisions for one path.
+fx="$(cfg_fixture 'disclose	transport.socket_path	the socket the daemon listens on
 omit	vault.insecure_plaintext_secret_path	presence is the finding
-' '    let c = get_str(vault, "hsm_pin_path");')"
-expect_reject "config-disclosure-drift/parser-key-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+mask	transport.socket_path	contradicts the row above
+')"
+expect_reject "config-disclosure-drift/duplicate-contradictory-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# ACCEPT: the clean fixture passes and reports its count. Without this every
+# ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
-fx="$(cfg_fixture 'disclose	vault.addr	where vault is
-omit	vault.insecure_plaintext_secret_path	presence is the finding
-')"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 2 paths, all decided" "$fx/ci/gates/config-disclosure-drift.sh"
+fx="$(cfg_fixture "$CFG_OK")"
+expect_accept "config-disclosure-drift/clean-fixture-passes" "2 paths decided, 2 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

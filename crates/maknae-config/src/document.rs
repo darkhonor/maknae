@@ -231,8 +231,8 @@ const DISCLOSABLE: &[&str] = &[
     // separate misses. Reading only the parsers missed these: §4 says
     // `schema_version` and `identity.*` are "carried as-is" for their
     // consumers, so no parser in this crate names them. Then reading only
-    // `docs/configuration.md` would miss twelve of the entries below --
-    // it documents `core` (§4) and `lake` (§5) and nothing else, while
+    // `docs/configuration.md` would miss fourteen of the entries below --
+    // it documents `core` (§4) and `lake` (§5) and nothing else -- and not even all of `core`, since `deployment_id` appears in neither -- while
     // `boot.rs` registers `vault`, `transport`, `audit` and `principal` too,
     // and §6 still calls extension sections "not yet supported".
     //
@@ -978,6 +978,62 @@ mod tests {
              to nothing -- otherwise its ABSENCE becomes the disclosure: {v:?}"
         );
         assert!(v["vault"].contains_key("addr"), "{v:?}");
+    }
+
+    /// A fold whose every field is suppressed leaves NO section behind. The
+    /// guard for this shipped untested: all three production folds and every
+    /// other test fold contain a non-suppressed field, so `local` was never
+    /// empty and mutating the guard to `if true` turned nothing red.
+    #[test]
+    fn merge_resolved_leaves_no_empty_section_when_every_field_is_suppressed() {
+        let mut v: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        Document::merge_resolved(
+            &mut v,
+            "vault",
+            &[(
+                "insecure_plaintext_secret_path",
+                Some("/etc/maknaed/secret-id".into()),
+            )],
+        );
+        assert!(
+            !v.contains_key("vault"),
+            "an all-suppressed fold must leave nothing -- an empty section is \
+             itself the presence bit: {v:?}"
+        );
+    }
+
+    /// `audit.au3_1`'s deployer-authored sub-key NAMES are omitted, not masked.
+    /// The paths under it have no schema, so a path allowlist cannot enumerate
+    /// them; masking would put `au3_1.enclave` on the wire.
+    #[test]
+    fn au3_1_sub_keys_are_omitted_not_masked() {
+        let d = doc(vec![(
+            "audit",
+            map(vec![
+                (
+                    "jsonl_path",
+                    Value::Str("/var/log/maknae/audit.jsonl".into()),
+                ),
+                (
+                    "au3_1",
+                    map(vec![("enclave", Value::Str("SCIF-B7".into()))]),
+                ),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        assert!(
+            !v["audit"].keys().any(|k| k.starts_with("au3_1")),
+            "no au3_1 path may appear, masked or otherwise: {v:?}"
+        );
+        assert!(
+            !format!("{v:?}").contains("enclave"),
+            "not even the key name: {v:?}"
+        );
+        assert!(!format!("{v:?}").contains("SCIF-B7"), "{v:?}");
+        assert!(
+            v["audit"].contains_key("jsonl_path"),
+            "siblings unaffected: {v:?}"
+        );
     }
 
     /// The prefix rule must not OVER-match a sibling. `core.handling_notes`
