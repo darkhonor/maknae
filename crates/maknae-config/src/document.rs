@@ -117,13 +117,13 @@ impl Document {
     ) {
         let entry = view.entry(section.to_string()).or_default();
         for (path, value) in fields {
-            let full = format!("{section}.{path}");
-            let shown = if DISCLOSABLE.contains(&full.as_str()) {
-                value.clone()
-            } else {
-                MASK.to_string()
+            // The SAME classifier the file walk uses — a resolved default is
+            // not privileged for having come from code.
+            match classify(section, path, DISCLOSABLE) {
+                Disclosure::Omit => continue,
+                Disclosure::Clear => entry.insert((*path).to_string(), value.clone()),
+                Disclosure::Mask => entry.insert((*path).to_string(), MASK.to_string()),
             };
-            entry.insert((*path).to_string(), shown);
         }
     }
 }
@@ -175,7 +175,6 @@ const DISCLOSABLE: &[&str] = &[
     // Audit destination. A path, and the operator already needs it to find the
     // log they are debugging.
     "audit.jsonl_path",
-    "audit.siem",
     // The enrolled principal. The operator IS this principal; hiding their own
     // uid and home from them serves nobody.
     "principal.name",
@@ -187,9 +186,29 @@ const DISCLOSABLE: &[&str] = &[
     "transport.frame_max_bytes",
     "transport.handshake_timeout_ms",
     "transport.read_timeout_ms",
-    // NOT classified, deliberately:
+    // NOT classified, deliberately. Each carries its reason, because "absent
+    // from the list" and "considered and withheld" are different states and
+    // only one of them survives a review:
+    //
     //   audit.au3_1 -- operator-authored free-form JSON. Whatever a deployer
-    //     put in there, nobody has reviewed it, so it masks.
+    //     put there has been reviewed by nobody, so it masks.
+    //
+    //   audit.siem -- an offload ENDPOINT, not a path, with no schema, no
+    //     validator, and today no consumer at all. The dominant real-world
+    //     shapes for one embed a credential IN the URL: `?token=...`,
+    //     `user:pass@host`, or a path segment that IS the secret.
+    //     `audit_from_section` rejects none of those. A field whose format is
+    //     undecided is exactly the case deny-by-default exists for. Reclassify
+    //     when the offload path lands and the format is pinned.
+    //
+    //   core.handling.* -- classification, sci, releasable_to, cui_permitted,
+    //     cui_categories_permitted, dissemination_permitted, accreditation_ref
+    //     (see `ceiling.rs`). A deployment's classification CEILING. An
+    //     operator debugging a Gated ingest wants it; it is also the single
+    //     fact that most helps an attacker choose a target, and on a DoD
+    //     deployment the ceiling is frequently itself classified. Deny-by-
+    //     default breaks the tie: masked until the operator rules otherwise.
+    //
     //   every future field, in every future section.
 ];
 
@@ -197,6 +216,50 @@ const DISCLOSABLE: &[&str] = &[
 /// rule can be exercised against every `Value` shape without widening the real
 /// allowlist to make types reachable. Production has exactly one caller and it
 /// passes [`DISCLOSABLE`].
+/// Paths whose **KEY ITSELF** must not be disclosed — omitted from the view
+/// entirely, not masked.
+///
+/// The failure that motivated it: [`MASK`] was documented as universally benign
+/// ("says THAT the setting is configured, never what it is"), and for a VALUE it
+/// is. For a KEY it is not. `sudo maknae enroll --insecure-plaintext-secret`
+/// writes `vault.insecure_plaintext_secret_path` into `maknae.yaml`; masking its
+/// value while showing its key discloses that **this host holds an AppRole
+/// SecretID in plaintext on disk** — exactly the "secret location, or a fact
+/// that materially helps an attacker choose a target" that [`DISCLOSABLE`]'s own
+/// bar forbids. Values had a classifier; key names had none.
+///
+/// Suppression beats disclosure: a path here is omitted even if a later edit
+/// also lists it on [`DISCLOSABLE`].
+const SUPPRESSED: &[&str] = &[
+    // Its PRESENCE is the finding. Absent on a correctly-enrolled host, so its
+    // absence from the view is not itself a signal.
+    "vault.insecure_plaintext_secret_path",
+];
+
+#[derive(PartialEq, Debug)]
+enum Disclosure {
+    /// Show the value.
+    Clear,
+    /// Show the key, mask the value.
+    Mask,
+    /// Show neither — the key's existence is itself the disclosure.
+    Omit,
+}
+
+/// ONE classifier, used by the file walk and by [`Document::merge_resolved`],
+/// so the two cannot drift. `maknae-proto`'s `ConfigView` doc names the hazard
+/// of a second redaction implementation; it applies inside this crate too.
+fn classify(section: &str, path: &str, disclosable: &[&str]) -> Disclosure {
+    let full = format!("{section}.{path}");
+    if SUPPRESSED.contains(&full.as_str()) {
+        return Disclosure::Omit;
+    }
+    if disclosable.contains(&full.as_str()) {
+        return Disclosure::Clear;
+    }
+    Disclosure::Mask
+}
+
 fn flatten(
     disclosable: &[&str],
     section: &str,
@@ -218,10 +281,16 @@ fn flatten(
         _ => {
             if prefix.is_empty() {
                 // A section whose whole body is a scalar: name it by section.
+                if classify(section, section, disclosable) == Disclosure::Omit {
+                    return;
+                }
                 out.insert(
                     section.to_string(),
                     render(disclosable, section, section, v),
                 );
+                return;
+            }
+            if classify(section, prefix, disclosable) == Disclosure::Omit {
                 return;
             }
             out.insert(prefix.to_string(), render(disclosable, section, prefix, v));
@@ -235,8 +304,7 @@ fn render(disclosable: &[&str], section: &str, path: &str, v: &Value) -> String 
     if matches!(v, Value::Null) {
         return NOT_SET.to_string();
     }
-    let full = format!("{section}.{path}");
-    if !disclosable.contains(&full.as_str()) {
+    if classify(section, path, disclosable) != Disclosure::Clear {
         return MASK.to_string();
     }
     match v {
@@ -453,6 +521,95 @@ mod tests {
         assert_eq!(
             view["transport"]["a_future_transport_field"], MASK,
             "coming from code rather than the file earns no disclosure"
+        );
+    }
+
+    /// A key whose EXISTENCE is the disclosure is omitted, not masked.
+    ///
+    /// `vault.insecure_plaintext_secret_path` appears only on a host enrolled
+    /// with `--insecure-plaintext-secret`. Masking its value while showing its
+    /// key would still tell a reader this host keeps an AppRole SecretID in
+    /// plaintext on disk -- a secret LOCATION, which the allowlist's own bar
+    /// forbids disclosing.
+    #[test]
+    fn a_suppressed_key_is_omitted_entirely_not_masked() {
+        let d = doc(vec![(
+            "vault",
+            map(vec![
+                ("addr", Value::Str("https://v:8200".into())),
+                (
+                    "insecure_plaintext_secret_path",
+                    Value::Str("/etc/maknaed/secret-id".into()),
+                ),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        assert!(
+            !v["vault"].contains_key("insecure_plaintext_secret_path"),
+            "the KEY must not appear at all, masked or otherwise: {v:?}"
+        );
+        assert!(
+            !format!("{v:?}").contains("secret-id"),
+            "and certainly not its value: {v:?}"
+        );
+        // The rest of the section is unaffected -- suppression is per-path.
+        assert!(v["vault"].contains_key("addr"), "{v:?}");
+    }
+
+    /// Suppression beats disclosure, so a later edit that lists a suppressed
+    /// path on the allowlist cannot re-open it by accident.
+    #[test]
+    fn suppression_wins_over_an_allowlist_entry_for_the_same_path() {
+        let allow: &[&str] = &["vault.insecure_plaintext_secret_path"];
+        let mut out = BTreeMap::new();
+        flatten(
+            allow,
+            "vault",
+            "",
+            &map(vec![(
+                "insecure_plaintext_secret_path",
+                Value::Str("/etc/maknaed/secret-id".into()),
+            )]),
+            &mut out,
+        );
+        assert!(
+            out.is_empty(),
+            "allowlisting must not defeat suppression: {out:?}"
+        );
+    }
+
+    /// `audit.siem` and the classification ceiling are withheld. Pinned so that
+    /// re-adding either is a red test and a conversation, not a quiet edit.
+    #[test]
+    fn deliberately_withheld_fields_stay_withheld() {
+        let d = doc(vec![
+            (
+                "audit",
+                map(vec![(
+                    "siem",
+                    Value::Str("https://splunk:8088/collector?token=SECRET".into()),
+                )]),
+            ),
+            (
+                "core",
+                map(vec![(
+                    "handling",
+                    map(vec![(
+                        "ceiling",
+                        map(vec![("classification", Value::Str("SECRET".into()))]),
+                    )]),
+                )]),
+            ),
+        ]);
+        let v = d.disclosable_view();
+        assert_eq!(
+            v["audit"]["siem"], MASK,
+            "an endpoint may carry a credential"
+        );
+        assert!(!format!("{v:?}").contains("token=SECRET"), "{v:?}");
+        assert_eq!(
+            v["core"]["handling.ceiling.classification"], MASK,
+            "a deployment's classification ceiling is not disclosed by default"
         );
     }
 

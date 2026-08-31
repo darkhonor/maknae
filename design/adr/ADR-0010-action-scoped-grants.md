@@ -78,7 +78,11 @@ A site that wants a person to hold `admin.*` **moves that person into the admin 
 
 **11. Downgrade is a fail-closed cliff, and that is the intended behaviour.** A policy file containing `roles:` refuses to load on any daemon predating this change: `check_known_keys` is an unknown-key gate at every level. An operator who writes grants and then downgrades gets a boot refusal naming `roles`, not a daemon that runs while silently ignoring their grants. This is the correct direction to fail, and it is the reason the unknown-key gate exists.
 
-**12. Phase 1 ships the decision path and zero operator-visible capability.** `dispatch_verb` returns `NoBehaviour` for all three terms, so a granted `admin.status` produces a genuine `Permit`, a genuine audit record with `posture: "not-implemented"`, and discloses nothing. This is pinned by test, so Phase 2 cannot wire a disclosure without the pin turning red and forcing the question — what may a given role actually see — to be answered deliberately rather than inherited from the grant that already exists.
+**12. Phase 1 shipped the decision path and zero operator-visible capability.** `dispatch_verb` returned `NoBehaviour` for all three terms, so a granted `admin.status` produced a genuine `Permit`, a genuine audit record with `posture: "not-implemented"`, and disclosed nothing. This was pinned by test, so Phase 2 could not wire a disclosure without the pin turning red and forcing the question — what may a given role actually see — to be answered deliberately rather than inherited from the grant that already exists.
+
+> **Corrected in place 2026-08-31 — the pin has since fired, once, and this decision no longer holds for all three terms.** `admin.config.show` gained a dispatch (`Dispatch::ConfigShowRequested`) and now returns a `ConfigView`; the pin went red exactly as designed and was narrowed to `admin.status` and `admin.subject.list`, which keep it. **Decision 15 below is what answered the question for `config.show`** — read it before relying on anything in this paragraph.
+>
+> This correction is made in the decision itself rather than only in decision 15, because appending was the mistake: `AGENTS.md` §Conventions says a semantic correction goes in the artifact, and the failure it names is precisely a reader who stops at the superseded text. A reader who stopped here concluded the term discloses nothing, thirty lines above the decision that says it discloses most of the configuration.
 
 **13. There is no `actions:` level. The grammar is `roles.<role>.{allow, deny}`** (operator ruling 2026-08-31).
 
@@ -115,7 +119,7 @@ This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admi
 
 ## Consequences
 
-- The migration contract for Phase 2 is: add the behaviour behind the arm that already decides. Grants written today keep their meaning; what changes is what a permit produces. The `NoBehaviour` pin is what makes that a decision rather than a side effect.
+- The migration contract for Phase 2 is: add the behaviour behind the arm that already decides. Grants written today keep their meaning; what changes is what a permit produces. The `NoBehaviour` pin is what makes that a decision rather than a side effect — **and it has now done so once**, for `admin.config.show` (decision 15). It still covers `admin.status` and `admin.subject.list`.
 - Adding a fourth grantable term is a code change (`GRANTABLE_ACTIONS`), a `grantable` row in `verb-manifest.txt`, **and** an `action` row for the same term — the gate enforces `grantable ⊆ action`, so a grant cannot name something no request will ever carry. All three are gated; none can be forgotten quietly.
 - The shipped `packaging/common/authz.yaml` gains no `roles:` key: nothing ships granted. The three terms' `action` rows read `not-granted-but-grantable`, distinguishing them from `admin.contain` and its siblings, which are `not-granted` and can never be granted at all — an auditor reading the primary row must not get the wrong answer.
 - `roles:` is a fourth closed vocabulary in `verb-vocabulary-drift`, inventoried exactly in both directions like the other three.

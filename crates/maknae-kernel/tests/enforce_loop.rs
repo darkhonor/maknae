@@ -1140,10 +1140,12 @@ async fn config_show_without_a_grant_discloses_nothing() {
         RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
         other => panic!("an ungranted config.show must disclose NOTHING, got {other:?}"),
     }
-    assert!(
-        !String::from_utf8_lossy(&frame).contains("vault"),
-        "not even the section NAMES may leak without a grant"
-    );
+    // NOTE: no "the section names are absent from the frame" assertion here.
+    // One was written, and it could not fail: the deny path returns before the
+    // `config_view` binding is ever reached, so no mutation of the redaction
+    // rule, the allowlist or the view could turn it red. It read like a control
+    // and was decoration. The two assertions that remain -- Unauthorized on the
+    // wire, `deny` in the audit record -- are the real ones.
     assert_eq!(request_record(&emit.records()).outcome.result, "deny");
 }
 

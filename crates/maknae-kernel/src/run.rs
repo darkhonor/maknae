@@ -1862,8 +1862,40 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
     // Built before `transport` is moved: the resolved settings are folded in
     // here, so the view reports what the daemon actually runs on.
+    //
+    // EVERY section with resolved defaults is folded, not just `transport`.
+    // Two distinct failures if one is missed. (a) OMISSION: `vault`'s mounts
+    // default to `maknae-approle` / `maknae-pki-int` when absent, so a view
+    // built from the file alone reports "not configured" for a mount the
+    // daemon is actively using. (b) A WRONG VALUE, which is worse: a
+    // present-but-mistyped `audit.jsonl_path` (say `42`) is DELIBERATELY
+    // defaulted by `audit_from_section`, so the daemon writes to the runtime
+    // dir while a file-derived view would render "42" -- reporting a log path
+    // the daemon is not using, for the one field whose whole justification is
+    // helping an operator find the log they are debugging.
     let config_view = {
         let mut v = boot.document().disclosable_view();
+        maknae_config::Document::merge_resolved(
+            &mut v,
+            "audit",
+            &[
+                ("jsonl_path", audit_cfg.jsonl_path.display().to_string()),
+                (
+                    "siem",
+                    audit_cfg.siem.clone().unwrap_or_else(|| "<not set>".into()),
+                ),
+            ],
+        );
+        if let Ok(vc) = maknae_vault::vault_config_from_document(boot.document()) {
+            maknae_config::Document::merge_resolved(
+                &mut v,
+                "vault",
+                &[
+                    ("approle_mount", vc.approle_mount.clone()),
+                    ("pki_int_mount", vc.pki_int_mount.clone()),
+                ],
+            );
+        }
         maknae_config::Document::merge_resolved(
             &mut v,
             "transport",
