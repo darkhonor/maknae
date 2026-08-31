@@ -10,9 +10,13 @@ cd "$(dirname "$0")/../.."
 
 HANDLER=crates/maknae-kernel/src/handler.rs
 AUTHZ=crates/maknae-config/src/authz.rs
+DECIDE=crates/maknae-authz-basic/src/decide.rs
 MANIFEST=ci/gates/verb-manifest.txt
 
-for f in "$HANDLER" "$AUTHZ" "$MANIFEST"; do
+# $DECIDE joins this loop, not just the input list: without the existence
+# check a missing file makes awk abort under `set -euo pipefail` with exit 2
+# and no FAIL line, which expect_reject reports as "crash, not a rejection".
+for f in "$HANDLER" "$AUTHZ" "$DECIDE" "$MANIFEST"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 
@@ -29,6 +33,17 @@ awk '/^pub const KERNEL_ACTIONS/{ while (match($0, /"[a-z0-9_.]+"/)) { print "ke
 # 3. grammar capabilities — the arms of parse_pattern
 awk '/fn parse_pattern/{f=1} f && /^        "[A-Z]/{ if (match($0, /"[A-Za-z]+"/)) { s=substr($0,RSTART+1,RLENGTH-2); print "capability\t" s } } f && /^}/{f=0}' \
   "$AUTHZ" | sort -u >> "$tmp/code"
+
+# 4. grantable action terms — the GRANTABLE_ACTIONS constant (#162)
+#
+# The anchor ESCAPES the parens: awk is ERE, so an unescaped `(crate)` is a
+# group and would match `pubcrate`, never the real constant. Unanchored
+# `/GRANTABLE_ACTIONS/` is also wrong — it picks up the const-pin's own
+# `admin.whoami` literal and inventories a term that is deliberately NOT
+# grantable. The constant carries #[rustfmt::skip] and is declared on one
+# line because this reads terms only off the matched line.
+awk '/^pub\(crate\) const GRANTABLE_ACTIONS/{ while (match($0, /"[a-z0-9_.]+"/)) { print "grantable\t" substr($0,RSTART+1,RLENGTH-2); $0=substr($0,RSTART+RLENGTH) } }' \
+  "$DECIDE" | sort -u >> "$tmp/code"
 
 sort -u "$tmp/code" -o "$tmp/code"
 grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' | cut -f1,2 | sort -u > "$tmp/manifest"

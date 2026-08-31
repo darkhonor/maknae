@@ -18,6 +18,19 @@ expect_reject() { # <label> <cmd...> — require a genuine rejection (a printed 
   fi
 }
 
+expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must also PASS a clean fixture
+  local label="$1" want="$2"; shift 2; total=$((total+1))
+  local out rc
+  if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$want"; then
+    echo "pos-ok: [$label] gate accepted"; pass=$((pass+1))
+  elif [ "$rc" -ne 0 ]; then
+    echo "POS-FAIL: [$label] gate rejected a CLEAN fixture (exit $rc): $out"
+  else
+    echo "POS-FAIL: [$label] gate passed but did not report '$want': $out"
+  fi
+}
+
 # Fixture A — optional privileged dep → must trip p1-manifest-lint.sh
 tmpA="$(mktemp -d)"; mkdir -p "$tmpA/crates/shared/src" "$tmpA/crates/maknae-kernel/src" "$tmpA/bins"
 cat > "$tmpA/Cargo.toml" <<'EOF'
@@ -428,7 +441,8 @@ expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-re
 vocab_fixture() { # <manifest-body> — builds a minimal repo the gate can read
   local fixture
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-kernel/src" "$fixture/crates/maknae-config/src"
+  mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-kernel/src" \
+           "$fixture/crates/maknae-config/src" "$fixture/crates/maknae-authz-basic/src"
   cp "$here/verb-vocabulary-drift.sh" "$fixture/ci/gates/"
   cat > "$fixture/crates/maknae-kernel/src/handler.rs" <<'FIX'
 pub const KERNEL_ACTIONS: [&str; 1] = ["kernel.contain"];
@@ -447,6 +461,11 @@ fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
     }
 }
 FIX
+  # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
+  # or the control exercises a different anchor than the one that ships.
+  cat > "$fixture/crates/maknae-authz-basic/src/decide.rs" <<'FIX'
+pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.show", "admin.subject.list"];
+FIX
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
   echo "$fixture"
 }
@@ -455,6 +474,9 @@ FIX
 fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only capability
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	admin.config.show	grantable-not-granted	per-role via roles:
+grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
 expect_reject "verb-vocabulary-drift/term-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
@@ -464,6 +486,9 @@ action	admin.status	not-granted	enumerated
 action	admin.retired	not-granted	STALE — no such term
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only capability
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	admin.config.show	grantable-not-granted	per-role via roles:
+grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
 expect_reject "verb-vocabulary-drift/stale-manifest-entry" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
@@ -472,8 +497,38 @@ expect_reject "verb-vocabulary-drift/stale-manifest-entry" "$fx/ci/gates/verb-vo
 fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
 action	admin.status	not-granted	enumerated
 kernel-action	kernel.contain	not-granted	no Verb variant
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	admin.config.show	grantable-not-granted	per-role via roles:
+grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
 expect_reject "verb-vocabulary-drift/capability-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT: a GRANTABLE term with no recorded disposition (#162). The grantable
+# list is a fourth closed vocabulary — a term an operator can write into
+# `roles:` must carry a decision like any other.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+action	admin.status	not-granted	enumerated
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only capability
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	admin.config.show	grantable-not-granted	per-role via roles:
+')"
+expect_reject "verb-vocabulary-drift/grantable-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# ACCEPT: the clean fixture passes, and reports the full count. Without this
+# every control above would still report neg-ok against a gate that rejects
+# EVERYTHING — including a correct repo. The count is asserted with its
+# leading ": " and trailing " terms," because a bare `7 terms` also matches
+# `17 terms`. Seven = 2 actions + kernel.contain + Read + 3 grantable.
+fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
+action	admin.status	not-granted	enumerated
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only capability
+grantable	admin.status	grantable-not-granted	per-role via roles:
+grantable	admin.config.show	grantable-not-granted	per-role via roles:
+grantable	admin.subject.list	grantable-not-granted	per-role via roles:
+')"
+expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 7 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
