@@ -325,7 +325,8 @@ pub fn discharge_plan(
 /// swappable behind the seam and the PEP must not depend on one backend's
 /// helper. The vector tables in both crates cross-reference each other; a
 /// divergence is a test failure on either side. Failing here is the
-/// malformed-request class (BadRequest before the PDP), like a decode error.
+/// malformed-request class (BadRequest before the PDP), like a decode error
+/// — which itself is audited and closed FRAMELESS, never answered (#181).
 pub fn lexical_pregate(path: &str) -> Result<(), &'static str> {
     if !path.starts_with('/') {
         return Err("not absolute");

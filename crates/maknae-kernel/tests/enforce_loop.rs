@@ -325,6 +325,7 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
     match resp.result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
             assert_eq!(
                 e.message, "not authorized",
                 "wire message is the fixed generic string"
@@ -1062,11 +1063,14 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
         .await
         .expect("a frame");
         match maknae_proto::decode_response(&frame).unwrap().result {
-            RespResult::Err(e) => assert_eq!(
-                e.code,
-                ProtoErrCode::Unauthorized,
-                "{verb:?} must deny without leaking implementation state"
-            ),
+            RespResult::Err(e) => {
+                assert_eq!(
+                    e.code,
+                    ProtoErrCode::Unauthorized,
+                    "{verb:?} must deny without leaking implementation state"
+                );
+                assert_eq!(e.message, "not authorized", "no note may reach the wire");
+            }
             other => panic!("expected Unauthorized for {verb:?}, got {other:?}"),
         }
     }
@@ -1315,7 +1319,10 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
         .await
         .expect("a frame");
         match maknae_proto::decode_response(&frame).unwrap().result {
-            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}"),
+            RespResult::Err(e) => {
+                assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}");
+                assert_eq!(e.message, "not authorized", "no note may reach the wire");
+            }
             other => panic!("{verb:?} disclosed without a grant: {other:?}"),
         }
         assert_eq!(request_record(&emit.records()).outcome.result, "deny");
@@ -1541,11 +1548,14 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
     match maknae_proto::decode_response(&frame).unwrap().result {
         // The code that was OBSERVED, not merely "not NotImplemented" -- which
         // would also pass for Internal, Timeout, or any code added later.
-        RespResult::Err(e) => assert_eq!(
-            e.code,
-            ProtoErrCode::Unauthorized,
-            "without a grant this must be refused by authz, never reach dispatch"
-        ),
+        RespResult::Err(e) => {
+            assert_eq!(
+                e.code,
+                ProtoErrCode::Unauthorized,
+                "without a grant this must be refused by authz, never reach dispatch"
+            );
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected an error, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();

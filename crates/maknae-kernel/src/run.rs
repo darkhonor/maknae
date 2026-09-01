@@ -515,7 +515,8 @@ pub async fn handle<S, E, P>(
     // 2½. THE PDP (spec D2, #77): every request is decided through the seam
     // before the audit-then-respond step. For a Read, the lexical pre-gate
     // runs FIRST — a malformed path is the BadRequest class (like a decode
-    // failure), and the PDP is never consulted for it.
+    // failure -- though a decode failure itself is audited and CLOSED, never
+    // answered; only this post-decode gate writes BadRequest), and the PDP is never consulted for it.
     if let Verb::Read { path } = &request.verb {
         if let Err(why) = lexical_pregate(path) {
             let appended = emit_request_outcome(

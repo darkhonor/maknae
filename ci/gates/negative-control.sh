@@ -539,7 +539,7 @@ expect_reject_because "verb-vocabulary-drift/grantable-with-no-disposition" \
 # every control above would still report neg-ok against a gate that rejects
 # EVERYTHING — including a correct repo. The count is asserted with its
 # leading ": " and trailing " terms," because a bare `7 terms` also matches
-# `17 terms`. Seven = 2 actions + kernel.contain + Read + 3 grantable.
+# `17 terms`.
 # The grantable set is narrowed to the fixture's OWN action vocabulary. The
 # shared handler.rs heredoc defines two actions, so admin.status is the only
 # grantable term that has an action behind it -- and the subset rule added for
