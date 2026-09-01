@@ -449,7 +449,9 @@ mod tests {
         agent_admin.action = Action("admin.whoami".into());
         assert_eq!(
             decide::decide_loaded(&lp, &principal(), &agent_admin),
-            Verdict::NotApplicable { note: None }
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for admin.whoami".into())
+            }
         );
     }
 
