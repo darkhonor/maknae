@@ -403,11 +403,14 @@ pub(crate) fn decide_loaded(
                     req.action.0
                 )),
             },
-            // Case-3 testimony for whole unbuilt classes; `None` (a term the
-            // class map cannot place) gets the same build-state note -- true
-            // either way, and the unknown-vocabulary Deny (ADR-0008 D5) is a
-            // COMPOSITION-layer control with no carrier until a second operand
-            // exists (spec D5: pinned, deferred, owner named).
+            // Case-3 testimony for whole unbuilt classes. `None` (a term the
+            // class map cannot place) shares the arm and the note; for that
+            // sub-case the "enumerated" wording is inexact -- and the sub-case
+            // is production-unreachable (`class_of` is total over the closed
+            // set every decoded Verb maps into). The unknown-vocabulary Deny
+            // (ADR-0008 D5) is a COMPOSITION-layer control with no carrier
+            // until a second operand exists (spec D5: pinned, deferred, owner
+            // named); it, not this note, owns the unreachable case.
             Some(Class::Session)
             | Some(Class::Terminal)
             | Some(Class::Mcp)

@@ -534,8 +534,9 @@ mod tests {
         // below, reaching the real constant through `-basic`'s
         // `grantable_actions()` re-export; the hand-typed list here is now
         // ASSERTED equal to the constant rather than trusted — and THIS list
-        // is not a copy at all any more: it reads the re-export, so there is
-        // exactly one hand-pin left, in the tripwire test, and it is asserted.)
+        // is not a copy at all any more: it reads the re-export. Two hand-pins
+        // remain, BOTH asserted against the constant: the tripwire test below
+        // (cross-crate) and `-basic`'s in-crate pin for the mutation lane.)
         let grantable = maknae_authz_basic::grantable_actions();
         let ungrantable: Vec<Verb> = all_verbs()
             .into_iter()

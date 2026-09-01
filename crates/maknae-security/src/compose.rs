@@ -677,13 +677,16 @@ mod tests {
 
     #[test]
     fn all_notapplicable_stays_notapplicable() {
-        assert!(matches!(
+        // Exact equality per the plan's matches!-ban (both this and the
+        // empty-vec sibling): the fully-specified pattern was equivalent, but
+        // one shape for the whole ban keeps the rule greppable.
+        assert_eq!(
             combine(vec![
                 Verdict::NotApplicable { note: None },
                 Verdict::NotApplicable { note: None }
             ]),
             Verdict::NotApplicable { note: None }
-        ));
+        );
     }
 
     #[test]

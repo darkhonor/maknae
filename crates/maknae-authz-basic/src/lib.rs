@@ -25,21 +25,6 @@ pub fn grantable_actions() -> &'static [&'static str] {
     &decide::GRANTABLE_ACTIONS
 }
 
-#[cfg(test)]
-mod grantable_reexport_tests {
-    /// The re-export is pinned IN THIS CRATE: the kernel's cross-crate
-    /// tripwire cannot kill a `-basic` mutant (per-package mutation runs only
-    /// this crate's tests), and the gate's run reported exactly that — three
-    /// `grantable_actions -> Vec::leak(...)` mutants MISSED. Exact equality
-    /// against the literal, both directions of drift covered.
-    #[test]
-    fn the_reexport_returns_the_real_constant_exactly() {
-        assert_eq!(
-            super::grantable_actions(),
-            ["admin.status", "admin.config.show", "admin.subject.list"]
-        );
-    }
-}
 mod role;
 
 use binding::UidMap;
@@ -404,6 +389,22 @@ pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_AUTHZ_BASIC";
 // matrix proof rides decide.rs's golden vectors; (c) containment e2e below.
 #[cfg(test)]
 mod tests {
+
+    /// The re-export is pinned IN THIS CRATE: the kernel's cross-crate
+    /// tripwire cannot kill a `-basic` mutant (per-package mutation runs only
+    /// this crate's tests), and the gate's run reported exactly that — three
+    /// `grantable_actions -> Vec::leak(...)` mutants MISSED. Exact equality
+    /// against the literal, both directions of drift covered. (Lives inside
+    /// the crate's single `#[cfg(test)]` module: coverage_check.py hard-fails
+    /// a second column-0 marker, which the first placement added — caught by
+    /// diff-CR running the LIVE coverage lane, `coverage-tiers.sh --root .`.)
+    #[test]
+    fn the_reexport_returns_the_real_constant_exactly() {
+        assert_eq!(
+            super::grantable_actions(),
+            ["admin.status", "admin.config.show", "admin.subject.list"]
+        );
+    }
     use super::*;
     use maknae_security::{
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,

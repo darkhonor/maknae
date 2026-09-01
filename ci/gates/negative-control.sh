@@ -549,7 +549,7 @@ expect_reject_because "verb-vocabulary-drift/grantable-with-no-disposition" \
 # Rationales carry the #181 clause vocabulary: the clause check runs LAST in
 # the gate, so a CLEAN fixture must satisfy it (the five reject fixtures above
 # keep short rationales because the inventory/subset checks fire first).
-CLEAN_VOCAB='action	liveness.ping	granted	shipped
+CLEAN_VOCAB='action	liveness.ping	granted	shipped; the fixture liveness term
 action	admin.status	not-granted	unbuilt — answers Unauthorized to an unpermitted caller
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only grammar capability
@@ -574,6 +574,18 @@ expect_reject_because "verb-vocabulary-drift/rationale-lacks-its-clause" \
 fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/^action	admin.status	not-granted	.*$/action	admin.status	not-granted/')" \
   'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_reject_because "verb-vocabulary-drift/three-field-row" \
+  "without exactly four non-empty fields" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#181, durable): a FIVE-field row — a TAB inside a rationale. This is
+# the arity check's UNIQUE coverage: a three-field row is also caught by the
+# clause check (index("", clause)==0), so with the arity block deleted the
+# three-field probe merely rejects for the wrong reason — but a tab-bearing
+# rationale sails through everything else (observed: the arity-deleted gate
+# ACCEPTS it at EXIT=0). The clause table's parsing assumes exactly four
+# fields; this is the probe that makes that assumption enforced.
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/^\(action	admin.status	not-granted	.*\)$/\1	extra-field/')" \
+  'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/five-field-row" \
   "without exactly four non-empty fields" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT (#181, durable): an INVENTED disposition. The clause table fails

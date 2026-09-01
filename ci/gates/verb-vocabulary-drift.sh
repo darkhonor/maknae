@@ -102,7 +102,7 @@ fi
 # 51 rows asserting behaviour that does not occur).
 bad_clause=$(awk -F'	' '
   BEGIN {
-    clause["action|granted"]            = "shipped"
+    clause["action|granted"]            = "shipped;"
     clause["capability|granted"]        = "the only grammar capability"
     clause["action|not-granted"]        = "answers Unauthorized to an unpermitted caller"
     clause["kernel-action|not-granted"] = "no Verb variant"
@@ -112,8 +112,8 @@ bad_clause=$(awk -F'	' '
   /^#/ || !NF { next }
   {
     key = $1 "|" $3
-    if (!(key in clause)) { print "unrecognized (kind, disposition): " $0; bad=1; next }
-    if (index($4, clause[key]) == 0) { print "rationale lacks its clause (" clause[key] "): " $0; bad=1 }
+    if (!(key in clause)) { print "unrecognized (kind, disposition): " $0; next }
+    if (index($4, clause[key]) == 0) { print "rationale lacks its clause (" clause[key] "): " $0 }
   }
 ' "$MANIFEST")
 if [ -n "$bad_clause" ]; then

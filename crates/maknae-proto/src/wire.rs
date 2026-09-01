@@ -323,10 +323,13 @@ pub struct RoleBindingView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtoErrCode {
     /// Declared for the decode-refusal class and currently EMITTED NOWHERE
-    /// (#181, honest-record note 2026-09-02): the decode-failure path answers
-    /// `BadRequest` (`run.rs`), so this variant is dead, kept additive. A
-    /// record that claims behaviour that does not occur is the defect class
-    /// #181 removed — this doc line is the guard against re-claiming it.
+    /// (#181, honest-record note 2026-09-02, corrected same day by diff-CR):
+    /// the decode-failure path audits the refusal and CLOSES with no response
+    /// frame at all (`run.rs`, the decode arm); `BadRequest` is emitted only
+    /// by the post-decode lexical pre-gate on `Read`. This variant is dead,
+    /// kept additive. A record that claims behaviour that does not occur is
+    /// the defect class #181 removed — and the first draft of THIS doc line
+    /// did exactly that, claiming the decode path answers `BadRequest`.
     UnknownVerb,
     Unauthorized,
     BadRequest,

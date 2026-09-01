@@ -366,7 +366,10 @@ async fn unbound_uid_is_denied_everything_including_ping() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -417,7 +420,10 @@ async fn user_role_pings_but_cannot_whoami() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&whoami).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("whoami narrows to admin: {other:?}"),
     }
 }
@@ -586,7 +592,10 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     .await
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("symlink alias must refuse: {other:?}"),
     }
     let needle = b"SECRET";
@@ -653,7 +662,10 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     .await
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("hardlink alias must refuse (nlink_exactly_one): {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -709,7 +721,10 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     // Deny at the PDP rather than a PEP unavailability. ADR-0009's "it produces a
     // verdict instead of a failure" — the trail records a decision, not an outage.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("group-writable home must still be refused: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -807,7 +822,10 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     .await
     .expect("timeout deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("elapsed decide must deny: {other:?}"),
     }
     assert!(
@@ -940,7 +958,10 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // operator wrote for a path outside the home does NOT yield the bytes, and the
     // trail says so as a decision rather than as a delivery failure.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("a grant outside the enrolled home must not deliver: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -968,7 +989,10 @@ async fn an_unhonorable_obligation_fails_closed() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("unknown obligation must deny: {other:?}"),
     }
     assert!(
@@ -1466,7 +1490,10 @@ async fn config_show_without_a_grant_discloses_nothing() {
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("an ungranted config.show must disclose NOTHING, got {other:?}"),
     }
     // NOTE: no "the section names are absent from the frame" assertion here.
@@ -1723,7 +1750,10 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
     .await
     .expect("a deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -1752,7 +1782,10 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
     .await
     .expect("a deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -1790,7 +1823,10 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
     .await
     .expect("a deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
