@@ -6,59 +6,59 @@ action	liveness.ping	granted	shipped; permitted to every bound role
 action	admin.whoami	granted	shipped; the ONE admin term the class arm keys on
 action	admin.status	not-granted-but-grantable	BUILT (#162 Phase 3): returns runtime posture — version, protocol version, listener, active authz backend. CLI: `maknae status`. Ungranted by default; operator MAY grant per-role — see the grantable row
 action	admin.config.show	not-granted-but-grantable	BUILT (#162 Phase 2): returns the boot-redacted ConfigView — deny-by-default allowlist; values masked to <value set>, presence-signal keys omitted entirely. CLI: `maknae config-show`. Ungranted by default; operator MAY grant per-role — see the grantable row
-action	admin.audit.tail	not-granted	enumerated, decided, answers NotImplemented
-action	admin.policy.reload	not-granted	enumerated, decided, answers NotImplemented
+action	admin.audit.tail	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.policy.reload	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
 action	admin.subject.list	not-granted-but-grantable	BUILT (#162 Phase 3): enumerates role bindings LIVE from the PDP (never a boot snapshot — bindings are re-read per request). CLI: `maknae subject-list`. Ungranted by default; operator MAY grant per-role — see the grantable row
-action	admin.subject.bind	not-granted	enumerated, decided, answers NotImplemented
-action	admin.subject.unbind	not-granted	enumerated, decided, answers NotImplemented
-action	admin.contain	not-granted	enumerated, decided, answers NotImplemented
-action	admin.release	not-granted	enumerated, decided, answers NotImplemented
-action	admin.credential.rotate	not-granted	enumerated, decided, answers NotImplemented
-action	admin.provider.list	not-granted	enumerated, decided, answers NotImplemented
-action	admin.provider.set	not-granted	enumerated, decided, answers NotImplemented
-action	admin.provider.disable	not-granted	enumerated, decided, answers NotImplemented
-action	admin.credential.broker	not-granted	enumerated, decided, answers NotImplemented
-action	admin.session.list	not-granted	enumerated, decided, answers NotImplemented
-action	admin.session.terminate	not-granted	enumerated, decided, answers NotImplemented
-action	session.new	not-granted	enumerated, decided, answers NotImplemented
-action	session.resume	not-granted	enumerated, decided, answers NotImplemented
-action	session.close	not-granted	enumerated, decided, answers NotImplemented
-action	session.delete	not-granted	enumerated, decided, answers NotImplemented
-action	session.list	not-granted	enumerated, decided, answers NotImplemented
-action	session.fork	not-granted	enumerated, decided, answers NotImplemented
-action	session.prompt	not-granted	enumerated, decided, answers NotImplemented
-action	session.cancel	not-granted	enumerated, decided, answers NotImplemented
-action	session.set_config_option	not-granted	enumerated, decided, answers NotImplemented
-action	session.set_mode	not-granted	enumerated, decided, answers NotImplemented
-action	session.load	not-granted	enumerated, decided, answers NotImplemented
-action	session.update	not-granted	enumerated, decided, answers NotImplemented
-action	session.request_permission	not-granted	enumerated, decided, answers NotImplemented
-action	session.elicit.create	not-granted	enumerated, decided, answers NotImplemented
-action	session.elicit.complete	not-granted	enumerated, decided, answers NotImplemented
-action	session.compact	not-granted	enumerated, decided, answers NotImplemented
+action	admin.subject.bind	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.subject.unbind	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.contain	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.release	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.credential.rotate	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.provider.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.provider.set	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.provider.disable	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.credential.broker	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	admin.session.terminate	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.new	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.resume	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.close	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.delete	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.fork	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.prompt	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.cancel	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.set_config_option	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.set_mode	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.load	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.update	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.request_permission	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.elicit.create	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.elicit.complete	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	session.compact	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
 action	fs.read	granted	shipped; decided through the capability grammar
-action	fs.write	not-granted	enumerated, decided, answers NotImplemented
-action	fs.delete	not-granted	enumerated, decided, answers NotImplemented
-action	fs.move	not-granted	enumerated, decided, answers NotImplemented
-action	fs.list	not-granted	enumerated, decided, answers NotImplemented
-action	fs.stat	not-granted	enumerated, decided, answers NotImplemented
-action	fs.mkdir	not-granted	enumerated, decided, answers NotImplemented
-action	fs.link	not-granted	enumerated, decided, answers NotImplemented
-action	fs.chmod	not-granted	enumerated, decided, answers NotImplemented
-action	fs.chown	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.create	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.output	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.wait_for_exit	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.kill	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.release	not-granted	enumerated, decided, answers NotImplemented
-action	terminal.input	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.connect	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.disconnect	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.message	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.tool.call	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.resource.read	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.prompt.get	not-granted	enumerated, decided, answers NotImplemented
-action	mcp.sampling.create	not-granted	enumerated, decided, answers NotImplemented
+action	fs.write	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.delete	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.move	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.stat	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.mkdir	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.link	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.chmod	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	fs.chown	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.create	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.output	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.wait_for_exit	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.kill	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.release	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	terminal.input	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.connect	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.disconnect	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.message	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.tool.call	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.resource.read	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.prompt.get	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
+action	mcp.sampling.create	not-granted	enumerated, decided, unbuilt — answers Unauthorized to an unpermitted caller (roadmap undisclosed on the wire; #181)
 kernel-action	kernel.contain	not-granted	no Verb variant (D2); reachable by no client
 kernel-action	kernel.session.terminate	not-granted	no Verb variant (D2); reachable by no client
 capability	Read	granted	the only grammar capability; Bash retired by #67

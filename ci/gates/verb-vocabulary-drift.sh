@@ -73,4 +73,56 @@ if [ -s "$tmp/grantable" ] && ! orphans=$(comm -23 "$tmp/grantable" "$tmp/action
   exit 1
 fi
 
+# --- #181: the RECORD is checkable, not just present. Both checks run LAST,
+# deliberately: the inventory diff and the subset check above fire first, so
+# their negative-control fixtures keep their short rationales and reject for
+# their OWN reasons. Order is load-bearing — moving these earlier makes five
+# probes reject on clause text instead of the checks they exist to prove.
+
+# ARITY first: exactly four non-empty TAB-separated fields per data row. New
+# coverage in itself — before this, a row with no disposition and no rationale
+# passed green (`cut -f1,2` never read fields 3-4) — and it rules out
+# tab-bearing rationales by construction, which the clause table relies on.
+bad_arity=$(awk -F'	' '!/^#/ && NF && !(NF==4 && $1!="" && $2!="" && $3!="" && $4!="")' "$MANIFEST")
+if [ -n "$bad_arity" ]; then
+  echo "FAIL: manifest row(s) without exactly four non-empty fields:"
+  printf '%s
+' "$bad_arity" | sed 's/^/  /'
+  echo "  kind<TAB>name<TAB>disposition<TAB>rationale — a row missing its"
+  echo "  disposition or rationale is not a recorded decision."
+  exit 1
+fi
+
+# Then the (kind, disposition) → clause table. `index()` CONTAINMENT, never
+# regex (two clauses carry parens — an ERE false-accepts `a(b)` against `ab`)
+# and never field-equality (the true rows carry the clause inside longer
+# text). An UNRECOGNIZED pair FAILS — fail-closed includes this gate: a row
+# `action<TAB>x<TAB>pending<TAB>...` matching no rule must never pass by
+# falling off the table (#181; the rationale-accuracy defect this closes was
+# 51 rows asserting behaviour that does not occur).
+bad_clause=$(awk -F'	' '
+  BEGIN {
+    clause["action|granted"]            = "shipped"
+    clause["capability|granted"]        = "the only grammar capability"
+    clause["action|not-granted"]        = "answers Unauthorized to an unpermitted caller"
+    clause["kernel-action|not-granted"] = "no Verb variant"
+    clause["action|not-granted-but-grantable"]  = "Ungranted by default; operator MAY grant per-role"
+    clause["grantable|grantable-not-granted"]   = "operator MAY grant per-role via `roles:`"
+  }
+  /^#/ || !NF { next }
+  {
+    key = $1 "|" $3
+    if (!(key in clause)) { print "unrecognized (kind, disposition): " $0; bad=1; next }
+    if (index($4, clause[key]) == 0) { print "rationale lacks its clause (" clause[key] "): " $0; bad=1 }
+  }
+' "$MANIFEST")
+if [ -n "$bad_clause" ]; then
+  echo "FAIL: manifest disposition/rationale disagreement(s):"
+  printf '%s
+' "$bad_clause" | sed 's/^/  /'
+  echo "  Each (kind, disposition) pair requires its clause in the rationale,"
+  echo "  so the record cannot assert behaviour that does not occur (#181)."
+  exit 1
+fi
+
 echo "verb-vocabulary-drift: $(wc -l < "$tmp/code" | tr -d ' ') terms, manifest exact"
