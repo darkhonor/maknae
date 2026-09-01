@@ -42,10 +42,10 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # per entry answers it: a dropped field, a dropped entry, or a field the
 # extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
-  "crates/maknae-config/src/transport.rs|TransportConfig|transport|5"
-  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3"
-  "crates/maknae-config/src/principal.rs|Principal|principal|3"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5"
+  "crates/maknae-config/src/transport.rs|TransportConfig|transport|5|config"
+  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3|config"
+  "crates/maknae-config/src/principal.rs|Principal|principal|3|config"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -53,7 +53,7 @@ SURFACE=(
   # That is harmless ONLY because `core.handling` is suppressed by prefix, which
   # covers both spellings -- and the check below enforces that precondition
   # rather than leaving it as an assumption.
-  "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling|7"
+  "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling|7|config"
   # `admin.status` is a SECOND disclosure surface. `StatusView` carries
   # `transport.socket_path` (as `listener`), and `admin.status` /
   # `admin.config.show` are INDEPENDENT grants -- a role granted only the
@@ -61,21 +61,21 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|4"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|4|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
   # count, needs no row, and reaches every `admin.subject.list` grant-holder --
   # who may be the untrusted agent runtime, since `bindings: {admin:["agent"]}`
   # is now correctly reported.
-  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2"
+  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2|wire"
   # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
   # facts rather than deployment config, which is a defensible reason to scope
   # it out -- but that rule was nowhere written, `RoleBindingView` (policy-file
   # state, not maknae.yaml) is already inside, and `admin.whoami` is the only
   # payload reachable with NO `roles:` grant at all. Inventorying two of three
   # is how the third ships unreviewed, which is this table's own argument.
-  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2"
+  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their
@@ -223,7 +223,11 @@ sort -u "$tmp/code" -o "$tmp/code"
 # 2. Every config STRUCT FIELD, as a dotted path.
 : > "$tmp/fields"
 for entry in "${SURFACE[@]}"; do
-  IFS='|' read -r f st sec want <<< "$entry"
+  IFS='|' read -r f st sec want kind <<< "$entry"
+  case "$kind" in
+    wire|config) ;;
+    *) echo "FAIL: SURFACE entry '$entry' declares no kind (wire|config)"; exit 1 ;;
+  esac
   before=$(wc -l < "$tmp/fields")
   # Fields with ANY visibility or none: `pub`, `pub(crate)`, `pub(super)`, or
   # bare. Raw identifiers, capitals, and every field on a line.
@@ -240,7 +244,7 @@ for entry in "${SURFACE[@]}"; do
   # declared a new SURFACE struct `pub(crate)`, which is house style here, got a
   # correct refusal with the wrong cause. Two anchors for one property should
   # not disagree; that disagreement is how the last recurrence happened.
-  awk -v st="$st" -v p="$sec" '
+  awk -v st="$st" -v p="$sec" -v k="$kind" '
     $0 ~ ("^(pub([[:space:]]|\\([^)]*\\)[[:space:]]))?struct " st "[[:space:]]*[<{]") { f=1; next }
     f && /^}/ { f=0 }
     # Comment skip is REQUIRED now that the visibility prefix is optional:
@@ -280,7 +284,7 @@ for entry in "${SURFACE[@]}"; do
             }
             ty = substr(ty, 1, cut - 1)
             gsub(/[[:space:]]+$/, "", ty)
-            print p "." tok "\t" ty
+            print p "." tok "\t" ty "\t" k
           }
           line = rest
         }
@@ -321,7 +325,7 @@ sort -u "$tmp/fields" -o "$tmp/fields"
 #
 # Precedent already in the table: `Ceiling` has its own SURFACE entry. Nothing
 # enforced that it must.
-while IFS=$'\t' read -r fpath fty; do
+while IFS=$'\t' read -r fpath fty fkind; do
   [ -n "$fty" ] || continue
   # Strip wrappers to FIXPOINT: a single pass left `Option<Box<SiemConfig>>` as
   # `Box<SiemConfig` and matched nothing.
@@ -336,9 +340,15 @@ while IFS=$'\t' read -r fpath fty; do
   # (including `home` and a token path) with IDENTICAL gate counts. That is the
   # silent variant this depth check exists to catch, inherited unexamined when
   # three wire structs joined SURFACE.
-  case "$sec" in
-    status|binding|whoami) wrappers='(Option|Box|Arc|Vec)' ;;
-    *)                     wrappers='(Option|Box|Arc)' ;;
+  # PER-ROW, from the field's OWN emitted kind. This read `$sec` -- a variable
+  # left over from the extraction loop above, which by then held the LAST
+  # SURFACE entry, so every one of the 31 rows saw `whoami`. The documented
+  # config-surface exemption therefore did not exist, and reordering the SURFACE
+  # array (a plausible grouping edit) silently restored the defeat this check
+  # was added to close, at identical counts and EXIT=0.
+  case "$fkind" in
+    wire) wrappers='(Option|Box|Arc|Vec)' ;;
+    *)    wrappers='(Option|Box|Arc)' ;;
   esac
   bare=$(printf '%s' "$fty" | sed -E ":a; s/^${wrappers}<//; ta" | sed -E 's/>+$//' | sed 's/.*:://')
   # A dynamic-key map is a subtree whose keys nobody can enumerate -- the same
@@ -420,15 +430,31 @@ grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' > "$tmp/man_raw"
 # Round-2 note: the old `$1!="mask"` predicate caught a bad token by ACCIDENT
 # (it fell into the code-backed set and failed the 4a diff). Narrowing that
 # predicate removed the accident without replacing it. This is the replacement.
-bad_disp=$(awk -F'\t' '
+# The by-construction prefixes, DERIVED from the SURFACE table's `wire` rows.
+# They were hand-inventoried in three places (bare_surface, byconstruction, and
+# the wrappers switch) with no cross-check -- so a FOURTH wire struct would be
+# rejected for `always` and silently accepted for `mask`, shipping a field whose
+# manifest says "withheld" while serde serializes it in the clear. That is the
+# failure the closed set exists to close, in the shape this gate keeps producing.
+wire_prefixes=""
+for entry in "${SURFACE[@]}"; do
+  IFS='|' read -r _ _ p _ k <<< "$entry"
+  [ "$k" = "wire" ] && wire_prefixes="$wire_prefixes $p"
+done
+
+bad_disp=$(awk -F'\t' -v wires="$wire_prefixes" '
   # The BARE prefix counts as the surface, not just `<surface>.`. Requiring the
   # dot left `mask<TAB>status` accepted -- and PREFIX rows are the idiom this
   # manifest already uses (`omit audit.au3_1 (prefix)`, `omit lake (prefix)`),
   # so it is the spelling a maintainer reaches for. It re-opened the exact hole
   # the closed set was written to close: every StatusView field then matched by
   # prefix at check 4b, and `mask` rows never enter the 4a diff.
-  function bare_surface(p) { return p=="status" || p=="binding" || p=="whoami" }
-  function byconstruction(p) { return bare_surface(p) || p ~ /^status\./ || p ~ /^binding\./ || p ~ /^whoami\./ }
+  function bare_surface(p,  i,n,a) { n=split(wires,a," "); for(i=1;i<=n;i++) if(p==a[i]) return 1; return 0 }
+  function byconstruction(p,  i,n,a) {
+    if (bare_surface(p)) return 1
+    n=split(wires,a," "); for(i=1;i<=n;i++) if (index(p, a[i] ".")==1) return 1
+    return 0
+  }
   $1!="disclose" && $1!="mask" && $1!="omit" && $1!="always" { print "unknown disposition: " $0; next }
   # `always` means "ships by construction on a non-allowlist surface".
   $1=="always" && !byconstruction($2) { print "always is only for by-construction surfaces: " $0 }
