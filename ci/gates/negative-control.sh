@@ -574,6 +574,11 @@ pub struct RoleBindingView {
     pub members: Vec<String>,
     ${4:-}
 }
+
+pub struct WhoamiView {
+    pub peer_plane_uri_san: String,
+    pub peer_uid: u32,
+}
 FIX
   # The gate cross-checks its SURFACE list against the section registry, so a
   # fixture needs one.
@@ -679,6 +684,8 @@ always	status.listener	ships by construction
 always	status.authz_backend	ships by construction
 always	binding.role	ships by construction
 always	binding.members	ships by construction
+always	whoami.peer_plane_uri_san	ships by construction
+always	whoami.peer_uid	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
@@ -725,7 +732,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 18 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 20 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -857,13 +864,13 @@ expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/confi
 # a nonsense value was being accepted as "a recorded decision" -- and the
 # round-2 predicate change had removed, by accident, the check that used to
 # catch it.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed 's/^always\tstatus.version\t/masc\tstatus.version\t/')")"
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s/^always${TABCH}status.version${TABCH}/masc${TABCH}status.version${TABCH}/")")"
 expect_reject "config-disclosure-drift/unknown-disposition-token" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: `mask` on a by-construction surface. `StatusView` is serialized WHOLE
 # and never passes through `classify`, so a masked row there would ship the
 # value in the clear while the manifest said it was withheld.
-fx="$(cfg_fixture "${CFG_OK}mask	status.vault_addr	value withheld
+fx="$(cfg_fixture "${CFG_OK}mask${TABCH}status.vault_addr${TABCH}value withheld
 ")"
 expect_reject "config-disclosure-drift/mask-on-a-by-construction-surface" "$fx/ci/gates/config-disclosure-drift.sh"
 
@@ -871,20 +878,23 @@ expect_reject "config-disclosure-drift/mask-on-a-by-construction-surface" "$fx/c
 # `mask<TAB>status` through, and prefix rows are the idiom this manifest
 # already uses -- so it is the spelling a maintainer reaches for. It re-opened
 # the hole the closed set closed.
-fx="$(cfg_fixture "${CFG_OK}mask	status	cover the whole surface
+fx="$(cfg_fixture "${CFG_OK}mask${TABCH}status${TABCH}cover the whole surface
 ")"
 expect_reject "config-disclosure-drift/mask-on-a-bare-by-construction-prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# REJECT: a new field on a WIRE disclosure struct with no recorded decision.
-# The two payload structs are the surface `admin.status`/`admin.subject.list`
-# return whole; a field added there reaches every grant-holder.
+# REJECT: a new field on a WIRE disclosure struct. Named for what it actually
+# fires -- the field COUNT -- not for check 4b, which an earlier label claimed.
+# The count is the control that stops the field silently; 4b then forces the
+# decision once the count is bumped, which is the path a maintainer going green
+# actually takes. These structs are returned WHOLE by their verbs, so a field
+# added there reaches every grant-holder.
 fx="$(cfg_fixture "$CFG_OK" '' '' 'pub clearance: String,')"
-expect_reject "config-disclosure-drift/wire-struct-field-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject "config-disclosure-drift/wire-struct-field-changes-the-count" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 18 paths decided, 29 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 20 paths decided, 31 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
@@ -892,7 +902,7 @@ expect_accept "config-disclosure-drift/clean-fixture-passes" ": 18 paths decided
 # (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
 # control; asserting it here means any future silent shrink is a red build.
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 30 paths decided, 29 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 32 paths decided, 31 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

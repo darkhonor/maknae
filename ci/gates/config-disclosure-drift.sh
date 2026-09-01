@@ -69,6 +69,13 @@ SURFACE=(
   # who may be the untrusted agent runtime, since `bindings: {admin:["agent"]}`
   # is now correctly reported.
   "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2"
+  # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
+  # facts rather than deployment config, which is a defensible reason to scope
+  # it out -- but that rule was nowhere written, `RoleBindingView` (policy-file
+  # state, not maknae.yaml) is already inside, and `admin.whoami` is the only
+  # payload reachable with NO `roles:` grant at all. Inventorying two of three
+  # is how the third ships unreviewed, which is this table's own argument.
+  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their
@@ -408,7 +415,7 @@ bad_disp=$(awk -F'\t' '
   # so it is the spelling a maintainer reaches for. It re-opened the exact hole
   # the closed set was written to close: every StatusView field then matched by
   # prefix at check 4b, and `mask` rows never enter the 4a diff.
-  function byconstruction(p) { return p=="status" || p ~ /^status\./ || p=="binding" || p ~ /^binding\./ }
+  function byconstruction(p) { return p=="status" || p ~ /^status\./ || p=="binding" || p ~ /^binding\./ || p=="whoami" || p ~ /^whoami\./ }
   $1!="disclose" && $1!="mask" && $1!="omit" && $1!="always" { print "unknown disposition: " $0; next }
   # `always` means "ships by construction on a non-allowlist surface".
   $1=="always" && !byconstruction($2) { print "always is only for by-construction surfaces: " $0 }

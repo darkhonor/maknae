@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 // PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/`Payload::ReadContent`/
 // `ProtoErrCode::TooLarge` are ADDITIVE CBOR enum variants — no version bump.
+// #162 adds `Payload::{ConfigView, Status, SubjectList}` the same way, appended
+// at the tail. A client built before them has no subcommand that can elicit
+// one; a newer client against an older daemon gets `NotImplemented` from the
+// `NoBehaviour` arm.
 // A pre-#77 CLI never sends `Read`, so it keeps interoperating with a #77
 // daemon for `ping`/`whoami` (same wire version); only the new read verb
 // needs the new CLI. A version bump would be an irreversible hard mutual

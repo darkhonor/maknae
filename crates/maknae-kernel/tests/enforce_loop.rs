@@ -1083,7 +1083,11 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
             assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
             assert_eq!(s.authz_backend, "maknae-authz-basic");
-            assert!(!s.version.is_empty(), "the daemon must report its version");
+            // EXACT, like its siblings. This was the one field where any
+            // non-empty string passed; the test crate is `maknae-kernel`, the
+            // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
+            // distinguishing assertion is free.
+            assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --
             // passed the emptiness check.
@@ -1328,6 +1332,16 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::TooLarge),
         other => panic!("expected an explicit TooLarge refusal, got {other:?}"),
     }
+    // And the TRAIL must not claim the disclosure happened. The pre-dispatch
+    // record says permit/authorized; a corrective record carries the real
+    // posture. `permit` is retained -- the DECISION was a permit; only the
+    // delivery was refused.
+    let last = emit.records().last().cloned().expect("a record");
+    assert_eq!(last.outcome.result, "permit");
+    assert_eq!(
+        last.outcome.posture, "refused-oversize",
+        "a Permit-then-not-delivered must never read as a completed action"
+    );
 }
 
 /// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,

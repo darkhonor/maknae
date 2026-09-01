@@ -947,6 +947,35 @@ pub async fn handle<S, E, P>(
                 // unchanged: a PERMIT whose delivery is refused is refused
                 // EXPLICITLY, never truncated and never silently oversized.
                 if bytes.len() > cfg.frame_max_bytes {
+                    // A CORRECTIVE record, the same shape the enumeration-
+                    // unavailable branch uses 60 lines above -- and for the
+                    // identical reason, which this arm missed because it emits
+                    // the record BEFORE discovering the oversize. (The read PEP
+                    // never has this problem: `read_budget` bounds the read, so
+                    // it computes the refusal first and emits once.)
+                    //
+                    // Without it the trail asserts an authorized-and-SERVED
+                    // disclosure for a caller that received TooLarge. ADR-0019
+                    // pins `refused-oversize` for exactly this, and the read
+                    // PEP already uses it; `permit` is retained because the
+                    // decision WAS a permit -- only the delivery was refused.
+                    let _ = emit_request_outcome(
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        session_id,
+                        seq.next(),
+                        verb_to_action(&request.verb),
+                        None,
+                        None,
+                        "permit",
+                        "delivery refused: response exceeds the frame limit",
+                        "refused-oversize",
+                        &au3_1,
+                    )
+                    .await;
                     write_error_bounded(
                         &mut stream,
                         &cfg,

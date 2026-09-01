@@ -46,3 +46,5 @@ always	status.listener	the socket the caller is already connected to
 always	status.authz_backend	which PDP produced a verdict; the point of the field
 always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
+always	whoami.peer_plane_uri_san	the caller's own verified plane identity; it is who they already are
+always	whoami.peer_uid	the caller's own uid, which they can read with getuid()
