@@ -148,7 +148,31 @@ fn sanitize_backend_name(raw: &str) -> String {
 /// See [`guarded_backend_name`]. A panicking operand yields `None` —
 /// "cannot enumerate" — never `Some(vec![])`.
 pub fn guarded_subjects(a: &dyn Authorizer) -> Option<Vec<SubjectBinding>> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects())).unwrap_or(None)
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects()))
+        .unwrap_or(None)
+        .map(|bindings| {
+            bindings
+                .into_iter()
+                .map(|mut b| {
+                    b.role = strip_control(&b.role);
+                    b.members = b.members.iter().map(|m| strip_control(m)).collect();
+                    b
+                })
+                .collect()
+        })
+}
+
+/// Binding strings are operand-supplied and reach the CLI's terminal verbatim
+/// (`println!("{role}: {members}")`), so control bytes here are a terminal
+/// injection: `\x1b[2J` clears the operator's screen, and an embedded newline
+/// FORGES a second binding line -- `"alice\nadmin: uid:0"` renders as a claim
+/// that uid:0 holds admin. Stripped at the guard, the choke point the kernel
+/// calls -- not at the CLI, which a site's own tooling may not share. Unlike
+/// `backend_name` this does NOT restrict to an identifier charset: member and
+/// role tokens are site-defined, and mangling a legitimate name would misreport
+/// authorization state. Only C0/C1 control bytes (and DEL) are removed.
+fn strip_control(raw: &str) -> String {
+    raw.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Holds N backends; `decide` composes their verdicts via [`combine`], each
@@ -297,6 +321,45 @@ mod tests {
                 .expect("the guard must not swallow a real answer")
                 .len(),
             1
+        );
+
+        // Binding strings are operand-supplied and reach the CLI's terminal
+        // verbatim (`println!("{}: {}", role, members.join(", "))`). Unlike
+        // `backend_name` they carried NO sanitization, so a hostile backend
+        // could clear the operator's screen (`\x1b[2J`) or FORGE a binding
+        // line with an embedded newline -- `"alice\nadmin: uid:0"` renders as
+        // a second line claiming uid:0 holds admin. Control bytes are
+        // stripped at this guard, the choke point the kernel calls.
+        struct Injecting;
+        impl Authorizer for Injecting {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                Some(vec![SubjectBinding {
+                    role: "adm\u{1b}[2Jin".into(),
+                    members: vec!["alice\nadmin: uid:0".into(), "uid:1000".into()],
+                }])
+            }
+        }
+        let got = crate::guarded_subjects(&Injecting).expect("still enumerates");
+        // The ESC byte is stripped; the now-inert `[2J` remainder survives as
+        // plain text. Deliberate: removing control BYTES neutralizes the
+        // injection, while parsing full ANSI sequences to prettify the residue
+        // would be a second grammar to get wrong -- and the leftover `[2J` is
+        // honest evidence the operand supplied garbage.
+        assert_eq!(
+            got[0].role, "adm[2Jin",
+            "the ESC byte must not survive the guard"
+        );
+        assert!(!got[0].role.chars().any(char::is_control));
+        assert_eq!(
+            got[0].members[0], "aliceadmin: uid:0",
+            "an embedded newline must not be able to forge a second binding line"
+        );
+        assert_eq!(
+            got[0].members[1], "uid:1000",
+            "legitimate tokens pass unchanged"
         );
         // And through the composed authorizer, which is where the raw calls were.
         let c = ConjunctionAuthorizer::new(vec![Box::new(Hostile)]);

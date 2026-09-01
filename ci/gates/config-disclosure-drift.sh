@@ -124,6 +124,77 @@ if [ "$wire_listed" != "$wire_declared" ]; then
   exit 1
 fi
 
+# --- And the inventory ORIGINATES at `Payload`, not at a naming convention
+# (codex round-11 P1): a variant carrying a struct NOT named `*View`, or an
+# inline map (`Secrets(BTreeMap<String, String>)`), would ship every field
+# undecided while the *View scan above stayed green -- `ConfigView`'s inline
+# BTreeMap proves the wire format already permits the shape. Every variant of
+# `Payload` must appear here with a disposition; a new variant fails the build
+# until someone classifies what it disclosing MEANS:
+#   unit        -- carries nothing.
+#   bytes       -- opaque content whose disclosure was decided by its OWN PEP
+#                  (the Read path's PDP verdict), not by this gate.
+#   preredacted -- values that already went through `effective_view`'s
+#                  deny-by-default fold; carries NO decision of its own, and
+#                  MUST NOT be used for anything that skips that fold.
+#   struct:X    -- discloses workspace struct X, which must be a wire SURFACE
+#                  row (every field decided) AND be named in the variant's own
+#                  operand, so this table cannot quietly lie about the type.
+PAYLOAD_DISPOSITIONS=(
+  "Pong|unit"
+  "Whoami|struct:WhoamiView"
+  "ReadContent|bytes"
+  "ConfigView|preredacted"
+  "Status|struct:StatusView"
+  "SubjectList|struct:RoleBindingView"
+)
+payload_variants="$(awk '
+  /^pub enum Payload \{/ { inenum=1; next }
+  inenum && /^\}/ { inenum=0 }
+  inenum {
+    line=$0
+    sub(/^[[:space:]]+/, "", line)
+    if (line ~ /^\/\// || line ~ /^#/) next
+    if (match(line, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+      name=substr(line, 1, RLENGTH)
+      rest=substr(line, RLENGTH+1)
+      op=""
+      if (match(rest, /^\(.*\),?$/)) { op=substr(rest, 2, length(rest)-3) }
+      print name "\t" op
+    }
+  }
+' "$WIRE_FILE")"
+listed_names="$(printf '%s\n' "${PAYLOAD_DISPOSITIONS[@]}" | cut -d'|' -f1 | sort)"
+actual_names="$(printf '%s\n' "$payload_variants" | cut -f1 | sort)"
+if [ "$listed_names" != "$actual_names" ]; then
+  echo "FAIL: Payload variants and the disposition table disagree:"
+  echo "  table lists: $(echo $listed_names)"
+  echo "  enum declares: $(echo $actual_names)"
+  echo "  Every Payload variant is a disclosure surface; classify the new one"
+  echo "  (unit / bytes / preredacted / struct:X) -- deliberately, not to go green."
+  exit 1
+fi
+for row in "${PAYLOAD_DISPOSITIONS[@]}"; do
+  vname="${row%%|*}"; disp="${row#*|}"
+  operand="$(printf '%s\n' "$payload_variants" | awk -F'\t' -v v="$vname" '$1==v{print $2}')"
+  case "$disp" in
+    unit)
+      [ -z "$operand" ] || { echo "FAIL: Payload::$vname is listed 'unit' but carries '$operand'"; exit 1; } ;;
+    bytes|preredacted) ;;
+    struct:*)
+      st="${disp#struct:}"
+      case "$operand" in
+        *"$st"*) ;;
+        *) echo "FAIL: Payload::$vname is listed as disclosing '$st' but its operand is '$operand' — the table is lying about the type"; exit 1 ;;
+      esac
+      case " $(echo $wire_listed) " in
+        *" $st "*) ;;
+        *) echo "FAIL: Payload::$vname discloses '$st', which has no wire SURFACE row"; exit 1 ;;
+      esac ;;
+    *) echo "FAIL: unknown payload disposition '$disp' for Payload::$vname"; exit 1 ;;
+  esac
+done
+
 for entry in "${SURFACE[@]}"; do
   f="${entry%%|*}"
   [ -f "$f" ] || { echo "FAIL: missing $f (declared in SURFACE)"; exit 1; }

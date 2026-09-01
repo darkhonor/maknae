@@ -208,6 +208,10 @@ where
     maknae_proto::write_frame(&mut client, &request_frame(verb))
         .await
         .unwrap();
+    // The harness plays the BOOT role: production captures this once in
+    // run_inner from the same authorizer it serves with, so the test captures
+    // from the authorizer it drives with -- before handle() takes it by value.
+    let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     maknae_kernel::handle(
         server,
         "maknae://d/plane/cli".to_string(),
@@ -220,6 +224,7 @@ where
         authorizer,
         Arc::new(fx_principal.clone()),
         Arc::clone(&config_view),
+        backend_name,
         timeout,
         maknae_security::Lane::Local,
         delegated,

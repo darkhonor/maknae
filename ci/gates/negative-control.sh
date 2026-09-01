@@ -616,6 +616,15 @@ pub struct WhoamiView {
     pub peer_plane_uri_san: String,
     pub peer_uid: u32,
 }
+
+pub enum Payload {
+    Pong,
+    Whoami(WhoamiView),
+    ReadContent(crate::Bytes),
+    ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
+    Status(StatusView),
+    SubjectList(Vec<RoleBindingView>),
+}
 FIX
   # The gate cross-checks its SURFACE list against the section registry, so a
   # fixture needs one.
@@ -1038,6 +1047,40 @@ pub struct AuditTailView {
 FIX
 expect_reject_because "config-disclosure-drift/uninventoried-wire-view-struct" \
   "wire disclosure structs and the SURFACE table disagree" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NEW Payload variant with no disposition row -- codex round-11's P1,
+# in its own shape: an INLINE map payload is a disclosure surface with no
+# struct at all, so the *View inventory above cannot see it, and `ConfigView`
+# proves the wire format permits it. The variant table is what forces the
+# classification moment.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = w.read_text()
+a = "    SubjectList(Vec<RoleBindingView>),\n"
+assert s.count(a) == 1, "fixture Payload anchor moved"
+w.write_text(s.replace(a, a + "    Secrets(std::collections::BTreeMap<String, String>),\n"))
+PY
+expect_reject_because "config-disclosure-drift/payload-variant-with-no-disposition" \
+  "Payload variants and the disposition table disagree" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a disposition row whose named struct is not what the variant carries.
+# Without the operand cross-check the table can quietly lie about the type and
+# the gate keeps certifying the OLD struct's decisions for a NEW payload.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = w.read_text()
+a = "    Status(StatusView),"
+assert s.count(a) == 1, "fixture Status variant anchor moved"
+w.write_text(s.replace(a, "    Status(std::collections::BTreeMap<String, String>),"))
+PY
+expect_reject_because "config-disclosure-drift/payload-disposition-table-lies" \
+  "the table is lying about the type" \
   "$fx/ci/gates/config-disclosure-drift.sh"
 
 

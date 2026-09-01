@@ -351,6 +351,10 @@ pub async fn handle<S, E, P>(
     authorizer: Arc<P>,
     principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
+    // Captured ONCE at boot from the same authorizer (static TCB: the backend
+    // set cannot change in-process, so per-request asking could only repeat
+    // this string while running operand code inline on the worker).
+    authz_backend_name: Arc<String>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -792,15 +796,13 @@ pub async fn handle<S, E, P>(
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: PROTOCOL_VERSION,
                     listener: cfg.socket_path.display().to_string(),
-                    // Asked of the PDP, not hardcoded: with the classification
-                    // library present the deciding backend is not `-basic`, and
-                    // an operator debugging a verdict needs to know which one
-                    // produced it.
-                    // Behind the panic boundary, like every other direct
-                    // backend invocation: this is inline on the async worker,
-                    // and an unguarded panic here unwinds AFTER the audit
-                    // record already said permit/authorized.
-                    authz_backend: maknae_security::guarded_backend_name(&*authorizer),
+                    // Asked of the PDP, not hardcoded -- ONCE, at boot, where
+                    // a blocking backend hangs startup loudly instead of
+                    // eating a tokio worker per granted request (the seam doc's
+                    // "MUST NOT block" is a contract, not an enforcement).
+                    // Panic-guarded and sanitized at capture; the request path
+                    // runs no operand code for this field.
+                    authz_backend: (*authz_backend_name).clone(),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -1443,6 +1445,7 @@ pub async fn accept_loop<A, E, P>(
     authorizer: Arc<P>,
     principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
+    authz_backend_name: Arc<String>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1542,6 +1545,7 @@ where
                                 let authorizer = Arc::clone(&authorizer);
                                 let principal = Arc::clone(&principal);
                                 let config_view = Arc::clone(&config_view);
+                                let authz_backend_name = Arc::clone(&authz_backend_name);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1631,6 +1635,7 @@ where
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer, principal,
                                                 config_view,
+                                                authz_backend_name,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
@@ -2139,6 +2144,14 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             },
         ))
     };
+    // Asked of the PDP ONCE, at boot -- not per request. The backend set is
+    // fixed for the life of the process (static TCB, ADR-0002: no hot-swap),
+    // so a per-request call could only ever return the same string, while
+    // handing every granted `admin.status` an unbounded inline invocation of
+    // operand code on a tokio worker -- the seam doc's "MUST NOT block" is a
+    // contract, not an enforcement (codex round-11 P2). A backend that blocks
+    // here hangs BOOT, loudly, instead of quietly eating workers in service.
+    let authz_backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -2152,6 +2165,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         // Redact ONCE, here, at boot. The run loop receives only the view;
         // the unredacted Document does not travel with it.
         config_view,
+        authz_backend_name,
     )
     .await;
 
@@ -2181,6 +2195,8 @@ async fn serve_after_mint(
     principal: Arc<Principal>,
     // Already redacted at boot — the raw Document never reaches the run loop.
     config_view: Arc<ConfigView>,
+    // Captured at boot, same discipline as `config_view` (see run_inner).
+    authz_backend_name: Arc<String>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -2217,6 +2233,7 @@ async fn serve_after_mint(
         authorizer,
         principal,
         config_view,
+        authz_backend_name,
     )
     .await;
     Ok(outcome)
