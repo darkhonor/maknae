@@ -228,6 +228,12 @@ for entry in "${SURFACE[@]}"; do
     wire|config) ;;
     *) echo "FAIL: SURFACE entry '$entry' declares no kind (wire|config)"; exit 1 ;;
   esac
+  # `wire_prefixes` is a space-joined string that awk splits on " ", so a prefix
+  # containing whitespace would silently become two phantom surfaces -- and
+  # `byconstruction` would then match on half a name.
+  case "$sec" in
+    *[[:space:]]*|'') echo "FAIL: SURFACE entry '$entry' has an empty or whitespace-bearing prefix"; exit 1 ;;
+  esac
   before=$(wc -l < "$tmp/fields")
   # Fields with ANY visibility or none: `pub`, `pub(crate)`, `pub(super)`, or
   # bare. Raw identifiers, capitals, and every field on a line.
@@ -379,6 +385,26 @@ while IFS=$'\t' read -r fpath fty fkind; do
   # exact mistake the FIELD extractor had already been corrected for twice.
   # Visibility is irrelevant to disclosure at both levels, for one reason:
   # `flatten` walks the parsed `Value`, not the Rust item.
+  # `$bare` is interpolated into an ERE below. A type that reduces to an
+  # unbalanced bracket or paren -- a tuple or array field -- makes `grep` error,
+  # and `|| continue` would then treat it as a LEAF: fail-open, on the check
+  # whose whole job is to refuse leaves that are not. Unreachable today (no such
+  # field exists on any SURFACE struct); refused rather than left to a future
+  # one, because the failure is silent.
+  # Only ERE METACHARACTERS are refused, not every non-identifier. On a CONFIG
+  # surface `Vec<String>` reduces to `Vec<String` by design -- `Vec` is not
+  # stripped there, and the residue is a leaf under the documented exemption --
+  # so demanding a plain identifier here rejected five live fields. A `(`, `[`
+  # or `{` is different: it makes the ERE invalid, grep errors, and `|| continue`
+  # scores the field a LEAF.
+  case "$bare" in
+    *[\(\)\[\]\{\}\\*+?^\$.\|]*)
+      echo "FAIL: '$fpath' has type '$fty', which reduces to '$bare' —"
+      echo "  that carries a regex metacharacter, so the subtree grep below"
+      echo "  cannot be trusted to answer (an invalid pattern reads as 'leaf')."
+      echo "  Give it a SURFACE entry, an 'omit' manifest row, or a named type."
+      exit 1 ;;
+  esac
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every

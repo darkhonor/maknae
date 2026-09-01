@@ -1612,3 +1612,45 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         "the record must have been OFFERED before the frame was withheld"
     );
 }
+
+/// The CORRECTIVE record is gated on ITS OWN append, not the admission
+/// record's. n=3 leaves the admission record (1) and the pre-dispatch
+/// `permit / authorized` record (2) durable and fails the third — the posture
+/// correction — so the only surviving statement about this request is
+/// "authorized and served", for a disclosure that never happened.
+///
+/// The three corrective sites discarded that result (`let _ =`) and wrote the
+/// frame regardless, on the argument that a guard would be a constant `if
+/// true`. That argument is about the ADMISSION record's `appended`; the value
+/// discarded here is a second, freshly meaningful bool. Meanwhile
+/// `emit_request_outcome` printed "withholding the frame" on a path that
+/// responded.
+#[tokio::test]
+async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
+    let fx = Fixture::new("subjlist-corrective-withhold");
+    let emit = FailNthEmit::new(3);
+    let out = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        out.is_none(),
+        "no frame may be released when the record CORRECTING its posture could not append"
+    );
+    // The correction must have been OFFERED -- withholding because the record
+    // was never attempted would pass this test for the wrong reason.
+    let recs = emit.records();
+    assert!(
+        recs.iter()
+            .any(|r| r.outcome.posture == "unavailable" && r.outcome.result == "deny"),
+        "the corrective record must have been offered before the frame was withheld, got {:?}",
+        recs.iter()
+            .map(|r| (r.outcome.result.clone(), r.outcome.posture.clone()))
+            .collect::<Vec<_>>()
+    );
+}

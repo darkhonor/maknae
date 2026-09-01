@@ -899,7 +899,7 @@ pub async fn handle<S, E, P>(
                             // these same four conditions -- breaker open, at
                             // capacity, timeout, join failure -- to
                             // `deny`/`unavailable`.
-                            let _ = emit_request_outcome(
+                            let corrected = emit_request_outcome(
                                 &emit,
                                 &host,
                                 &socket,
@@ -924,19 +924,27 @@ pub async fn handle<S, E, P>(
                                 &au3_1,
                             )
                             .await;
-                            // No `may_respond(true)` guard here: it is a literal
-                            // `if true` -- control only reaches this arm after the
-                            // `!may_respond(appended)` return above, so `appended`
-                            // is already true. A constant-true call shaped like an
-                            // audit gate is worse than no gate; it reads as a
-                            // control on a security surface and gates nothing.
-                            write_error_bounded(
-                                &mut stream,
-                                &cfg,
-                                ProtoErrCode::Internal,
-                                "binding enumeration unavailable",
-                            )
-                            .await;
+                            // Gated on the CORRECTIVE record's own result, not
+                            // the admission record's. An earlier comment here
+                            // argued a guard would be a literal `if true` --
+                            // which is true of `appended`, and irrelevant: the
+                            // value in hand is a SECOND, freshly meaningful
+                            // bool. Discarding it left the degraded-sink case
+                            // with a trail whose only surviving record says
+                            // `permit / authorized / authorized` -- affirming a
+                            // disclosure that did not happen, the exact failure
+                            // this corrective record was added to prevent --
+                            // while `emit_request_outcome` printed "withholding
+                            // the frame" and the frame went out anyway.
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    ProtoErrCode::Internal,
+                                    "binding enumeration unavailable",
+                                )
+                                .await;
+                            }
                             close_bounded(&mut stream).await;
                             return;
                         }
@@ -978,7 +986,7 @@ pub async fn handle<S, E, P>(
                     // pins `refused-oversize` for exactly this, and the read
                     // PEP already uses it; `permit` is retained because the
                     // decision WAS a permit -- only the delivery was refused.
-                    let _ = emit_request_outcome(
+                    let corrected = emit_request_outcome(
                         &emit,
                         &host,
                         &socket,
@@ -995,13 +1003,19 @@ pub async fn handle<S, E, P>(
                         &au3_1,
                     )
                     .await;
-                    write_error_bounded(
-                        &mut stream,
-                        &cfg,
-                        ProtoErrCode::TooLarge,
-                        "response exceeds the configured frame limit",
-                    )
-                    .await;
+                    // Same gate as every other outcome record on this loop:
+                    // if the correction cannot be recorded, the trail still
+                    // reads `permit / authorized / authorized`, so nothing may
+                    // go back to the caller.
+                    if may_respond(corrected) {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            ProtoErrCode::TooLarge,
+                            "response exceeds the configured frame limit",
+                        )
+                        .await;
+                    }
                     close_bounded(&mut stream).await;
                     return;
                 }
@@ -1018,7 +1032,7 @@ pub async fn handle<S, E, P>(
                 // this branch widened it by adding a second variable-size
                 // payload. Recording it costs nothing; discovering it from a
                 // trail that says "served" would cost an incident.
-                let _ = emit_request_outcome(
+                let corrected = emit_request_outcome(
                     &emit,
                     &host,
                     &socket,
@@ -1035,13 +1049,15 @@ pub async fn handle<S, E, P>(
                     &au3_1,
                 )
                 .await;
-                write_error_bounded(
-                    &mut stream,
-                    &cfg,
-                    ProtoErrCode::Internal,
-                    "response encoding failed",
-                )
-                .await;
+                if may_respond(corrected) {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::Internal,
+                        "response encoding failed",
+                    )
+                    .await;
+                }
             }
         }
         // UNUSED, and that is the design showing through: the read arm no longer

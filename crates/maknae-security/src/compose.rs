@@ -95,8 +95,54 @@ pub fn guarded_decide(a: &dyn Authorizer, req: &Request) -> Verdict {
 /// cannot be performed is `None` — "cannot enumerate", never an empty list,
 /// which is the claim this whole surface refuses to make wrongly.
 pub fn guarded_backend_name(a: &dyn Authorizer) -> String {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
-        .unwrap_or_else(|_| "unknown".to_string())
+    let raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
+        .unwrap_or_else(|_| "unknown".to_string());
+    sanitize_backend_name(&raw)
+}
+
+/// The longest name this surface will carry, whole.
+///
+/// Sized for a COMPOSED name, not a single operand: the kernel calls
+/// `guarded_backend_name` on the `ConjunctionAuthorizer` itself, so the cap
+/// applies to the joined string, and a per-operand-sized cap would truncate a
+/// legitimate three-backend name. 128 comfortably holds the realistic
+/// compositions and is still a trivial bound against a hostile operand.
+const BACKEND_NAME_MAX: usize = 128;
+
+/// An operand-supplied IDENTIFIER, reduced to what an identifier needs.
+///
+/// This value is serialized into `StatusView.authz_backend`, returned to the
+/// client, and printed by the CLI. Left unbounded and unfiltered it is a
+/// terminal-injection vector (ANSI escapes, embedded newlines forging a second
+/// line of output) and a way for a third-party backend to push a permitted
+/// `admin.status` response past `frame_max_bytes` — turning it into a
+/// `refused-oversize` the operator has no way to explain. Truncation is on a
+/// CHARACTER boundary: slicing a `String` by bytes panics mid-codepoint, which
+/// would defeat the panic boundary this same function exists to provide.
+fn sanitize_backend_name(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+        .collect();
+    // Truncation is MARKED. An unmarked cut would render a composed
+    // `a+b+c` as `a+b+` and read as a complete two-backend deployment —
+    // a wrong answer to the one question this field exists to answer, which is
+    // worse than a visibly incomplete one. `~` is outside the kept charset, so
+    // it cannot be forged by an operand naming itself.
+    let cleaned = if kept.chars().count() > BACKEND_NAME_MAX {
+        let mut t: String = kept.chars().take(BACKEND_NAME_MAX).collect();
+        t.push('~');
+        t
+    } else {
+        kept
+    };
+    if cleaned.is_empty() {
+        // Sanitized away is indistinguishable from "did not answer", and the
+        // honest report for both is the same one a panic gets.
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// See [`guarded_backend_name`]. A panicking operand yields `None` —
@@ -154,15 +200,24 @@ impl Authorizer for ConjunctionAuthorizer {
     /// means "cannot enumerate", which the kernel reports as unavailable;
     /// answering wrongly about authorization state is worse than not
     /// answering.
+    /// A PANIC is distinguished from a decline. `guarded_subjects` folds both
+    /// to `None`, which would let a hostile operand panic on demand to remove
+    /// itself from the count — turning "two answers, refuse" into "one answer,
+    /// disclose it" and promoting the survivor's list to sole authority over a
+    /// composed decision it does not describe. An operand that failed is not an
+    /// operand that declined, so any panic refuses the whole enumeration.
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
-        let mut answered = self
-            .operands
-            .iter()
-            .filter_map(|a| guarded_subjects(a.as_ref()));
-        let first = answered.next()?;
-        match answered.next() {
-            None => Some(first),
-            Some(_) => None,
+        let mut answers = Vec::new();
+        for a in &self.operands {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects())) {
+                Err(_) => return None,
+                Ok(Some(list)) => answers.push(list),
+                Ok(None) => {}
+            }
+        }
+        match answers.len() {
+            1 => answers.pop(),
+            _ => None,
         }
     }
 }
@@ -220,6 +275,114 @@ mod tests {
             Box::new(Named("maknae-authz-dcs")),
         ]);
         assert_eq!(c.backend_name(), "maknae-authz-basic+maknae-authz-dcs");
+    }
+
+    /// The name is OPERAND-SUPPLIED and reaches the wire, so it is bounded and
+    /// sanitized at the guard — the single choke point the kernel calls.
+    ///
+    /// `StatusView.authz_backend` is serialized to the client and printed by
+    /// the CLI. An unbounded `String` from a third-party backend is a terminal
+    /// injection vector (control bytes, ANSI escapes, embedded newlines that
+    /// forge a second line of output) and a way to push the response over
+    /// `frame_max_bytes`, turning a permitted `admin.status` into a
+    /// `refused-oversize` the operator cannot explain. Nothing about a backend
+    /// IDENTIFIER needs those bytes.
+    #[test]
+    fn a_backend_name_reaching_the_wire_is_bounded_and_sanitized() {
+        struct Nasty(String);
+        impl Authorizer for Nasty {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn backend_name(&self) -> String {
+                self.0.clone()
+            }
+        }
+        let esc = crate::guarded_backend_name(&Nasty("dcs\u{1b}[2Kforged\nline".into()));
+        assert!(
+            !esc.contains('\u{1b}') && !esc.contains('\n'),
+            "control bytes must not reach an operator terminal, got {esc:?}"
+        );
+        let long = crate::guarded_backend_name(&Nasty("x".repeat(10_000)));
+        assert!(
+            long.len() <= 129,
+            "an operand-supplied identifier must be bounded, got {} bytes",
+            long.len()
+        );
+        assert!(
+            long.ends_with('~'),
+            "a truncated name must SAY it was truncated: unmarked, a composed \
+             `a+b+c` cut to `a+b+` reads as a complete two-backend deployment"
+        );
+        // A realistic COMPOSED name survives whole — the cap is sized for the
+        // joined string because that is what the kernel passes through here.
+        let c = ConjunctionAuthorizer::new(vec![
+            Box::new(Nasty("maknae-authz-basic".into())),
+            Box::new(Nasty("maknae-authz-dcs".into())),
+        ]);
+        assert_eq!(
+            crate::guarded_backend_name(&c),
+            "maknae-authz-basic+maknae-authz-dcs"
+        );
+        // An identifier that is legitimate passes through UNCHANGED — a
+        // sanitizer that mangles the real names would make the field useless.
+        assert_eq!(
+            crate::guarded_backend_name(&Nasty("maknae-authz-dcs_1.2".into())),
+            "maknae-authz-dcs_1.2"
+        );
+        // Emptied by sanitizing is the same state as "did not answer".
+        assert_eq!(
+            crate::guarded_backend_name(&Nasty("\u{1b}\u{1b}".into())),
+            "unknown"
+        );
+    }
+
+    /// A PANICKING operand must not be able to promote another operand's list
+    /// to sole authority.
+    ///
+    /// `guarded_subjects` maps a panic to the same `None` as "this backend
+    /// cannot enumerate", and the "exactly one operand answers" rule then
+    /// counts only the answers it can see. So two enumerating operands -- which
+    /// must refuse, being two different claims about who holds what -- become
+    /// ONE answering operand the moment the other panics, and the survivor's
+    /// list is disclosed as though it described the composed decision. A
+    /// hostile operand chooses that outcome by panicking on demand.
+    ///
+    /// Distinguishing the two states is the whole fix: a panic is an operand
+    /// that FAILED, not one that declines, and the composition refuses.
+    #[test]
+    fn a_panicking_operand_cannot_promote_another_list_to_sole_authority() {
+        struct Hostile;
+        impl Authorizer for Hostile {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                panic!("hostile backend")
+            }
+        }
+        struct Enumerates;
+        impl Authorizer for Enumerates {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                Some(vec![SubjectBinding {
+                    role: "admin".into(),
+                    members: vec!["uid:0".into()],
+                }])
+            }
+        }
+        let c = ConjunctionAuthorizer::new(vec![Box::new(Hostile), Box::new(Enumerates)]);
+        assert_eq!(
+            c.subjects(),
+            None,
+            "an operand that PANICKED is a failed operand, not one that declines: \
+             its silence must not make another operand's list authoritative"
+        );
+        // Order must not decide it either.
+        let c = ConjunctionAuthorizer::new(vec![Box::new(Enumerates), Box::new(Hostile)]);
+        assert_eq!(c.subjects(), None);
     }
 
     /// Enumerable ONLY when exactly one operand can enumerate. Two answering

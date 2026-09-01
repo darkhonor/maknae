@@ -28,11 +28,11 @@ expect_reject_because() { # <label> <expected-FAIL-substring> <cmd...>
   local label="$1" why="$2"; shift 2; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -q "$why"; then
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why"; then
     echo "neg-ok: [$label] gate rejected, for '$why'"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
-  elif printf '%s' "$out" | grep -q "FAIL"; then
+  elif printf '%s' "$out" | grep -q "FAIL"; then # rejected, but not for `$why`
     echo "NEG-FAIL: [$label] gate rejected for the WRONG reason (wanted '$why'): $out"
   else
     echo "NEG-FAIL: [$label] gate exited $rc without a FAIL line (crash, not a rejection): $out"
@@ -75,7 +75,7 @@ edition = "2021"
 maknae-kernel = { path = "../maknae-kernel", optional = true }
 EOF
 echo '' > "$tmpA/crates/shared/src/lib.rs"
-expect_reject "p1/optional-priv-dep" "$here/p1-manifest-lint.sh" "$tmpA"
+expect_reject_because "p1/optional-priv-dep" "as OPTIONAL" "$here/p1-manifest-lint.sh" "$tmpA"
 
 # Fixture A2 — TABLE-form optional privileged dep (`[dependencies.<crate>]`) → must also trip p1.
 tmpA2="$(mktemp -d)"; mkdir -p "$tmpA2/crates/shared/src" "$tmpA2/crates/maknae-kernel/src"
@@ -102,64 +102,60 @@ path = "../maknae-kernel"
 optional = true
 EOF
 echo '' > "$tmpA2/crates/shared/src/lib.rs"
-expect_reject "p1/optional-priv-dep-TABLE-form" "$here/p1-manifest-lint.sh" "$tmpA2"
+expect_reject_because "p1/optional-priv-dep-TABLE-form" "as OPTIONAL" "$here/p1-manifest-lint.sh" "$tmpA2"
 
-# Fixture B — CLI normally links a privileged crate → must trip p2-invert-tree.sh
-tmpB="$(mktemp -d)"; mkdir -p "$tmpB/crates/maknae-kernel/src" "$tmpB/bins/maknae/src"
-cat > "$tmpB/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "3"
-members = ["crates/maknae-kernel", "bins/maknae"]
-EOF
-cat > "$tmpB/crates/maknae-kernel/Cargo.toml" <<'EOF'
-[package]
-name = "maknae-kernel"
-version = "0.0.0"
-edition = "2021"
-EOF
-echo 'pub const M: &str = "x";' > "$tmpB/crates/maknae-kernel/src/lib.rs"
-cat > "$tmpB/bins/maknae/Cargo.toml" <<'EOF'
-[package]
-name = "maknae"
-version = "0.0.0"
-edition = "2021"
-[[bin]]
-name = "maknae"
-path = "src/main.rs"
-[dependencies]
-maknae-kernel = { path = "../../crates/maknae-kernel" }
-EOF
-echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$tmpB/bins/maknae/src/main.rs"
-expect_reject "p2/cli-links-privileged" "$here/p2-invert-tree.sh" "$tmpB"
+# Fixture B — P2a reachability. The fixture carries a stub for EVERY crate in
+# PRIVILEGED_CRATES, because the gate iterates all of them and fails CLOSED on a
+# cargo-tree error. Both probes previously shipped a workspace with ONE
+# privileged crate, so the first four iterations rejected with "did not match
+# any packages" and the reachability grep -- the check the probes are named for,
+# and #85's whole claim -- was never exercised. Deleting that grep from the gate
+# left negative-control fully green; removing the linked crate from
+# PRIVILEGED_CRATES did too.
+source "$here/lib.sh"
+p2_fixture() { # <crate-to-link-from-the-CLI, or empty for the clean case>
+  local linked="${1:-}" fixture members c
+  fixture="$(mktemp -d)"
+  members=''
+  for c in "${PRIVILEGED_CRATES[@]}"; do
+    mkdir -p "$fixture/crates/$c/src"
+    printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$c" \
+      > "$fixture/crates/$c/Cargo.toml"
+    echo 'pub const M: &str = "x";' > "$fixture/crates/$c/src/lib.rs"
+    members="$members\"crates/$c\", "
+  done
+  mkdir -p "$fixture/bins/maknae/src"
+  printf '[workspace]\nresolver = "3"\nmembers = [%s"bins/maknae"]\n' "$members" \
+    > "$fixture/Cargo.toml"
+  {
+    printf '[package]\nname = "maknae"\nversion = "0.0.0"\nedition = "2021"\n'
+    printf '[[bin]]\nname = "maknae"\npath = "src/main.rs"\n[dependencies]\n'
+    [ -n "$linked" ] && printf '%s = { path = "../../crates/%s" }\n' "$linked" "$linked"
+  } > "$fixture/bins/maknae/Cargo.toml"
+  if [ -n "$linked" ]; then
+    echo "fn main(){ println!(\"{}\", ${linked//-/_}::M); }" > "$fixture/bins/maknae/src/main.rs"
+  else
+    echo 'fn main(){}' > "$fixture/bins/maknae/src/main.rs"
+  fi
+  echo "$fixture"
+}
+tmpB="$(p2_fixture maknae-kernel)"
+expect_reject_because "p2/cli-links-privileged" \
+  "privileged 'maknae-kernel' is reachable from 'maknae' (P2a)" \
+  "$here/p2-invert-tree.sh" "$tmpB"
 
-# Fixture B2 — CLI links the PDP backend (#85: maknae-authz-basic is privileged;
-# the untrusted client must never carry the decision engine) → must trip p2.
-tmpB2="$(mktemp -d)"; mkdir -p "$tmpB2/crates/maknae-authz-basic/src" "$tmpB2/bins/maknae/src"
-cat > "$tmpB2/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "3"
-members = ["crates/maknae-authz-basic", "bins/maknae"]
-EOF
-cat > "$tmpB2/crates/maknae-authz-basic/Cargo.toml" <<'EOF'
-[package]
-name = "maknae-authz-basic"
-version = "0.0.0"
-edition = "2021"
-EOF
-echo 'pub const M: &str = "x";' > "$tmpB2/crates/maknae-authz-basic/src/lib.rs"
-cat > "$tmpB2/bins/maknae/Cargo.toml" <<'EOF'
-[package]
-name = "maknae"
-version = "0.0.0"
-edition = "2021"
-[[bin]]
-name = "maknae"
-path = "src/main.rs"
-[dependencies]
-maknae-authz-basic = { path = "../../crates/maknae-authz-basic" }
-EOF
-echo 'fn main(){ println!("{}", maknae_authz_basic::M); }' > "$tmpB2/bins/maknae/src/main.rs"
-expect_reject "p2/cli-links-authz-basic" "$here/p2-invert-tree.sh" "$tmpB2"
+# Fixture B2 — #85: `maknae-authz-basic` is privileged; the untrusted client
+# must never carry the decision engine.
+tmpB2="$(p2_fixture maknae-authz-basic)"
+expect_reject_because "p2/cli-links-authz-basic" \
+  "privileged 'maknae-authz-basic' is reachable from 'maknae' (P2a)" \
+  "$here/p2-invert-tree.sh" "$tmpB2"
+
+# ACCEPT: the same workspace with NOTHING linked. Without it, both rejections
+# above stay green against a gate that refuses every fixture -- which is very
+# nearly what was happening.
+expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture)"
 
 # Fixture C — bare workspace build in a workflow → must trip build-invocation-lint.sh
 tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
@@ -574,6 +570,23 @@ expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/
 # repeated the mistake, extracting parser keys with a regex over assumed call
 # shapes that matched zero of the real multi-line `bounded_*` sites. These
 # fixtures are the probes that defeated that version.
+cfg_manifest() { # <drop-regex-or-empty> <appended-rows...> -- compose CFG_OK safely
+  # `$(printf '%s' "$CFG_OK" | grep -v ...)ROW` LOSES the trailing newline:
+  # command substitution strips ALL of them, so the appended row is GLUED onto
+  # the last surviving one. Live instance: the `always<TAB>status` probe below
+  # produced `...not oursalways<TAB>status<TAB>...` as a single line, so the row
+  # it was written to test DID NOT EXIST in the fixture. It scored neg-ok
+  # anyway, because `grep -v` had removed four rows and check 4b fired on the
+  # fields they used to decide -- and deleting the control under test from the
+  # gate left negative-control at 78/78.
+  local drop="$1"; shift
+  local body="$CFG_OK"
+  [ -n "$drop" ] && body="$(printf '%s' "$body" | grep -v "$drop")"$'\n'
+  printf '%s' "$body"
+  local row
+  for row in "$@"; do printf '%s\n' "$row"; done
+}
+
 cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [extra-wire-field] [read_timeout_ms-type] [members-type]
   # 5 and 6 RETYPE an existing field instead of adding one. Depth probes must
   # be count-NEUTRAL or the exact-count check rejects first and the depth
@@ -759,7 +772,7 @@ expect_reject "config-disclosure-drift/hyphenated-entry-with-no-decision" "$fx/c
 
 # REJECT: a manifest row carrying a path but no rationale. "Decide it" is what
 # the gate's own failure text demands; a bare path is not a decision.
-fx="$(cfg_fixture "${CFG_OK%\'}disclose	core.undecided
+fx="$(cfg_fixture "${CFG_OK}disclose	core.undecided
 ")"
 expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
 
@@ -945,23 +958,64 @@ fx="$(cfg_fixture "${CFG_OK}mask${TABCH}status${TABCH}cover the whole surface
 ")"
 expect_reject "config-disclosure-drift/mask-on-a-bare-by-construction-prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# REJECT: a new field on a WIRE disclosure struct. Named for what it actually
-# fires -- the field COUNT -- not for check 4b, which an earlier label claimed.
-# The count is the control that stops the field silently; 4b then forces the
-# decision once the count is bumped, which is the path a maintainer going green
-# actually takes. These structs are returned WHOLE by their verbs, so a field
-# added there reaches every grant-holder.
+# REJECT: a new field on a WIRE disclosure struct. TWO independent controls stop
+# it -- the exact field count, and 4b once the count is bumped -- and this probe
+# deliberately asserts neither in isolation, because either one alone is
+# sufficient and a maintainer going green passes through both. The label says
+# `is-stopped` rather than naming a check: an earlier label claimed check 4b, a
+# later comment claimed "it actually fires the COUNT", and neither was
+# demonstrated -- disabling the count check leaves this fixture rejecting at 4b.
+# The count check has its own isolating probes (`*-not-counted`); 4b has
+# `struct-field-with-no-decision`. This one pins the OUTCOME.
 fx="$(cfg_fixture "$CFG_OK" '' '' 'pub clearance: String,')"
-expect_reject "config-disclosure-drift/wire-struct-field-changes-the-count" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject "config-disclosure-drift/wire-struct-field-is-stopped" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a BARE surface token as an `always` row. Round 4 made bare prefixes
 # count as the surface so `mask<TAB>status` would reject -- and that same change
 # legalized `always<TAB>status`, which then covers every field under it by
 # prefix. One row, whole struct, and a new sensitive field ships with nothing
 # but a count edit.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^always${TABCH}status\.")always${TABCH}status${TABCH}cover the whole surface
-")"
-expect_reject "config-disclosure-drift/bare-surface-token-is-not-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+fx="$(cfg_fixture "$(cfg_manifest "^always${TABCH}status\." \
+  "always${TABCH}status${TABCH}cover the whole surface")")"
+expect_reject_because "config-disclosure-drift/bare-surface-token-is-not-a-decision" \
+  "a bare surface token is not a per-field decision" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: `always` on a CONFIG path. `always` asserts "ships by construction on
+# a non-allowlist surface"; on a config path the value goes through `classify`
+# and may be masked, so the row would claim a disclosure the code does not make.
+# Unprobed until now: deleting the check left negative-control fully green.
+fx="$(cfg_fixture "$(cfg_manifest "" \
+  "always${TABCH}transport.socket_path${TABCH}claims by-construction on a classified surface")")"
+expect_reject_because "config-disclosure-drift/always-on-a-config-path" \
+  "always is only for by-construction surfaces" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a field whose type reduces to a token carrying a regex metacharacter
+# (a tuple here). `$bare` is interpolated into a `grep -rqE`, and an invalid
+# pattern makes grep error -- which `|| continue` scores as LEAF. Fail-open on
+# the check whose entire job is to refuse leaves that are not leaves. Note the
+# guard refuses METACHARACTERS only: `Vec<String>` on a config surface reduces
+# to `Vec<String` legitimately (the documented exemption) and must still pass,
+# which the clean-fixture probe below holds.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '(u32, String)')"
+expect_reject_because "config-disclosure-drift/metacharacter-type-is-not-a-leaf" \
+  "regex metacharacter" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SURFACE prefix carrying whitespace. `wire_prefixes` is space-joined
+# and split on " ", so such a prefix becomes two phantom surfaces and
+# `byconstruction` matches on half a name.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
+s = p.read_text()
+old = "|StatusView|status|4|wire"
+assert s.count(old) == 1, "fixture prefix anchor moved"
+p.write_text(s.replace(old, "|StatusView|status view|4|wire"))
+PY
+expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
+  "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a wire-struct field whose type becomes Vec<WorkspaceStruct>. `Vec` is
 # a leaf for a CONFIG document (`flatten` never recurses into `Value::Seq`) and
