@@ -92,8 +92,8 @@ crates/maknae-vault/src/stream.rs:247|let _ = std::fs::remove_file(path);
 # load-bearing three ways
 # (ADR-0009 decision 5). Do not "complete" these fields; #186 owed-bullet 1 was
 # corrected for exactly this reason.
-crates/maknae-kernel/src/handler.rs:416|owner: None,
-crates/maknae-kernel/src/handler.rs:417|mode_mask: None,
+crates/maknae-kernel/src/handler.rs:417|owner: None,
+crates/maknae-kernel/src/handler.rs:418|mode_mask: None,
 
 # ADR-0009 open_for_delegation — the SUBJECT's own open, performed by the untrusted
 # CLIENT under its own credentials. This is the ONE std::fs call in the crate whose
