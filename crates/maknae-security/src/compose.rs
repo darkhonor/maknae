@@ -250,6 +250,29 @@ mod tests {
             None,
             "a panicking operand must yield `cannot enumerate`, never an empty list"
         );
+        // And the guard must PASS THROUGH a backend that can enumerate. Every
+        // other assertion on `guarded_subjects` expects `None`, so a guard
+        // hard-wired to refuse satisfied all of them -- reported MISSED, and on
+        // the one surface where "refuse" is the safe answer and therefore the
+        // easiest wrong one to ship.
+        struct Enumerating;
+        impl Authorizer for Enumerating {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                Some(vec![SubjectBinding {
+                    role: "admin".into(),
+                    members: vec!["uid:0".into()],
+                }])
+            }
+        }
+        assert_eq!(
+            crate::guarded_subjects(&Enumerating)
+                .expect("the guard must not swallow a real answer")
+                .len(),
+            1
+        );
         // And through the composed authorizer, which is where the raw calls were.
         let c = ConjunctionAuthorizer::new(vec![Box::new(Hostile)]);
         assert_eq!(c.backend_name(), "unknown");
@@ -334,6 +357,28 @@ mod tests {
         assert_eq!(
             crate::guarded_backend_name(&Nasty("\u{1b}\u{1b}".into())),
             "unknown"
+        );
+
+        // THE BOUNDARY, both sides. Reported MISSED (`>` -> `>=`): with the cap
+        // unpinned, a name of exactly the maximum length could be truncated and
+        // marked, and no test would notice a legitimate composed name being
+        // reported as incomplete.
+        let exact = crate::guarded_backend_name(&Nasty("y".repeat(BACKEND_NAME_MAX)));
+        assert_eq!(
+            exact.chars().count(),
+            BACKEND_NAME_MAX,
+            "a name of EXACTLY the cap is not truncated"
+        );
+        assert!(!exact.ends_with('~'), "and is not marked as though it were");
+        let over = crate::guarded_backend_name(&Nasty("y".repeat(BACKEND_NAME_MAX + 1)));
+        assert_eq!(
+            over.chars().count(),
+            BACKEND_NAME_MAX + 1,
+            "cap + the marker"
+        );
+        assert!(
+            over.ends_with('~'),
+            "one character over IS truncated and marked"
         );
     }
 
