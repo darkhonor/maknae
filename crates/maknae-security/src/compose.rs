@@ -183,9 +183,34 @@ impl Authorizer for ConjunctionAuthorizer {
     /// the deciding backend is NOT `-basic`, and an operator needs to know
     /// which one produced a verdict.
     fn backend_name(&self) -> String {
+        // Panic-guarded RAW names, joined; sanitization happens ONCE, at
+        // `guarded_backend_name` -- the choke point the kernel calls. Running
+        // each operand through the full guard here double-sanitized the
+        // composed path: the inner pass truncated and marked, the outer pass
+        // stripped the `~` (outside the kept charset -- the same property that
+        // makes it unforgeable) and the result landed at exactly the cap, so
+        // no marker was re-applied and a truncated `authz_backend` reported as
+        // complete. Sanitize-once makes the marker idempotent by construction.
         self.operands
             .iter()
-            .map(|a| guarded_backend_name(a.as_ref()))
+            .map(|a| {
+                let raw =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
+                        .unwrap_or_else(|_| "unknown".to_string());
+                // An operand whose name sanitizes to NOTHING renders `unknown`,
+                // not an empty slot: `sanitize_backend_name` documents that
+                // "sanitized away is indistinguishable from did not answer",
+                // and the sanitize-once fix silently regressed it to
+                // `+maknae-authz-basic` for a first operand of pure escapes.
+                // `sanitize_backend_name` never returns "" -- it maps an
+                // emptied name to `unknown` itself -- so THAT is the signal;
+                // an `.is_empty()` check here is dead, which the test caught.
+                if sanitize_backend_name(&raw) == "unknown" {
+                    "unknown".to_string()
+                } else {
+                    raw
+                }
+            })
             .collect::<Vec<_>>()
             .join("+")
     }
@@ -346,6 +371,32 @@ mod tests {
         assert_eq!(
             crate::guarded_backend_name(&c),
             "maknae-authz-basic+maknae-authz-dcs"
+        );
+        // The MARKER must survive the composed path. The kernel calls
+        // `guarded_backend_name` on the ConjunctionAuthorizer, whose own
+        // `backend_name` ran each operand through the guard already -- and the
+        // outer sanitize then stripped the inner pass's `~` (it is outside the
+        // kept charset, the same property that makes it unforgeable) leaving
+        // exactly BACKEND_NAME_MAX chars, which is not over the cap, so no
+        // marker was re-applied. A truncated `authz_backend` reported as
+        // complete: the exact failure the marker documents itself preventing.
+        // An operand sanitized away is `unknown` in its slot, matching the
+        // documented single-operand behaviour -- not an empty segment.
+        let c = ConjunctionAuthorizer::new(vec![
+            Box::new(Nasty("\u{1b}\u{1b}".into())),
+            Box::new(Nasty("maknae-authz-basic".into())),
+        ]);
+        assert_eq!(
+            crate::guarded_backend_name(&c),
+            "unknown+maknae-authz-basic"
+        );
+        let c = ConjunctionAuthorizer::new(vec![Box::new(Nasty("z".repeat(400)))]);
+        let composed = crate::guarded_backend_name(&c);
+        assert!(
+            composed.ends_with('~'),
+            "a truncated composed name must still carry the marker, got {} chars ending {:?}",
+            composed.chars().count(),
+            composed.chars().last()
         );
         // An identifier that is legitimate passes through UNCHANGED — a
         // sanitizer that mangles the real names would make the field useless.

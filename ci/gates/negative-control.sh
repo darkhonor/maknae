@@ -940,8 +940,15 @@ expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/confi
 # a nonsense value was being accepted as "a recorded decision" -- and the
 # round-2 predicate change had removed, by accident, the check that used to
 # catch it.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s/^always${TABCH}status.version${TABCH}/masc${TABCH}status.version${TABCH}/")")"
-expect_reject "config-disclosure-drift/unknown-disposition-token" "$fx/ci/gates/config-disclosure-drift.sh"
+# On a CONFIG path, where the closed set is the ONLY rule that can fire. The
+# original probe put `masc` on `status.version` -- a WIRE path, where the
+# "by-construction fields ship whole" rule rejects independently -- so deleting
+# the closed-set check left the harness fully green while `masc` on a config
+# mask path passed at EXIT=0.
+fx="$(cfg_fixture "$(cfg_manifest "^mask${TABCH}audit\.siem${TABCH}" \
+  "masc${TABCH}audit.siem${TABCH}endpoint, no schema")")"
+expect_reject_because "config-disclosure-drift/unknown-disposition-token" \
+  "unknown disposition" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: `mask` on a by-construction surface. `StatusView` is serialized WHOLE
 # and never passes through `classify`, so a masked row there would ship the
@@ -1017,14 +1024,31 @@ PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
+# half of SURFACE is cross-checked against boot.rs's section registry; the wire
+# half was hand-maintained with no closing rule, so a new disclosure struct --
+# probed with a field literally named `vault_token` -- shipped at unchanged
+# counts and EXIT=0. The naming-convention inventory closes both directions.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct AuditTailView {
+    pub jsonl_path: String,
+    pub vault_token: String,
+}
+FIX
+expect_reject_because "config-disclosure-drift/uninventoried-wire-view-struct" \
+  "wire disclosure structs and the SURFACE table disagree" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+
 # REJECT: a wire-struct field whose type becomes Vec<WorkspaceStruct>. `Vec` is
 # a leaf for a CONFIG document (`flatten` never recurses into `Value::Seq`) and
 # is NOT for a wire struct, which serde serializes whole -- the exemption is a
 # fact about the consumer, and it was inherited unexamined when three wire
 # structs joined SURFACE.
-fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberView>')"
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberEntry>')"
 cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub struct MemberView {
+pub struct MemberEntry {
     pub uid: u32,
     pub home: String,
 }
@@ -1039,9 +1063,9 @@ expect_reject_because "config-disclosure-drift/wire-vec-of-struct-is-a-subtree" 
 # crate, a plausible tidy-up, restored the defeat above at identical counts and
 # EXIT=0. The kind is now an explicit column carried per row; this is what
 # proves it.
-fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberView>')"
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberEntry>')"
 cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub struct MemberView {
+pub struct MemberEntry {
     pub uid: u32,
     pub home: String,
 }

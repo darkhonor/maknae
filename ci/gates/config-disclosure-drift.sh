@@ -45,7 +45,6 @@ SURFACE=(
   "crates/maknae-config/src/transport.rs|TransportConfig|transport|5|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|3|config"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -76,6 +75,7 @@ SURFACE=(
   # payload reachable with NO `roles:` grant at all. Inventorying two of three
   # is how the third ships unreviewed, which is this table's own argument.
   "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their
@@ -93,6 +93,37 @@ CEILING_REQUIRES_SUPPRESSED="core.handling"
 for f in "$DOC" "$MANIFEST"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
+# --- The WIRE half of SURFACE is exact-inventory too. The config half is
+# cross-checked against boot.rs's SectionSpec registry, so an unlisted section
+# fails closed; the wire rows were hand-maintained with NO closing rule, so a
+# FOURTH `pub struct FooView` in wire.rs shipped with unchanged counts, no
+# manifest row, and every one of its fields undecided -- demonstrated with a
+# struct carrying a field literally named `vault_token`. The table's own
+# comments ("inventorying two of three is how the third ships unreviewed")
+# asserted the property; nothing enforced it. The closing rule is the file's
+# own naming convention, both directions: every `pub struct <Name>View` in the
+# wire file has a SURFACE row, and every wire SURFACE row names such a struct.
+WIRE_FILE="crates/maknae-proto/src/wire.rs"
+wire_declared="$(grep -oE '^(pub([[:space:]]|\([^)]*\)[[:space:]]))?struct [A-Za-z0-9_]+View\b' "$WIRE_FILE" \
+  | awk '{print $NF}' | sort -u)"
+# `if`, NOT an `[ ... ] && ...` AND-list: when the LAST SURFACE row is a
+# config row the AND-list fails, the loop's status is 1, and under
+# `set -euo pipefail` the gate dies with no FAIL line -- the same
+# last-row-decides bug as R7's leaked `$sec`, in the check written to close it.
+# Caught by the reorder probe, which is the only fixture with a config row last.
+wire_listed="$(for entry in "${SURFACE[@]}"; do
+  IFS='|' read -r f st _ _ k <<< "$entry"
+  if [ "$k" = "wire" ] && [ "$f" = "$WIRE_FILE" ]; then echo "$st"; fi
+done | sort -u)"
+if [ "$wire_listed" != "$wire_declared" ]; then
+  echo "FAIL: wire disclosure structs and the SURFACE table disagree:"
+  echo "  SURFACE lists: $(echo $wire_listed)"
+  echo "  wire.rs declares: $(echo $wire_declared)"
+  echo "  A *View struct in $WIRE_FILE is a disclosure payload; give it a"
+  echo "  SURFACE row (kind wire) and decide every field, or remove it."
+  exit 1
+fi
+
 for entry in "${SURFACE[@]}"; do
   f="${entry%%|*}"
   [ -f "$f" ] || { echo "FAIL: missing $f (declared in SURFACE)"; exit 1; }
@@ -323,6 +354,7 @@ for entry in "${SURFACE[@]}"; do
 done
 sort -u "$tmp/fields" -o "$tmp/fields"
 
+
 # --- DEPTH. A field whose type is a config struct declared in this workspace
 # is a subtree: its own fields become real YAML paths. Counting it as one leaf
 # is the fifth instance of the same fail-open -- and the SILENT variant, since
@@ -465,7 +497,15 @@ grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' > "$tmp/man_raw"
 wire_prefixes=""
 for entry in "${SURFACE[@]}"; do
   IFS='|' read -r _ _ p _ k <<< "$entry"
-  [ "$k" = "wire" ] && wire_prefixes="$wire_prefixes $p"
+  # `if`, not `[ ... ] && ...` -- defensively: the FATAL form is a loop ending
+  # in a failed AND-list *inside a pipeline or command substitution*, where
+  # pipefail turns the loop status into the assignment's status and set -e
+  # kills the gate with no FAIL line (the wire inventory above -- caught by the
+  # reorder probe, the one fixture with a config row last). At plain statement
+  # position, as here and at the `covered=1` match in the subtree loop below,
+  # bash does NOT exit on it -- verified, not assumed. The `if` form is kept at
+  # this site anyway so the file has one shape instead of a rule with footnotes.
+  if [ "$k" = "wire" ]; then wire_prefixes="$wire_prefixes $p"; fi
 done
 
 bad_disp=$(awk -F'\t' -v wires="$wire_prefixes" '
