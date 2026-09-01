@@ -119,7 +119,13 @@
 # What is NOT covered is the one-line choice of loader. Reviewed and accepted.
 exclude_re = [
   "maknae-plane.*::poll_flush",
-  "maknae-authz-basic.*BasicAuthorizer>::subjects",
+  # NARROWED to the one replacement the argument covers. The broad form also
+  # suppressed the two KILLABLE mutants on the same method -- including
+  # `with Some(vec![])`, which is the single most load-bearing distinction on
+  # this surface: it turns "I cannot enumerate" into "nobody is bound". An
+  # exclusion wider than its justification silently retires coverage the
+  # justification never claimed.
+  "maknae-authz-basic.*BasicAuthorizer>::subjects -> Option<Vec<maknae_security::SubjectBinding>> with None",
 ]
 
 exclude_globs = [

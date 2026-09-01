@@ -113,10 +113,11 @@ pub struct WhereCtx {
 /// `handle` still holds raw configuration in the same scope as the arm that
 /// answers `admin.config.show`: `cfg` (the whole `transport` section --
 /// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
-/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). A future
-/// `admin.status` arm wanting "which socket am I on?" finds `cfg.socket_path`
-/// sitting right there. **Any new arm that reaches for one of those owes the
-/// same disclosure argument this one made** -- the boot-time redaction protects
+/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). That debt has since been
+/// PAID once: the `admin.status` arm wanting "which socket am I on?" found
+/// `cfg.socket_path` sitting right there, and `listener` is disclosed under
+/// ADR-0010 decision 16 with its own argument and its own gate row. **Any
+/// further arm that reaches for one of those owes the same argument** -- the boot-time redaction protects
 /// the `Document`, not the request path in general.
 ///
 /// It is also a BOOT SNAPSHOT. The authz policy is deliberately re-read per
@@ -874,6 +875,36 @@ pub async fn handle<S, E, P>(
                             )
                         }
                         None => {
+                            // A SECOND record, correcting the posture.
+                            //
+                            // The record for this request was appended as
+                            // `permit / authorized` before dispatch, and the
+                            // enumeration then refused -- so the trail asserted
+                            // an authorized-and-SERVED admin.subject.list for a
+                            // request whose caller received `Internal`.
+                            // ADR-0019 pins `unavailable` in the posture domain
+                            // precisely so a Permit-then-not-performed cannot
+                            // read as a completed action, and the read PEP maps
+                            // these same four conditions -- breaker open, at
+                            // capacity, timeout, join failure -- to
+                            // `deny`/`unavailable`.
+                            let _ = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                "binding enumeration unavailable",
+                                "unavailable",
+                                &au3_1,
+                            )
+                            .await;
                             // No `may_respond(true)` guard here: it is a literal
                             // `if true` -- control only reaches this arm after the
                             // `!may_respond(appended)` return above, so `appended`

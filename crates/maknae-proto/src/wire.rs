@@ -286,9 +286,11 @@ pub enum Payload {
 /// peer that completed a handshake already knows the protocol version, and the
 /// socket path is the one the caller is already connected to.
 ///
-/// NOT "config.show discloses it anyway": the grants are INDEPENDENT, and a
-/// deployment on the default `socket_path` has no `transport:` key for
-/// config.show to disclose — this would be the only surface that does.
+/// NOT "config.show discloses it anyway" — the grants are INDEPENDENT, so a
+/// role granted only `admin.status` never gets `config.show` and that argument
+/// cannot carry this field. (An earlier note here went further and said
+/// `config.show` discloses nothing of the sort on a default deployment. False:
+/// `effective_view` folds the RESOLVED default in regardless of the file.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
     /// The daemon's crate version.

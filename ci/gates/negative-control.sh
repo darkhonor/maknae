@@ -553,7 +553,7 @@ expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/
 # repeated the mistake, extracting parser keys with a regex over assumed call
 # shapes that matched zero of the real multi-line `bounded_*` sites. These
 # fixtures are the probes that defeated that version.
-cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
+cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [extra-wire-field]
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
@@ -561,7 +561,7 @@ cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
            "$fixture/crates/maknae-proto/src"
   # `StatusView` is the second disclosure surface (admin.status returns it
   # whole); the gate's SURFACE table names it, so a fixture needs it too.
-  cat > "$fixture/crates/maknae-proto/src/wire.rs" <<'FIX'
+  cat > "$fixture/crates/maknae-proto/src/wire.rs" <<FIX
 pub struct StatusView {
     pub version: String,
     pub protocol_version: u16,
@@ -572,6 +572,7 @@ pub struct StatusView {
 pub struct RoleBindingView {
     pub role: String,
     pub members: Vec<String>,
+    ${4:-}
 }
 FIX
   # The gate cross-checks its SURFACE list against the section registry, so a
@@ -660,6 +661,7 @@ FIX
   echo "$fixture"
 }
 
+TABCH="$(printf '\t')"
 CFG_OK='disclose	transport	transport shape, all fields
 disclose	vault.addr	where vault is
 mask	audit.siem	endpoint, no schema
@@ -850,6 +852,34 @@ expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/g
 # the 4a diff work also hid them.
 fx="$(cfg_fixture "$CFG_OK" '' '"vault.addr",')"
 expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: an unrecognised disposition token. The closed set was added because
+# a nonsense value was being accepted as "a recorded decision" -- and the
+# round-2 predicate change had removed, by accident, the check that used to
+# catch it.
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed 's/^always\tstatus.version\t/masc\tstatus.version\t/')")"
+expect_reject "config-disclosure-drift/unknown-disposition-token" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: `mask` on a by-construction surface. `StatusView` is serialized WHOLE
+# and never passes through `classify`, so a masked row there would ship the
+# value in the clear while the manifest said it was withheld.
+fx="$(cfg_fixture "${CFG_OK}mask	status.vault_addr	value withheld
+")"
+expect_reject "config-disclosure-drift/mask-on-a-by-construction-surface" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the BARE PREFIX spelling of the same thing. Requiring `status.` let
+# `mask<TAB>status` through, and prefix rows are the idiom this manifest
+# already uses -- so it is the spelling a maintainer reaches for. It re-opened
+# the hole the closed set closed.
+fx="$(cfg_fixture "${CFG_OK}mask	status	cover the whole surface
+")"
+expect_reject "config-disclosure-drift/mask-on-a-bare-by-construction-prefix" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a new field on a WIRE disclosure struct with no recorded decision.
+# The two payload structs are the surface `admin.status`/`admin.subject.list`
+# return whole; a field added there reaches every grant-holder.
+fx="$(cfg_fixture "$CFG_OK" '' '' 'pub clearance: String,')"
+expect_reject "config-disclosure-drift/wire-struct-field-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.

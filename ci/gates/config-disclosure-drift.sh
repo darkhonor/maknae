@@ -402,12 +402,19 @@ grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' > "$tmp/man_raw"
 # (it fell into the code-backed set and failed the 4a diff). Narrowing that
 # predicate removed the accident without replacing it. This is the replacement.
 bad_disp=$(awk -F'\t' '
+  # The BARE prefix counts as the surface, not just `<surface>.`. Requiring the
+  # dot left `mask<TAB>status` accepted -- and PREFIX rows are the idiom this
+  # manifest already uses (`omit audit.au3_1 (prefix)`, `omit lake (prefix)`),
+  # so it is the spelling a maintainer reaches for. It re-opened the exact hole
+  # the closed set was written to close: every StatusView field then matched by
+  # prefix at check 4b, and `mask` rows never enter the 4a diff.
+  function byconstruction(p) { return p=="status" || p ~ /^status\./ || p=="binding" || p ~ /^binding\./ }
   $1!="disclose" && $1!="mask" && $1!="omit" && $1!="always" { print "unknown disposition: " $0; next }
   # `always` means "ships by construction on a non-allowlist surface".
-  $1=="always" && $2 !~ /^status\./ && $2 !~ /^binding\./ { print "always is only for by-construction surfaces: " $0 }
+  $1=="always" && !byconstruction($2) { print "always is only for by-construction surfaces: " $0 }
   # masking is meaningful only where a classifier renders the value.
-  $1=="mask" && ($2 ~ /^status\./ || $2 ~ /^binding\./) { print "mask is meaningless on a by-construction surface: " $0 }
-  $1!="always" && ($2 ~ /^status\./ || $2 ~ /^binding\./) { print "status.* fields ship whole; the only valid disposition is `always`: " $0 }
+  $1=="mask" && byconstruction($2) { print "mask is meaningless on a by-construction surface: " $0 }
+  $1!="always" && byconstruction($2) { print "by-construction fields ship whole; the only valid disposition is `always`: " $0 }
 ' "$tmp/man_raw")
 if [ -n "$bad_disp" ]; then
   echo "FAIL: manifest disposition(s) not valid for their surface:"

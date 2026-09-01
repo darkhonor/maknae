@@ -775,9 +775,6 @@ mod tests {
     /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
     /// against a validator that refuses everything, so this is the assertion
     /// that keeps them honest.
-    /// loader `decide` uses -- and reports `None`, never an empty list, when it
-    /// different claims about authorization state, and only one of them is safe
-    /// to make wrongly.
     #[test]
     fn roles_valid_grant_block_constructs() {
         let p = parse_with_roles(

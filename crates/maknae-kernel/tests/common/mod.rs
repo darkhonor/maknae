@@ -113,3 +113,24 @@ pub fn permissive_authz() -> (Arc<AlwaysPermit>, Arc<maknae_config::Principal>, 
         Duration::from_secs(5),
     )
 }
+
+/// A backend whose `backend_name()` PANICS. Permits, so the request reaches
+/// dispatch — the kernel calls `backend_name` INLINE on the async worker, and
+/// unlike `subjects` it has no `spawn_blocking` backstop, so an unguarded
+/// panic there unwinds through `handle()` after the audit record already said
+/// permit/authorized.
+pub struct PanickingName;
+
+impl Authorizer for PanickingName {
+    fn decide(&self, _r: &maknae_security::Request) -> Verdict {
+        Verdict::Permit {
+            obligations: vec![maknae_security::Obligation {
+                id: "audit".into(),
+                params: maknae_security::Attributes::new(),
+            }],
+        }
+    }
+    fn backend_name(&self) -> String {
+        panic!("hostile backend name")
+    }
+}

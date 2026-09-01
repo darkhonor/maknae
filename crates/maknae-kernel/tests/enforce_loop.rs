@@ -16,7 +16,7 @@ use maknae_authz_basic::HermeticAuthorizer;
 use maknae_proto::{Payload, ProtoErrCode, RespResult};
 
 mod common;
-use common::{AlwaysPermit, FailNthEmit, HostileObligation, SleepAuthorizer};
+use common::{AlwaysPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer};
 
 // Reuse run_loop's recording emitter shape locally (each tests/*.rs is its
 // own crate; RecEmit is tiny and its semantics — record synchronously, then
@@ -1131,6 +1131,36 @@ async fn status_reports_the_backend_that_actually_decided() {
     }
 }
 
+/// A backend that PANICS in `backend_name()` is contained, on the production
+/// path. The kernel calls it INLINE on the async worker -- unlike `subjects`,
+/// which `spawn_blocking` would backstop -- so without the guard the panic
+/// unwinds through `handle()` AFTER the audit record already said
+/// permit/authorized, and the caller gets a dropped connection instead of a
+/// response. `run.rs` is mutation-excluded, so nothing else would catch a
+/// revert to the raw call.
+#[tokio::test]
+async fn a_panicking_backend_name_is_contained_on_the_production_path() {
+    let fx = Fixture::new("status-panicking-name");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(PanickingName),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame, not a dropped connection");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => assert_eq!(
+            s.authz_backend, "unknown",
+            "a panicking name must fail closed to `unknown`, not escape"
+        ),
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+}
+
 /// `admin.subject.list` reports what the POLICY FILE binds, end to end.
 ///
 /// This does NOT prove liveness, and an earlier version of this doc claimed it
@@ -1206,6 +1236,15 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
         ),
         other => panic!("expected an explicit refusal, got {other:?}"),
     }
+    // And the TRAIL must not claim the disclosure happened. The pre-dispatch
+    // record says permit/authorized; a second record corrects the posture,
+    // exactly as the read PEP does for these same four conditions.
+    let last = emit.records().last().cloned().expect("a record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(
+        last.outcome.posture, "unavailable",
+        "a Permit-then-not-performed must never read as a completed action"
+    );
 }
 
 /// Neither new term discloses without a grant. The authorization decision is
