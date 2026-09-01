@@ -775,9 +775,7 @@ mod tests {
     /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
     /// against a validator that refuses everything, so this is the assertion
     /// that keeps them honest.
-    /// `subjects()` reports what the POLICY FILE binds, read through the same
     /// loader `decide` uses -- and reports `None`, never an empty list, when it
-    /// cannot read. "No bindings exist" and "I could not tell you" are
     /// different claims about authorization state, and only one of them is safe
     /// to make wrongly.
     #[test]

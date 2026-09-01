@@ -284,7 +284,11 @@ pub enum Payload {
 /// ships UNGRANTED and admin-only. Once an operator has granted it to an admin
 /// role, withholding the daemon's own version from them protects nobody: any
 /// peer that completed a handshake already knows the protocol version, and the
-/// socket path is disclosed by `admin.config.show` on the same reasoning.
+/// socket path is the one the caller is already connected to.
+///
+/// NOT "config.show discloses it anyway": the grants are INDEPENDENT, and a
+/// deployment on the default `socket_path` has no `transport:` key for
+/// config.show to disclose — this would be the only surface that does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
     /// The daemon's crate version.

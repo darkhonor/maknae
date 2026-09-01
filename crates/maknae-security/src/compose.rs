@@ -81,6 +81,30 @@ pub fn guarded_decide(a: &dyn Authorizer, req: &Request) -> Verdict {
         .unwrap_or(Verdict::Indeterminate)
 }
 
+/// The same panic boundary for the two DISCLOSURE seam methods.
+///
+/// `guarded_decide`'s doc already says any PDP host invoking a backend
+/// directly should route through it — and when `subjects`/`backend_name` were
+/// added, the composed authorizer called both operands RAW, three lines below
+/// its own guarded `decide`. A hostile or buggy third-party operand panicking
+/// in either one unwinds through the kernel's `handle()` AFTER its audit
+/// record has already said `permit / authorized`.
+///
+/// Both fail CLOSED, and the two failures are different: a name that cannot be
+/// obtained is `unknown` (the seam default, honest), and an enumeration that
+/// cannot be performed is `None` — "cannot enumerate", never an empty list,
+/// which is the claim this whole surface refuses to make wrongly.
+pub fn guarded_backend_name(a: &dyn Authorizer) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// See [`guarded_backend_name`]. A panicking operand yields `None` —
+/// "cannot enumerate" — never `Some(vec![])`.
+pub fn guarded_subjects(a: &dyn Authorizer) -> Option<Vec<SubjectBinding>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects())).unwrap_or(None)
+}
+
 /// Holds N backends; `decide` composes their verdicts via [`combine`], each
 /// behind [`guarded_decide`]. Spec §13/§14 (N-ary operand fold). The kernel
 /// constructs this in a DCS build; a non-DCS build can use a single backend
@@ -115,7 +139,7 @@ impl Authorizer for ConjunctionAuthorizer {
     fn backend_name(&self) -> String {
         self.operands
             .iter()
-            .map(|a| a.backend_name())
+            .map(|a| guarded_backend_name(a.as_ref()))
             .collect::<Vec<_>>()
             .join("+")
     }
@@ -131,7 +155,10 @@ impl Authorizer for ConjunctionAuthorizer {
     /// answering wrongly about authorization state is worse than not
     /// answering.
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
-        let mut answered = self.operands.iter().filter_map(|a| a.subjects());
+        let mut answered = self
+            .operands
+            .iter()
+            .filter_map(|a| guarded_subjects(a.as_ref()));
         let first = answered.next()?;
         match answered.next() {
             None => Some(first),
@@ -143,6 +170,36 @@ impl Authorizer for ConjunctionAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both new seam methods sit behind the panic boundary, mirroring
+    /// `guarded_decide_converts_panic_to_indeterminate`. A hostile operand
+    /// panicking in either one would otherwise unwind through the kernel's
+    /// `handle()` after its audit record already said permit/authorized.
+    #[test]
+    fn guarded_seam_methods_convert_panic_to_the_fail_closed_answer() {
+        struct Hostile;
+        impl Authorizer for Hostile {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn backend_name(&self) -> String {
+                panic!("hostile backend")
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                panic!("hostile backend")
+            }
+        }
+        assert_eq!(crate::guarded_backend_name(&Hostile), "unknown");
+        assert_eq!(
+            crate::guarded_subjects(&Hostile),
+            None,
+            "a panicking operand must yield `cannot enumerate`, never an empty list"
+        );
+        // And through the composed authorizer, which is where the raw calls were.
+        let c = ConjunctionAuthorizer::new(vec![Box::new(Hostile)]);
+        assert_eq!(c.backend_name(), "unknown");
+        assert_eq!(c.subjects(), None);
+    }
 
     /// The composed authorizer NAMES its operands rather than taking the
     /// `unknown` default. Taking the default would have made `admin.status`'s

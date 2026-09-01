@@ -44,3 +44,5 @@ always	status.version	the daemon's own version; an operator debugging needs it a
 always	status.protocol_version	every peer that completed a handshake already has it
 always	status.listener	the socket the caller is already connected to
 always	status.authz_backend	which PDP produced a verdict; the point of the field
+always	binding.role	the policy-file role token an operator would grep for
+always	binding.members	the identities bound to it; the answer admin.subject.list exists to give

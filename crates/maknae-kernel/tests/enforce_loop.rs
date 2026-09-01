@@ -155,6 +155,7 @@ where
         timeout,
         fds,
         Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
 }
@@ -181,6 +182,7 @@ where
         timeout,
         maknae_io::DelegatedFds::new(0),
         Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
 }
@@ -197,6 +199,7 @@ async fn drive_with<P>(
     // The already-redacted effective config the daemon would hold. Default
     // (empty) for every verb that is not `admin.config.show`.
     config_view: Arc<maknae_kernel::ConfigView>,
+    transport: maknae_config::TransportConfig,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -212,7 +215,7 @@ where
         true,
         emit,
         1,
-        maknae_config::transport_from_section(None).unwrap(),
+        transport,
         serde_json::json!({}),
         authorizer,
         Arc::new(fx_principal.clone()),
@@ -1036,6 +1039,20 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// The transport a status test drives with, DELIBERATELY NON-DEFAULT.
+///
+/// Asserting `listener` against `transport_from_section(None)` -- the default
+/// -- could not separate "reads `cfg.socket_path`" from a hardcoded literal:
+/// expected and actual were the same string. Replacing both `listener` and
+/// `authz_backend` with literals left the entire kernel suite GREEN, and
+/// `run.rs` is in `exclude_globs`, so cargo-mutants never generated the
+/// mutant either. A distinguishing input is the only thing that closes it.
+fn nondefault_transport() -> maknae_config::TransportConfig {
+    let mut t = maknae_config::transport_from_section(None).unwrap();
+    t.socket_path = "/tmp/maknae-status-probe.sock".into();
+    t
+}
+
 /// `admin.status` end to end: a real grant, a real verdict, real posture.
 ///
 /// Every field is asserted, not just the variant. `authz_backend` is the one
@@ -1049,13 +1066,16 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
     let emit = RecEmit::new();
-    let frame = drive(
+    let frame = drive_with(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         0,
         maknae_proto::Verb::AdminStatus,
         Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
+        nondefault_transport(),
     )
     .await
     .expect("a frame");
@@ -1069,11 +1089,9 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             // passed the emptiness check.
             assert_eq!(
                 s.listener,
-                maknae_config::transport_from_section(None)
-                    .unwrap()
-                    .socket_path
-                    .display()
-                    .to_string()
+                nondefault_transport().socket_path.display().to_string(),
+                "listener must be READ from the running config -- a default-valued \
+                 expectation could not tell that apart from a hardcoded literal"
             );
         }
         other => panic!("expected a Status payload, got {other:?}"),
@@ -1082,6 +1100,35 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(req.action, "admin.status");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.outcome.posture, "authorized");
+}
+
+/// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself
+/// reports `unknown`, and this is the input that proves the field is not the
+/// `-basic` literal: `AlwaysPermit` implements only `decide`, so it takes the
+/// seam default. Two tests, two backends, two different expected strings --
+/// which is what "asked, not hardcoded" actually requires.
+#[tokio::test]
+async fn status_reports_the_backend_that_actually_decided() {
+    let fx = Fixture::new("status-unknown-backend");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => assert_eq!(
+            s.authz_backend, "unknown",
+            "a backend taking the seam default must report `unknown`, not the \
+             name of some other backend"
+        ),
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
 }
 
 /// `admin.subject.list` reports what the POLICY FILE binds, end to end.
@@ -1161,7 +1208,7 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
     }
 }
 
-/// Neither new term discloses without a grant./// Neither new term discloses without a grant. The authorization decision is
+/// Neither new term discloses without a grant. The authorization decision is
 /// the gate, not the dispatch.
 #[tokio::test]
 async fn the_new_terms_disclose_nothing_without_a_grant() {
@@ -1227,6 +1274,7 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");
@@ -1294,6 +1342,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");
@@ -1341,6 +1390,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");

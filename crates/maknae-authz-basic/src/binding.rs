@@ -127,6 +127,15 @@ impl ResolvedBindings {
     /// to admin when no bindings key is present) is a decision rule, not a
     /// binding, and listing it as one would tell an operator a binding exists
     /// that they could then look for in the file and not find.
+    /// MEMBERS ARE REPORTED BY UID; the reserved `agent` token by its name.
+    ///
+    /// Worth naming, because the sibling rationale on `Role::key` argues the
+    /// opposite direction for roles ("the token an operator would grep for in
+    /// `authz.yaml`"). `root` reports as `uid:0`, which appears in no policy
+    /// file. The uid IS the authenticated datum (ADR-0018) and the thing
+    /// `role_for` keys on, so it is the honest answer to "who is bound"; a
+    /// name is an input resolved once at construction that may since have been
+    /// re-pointed. `agent` has no uid by construction, so it reports as itself.
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         // NO `bindings:` KEY -> `None`, not an empty list.
         //

@@ -507,34 +507,36 @@ mod tests {
             dispatch_verb(&Verb::AdminSubjectList),
             Dispatch::SubjectListRequested
         );
-        // And EVERY term that is not grantable still has no behaviour. This is
-        // what the retired pin was really protecting: the class arm must not
-        // become a blanket grant for the rest of `admin.*`.
+        // And EVERY term that is not grantable still has no behaviour --
+        // DERIVED, not hand-typed.
         //
-        // The full set, not a sample. An earlier version listed two of these
-        // thirteen while its comment claimed to cover the class -- which is the
-        // shape of a test that reads as a class guard and guards two members.
+        // The previous version listed thirteen literals while its own comment
+        // complained that an earlier version listed two of thirteen. Same
+        // defect, one scale up: a fourteenth ungrantable `admin.*` verb is
+        // forced through `dispatch_verb` (a compile error) and through the
+        // `all_verbs()` length pin, but NOT into a hand-typed list -- so the
+        // class claim would silently cover 13 of 14. Derived, the invariant
+        // maintains itself.
         //
-        // NOT covered here, and stated rather than implied: nothing tests that
-        // a FOURTH term joining `GRANTABLE_ACTIONS` gains a dispatch. That
-        // constant is `pub(crate)` in `maknae-authz-basic` and invisible to
-        // this crate, so the grantable-side tripwire the retired pin provided
-        // has no replacement. ADR-0010 contemplates a fourth term.
-        for v in [
-            Verb::AdminAuditTail,
-            Verb::AdminPolicyReload,
-            Verb::AdminSubjectBind,
-            Verb::AdminSubjectUnbind,
-            Verb::AdminContain,
-            Verb::AdminRelease,
-            Verb::AdminCredentialRotate,
-            Verb::AdminProviderList,
-            Verb::AdminProviderSet,
-            Verb::AdminProviderDisable,
-            Verb::AdminCredentialBroker,
-            Verb::AdminSessionList,
-            Verb::AdminSessionTerminate,
-        ] {
+        // NOT covered, and stated rather than implied: nothing here fires when
+        // a FOURTH term joins `GRANTABLE_ACTIONS`. That constant is
+        // `pub(crate)` in `maknae-authz-basic` and invisible to this crate, so
+        // the grantable-side tripwire the retired pin provided has no
+        // replacement.
+        let grantable = ["admin.status", "admin.config.show", "admin.subject.list"];
+        let ungrantable: Vec<Verb> = all_verbs()
+            .into_iter()
+            .filter(|v| {
+                let a = verb_to_action(v);
+                a.starts_with("admin.") && a != "admin.whoami" && !grantable.contains(&a)
+            })
+            .collect();
+        assert!(
+            ungrantable.len() >= 13,
+            "the ungrantable admin set should not shrink unnoticed: {}",
+            ungrantable.len()
+        );
+        for v in ungrantable {
             assert_eq!(
                 dispatch_verb(&v),
                 Dispatch::NoBehaviour,

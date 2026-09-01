@@ -62,6 +62,13 @@ SURFACE=(
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
   "crates/maknae-proto/src/wire.rs|StatusView|status|4"
+  # The SIBLING disclosure struct, added in the same commit for the same
+  # feature. Inventorying one of a matched pair is how the pair's second member
+  # ships unreviewed: adding `home` or `clearance` to this struct changes no
+  # count, needs no row, and reaches every `admin.subject.list` grant-holder --
+  # who may be the untrusted agent runtime, since `bindings: {admin:["agent"]}`
+  # is now correctly reported.
+  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their
@@ -381,6 +388,32 @@ if awk -F'\t' '!/^#/ && NF && (NF < 3 || $3 ~ /^[[:space:]]*$/) { print; bad=1 }
   sed 's/^/  /' "$tmp/badrows"; exit 1
 fi
 grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' > "$tmp/man_raw"
+
+# The disposition column is a CLOSED SET, and each value is bound to the surface
+# it can mean something on. Before this, `masc` was accepted as "a recorded
+# decision" and `mask` was accepted on `status.*` -- where masking does not
+# exist, because `StatusView` is serialized WHOLE and never passes through
+# `document.rs::classify`. A `mask status.vault_addr` row would have shipped the
+# value in the clear while the audit record said it was withheld: the exact
+# failure the StatusView entry was added to close, through a disposition a
+# maintainer would plausibly pick.
+#
+# Round-2 note: the old `$1!="mask"` predicate caught a bad token by ACCIDENT
+# (it fell into the code-backed set and failed the 4a diff). Narrowing that
+# predicate removed the accident without replacing it. This is the replacement.
+bad_disp=$(awk -F'\t' '
+  $1!="disclose" && $1!="mask" && $1!="omit" && $1!="always" { print "unknown disposition: " $0; next }
+  # `always` means "ships by construction on a non-allowlist surface".
+  $1=="always" && $2 !~ /^status\./ && $2 !~ /^binding\./ { print "always is only for by-construction surfaces: " $0 }
+  # masking is meaningful only where a classifier renders the value.
+  $1=="mask" && ($2 ~ /^status\./ || $2 ~ /^binding\./) { print "mask is meaningless on a by-construction surface: " $0 }
+  $1!="always" && ($2 ~ /^status\./ || $2 ~ /^binding\./) { print "status.* fields ship whole; the only valid disposition is `always`: " $0 }
+' "$tmp/man_raw")
+if [ -n "$bad_disp" ]; then
+  echo "FAIL: manifest disposition(s) not valid for their surface:"
+  printf '%s\n' "$bad_disp" | sed 's/^/  /'
+  exit 1
+fi
 cut -f2 "$tmp/man_raw" | sort > "$tmp/man_paths_dup"
 sort -u "$tmp/man_paths_dup" > "$tmp/man_paths"
 if ! dupes=$(comm -23 "$tmp/man_paths_dup" "$tmp/man_paths") || [ -n "${dupes:-}" ]; then

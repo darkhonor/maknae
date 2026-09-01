@@ -795,7 +795,11 @@ pub async fn handle<S, E, P>(
                     // library present the deciding backend is not `-basic`, and
                     // an operator debugging a verdict needs to know which one
                     // produced it.
-                    authz_backend: authorizer.backend_name().to_string(),
+                    // Behind the panic boundary, like every other direct
+                    // backend invocation: this is inline on the async worker,
+                    // and an unguarded panic here unwinds AFTER the audit
+                    // record already said permit/authorized.
+                    authz_backend: maknae_security::guarded_backend_name(&*authorizer),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -822,7 +826,9 @@ pub async fn handle<S, E, P>(
                             let a = Arc::clone(&authorizer);
                             let out = tokio::time::timeout(
                                 authz_decide_timeout,
-                                tokio::task::spawn_blocking(move || a.subjects()),
+                                tokio::task::spawn_blocking(move || {
+                                    maknae_security::guarded_subjects(&*a)
+                                }),
                             )
                             .await;
                             match out {
@@ -2288,10 +2294,15 @@ mod subject_list_offload_tripwire {
             .expect("the payload arm exists");
         let arm = &prod[arm_start..];
         let with_comments = &arm[..arm.find("match enumerated {").expect("arm shape")];
-        // CODE only. The needles are plain `contains`, and this arm carries a
-        // long explanatory comment naming every one of them -- so a regression
-        // that inlined the call while keeping the prose would have satisfied
-        // the whole loop.
+        // CODE only -- forward defence, and the rationale is corrected here
+        // rather than left overstated. An earlier version claimed this arm
+        // "carries a long explanatory comment naming every one of them, so a
+        // regression that kept the prose would have satisfied the loop". That
+        // was never true of any version: the long comment sits ABOVE the
+        // `rfind` anchor and is excluded by construction, and none of the five
+        // needles appears in the seven comment lines actually scanned. The
+        // strip is cheap insurance against a future comment that does; the
+        // claim that it was already load-bearing was argued, not measured.
         let body: String = with_comments
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
