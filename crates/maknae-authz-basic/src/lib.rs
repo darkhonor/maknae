@@ -449,7 +449,7 @@ mod tests {
         agent_admin.action = Action("admin.whoami".into());
         assert_eq!(
             decide::decide_loaded(&lp, &principal(), &agent_admin),
-            Verdict::NotApplicable
+            Verdict::NotApplicable { note: None }
         );
     }
 

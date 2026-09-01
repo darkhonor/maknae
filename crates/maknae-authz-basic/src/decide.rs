@@ -303,7 +303,7 @@ pub(crate) fn decide_loaded(
     }
     let role = match lp.roles.role_for(name, uid, principal.uid) {
         Resolution::Role(r) => r,
-        Resolution::NoRole => return Verdict::NotApplicable,
+        Resolution::NoRole => return Verdict::NotApplicable { note: None },
     };
 
     // Step 3 — role gates over the closed class vocabulary.
@@ -314,7 +314,7 @@ pub(crate) fn decide_loaded(
         },
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => permit_with_audit(),
-            _ => Verdict::NotApplicable,
+            _ => Verdict::NotApplicable { note: None },
         },
         Role::Admin => match class {
             Some(Class::Liveness) => permit_with_audit(),
@@ -347,10 +347,10 @@ pub(crate) fn decide_loaded(
                     // No grant is an ABSENCE, not a refusal: deny-by-default
                     // happens once, at `finalize`, with "no grant" kept
                     // distinguishable from an explicit deny.
-                    maknae_config::Match3::NoMatch => Verdict::NotApplicable,
+                    maknae_config::Match3::NoMatch => Verdict::NotApplicable { note: None },
                 }
             }
-            Some(Class::Admin) => Verdict::NotApplicable,
+            Some(Class::Admin) => Verdict::NotApplicable { note: None },
             // Keyed like the admin arm above, and for the same reason. Without
             // it, safety rests on a remote `if let Verb::Read` in another crate:
             // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
@@ -373,12 +373,12 @@ pub(crate) fn decide_loaded(
                 },
                 OsDacGate::Indeterminate => Verdict::Indeterminate,
             },
-            Some(Class::Fs) => Verdict::NotApplicable,
+            Some(Class::Fs) => Verdict::NotApplicable { note: None },
             Some(Class::Session)
             | Some(Class::Terminal)
             | Some(Class::Mcp)
             | Some(Class::Kernel)
-            | None => Verdict::NotApplicable,
+            | None => Verdict::NotApplicable { note: None },
         },
     }
 }
@@ -407,7 +407,7 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest) -> Verdict {
             reason: format!("denied by policy entry {source}"),
         },
         maknae_config::Match3::AllowMatch => permit_with_audit(),
-        maknae_config::Match3::NoMatch => Verdict::NotApplicable,
+        maknae_config::Match3::NoMatch => Verdict::NotApplicable { note: None },
     }
 }
 
@@ -645,7 +645,11 @@ mod tests {
                         "{role_key} {action}: {v:?}"
                     );
                 } else {
-                    assert_eq!(v, Verdict::NotApplicable, "{role_key} {action}");
+                    assert_eq!(
+                        v,
+                        Verdict::NotApplicable { note: None },
+                        "{role_key} {action}"
+                    );
                 }
             }
         }
@@ -668,7 +672,7 @@ mod tests {
         );
         let user_v = decide_loaded(&lp, &principal(), &request(None, Some(701), action, path));
         assert!(matches!(admin_v, Verdict::Permit { .. }), "{admin_v:?}");
-        assert_eq!(user_v, Verdict::NotApplicable);
+        assert_eq!(user_v, Verdict::NotApplicable { note: None });
     }
 
     #[test]
@@ -720,7 +724,7 @@ mod tests {
                 &principal(),
                 &request(None, Some(OPERATOR_UID as i64), "fs.read", Some(path)),
             );
-            assert_eq!(v, Verdict::NotApplicable, "{path}");
+            assert_eq!(v, Verdict::NotApplicable { note: None }, "{path}");
         }
     }
 
@@ -733,7 +737,7 @@ mod tests {
                 &principal(),
                 &request(None, Some(OPERATOR_UID as i64), action, None),
             );
-            assert_eq!(v, Verdict::NotApplicable, "{action}");
+            assert_eq!(v, Verdict::NotApplicable { note: None }, "{action}");
         }
     }
 
@@ -755,7 +759,7 @@ mod tests {
             &principal(),
             &request(None, Some(999), "liveness.ping", None),
         );
-        assert_eq!(v, Verdict::NotApplicable);
+        assert_eq!(v, Verdict::NotApplicable { note: None });
     }
 
     #[test]
@@ -823,7 +827,7 @@ mod tests {
             &principal(),
             &request(None, Some(700), "fs.read", None),
         );
-        assert_eq!(v2, Verdict::NotApplicable);
+        assert_eq!(v2, Verdict::NotApplicable { note: None });
     }
 
     // ---- class-match rule pins (spec §5) ----
@@ -852,7 +856,7 @@ mod tests {
         ] {
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req(action)),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable { note: None },
                 "{action} must NOT permit off the admin class arm"
             );
         }
@@ -908,7 +912,7 @@ mod tests {
                 &principal(),
                 &request(None, Some(1001), "admin.contain", None)
             ),
-            Verdict::NotApplicable,
+            Verdict::NotApplicable { note: None },
             "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
              somehow reaches the grant map"
         );
@@ -996,7 +1000,7 @@ mod tests {
         for other in ["admin.config.show", "admin.subject.list"] {
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req(other)),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable { note: None },
                 "granting one term must not grant `{other}`"
             );
         }
@@ -1106,7 +1110,7 @@ mod tests {
                     &principal(),
                     &request(None, Some(uid as i64), "admin.status", None)
                 ),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable { note: None },
                 "role `{role}` must not inherit admin's grant"
             );
         }
@@ -1134,7 +1138,7 @@ mod tests {
             for t in GRANTABLE_ACTIONS {
                 assert_eq!(
                     decide_loaded(&lp, &principal(), &request(None, Some(1001), t, None)),
-                    Verdict::NotApplicable,
+                    Verdict::NotApplicable { note: None },
                     "block {block:?}, term {t}"
                 );
             }
@@ -1182,7 +1186,7 @@ mod tests {
         let policy_deny = || Verdict::Deny {
             reason: "denied by policy entry Read(~/.ssh/**)".into(),
         };
-        let na = || Verdict::NotApplicable;
+        let na = || Verdict::NotApplicable { note: None };
 
         // (action, path) x (admin 1001, user 1002, guest 1003, adversary 1004)
         // The literal tuple type, NOT a `type Row` alias. clippy::type_complexity
@@ -1266,7 +1270,7 @@ mod tests {
                         Some("/home/operator/x")
                     ),
                 ),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable { note: None },
                 "{action} must abstain"
             );
         }
@@ -1332,7 +1336,7 @@ mod tests {
         );
         assert_eq!(
             v,
-            Verdict::NotApplicable,
+            Verdict::NotApplicable { note: None },
             "agent must not inherit admin's grammar"
         );
     }
