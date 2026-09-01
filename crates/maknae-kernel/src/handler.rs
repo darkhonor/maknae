@@ -518,12 +518,15 @@ mod tests {
         // class claim would silently cover 13 of 14. Derived, the invariant
         // maintains itself.
         //
-        // NOT covered, and stated rather than implied: nothing here fires when
-        // a FOURTH term joins `GRANTABLE_ACTIONS`. That constant is
-        // `pub(crate)` in `maknae-authz-basic` and invisible to this crate, so
-        // the grantable-side tripwire the retired pin provided has no
-        // replacement.
-        let grantable = ["admin.status", "admin.config.show", "admin.subject.list"];
+        // (Corrected 2026-09-02, #181 S4: this comment said the grantable-side
+        // tripwire "has no replacement" — true when written, false now. The
+        // replacement is `every_grantable_term_dispatches_and_the_hand_copy_matches`
+        // below, reaching the real constant through `-basic`'s
+        // `grantable_actions()` re-export; the hand-typed list here is now
+        // ASSERTED equal to the constant rather than trusted — and THIS list
+        // is not a copy at all any more: it reads the re-export, so there is
+        // exactly one hand-pin left, in the tripwire test, and it is asserted.)
+        let grantable = maknae_authz_basic::grantable_actions();
         let ungrantable: Vec<Verb> = all_verbs()
             .into_iter()
             .filter(|v| {
@@ -543,6 +546,48 @@ mod tests {
                 "{v:?} is not grantable and must still disclose nothing"
             );
         }
+    }
+
+    /// Does every element of `terms` map to a wire verb whose dispatch is a
+    /// REAL arm (non-`NoBehaviour`)? Extracted so the discriminator itself is
+    /// testable: asserting only over `GRANTABLE_ACTIONS` would go green
+    /// vacuously if this helper always returned true.
+    fn all_dispatch(terms: &[&str]) -> bool {
+        terms.iter().all(|t| {
+            all_verbs()
+                .into_iter()
+                .find(|v| verb_to_action(v) == *t)
+                .is_some_and(|v| dispatch_verb(&v) != Dispatch::NoBehaviour)
+        })
+    }
+
+    /// The grantable-side tripwire (#181 S4), replacing what the retired
+    /// `NoBehaviour` pin provided: a FOURTH term joining `GRANTABLE_ACTIONS`
+    /// without a dispatch arm — the "granted-but-unbuilt" state ADR-0010 makes
+    /// a contradiction — turns this red, cross-crate, through the re-export.
+    /// The hand-copied list above is asserted equal to the constant, so it can
+    /// no longer drift silently either.
+    #[test]
+    fn every_grantable_term_dispatches_and_the_hand_copy_matches() {
+        let real = maknae_authz_basic::grantable_actions();
+        assert_eq!(
+            real,
+            ["admin.status", "admin.config.show", "admin.subject.list"],
+            "the hand-copied list in the class test above must match the constant"
+        );
+        assert!(
+            all_dispatch(real),
+            "every grantable term must dispatch to a real arm — a grantable \
+             term with NoBehaviour is granted-but-unbuilt, which ADR-0010 \
+             defines out of existence"
+        );
+        // The discriminator discriminates: a known ungrantable term has no
+        // real arm, so the helper must say false — otherwise the assert above
+        // is vacuous.
+        assert!(
+            !all_dispatch(&["admin.contain"]),
+            "all_dispatch must return false for an unbuilt term"
+        );
     }
 
     /// `admin.config.show` DOES dispatch now (#162 Phase 2). Its response

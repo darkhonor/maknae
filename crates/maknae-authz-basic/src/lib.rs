@@ -12,6 +12,18 @@
 
 mod binding;
 mod decide;
+
+/// The grantable term set, re-exported for CROSS-CRATE tripwires (#181 S4).
+///
+/// The constant itself stays `pub(crate)` in `decide.rs` deliberately: the
+/// `verb-vocabulary-drift` gate's awk anchor matches that exact spelling
+/// (`pub(crate) const GRANTABLE_ACTIONS`), four negative-control fixture
+/// literals hard-code it, and `mod decide` is private — so a re-exporting fn
+/// is the only shape that adds reachability without moving the anchor the
+/// gate and its controls stand on.
+pub fn grantable_actions() -> &'static [&'static str] {
+    &decide::GRANTABLE_ACTIONS
+}
 mod role;
 
 use binding::UidMap;
