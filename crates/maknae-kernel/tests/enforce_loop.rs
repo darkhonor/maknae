@@ -1602,9 +1602,14 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
 }
 
 /// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
-/// and only then refused. Driven with a permissive authorizer because the real
-/// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's
-/// ordering, not a decision.
+/// and only then refused — with the SAME wire answer as every refusal.
+/// (Operator ruling 2026-09-02, superseding the #67 NOOP contract's wire half:
+/// "unauthorized is all that is published to the wire" — implementation state
+/// is never a wire disclosure, on the permitted path either; an extension that
+/// wants to expose not-implemented does so through its own channel. The audit
+/// half stands unchanged: permit / posture not-implemented is the trail's
+/// truth.) Driven with a permissive authorizer because the real PDP grants no
+/// unbuilt term — this exercises the PEP's ordering, not a decision.
 #[tokio::test]
 async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     let fx = Fixture::new("noop-permit");
@@ -1620,8 +1625,14 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
-        other => panic!("expected NotImplemented, got {other:?}"),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(
+                e.message, "not authorized",
+                "build state is not a wire disclosure"
+            );
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.action, "admin.contain");

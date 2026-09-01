@@ -21,10 +21,13 @@ pub enum Dispatch {
     /// by construction the moment an extension operand grants a term `-basic`
     /// abstains on (ADR-0008 D2), which is why the arm and its NOOP contract
     /// stay: the extension-permit pin in `enforce_loop.rs` drives exactly that
-    /// path. An UNPERMITTED unbuilt term never reaches dispatch at all — it
-    /// answers the same generic `Unauthorized` as any unauthorized request
-    /// (#181 ruling R1: the roadmap is not a wire disclosure), with the WHY in
-    /// the audit trail only. (Corrected 2026-09-02, #181.)
+    /// path. An UNPERMITTED unbuilt term never reaches dispatch at all, and —
+    /// operator wire ruling, 2026-09-02 — a PERMITTED one answers the SAME
+    /// generic `Unauthorized`: "unauthorized is all that is published to the
+    /// wire", every path, superseding the #67 NOOP contract's wire half. Build
+    /// state lives in the audit trail only (permit / not-implemented); an
+    /// extension that wants to expose it does so through its own channel.
+    /// (Corrected 2026-09-02, #181, twice — same day, second time by ruling.)
     NoBehaviour,
     Pong,
     WhoamiRequested,

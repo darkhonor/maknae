@@ -754,11 +754,18 @@ pub async fn handle<S, E, P>(
             )
             .await;
             if may_respond(appended) {
+                // The SAME wire answer as every refusal (operator ruling
+                // 2026-09-02, #181: "unauthorized is all that is published to
+                // the wire" — superseding the #67 NOOP contract's wire half).
+                // Build state is not a wire disclosure on ANY path; the trail
+                // above carries the truth (permit / not-implemented), and an
+                // extension that wants to expose implementation state to its
+                // callers does so through its own channel.
                 write_error_bounded(
                     &mut stream,
                     &cfg,
-                    ProtoErrCode::NotImplemented,
-                    "not implemented",
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
                 )
                 .await;
             }

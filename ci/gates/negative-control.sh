@@ -550,7 +550,7 @@ expect_reject_because "verb-vocabulary-drift/grantable-with-no-disposition" \
 # the gate, so a CLEAN fixture must satisfy it (the five reject fixtures above
 # keep short rationales because the inventory/subset checks fire first).
 CLEAN_VOCAB='action	liveness.ping	granted	shipped; the fixture liveness term
-action	admin.status	not-granted	unbuilt — answers Unauthorized to an unpermitted caller
+action	admin.status	not-granted	unbuilt — answers Unauthorized like every refusal
 kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only grammar capability
 grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:`
@@ -563,7 +563,7 @@ expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/
 # real 51-row defect is evidence in the PR; THIS fixture is the control that
 # re-runs on every PR (the repo's own negative-control discipline: a one-off
 # observation is not a control).
-fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/unbuilt — answers Unauthorized to an unpermitted caller/enumerated, decided/')" \
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/unbuilt — answers Unauthorized like every refusal/enumerated, decided/')" \
   'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_reject_because "verb-vocabulary-drift/rationale-lacks-its-clause" \
   "rationale lacks its clause" "$fx/ci/gates/verb-vocabulary-drift.sh"

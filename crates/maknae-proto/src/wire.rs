@@ -340,6 +340,10 @@ pub enum ProtoErrCode {
     /// An enumerated term the daemon decided and PERMITTED, but whose behaviour
     /// is not built. Returned ONLY after a Permit — a denied caller receives
     /// `Unauthorized` and learns nothing about implementation state (#67 D7).
+    /// EMITTED NOWHERE since the 2026-09-02 wire ruling (#181): a permitted
+    /// unbuilt term now answers `Unauthorized` like every refusal — build
+    /// state is not a wire disclosure on any path. Dead, kept additive, same
+    /// honest-record treatment as `UnknownVerb` below.
     NotImplemented,
 }
 

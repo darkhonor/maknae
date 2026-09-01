@@ -104,7 +104,7 @@ bad_clause=$(awk -F'	' '
   BEGIN {
     clause["action|granted"]            = "shipped;"
     clause["capability|granted"]        = "the only grammar capability"
-    clause["action|not-granted"]        = "answers Unauthorized to an unpermitted caller"
+    clause["action|not-granted"]        = "answers Unauthorized like every refusal"
     clause["kernel-action|not-granted"] = "no Verb variant"
     clause["action|not-granted-but-grantable"]  = "Ungranted by default; operator MAY grant per-role"
     clause["grantable|grantable-not-granted"]   = "operator MAY grant per-role via `roles:`"
