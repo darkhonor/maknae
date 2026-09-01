@@ -15,10 +15,6 @@ pub(crate) enum Role {
 }
 
 impl Role {
-    /// The closed role vocabulary: a `bindings:` key must be exactly one of
-    /// these four names. `None` = unknown → the caller refuses the policy
-    /// (never defaults — a typo must not silently drop a subject to a
-    /// different role).
     /// The policy-file spelling of this role — the inverse of [`Role::from_key`],
     /// so `admin.subject.list` reports the token an operator would grep for in
     /// `authz.yaml` rather than a Rust variant name.
@@ -31,6 +27,10 @@ impl Role {
         }
     }
 
+    /// The closed role vocabulary: a `bindings:` key must be exactly one of
+    /// these four names. `None` = unknown → the caller refuses the policy
+    /// (never defaults — a typo must not silently drop a subject to a
+    /// different role).
     pub(crate) fn from_key(k: &str) -> Option<Role> {
         match k {
             "admin" => Some(Role::Admin),

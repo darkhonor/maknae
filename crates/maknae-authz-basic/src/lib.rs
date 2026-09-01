@@ -260,7 +260,7 @@ impl BasicAuthorizer {
     ) -> Option<Vec<maknae_security::SubjectBinding>> {
         let policy = loader(&self.policy_path).ok()?;
         let resolved = binding::resolve(&policy.bindings, &self.uid_map).ok()?;
-        Some(resolved.as_subject_bindings())
+        resolved.as_subject_bindings()
     }
 }
 
@@ -638,14 +638,6 @@ mod tests {
         );
     }
 
-    /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
-    /// against a validator that refuses everything, so this is the assertion
-    /// that keeps them honest.
-    /// `subjects()` reports what the POLICY FILE binds, read through the same
-    /// loader `decide` uses -- and reports `None`, never an empty list, when it
-    /// cannot read. "No bindings exist" and "I could not tell you" are
-    /// different claims about authorization state, and only one of them is safe
-    /// to make wrongly.
     #[test]
     fn subjects_reports_file_bindings_and_none_on_failure() {
         let auth = BasicAuthorizer {
@@ -681,22 +673,90 @@ mod tests {
         assert!(invalid.is_none(), "invalid bindings must be None");
     }
 
-    /// The TRAIT wrappers, called through the trait. `cargo mutants -p` and the
-    /// coverage floor are both per-crate, so the kernel's end-to-end exercise
-    /// of these does not reach them here -- the thin delegation is exactly
-    /// where a wrong loader or a swapped argument would hide.
+    /// `BasicAuthorizer::subjects` FAILS CLOSED on an unreadable path.
+    ///
+    /// That is all this asserts, and the name says so. An earlier version was
+    /// called `..._use_the_production_loaders` and its comment claimed to prove
+    /// the wrapper reaches `load_authz` "rather than some laxer reader" -- it
+    /// cannot: EVERY loader returns `None` for a nonexistent path, so the
+    /// assertion is satisfied by a hardened reader, a lax one, and a `None`
+    /// stub alike. `.cargo/mutants.toml` records that same fact as the reason
+    /// the wrapper is mutation-excluded; the test and the exclusion note were
+    /// asserting opposite things in one branch.
     #[test]
-    fn the_trait_subjects_wrappers_use_the_production_loaders() {
+    fn basic_authorizer_subjects_fails_closed_on_an_unreadable_path() {
         use maknae_security::Authorizer;
         let auth = BasicAuthorizer {
             policy_path: "/nonexistent".into(),
             principal: principal(),
             uid_map: UidMap::new(),
         };
-        // The production loader is the ROOT-OWNED hardened path, so a
-        // nonexistent file yields None -- fail-closed, and it proves this
-        // wrapper reaches `load_authz` rather than some laxer reader.
-        assert!(auth.subjects().is_none());
+        assert!(auth.subjects().is_none(), "unreadable must fail closed");
+    }
+
+    /// The AGENT binding is reported. It lives in its own field on
+    /// `ResolvedBindings` because the reserved token has no uid, and reading
+    /// only `by_uid` dropped it -- so `bindings: { admin: ["agent"] }`
+    /// reported an EMPTY list while `role_for` granted admin to the untrusted
+    /// agent runtime on that same binding. An operator auditing "is the agent
+    /// bound to admin?" was told nobody was.
+    #[test]
+    fn subjects_reports_the_agent_binding() {
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
+        };
+        let got = auth
+            .subjects_with_loader(|_| {
+                maknae_config::parse_authz(
+                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"agent\", \"root\"]\n"),
+                    None,
+                )
+            })
+            .expect("readable policy with an explicit block");
+        let admin = got.iter().find(|b| b.role == "admin").expect("admin");
+        assert!(
+            admin.members.contains(&"agent".to_string()),
+            "the agent binding must be reported, not silently dropped: {:?}",
+            admin.members
+        );
+        assert!(admin.members.contains(&"uid:0".to_string()));
+    }
+
+    /// NO `bindings:` key -> `None`, never `Some(vec![])`.
+    ///
+    /// The shipped `packaging/common/authz.yaml` has no `bindings:` key, so
+    /// the DEFAULT deployment took this path and answered "these are the
+    /// bindings, and there are none" -- while the default-role fallback was
+    /// live and the enrolled uid was resolving to admin. That is the exact
+    /// claim the `Option` on this seam exists to refuse.
+    #[test]
+    fn subjects_refuses_to_report_an_empty_set_when_no_block_exists() {
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: UidMap::new(),
+        };
+        let no_key = auth.subjects_with_loader(|_| {
+            maknae_config::parse_authz(GRANT_PREAMBLE, None) // no `bindings:` at all
+        });
+        assert!(
+            no_key.is_none(),
+            "no bindings key means CANNOT ENUMERATE, not `nobody is bound`: {no_key:?}"
+        );
+
+        // An EXPLICIT empty block is a different state and IS reportable --
+        // the operator wrote "nobody", so saying so is honest.
+        let explicit_empty = auth
+            .subjects_with_loader(|_| {
+                maknae_config::parse_authz(
+                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: []\n"),
+                    None,
+                )
+            })
+            .expect("an explicit block is reportable");
+        assert!(explicit_empty.is_empty(), "{explicit_empty:?}");
     }
 
     #[test]
@@ -712,6 +772,14 @@ mod tests {
         );
     }
 
+    /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
+    /// against a validator that refuses everything, so this is the assertion
+    /// that keeps them honest.
+    /// `subjects()` reports what the POLICY FILE binds, read through the same
+    /// loader `decide` uses -- and reports `None`, never an empty list, when it
+    /// cannot read. "No bindings exist" and "I could not tell you" are
+    /// different claims about authorization state, and only one of them is safe
+    /// to make wrongly.
     #[test]
     fn roles_valid_grant_block_constructs() {
         let p = parse_with_roles(

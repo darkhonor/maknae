@@ -1064,7 +1064,17 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
             assert_eq!(s.authz_backend, "maknae-authz-basic");
             assert!(!s.version.is_empty(), "the daemon must report its version");
-            assert!(!s.listener.is_empty(), "and its listener");
+            // The VALUE, not merely non-empty: wiring `listener` to any other
+            // non-empty config string -- the audit path, the plane socket --
+            // passed the emptiness check.
+            assert_eq!(
+                s.listener,
+                maknae_config::transport_from_section(None)
+                    .unwrap()
+                    .socket_path
+                    .display()
+                    .to_string()
+            );
         }
         other => panic!("expected a Status payload, got {other:?}"),
     }
@@ -1074,15 +1084,16 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(req.outcome.posture, "authorized");
 }
 
-/// `admin.subject.list` reports what the POLICY FILE binds, read LIVE.
+/// `admin.subject.list` reports what the POLICY FILE binds, end to end.
 ///
-/// The bindings in the fixture are the ones asserted, which is the property
-/// that matters: a boot snapshot would have reported whatever was on disk at
-/// startup, and bindings are re-read per request precisely so a containment
-/// edit bites on the next one. Disclosing stale authorization state is worse
-/// than disclosing none.
+/// This does NOT prove liveness, and an earlier version of this doc claimed it
+/// did. The fixture policy is on disk before `HermeticAuthorizer::new`, so an
+/// implementation that snapshotted bindings at construction passes it
+/// unchanged. The liveness property is owned by
+/// `wrapper_subjects_delegate_and_read_live` in `maknae-authz-basic`, which
+/// rewrites the policy between two calls and asserts the answer changes.
 #[tokio::test]
-async fn a_granted_subject_list_reports_live_bindings() {
+async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     let fx = Fixture::new("subjlist-grant");
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",

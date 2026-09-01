@@ -507,10 +507,34 @@ mod tests {
             dispatch_verb(&Verb::AdminSubjectList),
             Dispatch::SubjectListRequested
         );
-        // And the terms that are NOT grantable still have no behaviour. This
-        // is what the retired pin was really protecting: the class arm must
-        // not become a blanket grant for the rest of `admin.*`.
-        for v in [Verb::AdminContain, Verb::AdminPolicyReload] {
+        // And EVERY term that is not grantable still has no behaviour. This is
+        // what the retired pin was really protecting: the class arm must not
+        // become a blanket grant for the rest of `admin.*`.
+        //
+        // The full set, not a sample. An earlier version listed two of these
+        // thirteen while its comment claimed to cover the class -- which is the
+        // shape of a test that reads as a class guard and guards two members.
+        //
+        // NOT covered here, and stated rather than implied: nothing tests that
+        // a FOURTH term joining `GRANTABLE_ACTIONS` gains a dispatch. That
+        // constant is `pub(crate)` in `maknae-authz-basic` and invisible to
+        // this crate, so the grantable-side tripwire the retired pin provided
+        // has no replacement. ADR-0010 contemplates a fourth term.
+        for v in [
+            Verb::AdminAuditTail,
+            Verb::AdminPolicyReload,
+            Verb::AdminSubjectBind,
+            Verb::AdminSubjectUnbind,
+            Verb::AdminContain,
+            Verb::AdminRelease,
+            Verb::AdminCredentialRotate,
+            Verb::AdminProviderList,
+            Verb::AdminProviderSet,
+            Verb::AdminProviderDisable,
+            Verb::AdminCredentialBroker,
+            Verb::AdminSessionList,
+            Verb::AdminSessionTerminate,
+        ] {
             assert_eq!(
                 dispatch_verb(&v),
                 Dispatch::NoBehaviour,

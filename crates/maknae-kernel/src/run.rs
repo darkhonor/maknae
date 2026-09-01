@@ -801,20 +801,79 @@ pub async fn handle<S, E, P>(
                 // enumerate, and that is reported as unavailable below --
                 // never as an empty list, which would claim "no bindings
                 // exist" and is a different, dangerous answer.
-                Dispatch::SubjectListRequested => match authorizer.subjects() {
-                    Some(mut b) => {
-                        b.sort_by(|x, y| x.role.cmp(&y.role));
-                        Payload::SubjectList(
-                            b.into_iter()
-                                .map(|s| maknae_proto::RoleBindingView {
-                                    role: s.role,
-                                    members: s.members,
-                                })
-                                .collect(),
-                        )
-                    }
-                    None => {
-                        if may_respond(true) {
+                // OFFLOADED, bounded, and breaker-admitted -- the SAME
+                // discipline the decide path gets 250 lines above, and for the
+                // same reason stated there: `subjects()` reaches
+                // `load_authz`, which is sync file I/O on /etc/maknae. Called
+                // inline it pins a tokio worker for as long as that read
+                // blocks, and N granted calls against a wedged NFS/FUSE mount
+                // starve the runtime -- with the breaker unable to trip,
+                // because it never sees them.
+                //
+                // The seam's `-> Option<..>` signature is what made this look
+                // synchronous-and-cheap at the call site. It is a policy file
+                // read.
+                Dispatch::SubjectListRequested => {
+                    let subj_breaker = authz_decide_breaker();
+                    let admission = { subj_breaker.lock().await.begin_attempt_at(Instant::now()) };
+                    let enumerated = match admission {
+                        BreakerAdmission::RefuseOpen | BreakerAdmission::RefuseAtCapacity => None,
+                        BreakerAdmission::Admit => {
+                            let a = Arc::clone(&authorizer);
+                            let out = tokio::time::timeout(
+                                authz_decide_timeout,
+                                tokio::task::spawn_blocking(move || a.subjects()),
+                            )
+                            .await;
+                            match out {
+                                Ok(Ok(v)) => {
+                                    subj_breaker.lock().await.record_success();
+                                    v
+                                }
+                                // A JOIN failure is not counted against the
+                                // breaker -- same as the decide path, where a
+                                // panicked/cancelled task is not evidence that
+                                // the filesystem is wedged.
+                                Ok(Err(_join)) => {
+                                    subj_breaker.lock().await.record_success();
+                                    None
+                                }
+                                // A TIMEOUT is, and it is the signal that
+                                // trips: repeated blocking reads against a
+                                // stalled mount must stop spawning more.
+                                Err(_elapsed) => {
+                                    if subj_breaker.lock().await.record_timeout_at(Instant::now())
+                                        == BreakerTransition::Tripped
+                                    {
+                                        eprintln!(
+                                            "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
+                                            authz_decide_timeout.as_secs()
+                                        );
+                                    }
+                                    None
+                                }
+                            }
+                        }
+                    };
+                    match enumerated {
+                        Some(mut b) => {
+                            b.sort_by(|x, y| x.role.cmp(&y.role));
+                            Payload::SubjectList(
+                                b.into_iter()
+                                    .map(|s| maknae_proto::RoleBindingView {
+                                        role: s.role,
+                                        members: s.members,
+                                    })
+                                    .collect(),
+                            )
+                        }
+                        None => {
+                            // No `may_respond(true)` guard here: it is a literal
+                            // `if true` -- control only reaches this arm after the
+                            // `!may_respond(appended)` return above, so `appended`
+                            // is already true. A constant-true call shaped like an
+                            // audit gate is worse than no gate; it reads as a
+                            // control on a security surface and gates nothing.
                             write_error_bounded(
                                 &mut stream,
                                 &cfg,
@@ -822,11 +881,11 @@ pub async fn handle<S, E, P>(
                                 "binding enumeration unavailable",
                             )
                             .await;
+                            close_bounded(&mut stream).await;
+                            return;
                         }
-                        close_bounded(&mut stream).await;
-                        return;
                     }
-                },
+                }
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };
@@ -837,10 +896,11 @@ pub async fn handle<S, E, P>(
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
             if let Ok(bytes) = encode_response(&response) {
-                // SIZE-BOUNDED, like the read path. `ConfigView` is the only
-                // payload here that scales with input (one entry per config
-                // leaf); `Pong` and `Whoami` never approach the cap, so the
-                // check is free for them and load-bearing for the third.
+                // SIZE-BOUNDED, like the read path. TWO payloads here scale
+                // with input: `ConfigView` (one entry per config leaf) and
+                // `SubjectList` (one per `bindings:` entry). `Pong` and
+                // `Whoami` never approach the cap, so the check is free for
+                // them and load-bearing for the other two.
                 //
                 // Without it the daemon writes an oversized frame that the
                 // client's own `read_frame(frame_max_bytes)` refuses as a
@@ -2196,6 +2256,63 @@ mod tests {
 // to fail LATER, at `mint()` (no live Vault in a unit test), which proves it
 // got past the gate.
 #[cfg(unix)]
+#[cfg(test)]
+mod subject_list_offload_tripwire {
+    /// STRUCTURAL TRIPWIRE, deliberately — not a behavioural test.
+    ///
+    /// The property: `authorizer.subjects()` reaches `load_authz`, which is
+    /// sync file I/O on `/etc/maknae`, so it must run on the blocking pool
+    /// under the decide breaker and timeout. Called inline it pins a tokio
+    /// worker for as long as that read blocks, and N granted calls against a
+    /// wedged NFS/FUSE mount starve the runtime with the breaker unable to
+    /// trip, because it never sees them.
+    ///
+    /// That failure is not reproducible at unit scale — it needs a hung
+    /// filesystem and runtime saturation. A behavioural test that "passes"
+    /// against an inline call would be FALSE COVERAGE, which is worse than no
+    /// test: reverting the offload leaves it green. Verified: reverting to the
+    /// inline call keeps the whole e2e suite green.
+    ///
+    /// So this asserts the SHAPE instead, and says so in its name. It is the
+    /// labelled-tripwire form the project's standing rule prescribes for
+    /// exactly this case.
+    #[test]
+    fn subject_list_enumeration_is_offloaded_not_inline() {
+        let src = include_str!("run.rs");
+        // Cut this module off first: it reads its own file, so its own needle
+        // strings would otherwise be found as if they were the production arm.
+        // (They were: an index-based split landed between the shared-arm
+        // pattern and the payload arm, and the tripwire failed on clean source.)
+        let prod = &src[..src
+            .find("mod subject_list_offload_tripwire")
+            .expect("this module")];
+        let arm_start = prod
+            .rfind("Dispatch::SubjectListRequested => {")
+            .expect("the payload arm exists");
+        let arm = &prod[arm_start..];
+        let body = &arm[..arm.find("match enumerated {").expect("arm shape")];
+        for needle in [
+            "authz_decide_breaker()",
+            "begin_attempt_at",
+            "tokio::time::timeout",
+            "spawn_blocking",
+            "record_timeout_at",
+        ] {
+            assert!(
+                body.contains(needle),
+                "`subjects()` must run under the same offload discipline as the \
+                 decide path — missing `{needle}`. If this is a deliberate \
+                 change, the sync policy read is back on the async worker."
+            );
+        }
+        assert!(
+            !body.contains("= authorizer.subjects();"),
+            "a bare inline `authorizer.subjects()` is the exact regression this \
+             tripwire exists to catch"
+        );
+    }
+}
+
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;
