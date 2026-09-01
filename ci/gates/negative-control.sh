@@ -18,6 +18,27 @@ expect_reject() { # <label> <cmd...> — require a genuine rejection (a printed 
   fi
 }
 
+expect_reject_because() { # <label> <expected-FAIL-substring> <cmd...>
+  # `expect_reject` accepts ANY printed FAIL, so a probe that rejects for a
+  # reason its label does not name still scores neg-ok. Live instance: two
+  # depth probes APPENDED a field to a struct whose SURFACE count is exact, so
+  # the count check fired first and the depth check they were written for had
+  # zero coverage -- the gate's central claim, unprobed, with the harness
+  # printing neg-ok. Use this wherever an earlier check could plausibly fire.
+  local label="$1" why="$2"; shift 2; total=$((total+1))
+  local out rc
+  if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why"; then
+    echo "neg-ok: [$label] gate rejected, for '$why'"; pass=$((pass+1))
+  elif [ "$rc" -eq 0 ]; then
+    echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
+  elif printf '%s' "$out" | grep -q "FAIL"; then # rejected, but not for `$why`
+    echo "NEG-FAIL: [$label] gate rejected for the WRONG reason (wanted '$why'): $out"
+  else
+    echo "NEG-FAIL: [$label] gate exited $rc without a FAIL line (crash, not a rejection): $out"
+  fi
+}
+
 expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must also PASS a clean fixture
   local label="$1" want="$2"; shift 2; total=$((total+1))
   local out rc
@@ -54,7 +75,7 @@ edition = "2021"
 maknae-kernel = { path = "../maknae-kernel", optional = true }
 EOF
 echo '' > "$tmpA/crates/shared/src/lib.rs"
-expect_reject "p1/optional-priv-dep" "$here/p1-manifest-lint.sh" "$tmpA"
+expect_reject_because "p1/optional-priv-dep" "as OPTIONAL" "$here/p1-manifest-lint.sh" "$tmpA"
 
 # Fixture A2 — TABLE-form optional privileged dep (`[dependencies.<crate>]`) → must also trip p1.
 tmpA2="$(mktemp -d)"; mkdir -p "$tmpA2/crates/shared/src" "$tmpA2/crates/maknae-kernel/src"
@@ -81,64 +102,60 @@ path = "../maknae-kernel"
 optional = true
 EOF
 echo '' > "$tmpA2/crates/shared/src/lib.rs"
-expect_reject "p1/optional-priv-dep-TABLE-form" "$here/p1-manifest-lint.sh" "$tmpA2"
+expect_reject_because "p1/optional-priv-dep-TABLE-form" "as OPTIONAL" "$here/p1-manifest-lint.sh" "$tmpA2"
 
-# Fixture B — CLI normally links a privileged crate → must trip p2-invert-tree.sh
-tmpB="$(mktemp -d)"; mkdir -p "$tmpB/crates/maknae-kernel/src" "$tmpB/bins/maknae/src"
-cat > "$tmpB/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "3"
-members = ["crates/maknae-kernel", "bins/maknae"]
-EOF
-cat > "$tmpB/crates/maknae-kernel/Cargo.toml" <<'EOF'
-[package]
-name = "maknae-kernel"
-version = "0.0.0"
-edition = "2021"
-EOF
-echo 'pub const M: &str = "x";' > "$tmpB/crates/maknae-kernel/src/lib.rs"
-cat > "$tmpB/bins/maknae/Cargo.toml" <<'EOF'
-[package]
-name = "maknae"
-version = "0.0.0"
-edition = "2021"
-[[bin]]
-name = "maknae"
-path = "src/main.rs"
-[dependencies]
-maknae-kernel = { path = "../../crates/maknae-kernel" }
-EOF
-echo 'fn main(){ println!("{}", maknae_kernel::M); }' > "$tmpB/bins/maknae/src/main.rs"
-expect_reject "p2/cli-links-privileged" "$here/p2-invert-tree.sh" "$tmpB"
+# Fixture B — P2a reachability. The fixture carries a stub for EVERY crate in
+# PRIVILEGED_CRATES, because the gate iterates all of them and fails CLOSED on a
+# cargo-tree error. Both probes previously shipped a workspace with ONE
+# privileged crate, so the first four iterations rejected with "did not match
+# any packages" and the reachability grep -- the check the probes are named for,
+# and #85's whole claim -- was never exercised. Deleting that grep from the gate
+# left negative-control fully green; removing the linked crate from
+# PRIVILEGED_CRATES did too.
+source "$here/lib.sh"
+p2_fixture() { # <crate-to-link-from-the-CLI, or empty for the clean case>
+  local linked="${1:-}" fixture members c
+  fixture="$(mktemp -d)"
+  members=''
+  for c in "${PRIVILEGED_CRATES[@]}"; do
+    mkdir -p "$fixture/crates/$c/src"
+    printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$c" \
+      > "$fixture/crates/$c/Cargo.toml"
+    echo 'pub const M: &str = "x";' > "$fixture/crates/$c/src/lib.rs"
+    members="$members\"crates/$c\", "
+  done
+  mkdir -p "$fixture/bins/maknae/src"
+  printf '[workspace]\nresolver = "3"\nmembers = [%s"bins/maknae"]\n' "$members" \
+    > "$fixture/Cargo.toml"
+  {
+    printf '[package]\nname = "maknae"\nversion = "0.0.0"\nedition = "2021"\n'
+    printf '[[bin]]\nname = "maknae"\npath = "src/main.rs"\n[dependencies]\n'
+    [ -n "$linked" ] && printf '%s = { path = "../../crates/%s" }\n' "$linked" "$linked"
+  } > "$fixture/bins/maknae/Cargo.toml"
+  if [ -n "$linked" ]; then
+    echo "fn main(){ println!(\"{}\", ${linked//-/_}::M); }" > "$fixture/bins/maknae/src/main.rs"
+  else
+    echo 'fn main(){}' > "$fixture/bins/maknae/src/main.rs"
+  fi
+  echo "$fixture"
+}
+tmpB="$(p2_fixture maknae-kernel)"
+expect_reject_because "p2/cli-links-privileged" \
+  "privileged 'maknae-kernel' is reachable from 'maknae' (P2a)" \
+  "$here/p2-invert-tree.sh" "$tmpB"
 
-# Fixture B2 — CLI links the PDP backend (#85: maknae-authz-basic is privileged;
-# the untrusted client must never carry the decision engine) → must trip p2.
-tmpB2="$(mktemp -d)"; mkdir -p "$tmpB2/crates/maknae-authz-basic/src" "$tmpB2/bins/maknae/src"
-cat > "$tmpB2/Cargo.toml" <<'EOF'
-[workspace]
-resolver = "3"
-members = ["crates/maknae-authz-basic", "bins/maknae"]
-EOF
-cat > "$tmpB2/crates/maknae-authz-basic/Cargo.toml" <<'EOF'
-[package]
-name = "maknae-authz-basic"
-version = "0.0.0"
-edition = "2021"
-EOF
-echo 'pub const M: &str = "x";' > "$tmpB2/crates/maknae-authz-basic/src/lib.rs"
-cat > "$tmpB2/bins/maknae/Cargo.toml" <<'EOF'
-[package]
-name = "maknae"
-version = "0.0.0"
-edition = "2021"
-[[bin]]
-name = "maknae"
-path = "src/main.rs"
-[dependencies]
-maknae-authz-basic = { path = "../../crates/maknae-authz-basic" }
-EOF
-echo 'fn main(){ println!("{}", maknae_authz_basic::M); }' > "$tmpB2/bins/maknae/src/main.rs"
-expect_reject "p2/cli-links-authz-basic" "$here/p2-invert-tree.sh" "$tmpB2"
+# Fixture B2 — #85: `maknae-authz-basic` is privileged; the untrusted client
+# must never carry the decision engine.
+tmpB2="$(p2_fixture maknae-authz-basic)"
+expect_reject_because "p2/cli-links-authz-basic" \
+  "privileged 'maknae-authz-basic' is reachable from 'maknae' (P2a)" \
+  "$here/p2-invert-tree.sh" "$tmpB2"
+
+# ACCEPT: the same workspace with NOTHING linked. Without it, both rejections
+# above stay green against a gate that refuses every fixture -- which is very
+# nearly what was happening.
+expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
+  "$here/p2-invert-tree.sh" "$(p2_fixture)"
 
 # Fixture C — bare workspace build in a workflow → must trip build-invocation-lint.sh
 tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
@@ -553,11 +570,62 @@ expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/
 # repeated the mistake, extracting parser keys with a regex over assumed call
 # shapes that matched zero of the real multi-line `bounded_*` sites. These
 # fixtures are the probes that defeated that version.
-cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
+cfg_manifest() { # <drop-regex-or-empty> <appended-rows...> -- compose CFG_OK safely
+  # `$(printf '%s' "$CFG_OK" | grep -v ...)ROW` LOSES the trailing newline:
+  # command substitution strips ALL of them, so the appended row is GLUED onto
+  # the last surviving one. Live instance: the `always<TAB>status` probe below
+  # produced `...not oursalways<TAB>status<TAB>...` as a single line, so the row
+  # it was written to test DID NOT EXIST in the fixture. It scored neg-ok
+  # anyway, because `grep -v` had removed four rows and check 4b fired on the
+  # fields they used to decide -- and deleting the control under test from the
+  # gate left negative-control at 78/78.
+  local drop="$1"; shift
+  local body="$CFG_OK"
+  [ -n "$drop" ] && body="$(printf '%s' "$body" | grep -v "$drop")"$'\n'
+  printf '%s' "$body"
+  local row
+  for row in "$@"; do printf '%s\n' "$row"; done
+}
+
+cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [extra-wire-field] [read_timeout_ms-type] [members-type]
+  # 5 and 6 RETYPE an existing field instead of adding one. Depth probes must
+  # be count-NEUTRAL or the exact-count check rejects first and the depth
+  # check under test is never reached.
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
-           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src"
+           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
+           "$fixture/crates/maknae-proto/src"
+  # `StatusView` is the second disclosure surface (admin.status returns it
+  # whole); the gate's SURFACE table names it, so a fixture needs it too.
+  cat > "$fixture/crates/maknae-proto/src/wire.rs" <<FIX
+pub struct StatusView {
+    pub version: String,
+    pub protocol_version: u16,
+    pub listener: String,
+    pub authz_backend: String,
+}
+
+pub struct RoleBindingView {
+    pub role: String,
+    pub members: ${6:-Vec<String>},
+    ${4:-}
+}
+
+pub struct WhoamiView {
+    pub peer_plane_uri_san: String,
+    pub peer_uid: u32,
+}
+
+pub enum Payload {
+    Pong,
+    Whoami(WhoamiView),
+    ReadContent(crate::Bytes),
+    ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
+    Status(StatusView),
+    SubjectList(Vec<RoleBindingView>),
+}
+FIX
   # The gate cross-checks its SURFACE list against the section registry, so a
   # fixture needs one.
   cat > "$fixture/crates/maknae-kernel/src/boot.rs" <<'FIX'
@@ -600,7 +668,7 @@ pub struct TransportConfig {
     pub max_connections: u32,
     pub frame_max_bytes: usize,
     pub handshake_timeout_ms: u64,
-    pub read_timeout_ms: u64,
+    pub read_timeout_ms: ${5:-u64},
     ${2:-}
 }
 FIX
@@ -644,6 +712,7 @@ FIX
   echo "$fixture"
 }
 
+TABCH="$(printf '\t')"
 CFG_OK='disclose	transport	transport shape, all fields
 disclose	vault.addr	where vault is
 mask	audit.siem	endpoint, no schema
@@ -655,13 +724,54 @@ disclose	principal	readable via getpwuid anyway
 disclose	audit.jsonl_path	the log the operator is looking for
 omit	vault.insecure_plaintext_secret_path	presence is the finding
 omit	core.handling	presence says an above-baseline ceiling is configured
+always	status.version	ships by construction
+always	status.protocol_version	ships by construction
+always	status.listener	ships by construction
+always	status.authz_backend	ships by construction
+always	binding.role	ships by construction
+always	binding.members	ships by construction
+always	whoami.peer_plane_uri_san	ships by construction
+always	whoami.peer_uid	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
 # REJECT: a NEW config struct field with no recorded decision. This is the miss
 # the whole loop kept finding, and the shape the regex extraction could not see.
 fx="$(cfg_fixture "$CFG_OK" 'pub debug_core_dump_path: PathBuf,')"
-expect_reject "config-disclosure-drift/struct-field-with-no-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-count" \
+  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: check 4b -- a counted field with no manifest decision. Named
+# `struct-field-with-no-decision` and probed by APPENDING a field, this fired on
+# the field COUNT and never reached 4b at all; under the fixture's bare
+# `disclose<TAB>transport` prefix row the new field was decided by prefix, so
+# 4b could not have fired even if reached. The gate's CENTRAL claim -- that an
+# undecided field fails the build -- therefore had no negative control on the
+# config surface, while the harness printed neg-ok. Bump the SURFACE count so
+# the field is legitimately counted, and decide the transport fields
+# INDIVIDUALLY (as the real manifest does) so the new one is genuinely undecided.
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.frame_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
+  'pub debug_core_dump_path: PathBuf,')"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+g = root / "ci/gates/config-disclosure-drift.sh"
+s = g.read_text()
+old = "TransportConfig|transport|5|config"
+assert s.count(old) == 1, "fixture count anchor moved"
+g.write_text(s.replace(old, "TransportConfig|transport|6|config"))
+# The CODE side must itemize too, or check 3 (DISCLOSABLE-vs-manifest
+# agreement) fires first and 4b is again never reached.
+d = root / "crates/maknae-config/src/document.rs"
+t = d.read_text()
+assert t.count('    "transport",\n') == 1, "fixture DISCLOSABLE anchor moved"
+d.write_text(t.replace('    "transport",\n', "".join(
+    '    "transport.%s",\n' % f for f in
+    ("socket_path", "max_connections", "frame_max_bytes",
+     "handshake_timeout_ms", "read_timeout_ms"))))
+PY
+expect_reject_because "config-disclosure-drift/struct-field-with-no-decision" \
+  "NO recorded disclosure decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a path classified in code with no manifest row -- and it is HYPHENATED,
 # because the first gate's charset filter dropped such entries silently instead
@@ -671,7 +781,7 @@ expect_reject "config-disclosure-drift/hyphenated-entry-with-no-decision" "$fx/c
 
 # REJECT: a manifest row carrying a path but no rationale. "Decide it" is what
 # the gate's own failure text demands; a bare path is not a decision.
-fx="$(cfg_fixture "${CFG_OK%\'}disclose	core.undecided
+fx="$(cfg_fixture "${CFG_OK}disclose	core.undecided
 ")"
 expect_reject "config-disclosure-drift/manifest-row-with-no-rationale" "$fx/ci/gates/config-disclosure-drift.sh"
 
@@ -701,7 +811,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 20 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -722,12 +832,14 @@ expect_reject "config-disclosure-drift/registered-section-with-no-surface-entry"
 # style here, so the old `pub [a-z0-9_]+:` regex left such a field unclassified
 # while the count stayed put.
 fx="$(cfg_fixture "$CFG_OK" 'pub(crate) session_token_path: PathBuf,')"
-expect_reject "config-disclosure-drift/pub-crate-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/pub-crate-field-not-counted" \
+  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a raw-identifier field. `type` is a Rust keyword and an entirely
 # ordinary YAML key.
 fx="$(cfg_fixture "$CFG_OK" 'pub r#type: String,')"
-expect_reject "config-disclosure-drift/raw-identifier-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/raw-identifier-field-not-counted" \
+  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a SectionSpec registered with a STRING LITERAL name. boot.rs's own
 # grammar accepts it, and keying the cross-check on `[A-Z_]+_SECTION` const
@@ -747,7 +859,8 @@ expect_reject "config-disclosure-drift/string-literal-section-registration" "$fx
 # and no count change. This sits beside the pub(crate) fixture deliberately:
 # the two are the same property, one keyword apart.
 fx="$(cfg_fixture "$CFG_OK" 'session_token_path: PathBuf,')"
-expect_reject "config-disclosure-drift/private-field-not-counted" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/private-field-not-counted" \
+  "yielded 6 field(s), expected 5" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a scalar field turned into a config STRUCT. The silent variant of
 # the depth-blind tally: the field count does not change, so nothing else in
@@ -763,7 +876,8 @@ s = s.replace("pub struct AuditConfig {",
 s = s.replace("    pub siem: Option<String>,", "    pub siem: SiemConfig,", 1)
 p.write_text(s)
 PY
-expect_reject "config-disclosure-drift/struct-typed-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/struct-typed-field-is-a-subtree" "SUBTREE" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a SectionSpec whose `name:` operand the extractor cannot resolve.
 # Round 9's headline control, previously unprobed: the resolved-count tally is
@@ -809,7 +923,8 @@ s = s.replace("pub struct AuditConfig {",
 s = s.replace("    pub siem: Option<String>,", "    pub(crate) siem: SiemConfig,", 1)
 p.write_text(s)
 PY
-expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_reject_because "config-disclosure-drift/pub-crate-struct-subtree" "SUBTREE" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a field typed with THIS CRATE'S OWN `Value`. It is a map-bearing
 # enum (`value.rs`: `Map(Vec<(String, Value)>)`), so `pub extra: Value` is an
@@ -817,8 +932,9 @@ expect_reject "config-disclosure-drift/pub-crate-struct-subtree" "$fx/ci/gates/c
 # scope in every file SURFACE reads. It sat on the scalar skip list, where it
 # was DEAD for its apparent purpose: `serde_json::Value` is intercepted by the
 # map case first, so the entry was live only for the hazardous spelling.
-fx="$(cfg_fixture "$CFG_OK" 'pub extra: Value,')"
-expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Value')"
+expect_reject_because "config-disclosure-drift/crate-value-field-is-a-subtree" "dynamic-key MAP" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a repeated entry in DISCLOSABLE. Harmless at runtime -- `classify` is
 # boolean membership -- but the classification inventory is the artifact a
@@ -829,10 +945,199 @@ expect_reject "config-disclosure-drift/crate-value-field-is-a-subtree" "$fx/ci/g
 fx="$(cfg_fixture "$CFG_OK" '' '"vault.addr",')"
 expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: an unrecognised disposition token. The closed set was added because
+# a nonsense value was being accepted as "a recorded decision" -- and the
+# round-2 predicate change had removed, by accident, the check that used to
+# catch it.
+# On a CONFIG path, where the closed set is the ONLY rule that can fire. The
+# original probe put `masc` on `status.version` -- a WIRE path, where the
+# "by-construction fields ship whole" rule rejects independently -- so deleting
+# the closed-set check left the harness fully green while `masc` on a config
+# mask path passed at EXIT=0.
+fx="$(cfg_fixture "$(cfg_manifest "^mask${TABCH}audit\.siem${TABCH}" \
+  "masc${TABCH}audit.siem${TABCH}endpoint, no schema")")"
+expect_reject_because "config-disclosure-drift/unknown-disposition-token" \
+  "unknown disposition" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: `mask` on a by-construction surface. `StatusView` is serialized WHOLE
+# and never passes through `classify`, so a masked row there would ship the
+# value in the clear while the manifest said it was withheld.
+fx="$(cfg_fixture "${CFG_OK}mask${TABCH}status.vault_addr${TABCH}value withheld
+")"
+expect_reject "config-disclosure-drift/mask-on-a-by-construction-surface" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the BARE PREFIX spelling of the same thing. Requiring `status.` let
+# `mask<TAB>status` through, and prefix rows are the idiom this manifest
+# already uses -- so it is the spelling a maintainer reaches for. It re-opened
+# the hole the closed set closed.
+fx="$(cfg_fixture "${CFG_OK}mask${TABCH}status${TABCH}cover the whole surface
+")"
+expect_reject "config-disclosure-drift/mask-on-a-bare-by-construction-prefix" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a new field on a WIRE disclosure struct. TWO independent controls stop
+# it -- the exact field count, and 4b once the count is bumped -- and this probe
+# deliberately asserts neither in isolation, because either one alone is
+# sufficient and a maintainer going green passes through both. The label says
+# `is-stopped` rather than naming a check: an earlier label claimed check 4b, a
+# later comment claimed "it actually fires the COUNT", and neither was
+# demonstrated -- disabling the count check leaves this fixture rejecting at 4b.
+# The count check has its own isolating probes (`*-not-counted`); 4b has
+# `struct-field-with-no-decision`. This one pins the OUTCOME.
+fx="$(cfg_fixture "$CFG_OK" '' '' 'pub clearance: String,')"
+expect_reject "config-disclosure-drift/wire-struct-field-is-stopped" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a BARE surface token as an `always` row. Round 4 made bare prefixes
+# count as the surface so `mask<TAB>status` would reject -- and that same change
+# legalized `always<TAB>status`, which then covers every field under it by
+# prefix. One row, whole struct, and a new sensitive field ships with nothing
+# but a count edit.
+fx="$(cfg_fixture "$(cfg_manifest "^always${TABCH}status\." \
+  "always${TABCH}status${TABCH}cover the whole surface")")"
+expect_reject_because "config-disclosure-drift/bare-surface-token-is-not-a-decision" \
+  "a bare surface token is not a per-field decision" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: `always` on a CONFIG path. `always` asserts "ships by construction on
+# a non-allowlist surface"; on a config path the value goes through `classify`
+# and may be masked, so the row would claim a disclosure the code does not make.
+# Unprobed until now: deleting the check left negative-control fully green.
+fx="$(cfg_fixture "$(cfg_manifest "" \
+  "always${TABCH}transport.socket_path${TABCH}claims by-construction on a classified surface")")"
+expect_reject_because "config-disclosure-drift/always-on-a-config-path" \
+  "always is only for by-construction surfaces" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a field whose type reduces to a token carrying a regex metacharacter
+# (a tuple here). `$bare` is interpolated into a `grep -rqE`, and an invalid
+# pattern makes grep error -- which `|| continue` scores as LEAF. Fail-open on
+# the check whose entire job is to refuse leaves that are not leaves. Note the
+# guard refuses METACHARACTERS only: `Vec<String>` on a config surface reduces
+# to `Vec<String` legitimately (the documented exemption) and must still pass,
+# which the clean-fixture probe below holds.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '(u32, String)')"
+expect_reject_because "config-disclosure-drift/metacharacter-type-is-not-a-leaf" \
+  "regex metacharacter" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a SURFACE prefix carrying whitespace. `wire_prefixes` is space-joined
+# and split on " ", so such a prefix becomes two phantom surfaces and
+# `byconstruction` matches on half a name.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
+s = p.read_text()
+old = "|StatusView|status|4|wire"
+assert s.count(old) == 1, "fixture prefix anchor moved"
+p.write_text(s.replace(old, "|StatusView|status view|4|wire"))
+PY
+expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
+  "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
+# half of SURFACE is cross-checked against boot.rs's section registry; the wire
+# half was hand-maintained with no closing rule, so a new disclosure struct --
+# probed with a field literally named `vault_token` -- shipped at unchanged
+# counts and EXIT=0. The naming-convention inventory closes both directions.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct AuditTailView {
+    pub jsonl_path: String,
+    pub vault_token: String,
+}
+FIX
+expect_reject_because "config-disclosure-drift/uninventoried-wire-view-struct" \
+  "wire disclosure structs and the SURFACE table disagree" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a NEW Payload variant with no disposition row -- codex round-11's P1,
+# in its own shape: an INLINE map payload is a disclosure surface with no
+# struct at all, so the *View inventory above cannot see it, and `ConfigView`
+# proves the wire format permits it. The variant table is what forces the
+# classification moment.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = w.read_text()
+a = "    SubjectList(Vec<RoleBindingView>),\n"
+assert s.count(a) == 1, "fixture Payload anchor moved"
+w.write_text(s.replace(a, a + "    Secrets(std::collections::BTreeMap<String, String>),\n"))
+PY
+expect_reject_because "config-disclosure-drift/payload-variant-with-no-disposition" \
+  "Payload variants and the disposition table disagree" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a disposition row whose named struct is not what the variant carries.
+# Without the operand cross-check the table can quietly lie about the type and
+# the gate keeps certifying the OLD struct's decisions for a NEW payload.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = w.read_text()
+a = "    Status(StatusView),"
+assert s.count(a) == 1, "fixture Status variant anchor moved"
+w.write_text(s.replace(a, "    Status(std::collections::BTreeMap<String, String>),"))
+PY
+expect_reject_because "config-disclosure-drift/payload-disposition-table-lies" \
+  "the table is lying about the type" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+
+# REJECT: a wire-struct field whose type becomes Vec<WorkspaceStruct>. `Vec` is
+# a leaf for a CONFIG document (`flatten` never recurses into `Value::Seq`) and
+# is NOT for a wire struct, which serde serializes whole -- the exemption is a
+# fact about the consumer, and it was inherited unexamined when three wire
+# structs joined SURFACE.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberEntry>')"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct MemberEntry {
+    pub uid: u32,
+    pub home: String,
+}
+FIX
+expect_reject_because "config-disclosure-drift/wire-vec-of-struct-is-a-subtree" "SUBTREE" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the same defeat, with the SURFACE array REORDERED so a `config` row is
+# last. The per-surface `Vec` rule read `$sec` -- a variable left over from the
+# extraction loop, holding the LAST entry -- so the rule every row got was
+# whatever happened to sit at the bottom of the table. Grouping the entries by
+# crate, a plausible tidy-up, restored the defeat above at identical counts and
+# EXIT=0. The kind is now an explicit column carried per row; this is what
+# proves it.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Vec<MemberEntry>')"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct MemberEntry {
+    pub uid: u32,
+    pub home: String,
+}
+FIX
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
+s = p.read_text()
+row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"\n'
+last = '  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"\n'
+assert s.count(row) == 1 and s.count(last) == 1, "fixture reorder anchors moved"
+p.write_text(s.replace(row, "").replace(last, last + row))
+PY
+expect_reject_because "config-disclosure-drift/surface-order-does-not-decide-the-vec-rule" "SUBTREE" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
+# LEAF -- `flatten` never recurses into `Value::Seq` and `render` masks the
+# sequence whole -- so demanding coverage there would block legitimate work.
+# Unprobed, the exemption was free to not exist: under the leaked variable it
+# did not, and every config row was silently held to the wire rule.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
+expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
+  ": 20 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 20 paths decided, 31 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
@@ -840,7 +1145,7 @@ expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided
 # (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
 # control; asserting it here means any future silent shrink is a red build.
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 32 paths decided, 31 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

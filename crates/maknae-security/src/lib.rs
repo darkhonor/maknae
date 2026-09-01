@@ -17,8 +17,10 @@ mod request;
 mod value;
 mod verdict;
 
-pub use authorizer::Authorizer;
-pub use compose::{combine, guarded_decide, ConjunctionAuthorizer};
+pub use authorizer::{Authorizer, SubjectBinding};
+pub use compose::{
+    combine, guarded_backend_name, guarded_decide, guarded_subjects, ConjunctionAuthorizer,
+};
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{
     Action, Context, Lane, Request, Resource, Subject, CONTEXT_DAC_LANE, RESOURCE_OS_ACCESSIBLE,

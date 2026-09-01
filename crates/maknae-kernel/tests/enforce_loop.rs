@@ -16,7 +16,7 @@ use maknae_authz_basic::HermeticAuthorizer;
 use maknae_proto::{Payload, ProtoErrCode, RespResult};
 
 mod common;
-use common::{AlwaysPermit, FailNthEmit, HostileObligation, SleepAuthorizer};
+use common::{AlwaysPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer};
 
 // Reuse run_loop's recording emitter shape locally (each tests/*.rs is its
 // own crate; RecEmit is tiny and its semantics — record synchronously, then
@@ -155,6 +155,7 @@ where
         timeout,
         fds,
         Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
 }
@@ -181,6 +182,7 @@ where
         timeout,
         maknae_io::DelegatedFds::new(0),
         Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
 }
@@ -197,6 +199,7 @@ async fn drive_with<P>(
     // The already-redacted effective config the daemon would hold. Default
     // (empty) for every verb that is not `admin.config.show`.
     config_view: Arc<maknae_kernel::ConfigView>,
+    transport: maknae_config::TransportConfig,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -205,6 +208,10 @@ where
     maknae_proto::write_frame(&mut client, &request_frame(verb))
         .await
         .unwrap();
+    // The harness plays the BOOT role: production captures this once in
+    // run_inner from the same authorizer it serves with, so the test captures
+    // from the authorizer it drives with -- before handle() takes it by value.
+    let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     maknae_kernel::handle(
         server,
         "maknae://d/plane/cli".to_string(),
@@ -212,11 +219,12 @@ where
         true,
         emit,
         1,
-        maknae_config::transport_from_section(None).unwrap(),
+        transport,
         serde_json::json!({}),
         authorizer,
         Arc::new(fx_principal.clone()),
         Arc::clone(&config_view),
+        backend_name,
         timeout,
         maknae_security::Lane::Local,
         delegated,
@@ -1036,6 +1044,256 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// The transport a status test drives with, DELIBERATELY NON-DEFAULT.
+///
+/// Asserting `listener` against `transport_from_section(None)` -- the default
+/// -- could not separate "reads `cfg.socket_path`" from a hardcoded literal:
+/// expected and actual were the same string. Replacing both `listener` and
+/// `authz_backend` with literals left the entire kernel suite GREEN, and
+/// `run.rs` is in `exclude_globs`, so cargo-mutants never generated the
+/// mutant either. A distinguishing input is the only thing that closes it.
+fn nondefault_transport() -> maknae_config::TransportConfig {
+    let mut t = maknae_config::transport_from_section(None).unwrap();
+    t.socket_path = "/tmp/maknae-status-probe.sock".into();
+    t
+}
+
+/// `admin.status` end to end: a real grant, a real verdict, real posture.
+///
+/// Every field is asserted, not just the variant. `authz_backend` is the one
+/// worth naming: it is asked of the PDP rather than hardcoded, so with the
+/// classification library present it reports that backend instead — an
+/// operator debugging a verdict needs to know WHICH decider produced it.
+#[tokio::test]
+async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
+    let fx = Fixture::new("status-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
+        nondefault_transport(),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => {
+            assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
+            assert_eq!(s.authz_backend, "maknae-authz-basic");
+            // EXACT, like its siblings. This was the one field where any
+            // non-empty string passed; the test crate is `maknae-kernel`, the
+            // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
+            // distinguishing assertion is free.
+            assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
+            // The VALUE, not merely non-empty: wiring `listener` to any other
+            // non-empty config string -- the audit path, the plane socket --
+            // passed the emptiness check.
+            assert_eq!(
+                s.listener,
+                nondefault_transport().socket_path.display().to_string(),
+                "listener must be READ from the running config -- a default-valued \
+                 expectation could not tell that apart from a hardcoded literal"
+            );
+        }
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.status");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.outcome.posture, "authorized");
+}
+
+/// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself
+/// reports `unknown`, and this is the input that proves the field is not the
+/// `-basic` literal: `AlwaysPermit` implements only `decide`, so it takes the
+/// seam default. Two tests, two backends, two different expected strings --
+/// which is what "asked, not hardcoded" actually requires.
+#[tokio::test]
+async fn status_reports_the_backend_that_actually_decided() {
+    let fx = Fixture::new("status-unknown-backend");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => assert_eq!(
+            s.authz_backend, "unknown",
+            "a backend taking the seam default must report `unknown`, not the \
+             name of some other backend"
+        ),
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+}
+
+/// A backend that PANICS in `backend_name()` is contained, on the production
+/// path. The kernel calls it INLINE on the async worker -- unlike `subjects`,
+/// which `spawn_blocking` would backstop -- so without the guard the panic
+/// unwinds through `handle()` AFTER the audit record already said
+/// permit/authorized, and the caller gets a dropped connection instead of a
+/// response. `run.rs` is mutation-excluded, so nothing else would catch a
+/// revert to the raw call.
+#[tokio::test]
+async fn a_panicking_backend_name_is_contained_on_the_production_path() {
+    let fx = Fixture::new("status-panicking-name");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(PanickingName),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame, not a dropped connection");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => assert_eq!(
+            s.authz_backend, "unknown",
+            "a panicking name must fail closed to `unknown`, not escape"
+        ),
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+}
+
+/// `admin.subject.list` reports what the POLICY FILE binds, end to end.
+///
+/// This does NOT prove liveness, and an earlier version of this doc claimed it
+/// did. The fixture policy is on disk before `HermeticAuthorizer::new`, so an
+/// implementation that snapshotted bindings at construction passes it
+/// unchanged. The liveness property is owned by
+/// `wrapper_subjects_delegate_and_read_live` in `maknae-authz-basic`, which
+/// rewrites the policy between two calls and asserts the answer changes.
+#[tokio::test]
+async fn a_granted_subject_list_reports_the_policy_file_bindings() {
+    let fx = Fixture::new("subjlist-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::SubjectList(b)) => {
+            let admin = b
+                .iter()
+                .find(|r| r.role == "admin")
+                .expect("the admin binding the fixture wrote");
+            assert_eq!(
+                admin.members,
+                vec!["uid:0".to_string()],
+                "root resolves to uid 0, and members are reported by uid"
+            );
+        }
+        other => panic!("expected a SubjectList payload, got {other:?}"),
+    }
+    assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+}
+
+/// A backend that CANNOT enumerate yields an explicit refusal, never an empty
+/// list. This is the enforcement site of the claim the whole binding fix was
+/// written to protect, and until now nothing tested it.
+///
+/// `AlwaysPermit` implements only `decide`, so its `subjects()` takes the seam
+/// default of `None` -- exactly what a backend that cannot enumerate returns,
+/// and what the shipped `authz.yaml` (no `bindings:` key) produces through
+/// `-basic`. Replacing the kernel's `None` arm with
+/// `Payload::SubjectList(vec![])` left every other test on this branch green,
+/// and would tell an operator "nobody is bound" while the default-role
+/// fallback was live.
+#[tokio::test]
+async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
+    let fx = Fixture::new("subjlist-unavailable");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Internal),
+        RespResult::Ok(maknae_proto::Payload::SubjectList(b)) => panic!(
+            "an inability to enumerate must NOT render as a binding list -- \
+             an empty list is the claim `nobody is bound`, got {b:?}"
+        ),
+        other => panic!("expected an explicit refusal, got {other:?}"),
+    }
+    // And the TRAIL must not claim the disclosure happened. The pre-dispatch
+    // record says permit/authorized; a second record corrects the posture,
+    // exactly as the read PEP does for these same four conditions.
+    let last = emit.records().last().cloned().expect("a record");
+    assert_eq!(last.outcome.result, "deny");
+    assert_eq!(
+        last.outcome.posture, "unavailable",
+        "a Permit-then-not-performed must never read as a completed action"
+    );
+    // And the SPECIFIC condition, not just the category. Five paths reach the
+    // refusal and only this one is benign -- an auditor must be able to tell
+    // "this backend does not enumerate" (the shipped default's permanent
+    // state) from "the policy filesystem is wedged" (an incident).
+    assert!(
+        last.outcome.reason.contains("does not enumerate"),
+        "the reason must name WHICH refusal: {:?}",
+        last.outcome.reason
+    );
+}
+
+/// Neither new term discloses without a grant. The authorization decision is
+/// the gate, not the dispatch.
+#[tokio::test]
+async fn the_new_terms_disclose_nothing_without_a_grant() {
+    for (tag, verb) in [
+        ("status-nogrant", maknae_proto::Verb::AdminStatus),
+        ("subjlist-nogrant", maknae_proto::Verb::AdminSubjectList),
+    ] {
+        let fx = Fixture::new(tag);
+        fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.principal,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}"),
+            other => panic!("{verb:?} disclosed without a grant: {other:?}"),
+        }
+        assert_eq!(request_record(&emit.records()).outcome.result, "deny");
+    }
+}
+
 /// An oversized `ConfigView` is refused EXPLICITLY, not written oversized.
 ///
 /// `ConfigView` is the only payload on that arm whose size scales with input --
@@ -1073,6 +1331,7 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");
@@ -1087,6 +1346,16 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::TooLarge),
         other => panic!("expected an explicit TooLarge refusal, got {other:?}"),
     }
+    // And the TRAIL must not claim the disclosure happened. The pre-dispatch
+    // record says permit/authorized; a corrective record carries the real
+    // posture. `permit` is retained -- the DECISION was a permit; only the
+    // delivery was refused.
+    let last = emit.records().last().cloned().expect("a record");
+    assert_eq!(last.outcome.result, "permit");
+    assert_eq!(
+        last.outcome.posture, "refused-oversize",
+        "a Permit-then-not-delivered must never read as a completed action"
+    );
 }
 
 /// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,
@@ -1140,6 +1409,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");
@@ -1187,6 +1457,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
         Duration::from_secs(5),
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
+        maknae_config::transport_from_section(None).unwrap(),
     )
     .await
     .expect("a frame");
@@ -1203,52 +1474,20 @@ async fn config_show_without_a_grant_discloses_nothing() {
     assert_eq!(request_record(&emit.records()).outcome.result, "deny");
 }
 
-/// The `roles:` grant crosses the SEAM (#162 step 7).
-///
-/// Every other test of the grant path sits on one side of it, and the existing
-/// end-to-end permit drives `AlwaysPermit` -- a stub. This one runs a real
-/// `HermeticAuthorizer` over a real on-disk `authz.yaml` carrying a real
-/// `roles:` block, so the Permit that reaches the kernel is a genuine PDP
-/// verdict rather than a design intention.
-///
-/// The policy carries `bindings: { admin: ["root"] }` and the request is driven
-/// with `peer_uid = 0`. Without a `bindings:` key the defaults apply and Admin
-/// is granted only when `peer_uid == principal.uid`, which `Fixture::new` sets
-/// to `geteuid()` -- so the grant and the binding that reaches it have to sit
-/// in one hand-written file.
-///
-/// It ends at `NotImplemented`, and that is the point: Phase 1 ships the
-/// DECISION, not the capability. `dispatch_verb` still returns `NoBehaviour`,
-/// so a granted `admin.status` discloses nothing.
-#[tokio::test]
-async fn a_roles_granted_term_permits_through_the_real_pdp_and_still_discloses_nothing() {
-    let fx = Fixture::new("roles-grant");
-    fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
-    );
-    let emit = RecEmit::new();
-    let frame = drive(
-        &fx.principal,
-        fx.authorizer(),
-        emit.clone(),
-        0,
-        maknae_proto::Verb::AdminStatus,
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("a frame");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
-        other => panic!("expected NotImplemented, got {other:?}"),
-    }
-    let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "admin.status");
-    assert_eq!(
-        req.outcome.result, "permit",
-        "the grant must produce a real permit, not a fallthrough"
-    );
-    assert_eq!(req.outcome.posture, "not-implemented");
-}
+// RETIRED (#162 Phase 3): `a_roles_granted_term_permits_through_the_real_pdp_
+// and_still_discloses_nothing` lived here. It drove a granted `admin.status`
+// and asserted `NotImplemented` -- that the grant produced a real PDP verdict
+// and disclosed nothing. Its second half is now deliberately false: the term
+// is built and discloses posture.
+//
+// Deleted rather than rewritten, because its unique claim -- that a `roles:`
+// grant crosses the seam to a real verdict -- is now made by three tests that
+// assert the actual disclosure
+// (`a_granted_status_reports_real_posture_from_the_real_pdp`,
+// `a_granted_config_show_discloses_the_redacted_view_and_nothing_else`,
+// `a_granted_subject_list_reports_the_policy_file_bindings`). Keeping it retargeted at an
+// ungrantable term would have tested the NOOP path, which
+// `a_permitted_unbuilt_term_is_audited_then_refused` already pins.
 
 /// The same file WITHOUT the grant refuses. This is what makes the test above
 /// mean something: without it, a permit that came from anywhere else in the
@@ -1334,7 +1573,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::AdminContain,
         Duration::from_secs(5),
     )
     .await
@@ -1344,7 +1583,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         other => panic!("expected NotImplemented, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "admin.status");
+    assert_eq!(req.action, "admin.contain");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(
         req.outcome.posture, "not-implemented",
@@ -1365,7 +1604,7 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::AdminContain,
         Duration::from_secs(5),
     )
     .await;
@@ -1374,7 +1613,49 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         "no frame may be released when its record could not append"
     );
     assert!(
-        emit.records().iter().any(|r| r.action == "admin.status"),
+        emit.records().iter().any(|r| r.action == "admin.contain"),
         "the record must have been OFFERED before the frame was withheld"
+    );
+}
+
+/// The CORRECTIVE record is gated on ITS OWN append, not the admission
+/// record's. n=3 leaves the admission record (1) and the pre-dispatch
+/// `permit / authorized` record (2) durable and fails the third — the posture
+/// correction — so the only surviving statement about this request is
+/// "authorized and served", for a disclosure that never happened.
+///
+/// The three corrective sites discarded that result (`let _ =`) and wrote the
+/// frame regardless, on the argument that a guard would be a constant `if
+/// true`. That argument is about the ADMISSION record's `appended`; the value
+/// discarded here is a second, freshly meaningful bool. Meanwhile
+/// `emit_request_outcome` printed "withholding the frame" on a path that
+/// responded.
+#[tokio::test]
+async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
+    let fx = Fixture::new("subjlist-corrective-withhold");
+    let emit = FailNthEmit::new(3);
+    let out = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        out.is_none(),
+        "no frame may be released when the record CORRECTING its posture could not append"
+    );
+    // The correction must have been OFFERED -- withholding because the record
+    // was never attempted would pass this test for the wrong reason.
+    let recs = emit.records();
+    assert!(
+        recs.iter()
+            .any(|r| r.outcome.posture == "unavailable" && r.outcome.result == "deny"),
+        "the corrective record must have been offered before the frame was withheld, got {:?}",
+        recs.iter()
+            .map(|r| (r.outcome.result.clone(), r.outcome.posture.clone()))
+            .collect::<Vec<_>>()
     );
 }
