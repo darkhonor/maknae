@@ -135,6 +135,14 @@ plus `<not set>` for a field that is present-but-valueless or resolved to nothin
 
 This is the ruling Phase 2 was blocked on. It settles `admin.config.show`; `admin.status`'s and `admin.subject.list`'s response shapes remain open, and neither is a disclosure question of the same weight.
 
+**16. `admin.status` discloses version, protocol version, listener, and the deciding backend.** All four are deployment shape, none is a credential. The verb's own wire doc warns it is *"useful to an operator, and useful to an attacker fingerprinting the deployment"* — true, and it is why the term ships **ungranted** and admin-only. Once an operator has granted it, withholding the daemon's own version from them protects nobody: any peer that completed a handshake already knows the protocol version, and the socket path is disclosed by `admin.config.show` on the same reasoning. `authz_backend` is asked of the PDP rather than hardcoded — with the classification library present the deciding backend is not `-basic`, and an operator debugging a verdict needs to know which one produced it.
+
+**17. `admin.subject.list` reads bindings LIVE, through the seam — never from a boot snapshot.** This is the one place Phase 3 could not reuse the `config.show` pattern. The configuration is fixed until restart, so redacting it once at boot is correct. **Bindings are not**: `decide` re-reads the policy per request precisely so a containment edit bites on the next one, and a boot snapshot would report authorization state the PDP is no longer using. Disclosing *stale* authorization state is worse than disclosing none.
+
+So `Authorizer` gains two defaulted, object-safe methods — `subjects()` and `backend_name()` — rather than the kernel reading policy itself, which would put policy parsing back inside the TCB the seam exists to keep it out of ([ADR-0004](ADR-0004-modular-authorization-architecture.md)). `subjects()` returns `Option`: `None` means *this backend cannot enumerate*, which the kernel reports as unavailable and **never as an empty list** — "no bindings exist" is a different and dangerous claim. `-basic` returns `None` on any failure to read or validate, for the same reason.
+
+It reports what the **policy file binds**. The default-role fallback — an enrolled uid resolving to admin when no `bindings:` key is present — is a decision rule, not a binding, and listing it as one would tell an operator a binding exists that they could then look for in the file and fail to find.
+
 ## Consequences
 
 - Building a remaining term means adding behaviour behind the arm that already decides. The `NoBehaviour` pin is what makes that a decision rather than a side effect — **and it has now done so once**, for `admin.config.show` (decision 15). It still covers `admin.status` and `admin.subject.list`.

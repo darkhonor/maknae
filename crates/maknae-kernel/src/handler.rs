@@ -24,6 +24,11 @@ pub enum Dispatch {
     /// The peer asked for the effective configuration (#162 Phase 2). Carries
     /// no datum: the config is the daemon's own, never client-supplied.
     ConfigShowRequested,
+    /// The peer asked for runtime posture. No datum: the daemon's own state.
+    StatusRequested,
+    /// The peer asked to enumerate role bindings. No datum; the answer is read
+    /// LIVE from the PDP, never from a boot snapshot.
+    SubjectListRequested,
 }
 
 /// Resolve a verb to its dispatch. `Ping → Pong`, `Whoami → WhoamiRequested`.
@@ -35,10 +40,10 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
         // compile error until someone decides what it dispatches to.
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
-        Verb::AdminStatus
-        | Verb::AdminAuditTail
+        Verb::AdminStatus => Dispatch::StatusRequested,
+        Verb::AdminSubjectList => Dispatch::SubjectListRequested,
+        Verb::AdminAuditTail
         | Verb::AdminPolicyReload
-        | Verb::AdminSubjectList
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
         | Verb::AdminContain
@@ -481,21 +486,35 @@ mod tests {
         assert_eq!(dispatch_verb(&Verb::Whoami), Dispatch::WhoamiRequested);
     }
 
-    /// `admin.status` and `admin.subject.list` still dispatch to NO BEHAVIOUR.
+    /// All three grantable disclosure terms now dispatch. The `NoBehaviour`
+    /// pin that guarded them is RETIRED here, having done its job twice.
     ///
-    /// This test was written in Phase 1 over all THREE grantable terms, so that
-    /// none could gain a dispatch without someone answering the disclosure
-    /// question deliberately. It has now done that job once: adding
-    /// `admin.config.show`'s arm turned it red, and it is narrowed here against
-    /// the operator ruling that settled what that term may disclose. The other
-    /// two keep the pin, and narrowing it again requires the same ruling.
+    /// It was written in Phase 1 over all three, so that none could gain a
+    /// dispatch without someone answering the disclosure question deliberately.
+    /// It went red for `admin.config.show` and was narrowed; it went red again
+    /// for these two. There are no grantable terms left for it to cover, so
+    /// keeping it would be keeping a test that asserts nothing. What replaces
+    /// it is the inverse claim, which is now the one worth holding: each term
+    /// dispatches to its OWN arm, not to a shared or class-granular one.
     #[test]
-    fn the_remaining_grantable_terms_have_no_behaviour_yet() {
-        for v in [Verb::AdminStatus, Verb::AdminSubjectList] {
+    fn each_grantable_term_dispatches_to_its_own_arm() {
+        assert_eq!(dispatch_verb(&Verb::AdminStatus), Dispatch::StatusRequested);
+        assert_eq!(
+            dispatch_verb(&Verb::AdminConfigShow),
+            Dispatch::ConfigShowRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminSubjectList),
+            Dispatch::SubjectListRequested
+        );
+        // And the terms that are NOT grantable still have no behaviour. This
+        // is what the retired pin was really protecting: the class arm must
+        // not become a blanket grant for the rest of `admin.*`.
+        for v in [Verb::AdminContain, Verb::AdminPolicyReload] {
             assert_eq!(
                 dispatch_verb(&v),
                 Dispatch::NoBehaviour,
-                "{v:?} is grantable but must still disclose nothing"
+                "{v:?} is not grantable and must still disclose nothing"
             );
         }
     }

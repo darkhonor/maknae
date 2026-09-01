@@ -19,6 +19,18 @@ impl Role {
     /// these four names. `None` = unknown → the caller refuses the policy
     /// (never defaults — a typo must not silently drop a subject to a
     /// different role).
+    /// The policy-file spelling of this role — the inverse of [`Role::from_key`],
+    /// so `admin.subject.list` reports the token an operator would grep for in
+    /// `authz.yaml` rather than a Rust variant name.
+    pub(crate) fn key(&self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::User => "user",
+            Role::Guest => "guest",
+            Role::Adversary => "adversary",
+        }
+    }
+
     pub(crate) fn from_key(k: &str) -> Option<Role> {
         match k {
             "admin" => Some(Role::Admin),
@@ -33,6 +45,19 @@ impl Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `key` is the inverse of `from_key`, and the round trip is the property
+    /// worth holding: `admin.subject.list` reports the token an operator would
+    /// grep for in `authz.yaml`, so a drift between the two spellings would
+    /// disclose a role name that does not exist in any policy file.
+    #[test]
+    fn key_round_trips_through_from_key_for_every_role() {
+        for r in [Role::Admin, Role::User, Role::Guest, Role::Adversary] {
+            assert_eq!(Role::from_key(r.key()), Some(r), "round trip for {r:?}");
+        }
+        assert_eq!(Role::Admin.key(), "admin");
+        assert_eq!(Role::Adversary.key(), "adversary");
+    }
 
     #[test]
     fn the_vocabulary_is_exactly_the_four_shipped_names() {

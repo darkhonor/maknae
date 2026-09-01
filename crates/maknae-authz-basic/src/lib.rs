@@ -248,6 +248,22 @@ fn lookup_uid(name: &str) -> Option<u32> {
     }
 }
 
+impl BasicAuthorizer {
+    /// Bindings as the PDP would resolve them RIGHT NOW, via the same loader
+    /// `decide` uses. Any failure -- unreadable file, bad grammar, invalid
+    /// bindings -- yields `None`, which the kernel reports as unavailable.
+    /// Never a partial or defaulted list: "these are the bindings" is a claim,
+    /// and a wrong one about authorization state is worse than no answer.
+    fn subjects_with_loader(
+        &self,
+        loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
+    ) -> Option<Vec<maknae_security::SubjectBinding>> {
+        let policy = loader(&self.policy_path).ok()?;
+        let resolved = binding::resolve(&policy.bindings, &self.uid_map).ok()?;
+        Some(resolved.as_subject_bindings())
+    }
+}
+
 impl maknae_security::Authorizer for BasicAuthorizer {
     /// Per-request: re-read the policy file (Zero Trust — a binding edit
     /// bites on the next request), then run the pure core. ANY load/parse/
@@ -255,6 +271,15 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
         let home = self.principal.home.clone();
         self.decide_with_loader(req, move |p| maknae_config::load_authz(p, Some(&home)))
+    }
+
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        let home = self.principal.home.clone();
+        self.subjects_with_loader(move |p| maknae_config::load_authz(p, Some(&home)))
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "maknae-authz-basic"
     }
 }
 
@@ -320,6 +345,22 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
         self.inner.decide_with_loader(r, move |p| {
             maknae_config::load_authz_with_requirement(p, req.clone(), Some(&home))
         })
+    }
+
+    /// DELEGATED, not defaulted. The hermetic wrapper exists to exercise the
+    /// real backend through a fixture-satisfiable loader; reporting `unknown`
+    /// here would make every e2e test assert against a stub value and prove
+    /// nothing about what production answers.
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        let req = self.req.clone();
+        let home = self.inner.principal.home.clone();
+        self.inner.subjects_with_loader(move |p| {
+            maknae_config::load_authz_with_requirement(p, req.clone(), Some(&home))
+        })
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.inner.backend_name()
     }
 }
 
@@ -600,6 +641,77 @@ mod tests {
     /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
     /// against a validator that refuses everything, so this is the assertion
     /// that keeps them honest.
+    /// `subjects()` reports what the POLICY FILE binds, read through the same
+    /// loader `decide` uses -- and reports `None`, never an empty list, when it
+    /// cannot read. "No bindings exist" and "I could not tell you" are
+    /// different claims about authorization state, and only one of them is safe
+    /// to make wrongly.
+    #[test]
+    fn subjects_reports_file_bindings_and_none_on_failure() {
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
+        };
+        let got = auth
+            .subjects_with_loader(|_| {
+                maknae_config::parse_authz(
+                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"root\"]\n"),
+                    None,
+                )
+            })
+            .expect("a readable policy yields Some");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].role, "admin");
+        assert_eq!(got[0].members, vec!["uid:0".to_string()]);
+
+        // An unreadable policy yields None -- NOT an empty list.
+        let none = auth.subjects_with_loader(|_| Err(maknae_config::AuthzError::Yaml("x".into())));
+        assert!(none.is_none(), "unreadable must be None, got {none:?}");
+
+        // So does an INVALID one: a binding that does not resolve is not
+        // "no bindings", and answering as though it were would tell an
+        // operator their policy binds nobody when it binds something broken.
+        let invalid = auth.subjects_with_loader(|_| {
+            maknae_config::parse_authz(
+                &format!("{GRANT_PREAMBLE}bindings:\n  admn: [\"root\"]\n"),
+                None,
+            )
+        });
+        assert!(invalid.is_none(), "invalid bindings must be None");
+    }
+
+    /// The TRAIT wrappers, called through the trait. `cargo mutants -p` and the
+    /// coverage floor are both per-crate, so the kernel's end-to-end exercise
+    /// of these does not reach them here -- the thin delegation is exactly
+    /// where a wrong loader or a swapped argument would hide.
+    #[test]
+    fn the_trait_subjects_wrappers_use_the_production_loaders() {
+        use maknae_security::Authorizer;
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: UidMap::new(),
+        };
+        // The production loader is the ROOT-OWNED hardened path, so a
+        // nonexistent file yields None -- fail-closed, and it proves this
+        // wrapper reaches `load_authz` rather than some laxer reader.
+        assert!(auth.subjects().is_none());
+    }
+
+    #[test]
+    fn backend_name_identifies_this_backend() {
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: UidMap::new(),
+        };
+        assert_eq!(
+            maknae_security::Authorizer::backend_name(&auth),
+            "maknae-authz-basic"
+        );
+    }
+
     #[test]
     fn roles_valid_grant_block_constructs() {
         let p = parse_with_roles(
@@ -854,6 +966,34 @@ mod tests {
             assert!(
                 matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
                 "{after:?}"
+            );
+        }
+
+        /// The wrapper's `subjects` and `backend_name` DELEGATE to the inner
+        /// backend rather than taking the trait defaults. A default here would
+        /// make every kernel e2e assert against `None`/`unknown` and prove
+        /// nothing about what production answers -- and it reads LIVE, so a
+        /// binding edited after construction shows up on the next call.
+        #[test]
+        fn wrapper_subjects_delegate_and_read_live() {
+            let d = fixture_dir("subjects");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p.clone(), principal(), fixture_req()).unwrap();
+
+            assert_eq!(auth.backend_name(), "maknae-authz-basic");
+            let before = auth.subjects().expect("readable policy");
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].role, "admin");
+            assert_eq!(before[0].members, vec!["uid:0".to_string()]);
+
+            // LIVE: the same edit that flips a verdict flips the listing.
+            write_policy(&p, "adversary");
+            let after = auth.subjects().expect("still readable");
+            let _ = std::fs::remove_dir_all(&d);
+            assert_eq!(
+                after[0].role, "adversary",
+                "subjects must re-read, not report a construction-time snapshot"
             );
         }
 

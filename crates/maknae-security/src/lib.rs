@@ -17,7 +17,7 @@ mod request;
 mod value;
 mod verdict;
 
-pub use authorizer::Authorizer;
+pub use authorizer::{Authorizer, SubjectBinding};
 pub use compose::{combine, guarded_decide, ConjunctionAuthorizer};
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{

@@ -8,9 +8,43 @@
 use crate::request::Request;
 use crate::verdict::Verdict;
 
+/// One role and the member identities bound to it, as a backend reports them.
+///
+/// Strings, deliberately: the seam stays policy-agnostic (ADR-0004), and how a
+/// backend spells an identity is its own business. The kernel renders; it does
+/// not interpret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubjectBinding {
+    pub role: String,
+    pub members: Vec<String>,
+}
+
 /// A policy decision point. Total: always returns a `Verdict`, never panics.
 pub trait Authorizer {
     fn decide(&self, req: &Request) -> Verdict;
+
+    /// The bindings this PDP would resolve **right now**, for
+    /// `admin.subject.list`.
+    ///
+    /// Live, not a snapshot, and that is the whole reason this is on the seam
+    /// rather than computed at boot like the config view. Bindings are re-read
+    /// per request by design — a containment edit bites on the next request —
+    /// so a boot snapshot would report bindings the PDP is no longer using.
+    /// Disclosing stale authorization state is worse than disclosing none.
+    ///
+    /// `None` means this backend cannot enumerate, which the kernel reports as
+    /// unavailable — never as "no bindings", which is a different and
+    /// dangerous claim. Defaulted so a backend need not implement it.
+    fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+        None
+    }
+
+    /// A short identifier for this backend, for `admin.status`. Defaulted
+    /// rather than required: a backend that does not name itself is reported
+    /// as `unknown`, which is honest.
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 #[cfg(test)]

@@ -1036,6 +1036,114 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     }
 }
 
+/// `admin.status` end to end: a real grant, a real verdict, real posture.
+///
+/// Every field is asserted, not just the variant. `authz_backend` is the one
+/// worth naming: it is asked of the PDP rather than hardcoded, so with the
+/// classification library present it reports that backend instead — an
+/// operator debugging a verdict needs to know WHICH decider produced it.
+#[tokio::test]
+async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
+    let fx = Fixture::new("status-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => {
+            assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
+            assert_eq!(s.authz_backend, "maknae-authz-basic");
+            assert!(!s.version.is_empty(), "the daemon must report its version");
+            assert!(!s.listener.is_empty(), "and its listener");
+        }
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.action, "admin.status");
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.outcome.posture, "authorized");
+}
+
+/// `admin.subject.list` reports what the POLICY FILE binds, read LIVE.
+///
+/// The bindings in the fixture are the ones asserted, which is the property
+/// that matters: a boot snapshot would have reported whatever was on disk at
+/// startup, and bindings are re-read per request precisely so a containment
+/// edit bites on the next one. Disclosing stale authorization state is worse
+/// than disclosing none.
+#[tokio::test]
+async fn a_granted_subject_list_reports_live_bindings() {
+    let fx = Fixture::new("subjlist-grant");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::SubjectList(b)) => {
+            let admin = b
+                .iter()
+                .find(|r| r.role == "admin")
+                .expect("the admin binding the fixture wrote");
+            assert_eq!(
+                admin.members,
+                vec!["uid:0".to_string()],
+                "root resolves to uid 0, and members are reported by uid"
+            );
+        }
+        other => panic!("expected a SubjectList payload, got {other:?}"),
+    }
+    assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+}
+
+/// Neither new term discloses without a grant. The authorization decision is
+/// the gate, not the dispatch.
+#[tokio::test]
+async fn the_new_terms_disclose_nothing_without_a_grant() {
+    for (tag, verb) in [
+        ("status-nogrant", maknae_proto::Verb::AdminStatus),
+        ("subjlist-nogrant", maknae_proto::Verb::AdminSubjectList),
+    ] {
+        let fx = Fixture::new(tag);
+        fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.principal,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}"),
+            other => panic!("{verb:?} disclosed without a grant: {other:?}"),
+        }
+        assert_eq!(request_record(&emit.records()).outcome.result, "deny");
+    }
+}
+
 /// An oversized `ConfigView` is refused EXPLICITLY, not written oversized.
 ///
 /// `ConfigView` is the only payload on that arm whose size scales with input --
@@ -1203,52 +1311,20 @@ async fn config_show_without_a_grant_discloses_nothing() {
     assert_eq!(request_record(&emit.records()).outcome.result, "deny");
 }
 
-/// The `roles:` grant crosses the SEAM (#162 step 7).
-///
-/// Every other test of the grant path sits on one side of it, and the existing
-/// end-to-end permit drives `AlwaysPermit` -- a stub. This one runs a real
-/// `HermeticAuthorizer` over a real on-disk `authz.yaml` carrying a real
-/// `roles:` block, so the Permit that reaches the kernel is a genuine PDP
-/// verdict rather than a design intention.
-///
-/// The policy carries `bindings: { admin: ["root"] }` and the request is driven
-/// with `peer_uid = 0`. Without a `bindings:` key the defaults apply and Admin
-/// is granted only when `peer_uid == principal.uid`, which `Fixture::new` sets
-/// to `geteuid()` -- so the grant and the binding that reaches it have to sit
-/// in one hand-written file.
-///
-/// It ends at `NotImplemented`, and that is the point: Phase 1 ships the
-/// DECISION, not the capability. `dispatch_verb` still returns `NoBehaviour`,
-/// so a granted `admin.status` discloses nothing.
-#[tokio::test]
-async fn a_roles_granted_term_permits_through_the_real_pdp_and_still_discloses_nothing() {
-    let fx = Fixture::new("roles-grant");
-    fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
-    );
-    let emit = RecEmit::new();
-    let frame = drive(
-        &fx.principal,
-        fx.authorizer(),
-        emit.clone(),
-        0,
-        maknae_proto::Verb::AdminStatus,
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("a frame");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
-        other => panic!("expected NotImplemented, got {other:?}"),
-    }
-    let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "admin.status");
-    assert_eq!(
-        req.outcome.result, "permit",
-        "the grant must produce a real permit, not a fallthrough"
-    );
-    assert_eq!(req.outcome.posture, "not-implemented");
-}
+// RETIRED (#162 Phase 3): `a_roles_granted_term_permits_through_the_real_pdp_
+// and_still_discloses_nothing` lived here. It drove a granted `admin.status`
+// and asserted `NotImplemented` -- that the grant produced a real PDP verdict
+// and disclosed nothing. Its second half is now deliberately false: the term
+// is built and discloses posture.
+//
+// Deleted rather than rewritten, because its unique claim -- that a `roles:`
+// grant crosses the seam to a real verdict -- is now made by three tests that
+// assert the actual disclosure
+// (`a_granted_status_reports_real_posture_from_the_real_pdp`,
+// `a_granted_config_show_discloses_the_redacted_view_and_nothing_else`,
+// `a_granted_subject_list_reports_live_bindings`). Keeping it retargeted at an
+// ungrantable term would have tested the NOOP path, which
+// `a_permitted_unbuilt_term_is_audited_then_refused` already pins.
 
 /// The same file WITHOUT the grant refuses. This is what makes the test above
 /// mean something: without it, a permit that came from anywhere else in the
@@ -1334,7 +1410,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::AdminContain,
         Duration::from_secs(5),
     )
     .await
@@ -1344,7 +1420,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         other => panic!("expected NotImplemented, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "admin.status");
+    assert_eq!(req.action, "admin.contain");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(
         req.outcome.posture, "not-implemented",
@@ -1365,7 +1441,7 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::AdminContain,
         Duration::from_secs(5),
     )
     .await;
@@ -1374,7 +1450,7 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         "no frame may be released when its record could not append"
     );
     assert!(
-        emit.records().iter().any(|r| r.action == "admin.status"),
+        emit.records().iter().any(|r| r.action == "admin.contain"),
         "the record must have been OFFERED before the frame was withheld"
     );
 }

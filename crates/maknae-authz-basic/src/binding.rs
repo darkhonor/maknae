@@ -123,6 +123,28 @@ impl ResolvedBindings {
     /// Subject → role, in the FIXED order of spec §3b: reserved subject name
     /// first (never through uid), then uid; defaults only when the file had
     /// no `bindings:` key.
+    /// Render as seam-level bindings for `admin.subject.list`.
+    ///
+    /// Reports what the POLICY FILE binds -- the explicit `bindings:` block --
+    /// and nothing else. The default-role fallback (an enrolled uid resolving
+    /// to admin when no bindings key is present) is a decision rule, not a
+    /// binding, and listing it as one would tell an operator a binding exists
+    /// that they could then look for in the file and not find.
+    pub(crate) fn as_subject_bindings(&self) -> Vec<maknae_security::SubjectBinding> {
+        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (uid, role) in self.by_uid.iter() {
+            out.entry(role.key().to_string())
+                .or_default()
+                .push(format!("uid:{uid}"));
+        }
+        out.into_iter()
+            .map(|(role, mut members)| {
+                members.sort();
+                maknae_security::SubjectBinding { role, members }
+            })
+            .collect()
+    }
+
     pub(crate) fn role_for(
         &self,
         subject_name: Option<&str>,

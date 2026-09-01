@@ -755,7 +755,11 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::Pong | Dispatch::WhoamiRequested | Dispatch::ConfigShowRequested => {
+        Dispatch::Pong
+        | Dispatch::WhoamiRequested
+        | Dispatch::ConfigShowRequested
+        | Dispatch::StatusRequested
+        | Dispatch::SubjectListRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -783,6 +787,46 @@ pub async fn handle<S, E, P>(
                 // Already redacted at boot; this arm only hands it over. No
                 // redaction happens here, deliberately -- see `ConfigView`.
                 Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
+                Dispatch::StatusRequested => Payload::Status(maknae_proto::StatusView {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                    listener: cfg.socket_path.display().to_string(),
+                    // Asked of the PDP, not hardcoded: with the classification
+                    // library present the deciding backend is not `-basic`, and
+                    // an operator debugging a verdict needs to know which one
+                    // produced it.
+                    authz_backend: authorizer.backend_name().to_string(),
+                }),
+                // LIVE, via the seam. `None` means the backend cannot
+                // enumerate, and that is reported as unavailable below --
+                // never as an empty list, which would claim "no bindings
+                // exist" and is a different, dangerous answer.
+                Dispatch::SubjectListRequested => match authorizer.subjects() {
+                    Some(mut b) => {
+                        b.sort_by(|x, y| x.role.cmp(&y.role));
+                        Payload::SubjectList(
+                            b.into_iter()
+                                .map(|s| maknae_proto::RoleBindingView {
+                                    role: s.role,
+                                    members: s.members,
+                                })
+                                .collect(),
+                        )
+                    }
+                    None => {
+                        if may_respond(true) {
+                            write_error_bounded(
+                                &mut stream,
+                                &cfg,
+                                ProtoErrCode::Internal,
+                                "binding enumeration unavailable",
+                            )
+                            .await;
+                        }
+                        close_bounded(&mut stream).await;
+                        return;
+                    }
+                },
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };

@@ -267,6 +267,43 @@ pub enum Payload {
     /// a second redaction implementation on the wire side is a second thing to
     /// drift. Never construct this from raw configuration.
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
+    /// Runtime posture for a permitted `admin.status`.
+    Status(StatusView),
+    /// Role bindings for a permitted `admin.subject.list`: role → members, as
+    /// the PDP resolves them RIGHT NOW. Never a boot snapshot -- bindings are
+    /// re-read per request, so a snapshot would report authorization state the
+    /// PDP is no longer using, and disclosing stale authz is worse than none.
+    SubjectList(Vec<RoleBindingView>),
+}
+
+/// What `admin.status` discloses. Every field is deployment SHAPE the operator
+/// needs to debug with, and none is a credential.
+///
+/// The wire doc for this verb warns it is "useful to an operator, and useful to
+/// an attacker fingerprinting the deployment" -- true, and it is why the term
+/// ships UNGRANTED and admin-only. Once an operator has granted it to an admin
+/// role, withholding the daemon's own version from them protects nobody: any
+/// peer that completed a handshake already knows the protocol version, and the
+/// socket path is disclosed by `admin.config.show` on the same reasoning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusView {
+    /// The daemon's crate version.
+    pub version: String,
+    /// The wire protocol version this daemon speaks.
+    pub protocol_version: u16,
+    /// The listening socket path.
+    pub listener: String,
+    /// Which authorization backend decided this request (`Authorizer::
+    /// backend_name`). An operator debugging a verdict needs to know WHICH
+    /// PDP produced it; with the DCS library present this is not `-basic`.
+    pub authz_backend: String,
+}
+
+/// One role and the identities bound to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleBindingView {
+    pub role: String,
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

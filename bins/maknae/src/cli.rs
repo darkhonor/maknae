@@ -87,6 +87,17 @@ enum Command {
         /// File to read (absolute, or relative to the current directory).
         path: std::path::PathBuf,
     },
+    /// Report daemon runtime posture: version, protocol version, listener,
+    /// active authorization backend. Ungranted by default — the operator must
+    /// grant `admin.status` to a role in `authz.yaml`'s `roles:` block.
+    Status,
+    /// Show the effective configuration as the daemon resolved it. Secret
+    /// values render `<value set>`; some keys are withheld entirely because
+    /// their mere presence is a disclosure. Ungranted by default.
+    ConfigShow,
+    /// Enumerate role bindings as the daemon resolves them right now.
+    /// Ungranted by default.
+    SubjectList,
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(crate::enroll::EnrollArgs),
@@ -106,6 +117,9 @@ enum Verb {
     Ping,
     Whoami,
     Read { path: String },
+    AdminStatus,
+    AdminConfigShow,
+    AdminSubjectList,
 }
 
 impl From<Verb> for maknae_proto::Verb {
@@ -114,6 +128,9 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
             Verb::Read { path } => maknae_proto::Verb::Read { path },
+            Verb::AdminStatus => maknae_proto::Verb::AdminStatus,
+            Verb::AdminConfigShow => maknae_proto::Verb::AdminConfigShow,
+            Verb::AdminSubjectList => maknae_proto::Verb::AdminSubjectList,
         }
     }
 }
@@ -171,7 +188,14 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 fn delegated_object(verb: &Verb) -> Option<&str> {
     match verb {
         Verb::Read { path } => Some(path.as_str()),
-        Verb::Ping | Verb::Whoami => None,
+        // The three admin disclosures name NO object: the state they report is
+        // the daemon's own, never a client-supplied path, so there is nothing
+        // for a subject to delegate a descriptor for.
+        Verb::Ping
+        | Verb::Whoami
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminSubjectList => None,
     }
 }
 
@@ -304,7 +328,42 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
                 .map_err(|e| format!("writing content to stdout: {e}"))?;
             Ok(())
         }
-        (v, p) => Err(format!(
+        (Verb::AdminStatus, Payload::Status(s)) => {
+            println!("version           {}", s.version);
+            println!("protocol_version {}", s.protocol_version);
+            println!("listener         {}", s.listener);
+            println!("authz_backend    {}", s.authz_backend);
+            Ok(())
+        }
+        (Verb::AdminConfigShow, Payload::ConfigView(v)) => {
+            for (section, fields) in &v {
+                for (k, val) in fields {
+                    println!("{section}.{k} = {val}");
+                }
+            }
+            Ok(())
+        }
+        (Verb::AdminSubjectList, Payload::SubjectList(bindings)) => {
+            for b in &bindings {
+                println!("{}: {}", b.role, b.members.join(", "));
+            }
+            Ok(())
+        }
+        // A payload for a DIFFERENT verb than we sent — a protocol error.
+        //
+        // Written as an explicit list of the wrong-payload cases rather than a
+        // `(v, p)` wildcard, deliberately. The wildcard silently absorbed
+        // `Payload::ConfigView` when it was added: the client compiled clean
+        // with no arm for it, and nothing said an arm was missing. That is the
+        // opposite of `dispatch_verb`, which has no wildcard precisely so a new
+        // variant is a compile error until someone decides what it does. The
+        // producing side forced the decision; the consuming side did not.
+        (v, p @ Payload::Pong)
+        | (v, p @ Payload::Whoami(_))
+        | (v, p @ Payload::ReadContent(_))
+        | (v, p @ Payload::ConfigView(_))
+        | (v, p @ Payload::Status(_))
+        | (v, p @ Payload::SubjectList(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
     }
@@ -318,6 +377,9 @@ pub async fn run_cli() -> ExitCode {
     match cli.command {
         Command::Ping => wire_exit_code(execute(Verb::Ping).await),
         Command::Whoami => wire_exit_code(execute(Verb::Whoami).await),
+        Command::Status => wire_exit_code(execute(Verb::AdminStatus).await),
+        Command::ConfigShow => wire_exit_code(execute(Verb::AdminConfigShow).await),
+        Command::SubjectList => wire_exit_code(execute(Verb::AdminSubjectList).await),
         Command::Read { path } => {
             // Lexically absolutize client-side (std::path::absolute keeps `..`
             // on Unix — the daemon's canonical pre-gate refuses those as
