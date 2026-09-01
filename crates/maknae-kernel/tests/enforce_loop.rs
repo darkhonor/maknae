@@ -1249,6 +1249,15 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
         last.outcome.posture, "unavailable",
         "a Permit-then-not-performed must never read as a completed action"
     );
+    // And the SPECIFIC condition, not just the category. Five paths reach the
+    // refusal and only this one is benign -- an auditor must be able to tell
+    // "this backend does not enumerate" (the shipped default's permanent
+    // state) from "the policy filesystem is wedged" (an incident).
+    assert!(
+        last.outcome.reason.contains("does not enumerate"),
+        "the reason must name WHICH refusal: {:?}",
+        last.outcome.reason
+    );
 }
 
 /// Neither new term discloses without a grant. The authorization decision is

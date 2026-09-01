@@ -324,11 +324,23 @@ sort -u "$tmp/fields" -o "$tmp/fields"
 while IFS=$'\t' read -r fpath fty; do
   [ -n "$fty" ] || continue
   # Strip wrappers to FIXPOINT: a single pass left `Option<Box<SiemConfig>>` as
-  # `Box<SiemConfig` and matched nothing. `Vec` is deliberately NOT stripped --
-  # `flatten` never recurses into `Value::Seq` and `render` masks it whole, so a
-  # sequence genuinely IS a leaf and demanding coverage for it would block
-  # legitimate work with a wrong diagnosis.
-  bare=$(printf '%s' "$fty" | sed -E ':a; s/^(Option|Box|Arc)<//; ta' | sed -E 's/>+$//' | sed 's/.*:://')
+  # `Box<SiemConfig` and matched nothing.
+  #
+  # `Vec` IS stripped on the by-construction (wire) surfaces and is NOT on the
+  # config surfaces, because the exemption is a fact about the CONSUMER, not
+  # about the type. For a config document, `flatten` never recurses into
+  # `Value::Seq` and `render` masks it whole, so a sequence genuinely is a leaf
+  # and demanding coverage would block legitimate work. A wire struct is
+  # serialized WHOLE by serde, which recurses into `Vec<T>` -- so turning
+  # `members: Vec<String>` into `Vec<MemberView>` shipped four new fields
+  # (including `home` and a token path) with IDENTICAL gate counts. That is the
+  # silent variant this depth check exists to catch, inherited unexamined when
+  # three wire structs joined SURFACE.
+  case "$sec" in
+    status|binding|whoami) wrappers='(Option|Box|Arc|Vec)' ;;
+    *)                     wrappers='(Option|Box|Arc)' ;;
+  esac
+  bare=$(printf '%s' "$fty" | sed -E ":a; s/^${wrappers}<//; ta" | sed -E 's/>+$//' | sed 's/.*:://')
   # A dynamic-key map is a subtree whose keys nobody can enumerate -- the same
   # structural condition that moved `audit.au3_1` from mask to omit. Demand the
   # same coverage rather than letting a typed map ship its deployer-authored
@@ -415,10 +427,19 @@ bad_disp=$(awk -F'\t' '
   # so it is the spelling a maintainer reaches for. It re-opened the exact hole
   # the closed set was written to close: every StatusView field then matched by
   # prefix at check 4b, and `mask` rows never enter the 4a diff.
-  function byconstruction(p) { return p=="status" || p ~ /^status\./ || p=="binding" || p ~ /^binding\./ || p=="whoami" || p ~ /^whoami\./ }
+  function bare_surface(p) { return p=="status" || p=="binding" || p=="whoami" }
+  function byconstruction(p) { return bare_surface(p) || p ~ /^status\./ || p ~ /^binding\./ || p ~ /^whoami\./ }
   $1!="disclose" && $1!="mask" && $1!="omit" && $1!="always" { print "unknown disposition: " $0; next }
   # `always` means "ships by construction on a non-allowlist surface".
   $1=="always" && !byconstruction($2) { print "always is only for by-construction surfaces: " $0 }
+  # A BARE surface token is not a per-field decision. Round 4 made bare
+  # prefixes count as the surface so `mask<TAB>status` would be rejected -- and
+  # that same change LEGALIZED `always<TAB>status`, which then covers every
+  # field under it by prefix at check 4b. One row, whole struct, and a new
+  # sensitive field ships with nothing but a count edit -- which is exactly the
+  # "edit the number to go green" move the count exists to prevent. Same defeat
+  # round 4 demonstrated, surviving in the disposition round 4 added.
+  $1=="always" && bare_surface($2) { print "a bare surface token is not a per-field decision; name the field: " $0 }
   # masking is meaningful only where a classifier renders the value.
   $1=="mask" && byconstruction($2) { print "mask is meaningless on a by-construction surface: " $0 }
   $1!="always" && byconstruction($2) { print "by-construction fields ship whole; the only valid disposition is `always`: " $0 }

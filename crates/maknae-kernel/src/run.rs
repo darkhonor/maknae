@@ -822,7 +822,10 @@ pub async fn handle<S, E, P>(
                     let subj_breaker = authz_decide_breaker();
                     let admission = { subj_breaker.lock().await.begin_attempt_at(Instant::now()) };
                     let enumerated = match admission {
-                        BreakerAdmission::RefuseOpen | BreakerAdmission::RefuseAtCapacity => None,
+                        BreakerAdmission::RefuseOpen => Err("enumeration circuit breaker open"),
+                        BreakerAdmission::RefuseAtCapacity => {
+                            Err("enumeration blocking worker budget exhausted")
+                        }
                         BreakerAdmission::Admit => {
                             let a = Arc::clone(&authorizer);
                             let out = tokio::time::timeout(
@@ -833,9 +836,17 @@ pub async fn handle<S, E, P>(
                             )
                             .await;
                             match out {
-                                Ok(Ok(v)) => {
+                                Ok(Ok(Some(v))) => {
                                     subj_breaker.lock().await.record_success();
-                                    v
+                                    Ok(v)
+                                }
+                                // The backend ANSWERED, and its answer is "I
+                                // cannot enumerate" -- permanent, benign, and
+                                // the shipped default's state. An auditor must
+                                // be able to tell it from a wedged mount.
+                                Ok(Ok(None)) => {
+                                    subj_breaker.lock().await.record_success();
+                                    Err("backend does not enumerate bindings")
                                 }
                                 // A JOIN failure is not counted against the
                                 // breaker -- same as the decide path, where a
@@ -843,7 +854,7 @@ pub async fn handle<S, E, P>(
                                 // the filesystem is wedged.
                                 Ok(Err(_join)) => {
                                     subj_breaker.lock().await.record_success();
-                                    None
+                                    Err("enumeration failed (join)")
                                 }
                                 // A TIMEOUT is, and it is the signal that
                                 // trips: repeated blocking reads against a
@@ -857,13 +868,13 @@ pub async fn handle<S, E, P>(
                                             authz_decide_timeout.as_secs()
                                         );
                                     }
-                                    None
+                                    Err("enumeration timed out")
                                 }
                             }
                         }
                     };
                     match enumerated {
-                        Some(mut b) => {
+                        Ok(mut b) => {
                             b.sort_by(|x, y| x.role.cmp(&y.role));
                             Payload::SubjectList(
                                 b.into_iter()
@@ -874,7 +885,7 @@ pub async fn handle<S, E, P>(
                                     .collect(),
                             )
                         }
-                        None => {
+                        Err(why) => {
                             // A SECOND record, correcting the posture.
                             //
                             // The record for this request was appended as
@@ -900,7 +911,15 @@ pub async fn handle<S, E, P>(
                                 None,
                                 None,
                                 "deny",
-                                "binding enumeration unavailable",
+                                // The SPECIFIC condition. Five paths reach
+                                // here and only one is benign: "this backend
+                                // does not enumerate" is the shipped default's
+                                // permanent state, while "the breaker is open"
+                                // is an incident. Collapsing them made the
+                                // POSTURE parity with the read PEP true and the
+                                // REASON parity false -- which the comment
+                                // claimed.
+                                &format!("binding enumeration unavailable: {why}"),
                                 "unavailable",
                                 &au3_1,
                             )
@@ -989,6 +1008,38 @@ pub async fn handle<S, E, P>(
                 let _ = tokio::time::timeout(
                     Duration::from_millis(cfg.read_timeout_ms),
                     write_frame(&mut stream, &bytes),
+                )
+                .await;
+            } else {
+                // NO PATH out of this arm may have recorded `authorized`
+                // without delivering. Practically unreachable -- ciborium into
+                // a Vec, for owned types -- but it is the third instance of
+                // the shape the last two rounds closed, on the same arm, and
+                // this branch widened it by adding a second variable-size
+                // payload. Recording it costs nothing; discovering it from a
+                // trail that says "served" would cost an incident.
+                let _ = emit_request_outcome(
+                    &emit,
+                    &host,
+                    &socket,
+                    peer_uid,
+                    &peer_uri,
+                    session_id,
+                    seq.next(),
+                    verb_to_action(&request.verb),
+                    None,
+                    None,
+                    "permit",
+                    "delivery failed: response could not be encoded",
+                    "unavailable",
+                    &au3_1,
+                )
+                .await;
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::Internal,
+                    "response encoding failed",
                 )
                 .await;
             }

@@ -891,6 +891,29 @@ expect_reject "config-disclosure-drift/mask-on-a-bare-by-construction-prefix" "$
 fx="$(cfg_fixture "$CFG_OK" '' '' 'pub clearance: String,')"
 expect_reject "config-disclosure-drift/wire-struct-field-changes-the-count" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a BARE surface token as an `always` row. Round 4 made bare prefixes
+# count as the surface so `mask<TAB>status` would reject -- and that same change
+# legalized `always<TAB>status`, which then covers every field under it by
+# prefix. One row, whole struct, and a new sensitive field ships with nothing
+# but a count edit.
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^always${TABCH}status\.")always${TABCH}status${TABCH}cover the whole surface
+")"
+expect_reject "config-disclosure-drift/bare-surface-token-is-not-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a wire-struct field whose type becomes Vec<WorkspaceStruct>. `Vec` is
+# a leaf for a CONFIG document (`flatten` never recurses into `Value::Seq`) and
+# is NOT for a wire struct, which serde serializes whole -- the exemption is a
+# fact about the consumer, and it was inherited unexamined when three wire
+# structs joined SURFACE.
+fx="$(cfg_fixture "$CFG_OK" '' '' 'pub extra: Vec<MemberView>,')"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct MemberView {
+    pub uid: u32,
+    pub home: String,
+}
+FIX
+expect_reject "config-disclosure-drift/wire-vec-of-struct-is-a-subtree" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"

@@ -434,6 +434,17 @@ mod tests {
         );
         assert_eq!(super::delegated_object(&super::Verb::Ping), None);
         assert_eq!(super::delegated_object(&super::Verb::Whoami), None);
+        // The three admin disclosures too. `delegated_object` gained these arms
+        // and this test did not: flipping one to `Some(..)` would make the
+        // untrusted client manufacture and delegate a descriptor for a term
+        // that names no object, and left the whole suite green.
+        for v in [
+            super::Verb::AdminStatus,
+            super::Verb::AdminConfigShow,
+            super::Verb::AdminSubjectList,
+        ] {
+            assert_eq!(super::delegated_object(&v), None, "{v:?} names no object");
+        }
     }
 
     use super::*;

@@ -6,7 +6,7 @@
 # section parsers (transport.rs, audit_cfg.rs, principal.rs,
 # maknae-vault/config.rs), and boot.rs's SectionSpec list.
 #
-# Three decisions, and 'mask' is the common and correct one:
+# Four decisions, and 'mask' is the common and correct one:
 #   disclose  the value ships in the clear
 #   mask      the value is withheld; the KEY still appears (<value set>)
 #   always    ships BY CONSTRUCTION on a non-allowlist surface (StatusView,
