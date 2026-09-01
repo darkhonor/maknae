@@ -60,6 +60,36 @@ mod tests {
     use crate::request::{Action, Context, Request, Resource, Subject};
     use crate::value::Attributes;
 
+    /// The DEFAULTS themselves. A backend that implements only `decide` must
+    /// get `None` and `unknown` -- and the values matter, not just the fact
+    /// that a default exists.
+    ///
+    /// `None` specifically, never `Some(vec![])`: the kernel renders an empty
+    /// list as "these are the bindings, and there are none", which is a claim
+    /// about authorization state. A backend that cannot enumerate has not made
+    /// that claim. Mutating the default to `Some(vec![])` turns "I cannot tell
+    /// you" into "nobody is bound", which is exactly the wrong direction to
+    /// fail, so the distinction is asserted rather than assumed.
+    #[test]
+    fn seam_defaults_are_cannot_enumerate_and_unknown() {
+        struct OnlyDecides;
+        impl Authorizer for OnlyDecides {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+        }
+        assert_eq!(
+            OnlyDecides.subjects(),
+            None,
+            "the default must be `cannot enumerate`, NOT an empty list"
+        );
+        assert_eq!(OnlyDecides.backend_name(), "unknown");
+        assert!(
+            !OnlyDecides.backend_name().is_empty(),
+            "an empty name is not an honest answer"
+        );
+    }
+
     struct Always(Verdict);
     impl Authorizer for Always {
         fn decide(&self, _r: &Request) -> Verdict {

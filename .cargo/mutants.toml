@@ -88,8 +88,31 @@
 # 0 bytes turned both into TIMEOUTs, which is a detection. The near-miss is recorded
 # because "it delegates, so it is equivalent" is the reasoning that would have wrongly
 # excluded it too.
+# `BasicAuthorizer::subjects` -- the 3-line PRODUCTION trait wrapper that binds
+# `load_authz` (the root-owned hardened loader) and forwards to
+# `subjects_with_loader`. `replace ... with None` survives, and cannot be killed
+# in this environment for a structural reason worth writing down:
+#
+#   the production loader requires a ROOT-OWNED policy file, so off-root every
+#   call returns None whether the body forwards or is stubbed. Any assertion
+#   available to a non-root test is satisfied by both.
+#
+# It is the exact shape of the sibling `decide` wrapper two impls above, which
+# is NOT in this list only because `Verdict` has no `Default` -- cargo-mutants
+# marks that one unviable rather than missed. Same unkillable structure, two
+# different report categories.
+#
+# COMPENSATING CONTROLS, both real:
+#   - `subjects_with_loader` -- everything the wrapper delegates to, including
+#     the None-on-unreadable and None-on-invalid paths -- is mutation-covered
+#     and directly tested (`subjects_reports_file_bindings_and_none_on_failure`).
+#   - `HermeticAuthorizer::subjects` runs the SAME code through a
+#     fixture-satisfiable requirement, and `wrapper_subjects_delegate_and_read_live`
+#     proves it returns Some, reads live, and re-reads after a file edit.
+# What is NOT covered is the one-line choice of loader. Reviewed and accepted.
 exclude_re = [
   "maknae-plane.*::poll_flush",
+  "maknae-authz-basic.*BasicAuthorizer>::subjects",
 ]
 
 exclude_globs = [
