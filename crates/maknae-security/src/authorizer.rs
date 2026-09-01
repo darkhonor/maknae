@@ -39,11 +39,18 @@ pub trait Authorizer {
         None
     }
 
-    /// A short identifier for this backend, for `admin.status`. Defaulted
-    /// rather than required: a backend that does not name itself is reported
-    /// as `unknown`, which is honest.
-    fn backend_name(&self) -> &'static str {
-        "unknown"
+    /// A short identifier for this backend, for `admin.status`.
+    ///
+    /// `String`, not `&'static str`, so a COMPOSED authorizer can name the
+    /// operands it actually consulted. The whole justification for disclosing
+    /// this field is that an operator debugging a verdict needs to know WHICH
+    /// PDP produced it — and under the composed multi-backend build that is
+    /// several, whose names are not known until construction.
+    ///
+    /// Defaulted rather than required: a backend that does not name itself
+    /// reports `unknown`, which is honest.
+    fn backend_name(&self) -> String {
+        "unknown".to_string()
     }
 }
 

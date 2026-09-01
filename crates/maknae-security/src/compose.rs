@@ -15,7 +15,7 @@
 //! `Permit` on a complete evaluation of its own predicate, which a conjunction
 //! of policy types cannot express.)*
 
-use crate::authorizer::Authorizer;
+use crate::authorizer::{Authorizer, SubjectBinding};
 use crate::obligation::{merge_obligations, Obligation};
 use crate::request::Request;
 use crate::verdict::Verdict;
@@ -104,11 +104,106 @@ impl Authorizer for ConjunctionAuthorizer {
                 .collect(),
         )
     }
+
+    /// Names every operand, in composition order.
+    ///
+    /// Taking the `unknown` default here would have made `admin.status`'s
+    /// disclosure useless in the exact deployment it was justified for: the
+    /// stated reason to disclose this field is that under the composed build
+    /// the deciding backend is NOT `-basic`, and an operator needs to know
+    /// which one produced a verdict.
+    fn backend_name(&self) -> String {
+        self.operands
+            .iter()
+            .map(|a| a.backend_name())
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// Enumerable ONLY when exactly one operand can enumerate.
+    ///
+    /// Two operands that both answer are two different claims about who holds
+    /// what, and this layer has no basis to pick one or to merge them — a
+    /// union would assert a binding set no single PDP actually resolves. Under
+    /// deny-overrides an operand may also deny what another permits, so the
+    /// merged list would not describe the composed decision either. `None`
+    /// means "cannot enumerate", which the kernel reports as unavailable;
+    /// answering wrongly about authorization state is worse than not
+    /// answering.
+    fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+        let mut answered = self.operands.iter().filter_map(|a| a.subjects());
+        let first = answered.next()?;
+        match answered.next() {
+            None => Some(first),
+            Some(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composed authorizer NAMES its operands rather than taking the
+    /// `unknown` default. Taking the default would have made `admin.status`'s
+    /// disclosure useless in the one deployment it was justified for.
+    #[test]
+    fn composed_backend_name_lists_every_operand() {
+        struct Named(&'static str);
+        impl Authorizer for Named {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn backend_name(&self) -> String {
+                self.0.to_string()
+            }
+        }
+        let c = ConjunctionAuthorizer::new(vec![
+            Box::new(Named("maknae-authz-basic")),
+            Box::new(Named("maknae-authz-dcs")),
+        ]);
+        assert_eq!(c.backend_name(), "maknae-authz-basic+maknae-authz-dcs");
+    }
+
+    /// Enumerable ONLY when exactly one operand can enumerate. Two answering
+    /// operands are two different claims about who holds what, and this layer
+    /// has no basis to pick one or merge them.
+    #[test]
+    fn composed_subjects_answers_only_when_exactly_one_operand_can() {
+        struct Enum(Option<&'static str>);
+        impl Authorizer for Enum {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::NotApplicable
+            }
+            fn subjects(&self) -> Option<Vec<SubjectBinding>> {
+                self.0.map(|r| {
+                    vec![SubjectBinding {
+                        role: r.to_string(),
+                        members: vec!["uid:0".into()],
+                    }]
+                })
+            }
+        }
+        // Exactly one answers -> that answer.
+        let one =
+            ConjunctionAuthorizer::new(vec![Box::new(Enum(Some("admin"))), Box::new(Enum(None))]);
+        assert_eq!(
+            one.subjects().map(|v| v[0].role.clone()),
+            Some("admin".into())
+        );
+
+        // Two answer -> None. NOT a merge and NOT first-wins: either would
+        // assert a binding set no single PDP actually resolves.
+        let two = ConjunctionAuthorizer::new(vec![
+            Box::new(Enum(Some("admin"))),
+            Box::new(Enum(Some("operator"))),
+        ]);
+        assert!(two.subjects().is_none(), "ambiguous must be None");
+
+        // None answer -> None.
+        let zero = ConjunctionAuthorizer::new(vec![Box::new(Enum(None)), Box::new(Enum(None))]);
+        assert!(zero.subjects().is_none());
+    }
     use crate::obligation::Obligation;
     use crate::request::{Action, Context, Request, Resource, Subject};
     use crate::value::{AttrValue, Attributes};

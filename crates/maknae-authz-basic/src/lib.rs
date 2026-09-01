@@ -278,8 +278,8 @@ impl maknae_security::Authorizer for BasicAuthorizer {
         self.subjects_with_loader(move |p| maknae_config::load_authz(p, Some(&home)))
     }
 
-    fn backend_name(&self) -> &'static str {
-        "maknae-authz-basic"
+    fn backend_name(&self) -> String {
+        "maknae-authz-basic".to_string()
     }
 }
 
@@ -359,7 +359,7 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn backend_name(&self) -> String {
         self.inner.backend_name()
     }
 }
