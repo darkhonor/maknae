@@ -14,7 +14,17 @@ use maknae_vault::VaultError;
 /// peer facts (`build_whoami`) so this decision stays a pure function of the verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
-    /// An enumerated term with no behaviour. Reached only after a Permit.
+    /// An enumerated term with no behaviour. Reached only after a Permit —
+    /// which, while `-basic` is the sole operand, NOTHING can produce for an
+    /// unbuilt term (grants are code-bounded to `GRANTABLE_ACTIONS`,
+    /// ADR-0010), so this arm is production-unreachable TODAY. It is reachable
+    /// by construction the moment an extension operand grants a term `-basic`
+    /// abstains on (ADR-0008 D2), which is why the arm and its NOOP contract
+    /// stay: the extension-permit pin in `enforce_loop.rs` drives exactly that
+    /// path. An UNPERMITTED unbuilt term never reaches dispatch at all — it
+    /// answers the same generic `Unauthorized` as any unauthorized request
+    /// (#181 ruling R1: the roadmap is not a wire disclosure), with the WHY in
+    /// the audit trail only. (Corrected 2026-09-02, #181.)
     NoBehaviour,
     Pong,
     WhoamiRequested,

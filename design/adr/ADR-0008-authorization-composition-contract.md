@@ -14,7 +14,7 @@ Three things were true and unrecorded:
 
 2. **What an extension is permitted to do was never decided**, only implied by `combine`'s fold rules.
 
-3. **What any operand must do with input it cannot evaluate was never decided**, only emergent: `class_of()` returns `None` for an unrecognized action, `decide_loaded` maps it to `NotApplicable`, and `finalize` converts that to `Deny { "no applicable authorizer (fail-closed)" }`. The outcome is correct; it is reached by abstention rather than by an explicit refusal, and its audit reason cannot distinguish *"this term does not exist"* from *"you lack the role."*
+3. **What any operand must do with input it cannot evaluate was never decided**, only emergent: `class_of()` returns `None` for an unrecognized action, `decide_loaded` maps it to `NotApplicable`, and `finalize` converts that to `Deny { "no applicable authorizer (fail-closed)" }`. The outcome is correct; it is reached by abstention rather than by an explicit refusal, and its audit reason cannot distinguish *"this term does not exist"* from *"you lack the role."* *(No longer current — closed by the 2026-09-02 amendment below, #181: absences now carry audit-only testimony and the trail distinguishes all four refusal classes. Kept as the context that motivated decision 5.)*
 
 **The failure that motivates this ADR.** In the design discussion that produced it, the agent twice derived *"extensions may only ever add denials"* from ADR-0020's *"a mandatory Deny is never waivable by a discretionary Permit."* **That reading is wrong.** ADR-0020 constrains what an extension can **undo**, not what it can **do**. Issue #154's own body carries the same error in its phrasing (*"it may only ever add denials"*), which is where the agent took it from.
 
@@ -93,9 +93,9 @@ Maknae is **deny-by-default**. Two mechanisms move a subject off that default, a
 1. any `Deny` → `Deny`
 2. else any `Indeterminate` → `Deny` (never masked by a peer `Permit`)
 3. else any `Permit` → `Permit` with the union of Permit obligations; a `(id, params)` conflict → `Deny`
-4. else (all `NotApplicable`, or empty) → `NotApplicable` → `Deny` at `finalize`
+4. else (all `NotApplicable`, or empty) → `NotApplicable` → `Deny` at `finalize` *(amended 2026-09-02, #181: the surviving absence carries the FIRST annotated operand's note — the kernel passes the baseline first, so baseline testimony outranks. Notes are audit-only; the classification here is untouched)*
 
-One `Deny` is a Deny regardless of what any peer concluded. That single rule *is* the non-waivability guarantee; no additional mechanism is required, and **`combine` is not to be modified to implement this ADR.** `guarded_decide`'s panic boundary already converts a hostile or buggy operand into `Indeterminate`, and rule 2 converts that to `Deny`.
+One `Deny` is a Deny regardless of what any peer concluded. That single rule *is* the non-waivability guarantee; no additional mechanism is required, and **`combine` is not to be modified to implement this ADR.** *(Amended 2026-09-02, #181: `combine` WAS modified once, for rule 4's note-carry only — testimony selection, not classification. No fold rule changed; the classification-invariance rows in `golden.rs` pin that a note can never alter which branch fires.)* `guarded_decide`'s panic boundary already converts a hostile or buggy operand into `Indeterminate`, and rule 2 converts that to `Deny`.
 
 ### 4. No operand may fail open
 
@@ -122,7 +122,7 @@ A fork that rewrites the composition root is a different product, and this ADR m
 
 ## Consequences
 
-- **`combine` is unchanged.** The composition semantics were already correct; what was missing was the record of why, and the structural guarantee that the baseline is present to exercise them.
+- **`combine` is unchanged** in its classification semantics. *(Corrected 2026-09-02, #181: rule 4 now selects which absence NOTE survives — see the amendment. Every Permit/Deny/Indeterminate outcome is byte-identical.)* The composition semantics were already correct; what was missing was the record of why, and the structural guarantee that the baseline is present to exercise them.
 
 - **The `Composition` type is the implementation.** `ConjunctionAuthorizer` already exists in `compose.rs` (a `Vec<Box<dyn Authorizer>>` folding through `combine`) and is unused at the real call site; it is the starting point, but it **does not** satisfy decision 1 as written, because its operands are homogeneous — the baseline must become a named field.
 
@@ -134,7 +134,7 @@ A fork that rewrites the composition root is a different product, and this ADR m
 
 - **The vocabulary is no longer a compile-time closed set.** #67's drift gate asserts a closed 59-term vocabulary. Under decision 5 the **core** vocabulary stays closed and gate-checked; the **composed** vocabulary is core plus declared extension terms and resolves at boot. The gate covers the core set and the declaration mechanism — not the union.
 
-- **Unknown-vocabulary denial needs its own audit reason.** Today it is reached emergently through `NotApplicable`, sharing the generic `"no applicable authorizer (fail-closed)"` string with "you lack the role." Overlaps the reason-enrichment work in [#181](https://github.com/darkhonor/maknae/issues/181) and [#84](https://github.com/darkhonor/maknae/issues/84) — **land it once.**
+- **Unknown-vocabulary denial needs its own audit reason.** *(LANDED 2026-09-02 via #181 — the reason-enrichment mechanism shipped once, complete: see the amendment below. The reason string for THIS case is pinned there; its membership check awaits the first second-operand integration.)*
 
 - **The whole-vocabulary deny grammar is load-bearing twice over.** It is the operator's floor under attribute-native grants (below), **and** it is what a scoped carve's scope is written in (decision 2a). Until it exists, a carve can only be total. Tracked in [#158](https://github.com/darkhonor/maknae/issues/158); [#165](https://github.com/darkhonor/maknae/issues/165) depends on it for scoped carves and can land total containment without it.
 
@@ -154,3 +154,13 @@ A fork that rewrites the composition root is a different product, and this ADR m
 - `crates/maknae-kernel/src/run.rs` (composition call site), `boot_gate.rs` (baseline construction)
 - [#154](https://github.com/darkhonor/maknae/issues/154), [#158](https://github.com/darkhonor/maknae/issues/158), [#164](https://github.com/darkhonor/maknae/issues/164), [#181](https://github.com/darkhonor/maknae/issues/181), [#182](https://github.com/darkhonor/maknae/issues/182)
 - Operator rulings, 2026-08-29 — quoted verbatim in Context
+
+## Amendment 2026-09-02 (#181): absences carry testimony; the record is true
+
+**What changed and why.** #181 found the vocabulary's recorded contract asserting behaviour that does not occur (54, later 51, manifest rows claiming `NotImplemented` answers; `NoBehaviour` documented as reachable with no operand able to permit it) and four operationally distinct refusals collapsing to one audit string. Three operator rulings (2026-09-01/02) resolved it; this amendment records the contract they produced.
+
+1. **`Verdict::NotApplicable` carries an optional, audit-only note** — testimony the abstaining operand may volunteer about WHY. `None` composes and renders exactly as the historical bare variant (the fallback string is byte-pinned). The note is never an input: no note may influence which branch `combine` takes (pinned by the classification-invariance rows in `golden.rs`), and no note reaches the wire — the wire answer for every refusal stays the static `Unauthorized`.
+2. **Ruling R1, scoped:** an UNPERMITTED unbuilt term is wire-indistinguishable from an unauthorized request (the roadmap is not a disclosure surface); a PERMITTED unbuilt term — reachable only via an extension grant under decision 2 — keeps its ratified NOOP answer (`NotImplemented`, posture `not-implemented`). The two rulings compose; neither overturns the other.
+3. **The absence-survivor rule:** when all operands abstain, the first annotated absence's note survives; the kernel (the only production composer) passes the baseline's verdict first, so baseline testimony outranks an extension's. When ADR-0008 D1's named-field `Composition` lands, the baseline's note is selected by its field position.
+4. **The five annotations `-basic` produces** (role/term tokens only, never paths): `subject resolves to no role`; `role {role}: no rule for {term}` (role-reach, which outranks build-state for non-admin roles); `term enumerated, not implemented: {term}` (admin-visible build-state); `role {role}: no capability entry for {term}` (a grammar absence, distinct from "no rule" — a rule for the term exists, no entry matched).
+5. **The unknown-vocabulary reason is pinned here, and the check is deferred with a named owner:** `unknown to the composed vocabulary: {term}`, an explicit **`Deny` at the composition layer, before any operand is consulted** (decision 5 — never a note). It has no carrier while `-basic` is the sole operand (an unknown term cannot decode into `Verb`; ADR-0010 load-refuses unknown grant names). **The first second-operand integration owns building it**, referencing this amendment.

@@ -90,7 +90,10 @@ pub struct AuthzPolicy {
 /// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued where
 /// [`Decision`] is two-valued — the PDP backend maps `NoMatch` to
 /// `NotApplicable` (deny-by-default happens at `finalize`, with the reason
-/// "no grant" distinguishable from "explicit deny").
+/// "no grant" distinguishable from "explicit deny"). (#181, 2026-09-02: the
+/// backend now ANNOTATES that absence — `NotApplicable { note }` carries
+/// role/term testimony the audit trail renders; the mapping and the
+/// deny-at-finalize contract here are unchanged.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Match3 {
     AllowMatch,
@@ -1420,7 +1423,8 @@ mod tests {
     #[test]
     fn evaluate3_allow_and_nomatch_are_distinct() {
         // The two-valued evaluate() collapses no-match into deny; the PDP
-        // backend needs the distinction (NoMatch → NotApplicable, spec §4.4).
+        // backend needs the distinction (NoMatch → NotApplicable, spec §4.4;
+        // since #181 the backend annotates that absence with WHY, audit-only).
         let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
         assert!(matches!(
             p.evaluate3(&Request::Read(Path::new("/home/operator/notes.txt"))),
