@@ -303,7 +303,13 @@ pub(crate) fn decide_loaded(
     }
     let role = match lp.roles.role_for(name, uid, principal.uid) {
         Resolution::Role(r) => r,
-        Resolution::NoRole => return Verdict::NotApplicable,
+        // Case-1 testimony (#181): the FACT, audit-only. The absence still
+        // composes as an absence -- an extension may yet grant.
+        Resolution::NoRole => {
+            return Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into()),
+            }
+        }
     };
 
     // Step 3 — role gates over the closed class vocabulary.
@@ -314,7 +320,13 @@ pub(crate) fn decide_loaded(
         },
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => permit_with_audit(),
-            _ => Verdict::NotApplicable,
+            // Case-2 testimony: ROLE-REACH OUTRANKS BUILD-STATE (#181 D4).
+            // A non-admin's trail reads its own operational fact -- its reach
+            // -- never the roadmap, which is admin-visible only; the wire is
+            // the same generic Unauthorized either way (ruling R1).
+            _ => Verdict::NotApplicable {
+                note: Some(format!("role {}: no rule for {}", role.key(), req.action.0)),
+            },
         },
         Role::Admin => match class {
             Some(Class::Liveness) => permit_with_audit(),
@@ -347,10 +359,22 @@ pub(crate) fn decide_loaded(
                     // No grant is an ABSENCE, not a refusal: deny-by-default
                     // happens once, at `finalize`, with "no grant" kept
                     // distinguishable from an explicit deny.
-                    maknae_config::Match3::NoMatch => Verdict::NotApplicable,
+                    // Case-2 testimony: a grant COULD exist and none is
+                    // written -- a policy question, named by term.
+                    maknae_config::Match3::NoMatch => Verdict::NotApplicable {
+                        note: Some(format!("role admin: no rule for {}", req.action.0)),
+                    },
                 }
             }
-            Some(Class::Admin) => Verdict::NotApplicable,
+            // Case-3 testimony: an enumerated admin term outside the grantable
+            // set is unbuilt -- a roadmap question, and the admin trail may say
+            // so (the wire still may not).
+            Some(Class::Admin) => Verdict::NotApplicable {
+                note: Some(format!(
+                    "term enumerated, not implemented: {}",
+                    req.action.0
+                )),
+            },
             // Keyed like the admin arm above, and for the same reason. Without
             // it, safety rests on a remote `if let Verb::Read` in another crate:
             // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
@@ -367,24 +391,45 @@ pub(crate) fn decide_loaded(
             Some(Class::Fs) if req.action.0 == "fs.read" => match os_dac_gate(req) {
                 // Satisfied: the OS permits it, so the policy decides.
                 // NotApplicable: OS DAC is not this lane's control, so likewise.
-                OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req),
+                OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req, "admin"),
                 OsDacGate::Deny(why) => Verdict::Deny {
                     reason: format!("os dac: {why}"),
                 },
                 OsDacGate::Indeterminate => Verdict::Indeterminate,
             },
-            Some(Class::Fs) => Verdict::NotApplicable,
+            Some(Class::Fs) => Verdict::NotApplicable {
+                note: Some(format!(
+                    "term enumerated, not implemented: {}",
+                    req.action.0
+                )),
+            },
+            // Case-3 testimony for whole unbuilt classes. `None` (a term the
+            // class map cannot place) shares the arm and the note; for that
+            // sub-case the "enumerated" wording is inexact -- and the sub-case
+            // is production-unreachable (`class_of` is total over the closed
+            // set every decoded Verb maps into). The unknown-vocabulary Deny
+            // (ADR-0008 D5) is a COMPOSITION-layer control with no carrier
+            // until a second operand exists (spec D5: pinned, deferred, owner
+            // named); it, not this note, owns the unreachable case.
             Some(Class::Session)
             | Some(Class::Terminal)
             | Some(Class::Mcp)
             | Some(Class::Kernel)
-            | None => Verdict::NotApplicable,
+            | None => Verdict::NotApplicable {
+                note: Some(format!(
+                    "term enumerated, not implemented: {}",
+                    req.action.0
+                )),
+            },
         },
     }
 }
 
 /// Step 4 — the capability grammar, admin-only, `fs.*`-only (spec §4.4).
-fn decide_fs(lp: &LoadedPolicy, req: &SecRequest) -> Verdict {
+/// `role_key` names the caller's role in case-5 testimony only — the one call
+/// site sits inside `Role::Admin`, so the role is statically known there (the
+/// same pattern `evaluate3_action`'s key uses, #162).
+fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
         // Required at THIS point of use: absent or wrong-typed → Indeterminate.
@@ -407,7 +452,15 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest) -> Verdict {
             reason: format!("denied by policy entry {source}"),
         },
         maknae_config::Match3::AllowMatch => permit_with_audit(),
-        maknae_config::Match3::NoMatch => Verdict::NotApplicable,
+        // Case-5 testimony (#181): role and term ONLY -- never the path (the
+        // D9 hazard). "No capability entry" is accurate where "no rule" would
+        // be false: a rule for fs.read exists; no ENTRY matched this request.
+        maknae_config::Match3::NoMatch => Verdict::NotApplicable {
+            note: Some(format!(
+                "role {role_key}: no capability entry for {}",
+                req.action.0
+            )),
+        },
     }
 }
 
@@ -645,7 +698,15 @@ mod tests {
                         "{role_key} {action}: {v:?}"
                     );
                 } else {
-                    assert_eq!(v, Verdict::NotApplicable, "{role_key} {action}");
+                    // Exact case-2 note per cell (#181 D4): role-reach outranks
+                    // build-state for non-admin roles, whatever the term.
+                    assert_eq!(
+                        v,
+                        Verdict::NotApplicable {
+                            note: Some(format!("role {role_key}: no rule for {action}"))
+                        },
+                        "{role_key} {action}"
+                    );
                 }
             }
         }
@@ -668,7 +729,12 @@ mod tests {
         );
         let user_v = decide_loaded(&lp, &principal(), &request(None, Some(701), action, path));
         assert!(matches!(admin_v, Verdict::Permit { .. }), "{admin_v:?}");
-        assert_eq!(user_v, Verdict::NotApplicable);
+        assert_eq!(
+            user_v,
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for fs.read".into())
+            }
+        );
     }
 
     #[test]
@@ -720,7 +786,14 @@ mod tests {
                 &principal(),
                 &request(None, Some(OPERATOR_UID as i64), "fs.read", Some(path)),
             );
-            assert_eq!(v, Verdict::NotApplicable, "{path}");
+            // Case-5 note: role and term only — the PATH stays out (D9).
+            assert_eq!(
+                v,
+                Verdict::NotApplicable {
+                    note: Some("role admin: no capability entry for fs.read".into())
+                },
+                "{path}"
+            );
         }
     }
 
@@ -733,7 +806,16 @@ mod tests {
                 &principal(),
                 &request(None, Some(OPERATOR_UID as i64), action, None),
             );
-            assert_eq!(v, Verdict::NotApplicable, "{action}");
+            // Case-3 note, including `unknown.thing` (class None): build-state
+            // is the true fact either way; the D5 unknown-vocabulary Deny is a
+            // composition-layer control with no carrier yet.
+            assert_eq!(
+                v,
+                Verdict::NotApplicable {
+                    note: Some(format!("term enumerated, not implemented: {action}"))
+                },
+                "{action}"
+            );
         }
     }
 
@@ -755,7 +837,12 @@ mod tests {
             &principal(),
             &request(None, Some(999), "liveness.ping", None),
         );
-        assert_eq!(v, Verdict::NotApplicable);
+        assert_eq!(
+            v,
+            Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into())
+            }
+        );
     }
 
     #[test]
@@ -823,7 +910,12 @@ mod tests {
             &principal(),
             &request(None, Some(700), "fs.read", None),
         );
-        assert_eq!(v2, Verdict::NotApplicable);
+        assert_eq!(
+            v2,
+            Verdict::NotApplicable {
+                note: Some("role guest: no rule for fs.read".into())
+            }
+        );
     }
 
     // ---- class-match rule pins (spec §5) ----
@@ -850,9 +942,20 @@ mod tests {
             "admin.policy.reload",
             "admin.subject.bind",
         ] {
+            // The note tells the two absences apart (#181 D4): a GRANTABLE
+            // sibling with no grant is a policy question (case 2); an
+            // ungrantable admin term is a roadmap question (case 3). Exact
+            // equality on both — the distinction IS the new behaviour.
+            let expected = if GRANTABLE_ACTIONS.contains(&action) {
+                format!("role admin: no rule for {action}")
+            } else {
+                format!("term enumerated, not implemented: {action}")
+            };
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req(action)),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable {
+                    note: Some(expected)
+                },
                 "{action} must NOT permit off the admin class arm"
             );
         }
@@ -908,7 +1011,9 @@ mod tests {
                 &principal(),
                 &request(None, Some(1001), "admin.contain", None)
             ),
-            Verdict::NotApplicable,
+            Verdict::NotApplicable {
+                note: Some("term enumerated, not implemented: admin.contain".into())
+            },
             "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
              somehow reaches the grant map"
         );
@@ -996,7 +1101,9 @@ mod tests {
         for other in ["admin.config.show", "admin.subject.list"] {
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req(other)),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable {
+                    note: Some(format!("role admin: no rule for {other}"))
+                },
                 "granting one term must not grant `{other}`"
             );
         }
@@ -1106,7 +1213,9 @@ mod tests {
                     &principal(),
                     &request(None, Some(uid as i64), "admin.status", None)
                 ),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable {
+                    note: Some(format!("role {role}: no rule for admin.status"))
+                },
                 "role `{role}` must not inherit admin's grant"
             );
         }
@@ -1134,7 +1243,9 @@ mod tests {
             for t in GRANTABLE_ACTIONS {
                 assert_eq!(
                     decide_loaded(&lp, &principal(), &request(None, Some(1001), t, None)),
-                    Verdict::NotApplicable,
+                    Verdict::NotApplicable {
+                        note: Some(format!("role admin: no rule for {t}"))
+                    },
                     "block {block:?}, term {t}"
                 );
             }
@@ -1150,6 +1261,14 @@ mod tests {
     /// the grant map stays empty and the three grant-sensitive terms keep
     /// answering `NotApplicable`. The grant path is asserted separately, against
     /// its own fixture. **If you find yourself editing a cell below, stop.**
+    ///
+    /// *(Corrected 2026-09-02, #181 — the never-edit claim is NARROWED, not
+    /// voided: every `Verdict` CELL below is byte-identical to the pre-#181
+    /// matrix — same variant, same permits, same denies — and the only change
+    /// is `na()` gaining the absence's note argument, because absences now
+    /// carry audit-only testimony. No verdict changed; the notes are the new
+    /// behaviour, and pinning them exactly is what the zero-missed rule
+    /// demands. A change to any VERDICT cell still means stop.)*
     ///
     /// Full `Verdict` equality, never `matches!`: the variant alone collapses
     /// adversary-deny, policy-deny and OS-DAC deny into one cell, and a pin that
@@ -1182,7 +1301,11 @@ mod tests {
         let policy_deny = || Verdict::Deny {
             reason: "denied by policy entry Read(~/.ssh/**)".into(),
         };
-        let na = || Verdict::NotApplicable;
+        // The note argument is #181's only edit to this table (see the dated
+        // correction above): the CELL verdicts are untouched.
+        let na = |n: &str| Verdict::NotApplicable {
+            note: Some(n.into()),
+        };
 
         // (action, path) x (admin 1001, user 1002, guest 1003, adversary 1004)
         // The literal tuple type, NOT a `type Row` alias. clippy::type_complexity
@@ -1200,27 +1323,62 @@ mod tests {
                 permit(),
                 contained(),
             ),
-            ("admin.whoami", None, permit(), na(), na(), contained()),
-            ("admin.status", None, na(), na(), na(), contained()),
-            ("admin.config.show", None, na(), na(), na(), contained()),
-            ("admin.subject.list", None, na(), na(), na(), contained()),
+            (
+                "admin.whoami",
+                None,
+                permit(),
+                na("role user: no rule for admin.whoami"),
+                na("role guest: no rule for admin.whoami"),
+                contained(),
+            ),
+            (
+                "admin.status",
+                None,
+                na("role admin: no rule for admin.status"),
+                na("role user: no rule for admin.status"),
+                na("role guest: no rule for admin.status"),
+                contained(),
+            ),
+            (
+                "admin.config.show",
+                None,
+                na("role admin: no rule for admin.config.show"),
+                na("role user: no rule for admin.config.show"),
+                na("role guest: no rule for admin.config.show"),
+                contained(),
+            ),
+            (
+                "admin.subject.list",
+                None,
+                na("role admin: no rule for admin.subject.list"),
+                na("role user: no rule for admin.subject.list"),
+                na("role guest: no rule for admin.subject.list"),
+                contained(),
+            ),
             (
                 "fs.read",
                 Some("/home/operator/x"),
                 permit(),
-                na(),
-                na(),
+                na("role user: no rule for fs.read"),
+                na("role guest: no rule for fs.read"),
                 contained(),
             ),
             (
                 "fs.read",
                 Some("/home/operator/.ssh/k"),
                 policy_deny(),
-                na(),
-                na(),
+                na("role user: no rule for fs.read"),
+                na("role guest: no rule for fs.read"),
                 contained(),
             ),
-            ("unknown.thing", None, na(), na(), na(), contained()),
+            (
+                "unknown.thing",
+                None,
+                na("term enumerated, not implemented: unknown.thing"),
+                na("role user: no rule for unknown.thing"),
+                na("role guest: no rule for unknown.thing"),
+                contained(),
+            ),
         ];
 
         for (action, path, adm, usr, gst, adv) in matrix {
@@ -1266,7 +1424,9 @@ mod tests {
                         Some("/home/operator/x")
                     ),
                 ),
-                Verdict::NotApplicable,
+                Verdict::NotApplicable {
+                    note: Some(format!("term enumerated, not implemented: {action}"))
+                },
                 "{action} must abstain"
             );
         }
@@ -1332,7 +1492,9 @@ mod tests {
         );
         assert_eq!(
             v,
-            Verdict::NotApplicable,
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for fs.read".into())
+            },
             "agent must not inherit admin's grammar"
         );
     }

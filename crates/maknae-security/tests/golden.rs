@@ -27,7 +27,7 @@ fn v_indeterminate_never_masked_then_denied() {
 fn v_all_notapplicable_finalizes_deny() {
     // §15.4: NotApplicable reaching the top → Deny
     assert!(matches!(
-        finalize(combine(vec![Verdict::NotApplicable])),
+        finalize(combine(vec![Verdict::NotApplicable { note: None }])),
         Decision::Deny { .. }
     ));
 }
@@ -123,4 +123,46 @@ fn v_deny_reasons_are_populated() {
         Decision::Deny { reason } => assert!(reason.contains("onflict")), // "conflict"
         _ => panic!("obligation conflict must deny"),
     }
+}
+
+/// Classification invariance (#181): a note is TESTIMONY, never an input —
+/// composed with any decisive verdict, an annotated absence yields the
+/// IDENTICAL post-`finalize` `Decision` as a bare one. These rows are what
+/// makes "no note may influence which branch `combine` takes" a tested claim
+/// rather than a doc sentence; the survivor rule (which note renders when ALL
+/// abstain) is pinned separately in `compose.rs`'s own tests.
+#[test]
+fn a_note_never_changes_what_composes() {
+    let bare = || Verdict::NotApplicable { note: None };
+    let ann = || Verdict::NotApplicable {
+        note: Some("testimony".into()),
+    };
+    let permit = || Verdict::Permit {
+        obligations: vec![],
+    };
+    let deny = || Verdict::Deny {
+        reason: "denied by policy".into(),
+    };
+    // Permit row: the absence's note must not leak into a Permit fold.
+    assert_eq!(
+        finalize(combine(vec![permit(), bare()])),
+        finalize(combine(vec![permit(), ann()]))
+    );
+    // Deny row: deny-overrides unchanged, the DENY's reason survives, never
+    // the testimony.
+    assert_eq!(
+        finalize(combine(vec![deny(), ann()])),
+        Decision::Deny {
+            reason: "denied by policy".into()
+        }
+    );
+    assert_eq!(
+        finalize(combine(vec![deny(), bare()])),
+        finalize(combine(vec![deny(), ann()]))
+    );
+    // Indeterminate row: the fail-closed conversion wins over any testimony.
+    assert_eq!(
+        finalize(combine(vec![Verdict::Indeterminate, bare()])),
+        finalize(combine(vec![Verdict::Indeterminate, ann()]))
+    );
 }

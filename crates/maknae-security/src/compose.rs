@@ -20,13 +20,29 @@ use crate::obligation::{merge_obligations, Obligation};
 use crate::request::Request;
 use crate::verdict::Verdict;
 
-/// Fold operand verdicts (order-independent):
+/// Fold operand verdicts:
 /// 1. any `Deny` → `Deny`;
 /// 2. else any `Indeterminate` → `Deny` (never masked by a peer `Permit`);
 /// 3. else any `Permit` → `Permit` with the union of all Permit obligations
 ///    (a `(id, params)` conflict → `Deny`);
-/// 4. else (all `NotApplicable`, or empty) → `NotApplicable`.
+/// 4. else (all `NotApplicable`, or empty) → `NotApplicable`, carrying the
+///    FIRST annotated absence's note (#181; ADR-0008 amendment). The caller
+///    (the kernel is the only production composer) passes the baseline's
+///    verdict first, so baseline testimony outranks an extension's.
+///
+/// *(Corrected 2026-09-02, #181: this doc read "(order-independent)" — true of
+/// the CLASSIFICATION, which no note may influence, but rule 4's surviving
+/// note is testimony-order-aware by design. The classification remains
+/// order-independent; only which explanation survives an all-abstain fold
+/// depends on order.)*
 pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
+    // Captured up front: step 3's fold consumes `verdicts`, so the note rule 4
+    // needs would be gone by the time it runs. Notes are TESTIMONY — this read
+    // feeds only rule 4's absence rendering, never the classification.
+    let first_note = verdicts.iter().find_map(|v| match v {
+        Verdict::NotApplicable { note: Some(n) } => Some(n.clone()),
+        _ => None,
+    });
     // 1. any Deny
     for v in &verdicts {
         if let Verdict::Deny { reason } = v {
@@ -60,8 +76,10 @@ pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
     if any_permit {
         return Verdict::Permit { obligations: acc };
     }
-    // 4. all NotApplicable (or empty)
-    Verdict::NotApplicable
+    // 4. all NotApplicable (or empty): the first annotated absence survives.
+    // `first_note` was captured BEFORE the consuming fold above — by the time
+    // control reaches here the vec is gone.
+    Verdict::NotApplicable { note: first_note }
 }
 
 /// Invoke a backend behind a **panic boundary** (spec §6, §15.4). A buggy or
@@ -284,7 +302,7 @@ mod tests {
         struct Hostile;
         impl Authorizer for Hostile {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn backend_name(&self) -> String {
                 panic!("hostile backend")
@@ -307,7 +325,7 @@ mod tests {
         struct Enumerating;
         impl Authorizer for Enumerating {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn subjects(&self) -> Option<Vec<SubjectBinding>> {
                 Some(vec![SubjectBinding {
@@ -333,7 +351,7 @@ mod tests {
         struct Injecting;
         impl Authorizer for Injecting {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn subjects(&self) -> Option<Vec<SubjectBinding>> {
                 Some(vec![SubjectBinding {
@@ -375,7 +393,7 @@ mod tests {
         struct Named(&'static str);
         impl Authorizer for Named {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn backend_name(&self) -> String {
                 self.0.to_string()
@@ -403,7 +421,7 @@ mod tests {
         struct Nasty(String);
         impl Authorizer for Nasty {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn backend_name(&self) -> String {
                 self.0.clone()
@@ -514,7 +532,7 @@ mod tests {
         struct Hostile;
         impl Authorizer for Hostile {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn subjects(&self) -> Option<Vec<SubjectBinding>> {
                 panic!("hostile backend")
@@ -523,7 +541,7 @@ mod tests {
         struct Enumerates;
         impl Authorizer for Enumerates {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn subjects(&self) -> Option<Vec<SubjectBinding>> {
                 Some(vec![SubjectBinding {
@@ -552,7 +570,7 @@ mod tests {
         struct Enum(Option<&'static str>);
         impl Authorizer for Enum {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
             fn subjects(&self) -> Option<Vec<SubjectBinding>> {
                 self.0.map(|r| {
@@ -648,7 +666,10 @@ mod tests {
 
     #[test]
     fn notapplicable_is_identity() {
-        match combine(vec![permit(vec![ob("audit")]), Verdict::NotApplicable]) {
+        match combine(vec![
+            permit(vec![ob("audit")]),
+            Verdict::NotApplicable { note: None },
+        ]) {
             Verdict::Permit { obligations } => assert_eq!(obligations.len(), 1),
             _ => panic!("identity broken"),
         }
@@ -656,15 +677,56 @@ mod tests {
 
     #[test]
     fn all_notapplicable_stays_notapplicable() {
-        assert!(matches!(
-            combine(vec![Verdict::NotApplicable, Verdict::NotApplicable]),
-            Verdict::NotApplicable
-        ));
+        // Exact equality per the plan's matches!-ban (both this and the
+        // empty-vec sibling): the fully-specified pattern was equivalent, but
+        // one shape for the whole ban keeps the rule greppable.
+        assert_eq!(
+            combine(vec![
+                Verdict::NotApplicable { note: None },
+                Verdict::NotApplicable { note: None }
+            ]),
+            Verdict::NotApplicable { note: None }
+        );
     }
 
     #[test]
     fn empty_is_notapplicable() {
-        assert!(matches!(combine(vec![]), Verdict::NotApplicable));
+        // Exact equality, not `matches!`: a `{ .. }` pattern would accept an
+        // INVENTED note on the empty composition — the hole the bare+bare pin
+        // in the sibling test closes (#181 plan, matches!-ban).
+        assert_eq!(combine(vec![]), Verdict::NotApplicable { note: None });
+    }
+
+    /// The absence-survivor rule (#181, ADR-0008 amendment): when ALL operands
+    /// abstain, the FIRST annotated absence survives — the kernel passes the
+    /// baseline's verdict first, so core testimony outranks an extension's.
+    /// These are the only assertions that can see WHICH note survives: the
+    /// invariance rows prove notes don't change outcomes, and cargo-mutants
+    /// has no guaranteed first-vs-last mutant for a capture.
+    #[test]
+    fn first_annotated_absence_survives_an_all_abstain_fold() {
+        let ann = |t: &str| Verdict::NotApplicable {
+            note: Some(t.into()),
+        };
+        let bare = Verdict::NotApplicable { note: None };
+        // Two testimonies: the first wins (baseline-first ordering carries it).
+        assert_eq!(
+            crate::finalize(combine(vec![ann("A"), ann("B")])),
+            crate::Decision::Deny { reason: "A".into() }
+        );
+        // A silent baseline does not gag an annotated extension.
+        assert_eq!(
+            crate::finalize(combine(vec![bare.clone(), ann("B")])),
+            crate::Decision::Deny { reason: "B".into() }
+        );
+        // PIN, green from the start, not a red: all-silent renders the
+        // historical string — guards a survivor that INVENTS a note.
+        assert_eq!(
+            crate::finalize(combine(vec![bare.clone(), bare])),
+            crate::Decision::Deny {
+                reason: "no applicable authorizer (fail-closed)".into()
+            }
+        );
     }
 
     #[test]
@@ -711,7 +773,7 @@ mod tests {
     #[test]
     fn conjunction_reduces_over_notapplicable() {
         let c = ConjunctionAuthorizer::new(vec![
-            Box::new(Fixed(Verdict::NotApplicable)),
+            Box::new(Fixed(Verdict::NotApplicable { note: None })),
             Box::new(Fixed(Verdict::Permit {
                 obligations: vec![],
             })),

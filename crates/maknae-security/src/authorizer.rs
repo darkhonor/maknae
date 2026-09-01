@@ -88,7 +88,7 @@ mod tests {
         struct OnlyDecides;
         impl Authorizer for OnlyDecides {
             fn decide(&self, _: &Request) -> Verdict {
-                Verdict::NotApplicable
+                Verdict::NotApplicable { note: None }
             }
         }
         assert_eq!(
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         // The `Box<dyn Authorizer>` coercion compiling *is* the object-safety proof.
-        let b: Box<dyn Authorizer> = Box::new(Always(Verdict::NotApplicable));
-        assert_eq!(b.decide(&req()), Verdict::NotApplicable);
+        let b: Box<dyn Authorizer> = Box::new(Always(Verdict::NotApplicable { note: None }));
+        assert_eq!(b.decide(&req()), Verdict::NotApplicable { note: None });
     }
 }

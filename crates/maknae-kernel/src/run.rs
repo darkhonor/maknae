@@ -515,7 +515,8 @@ pub async fn handle<S, E, P>(
     // 2½. THE PDP (spec D2, #77): every request is decided through the seam
     // before the audit-then-respond step. For a Read, the lexical pre-gate
     // runs FIRST — a malformed path is the BadRequest class (like a decode
-    // failure), and the PDP is never consulted for it.
+    // failure -- though a decode failure itself is audited and CLOSED, never
+    // answered; only this post-decode gate writes BadRequest), and the PDP is never consulted for it.
     if let Verb::Read { path } = &request.verb {
         if let Err(why) = lexical_pregate(path) {
             let appended = emit_request_outcome(
@@ -729,6 +730,10 @@ pub async fn handle<S, E, P>(
     match dispatch_verb(&request.verb) {
         Dispatch::NoBehaviour => {
             // Decided and PERMITTED above; the term simply has no behaviour.
+            // (#181, 2026-09-02: only an EXTENSION grant can produce that
+            // Permit — ADR-0008 D2 — since `-basic` cannot permit an unbuilt
+            // term; with `-basic` alone this arm is unreachable and an
+            // unpermitted unbuilt term answers Unauthorized upstream.)
             // Same audit-then-respond gate as every sibling path — the record
             // must be durable before any frame is released (ADR-0019).
             let appended = emit_request_outcome(
@@ -749,11 +754,18 @@ pub async fn handle<S, E, P>(
             )
             .await;
             if may_respond(appended) {
+                // The SAME wire answer as every refusal (operator ruling
+                // 2026-09-02, #181: "unauthorized is all that is published to
+                // the wire" — superseding the #67 NOOP contract's wire half).
+                // Build state is not a wire disclosure on ANY path; the trail
+                // above carries the truth (permit / not-implemented), and an
+                // extension that wants to expose implementation state to its
+                // callers does so through its own channel.
                 write_error_bounded(
                     &mut stream,
                     &cfg,
-                    ProtoErrCode::NotImplemented,
-                    "not implemented",
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
                 )
                 .await;
             }
