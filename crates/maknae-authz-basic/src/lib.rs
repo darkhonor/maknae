@@ -24,6 +24,22 @@ mod decide;
 pub fn grantable_actions() -> &'static [&'static str] {
     &decide::GRANTABLE_ACTIONS
 }
+
+#[cfg(test)]
+mod grantable_reexport_tests {
+    /// The re-export is pinned IN THIS CRATE: the kernel's cross-crate
+    /// tripwire cannot kill a `-basic` mutant (per-package mutation runs only
+    /// this crate's tests), and the gate's run reported exactly that — three
+    /// `grantable_actions -> Vec::leak(...)` mutants MISSED. Exact equality
+    /// against the literal, both directions of drift covered.
+    #[test]
+    fn the_reexport_returns_the_real_constant_exactly() {
+        assert_eq!(
+            super::grantable_actions(),
+            ["admin.status", "admin.config.show", "admin.subject.list"]
+        );
+    }
+}
 mod role;
 
 use binding::UidMap;
