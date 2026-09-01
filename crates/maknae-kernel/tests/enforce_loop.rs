@@ -371,9 +371,13 @@ async fn unbound_uid_is_denied_everything_including_ping() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
+    // Retargeted (#181): the trail now names the FACT — the subject resolves
+    // to no role — rather than the mechanism ("no applicable authorizer").
+    // This was the only byte-level pin of the historical string; the fallback
+    // is pinned at its own unit test in verdict.rs now.
     assert!(
-        req.outcome.reason.contains("no applicable authorizer"),
-        "fail-closed NotApplicable→Deny: {}",
+        req.outcome.reason.contains("subject resolves to no role"),
+        "case-1 note (was the collapsed historical string): {}",
         req.outcome.reason
     );
 }
@@ -1659,3 +1663,141 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
             .collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// #181 — the trail distinguishes WHY an absence denied; the wire never does.
+// Written RED against the un-annotated decide (S2 of the plan), turned green
+// by S3's annotations. Every wire assertion is the SAME generic Unauthorized:
+// the roadmap and the policy shape are audit-only disclosures.
+// ---------------------------------------------------------------------------
+
+/// Case 3: an enumerated-but-unbuilt term, asked by the role that would own
+/// it. The trail states the roadmap fact; the wire stays indistinguishable
+/// from unauthorized (ruling R1 -- fingerprinting denied).
+#[tokio::test]
+async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
+    let fx = Fixture::new("note-unbuilt-admin");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminContain,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(
+        req.outcome.reason, "term enumerated, not implemented: admin.contain",
+        "the ADMIN trail carries the roadmap fact"
+    );
+}
+
+/// Case 2 for a non-admin: role-reach outranks build-state. A user asking the
+/// same unbuilt term reads their OWN operational fact -- their reach -- not
+/// the roadmap, which is admin-visible only.
+#[tokio::test]
+async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
+    let fx = Fixture::new("note-unbuilt-user");
+    fx.write_policy(BINDINGS_ROOT_USER);
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminContain,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role user: no rule for admin.contain",
+        "a non-admin trail reads role-reach, never build-state"
+    );
+}
+
+/// Case 2 at the grant surface: a grantable term with NO grant written. The
+/// absence is a policy question ("a grant could exist; none does") and the
+/// trail says so by term.
+#[tokio::test]
+async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
+    let fx = Fixture::new("note-nogrant");
+    fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings, but NO `roles:` key
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role admin: no rule for admin.status",
+        "a written deny would say 'denied by role grant'; an ABSENCE says this"
+    );
+}
+
+/// Case 5: a delegated, OS-readable object that no capability entry matches.
+/// Preconditions per the plan: a REAL delegated fd (without one, the os-dac
+/// gate denies first with `os dac:`); the file inside the fixture home
+/// (confinement); and a NARROW allow list -- under the shipped `Read(~/**)`
+/// every in-home path AllowMatches and this test would Permit instead.
+#[tokio::test]
+async fn an_unmatched_read_names_the_missing_capability_entry() {
+    let fx = Fixture::new("note-nocap");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"root\"]\n",
+    );
+    std::fs::write(fx.dir.join("outside.txt"), b"not under any entry").unwrap();
+    let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
+    let emit = RecEmit::new();
+    let frame = drive_read(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role admin: no capability entry for fs.read",
+        "role and term only -- no rule for fs.read EXISTS; no entry MATCHED, \
+         and the path stays out of the reason"
+    );
+}
+
