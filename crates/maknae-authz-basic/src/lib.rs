@@ -12,6 +12,19 @@
 
 mod binding;
 mod decide;
+
+/// The grantable term set, re-exported for CROSS-CRATE tripwires (#181 S4).
+///
+/// The constant itself stays `pub(crate)` in `decide.rs` deliberately: the
+/// `verb-vocabulary-drift` gate's awk anchor matches that exact spelling
+/// (`pub(crate) const GRANTABLE_ACTIONS`), four negative-control fixture
+/// literals hard-code it, and `mod decide` is private — so a re-exporting fn
+/// is the only shape that adds reachability without moving the anchor the
+/// gate and its controls stand on.
+pub fn grantable_actions() -> &'static [&'static str] {
+    &decide::GRANTABLE_ACTIONS
+}
+
 mod role;
 
 use binding::UidMap;
@@ -376,6 +389,22 @@ pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_AUTHZ_BASIC";
 // matrix proof rides decide.rs's golden vectors; (c) containment e2e below.
 #[cfg(test)]
 mod tests {
+
+    /// The re-export is pinned IN THIS CRATE: the kernel's cross-crate
+    /// tripwire cannot kill a `-basic` mutant (per-package mutation runs only
+    /// this crate's tests), and the gate's run reported exactly that — three
+    /// `grantable_actions -> Vec::leak(...)` mutants MISSED. Exact equality
+    /// against the literal, both directions of drift covered. (Lives inside
+    /// the crate's single `#[cfg(test)]` module: coverage_check.py hard-fails
+    /// a second column-0 marker, which the first placement added — caught by
+    /// diff-CR running the LIVE coverage lane, `coverage-tiers.sh --root .`.)
+    #[test]
+    fn the_reexport_returns_the_real_constant_exactly() {
+        assert_eq!(
+            super::grantable_actions(),
+            ["admin.status", "admin.config.show", "admin.subject.list"]
+        );
+    }
     use super::*;
     use maknae_security::{
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
@@ -449,7 +478,9 @@ mod tests {
         agent_admin.action = Action("admin.whoami".into());
         assert_eq!(
             decide::decide_loaded(&lp, &principal(), &agent_admin),
-            Verdict::NotApplicable
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for admin.whoami".into())
+            }
         );
     }
 

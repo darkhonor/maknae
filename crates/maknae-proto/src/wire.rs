@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 // `ProtoErrCode::TooLarge` are ADDITIVE CBOR enum variants — no version bump.
 // #162 adds `Payload::{ConfigView, Status, SubjectList}` the same way, appended
 // at the tail. A client built before them has no subcommand that can elicit
-// one; a newer client against an older daemon gets `NotImplemented` from the
-// `NoBehaviour` arm.
+// one. (Corrected 2026-09-02, #181: this comment claimed a newer client
+// against an older daemon "gets `NotImplemented` from the `NoBehaviour` arm"
+// — false twice over. The older daemon cannot DECODE the unknown `Verb`
+// variant at all; that path is the decode-failure class. And `NoBehaviour` is
+// reached only after a Permit, which no shipped operand can produce for an
+// unbuilt term — see `handler.rs`'s `Dispatch::NoBehaviour` doc.)
 // A pre-#77 CLI never sends `Read`, so it keeps interoperating with a #77
 // daemon for `ping`/`whoami` (same wire version); only the new read verb
 // needs the new CLI. A version bump would be an irreversible hard mutual
@@ -318,6 +322,14 @@ pub struct RoleBindingView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtoErrCode {
+    /// Declared for the decode-refusal class and currently EMITTED NOWHERE
+    /// (#181, honest-record note 2026-09-02, corrected same day by diff-CR):
+    /// the decode-failure path audits the refusal and CLOSES with no response
+    /// frame at all (`run.rs`, the decode arm); `BadRequest` is emitted only
+    /// by the post-decode lexical pre-gate on `Read`. This variant is dead,
+    /// kept additive. A record that claims behaviour that does not occur is
+    /// the defect class #181 removed — and the first draft of THIS doc line
+    /// did exactly that, claiming the decode path answers `BadRequest`.
     UnknownVerb,
     Unauthorized,
     BadRequest,
@@ -328,6 +340,10 @@ pub enum ProtoErrCode {
     /// An enumerated term the daemon decided and PERMITTED, but whose behaviour
     /// is not built. Returned ONLY after a Permit — a denied caller receives
     /// `Unauthorized` and learns nothing about implementation state (#67 D7).
+    /// EMITTED NOWHERE since the 2026-09-02 wire ruling (#181): a permitted
+    /// unbuilt term now answers `Unauthorized` like every refusal — build
+    /// state is not a wire disclosure on any path. Dead, kept additive, same
+    /// honest-record treatment as `UnknownVerb` below.
     NotImplemented,
 }
 

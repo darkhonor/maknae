@@ -495,7 +495,8 @@ grantable	admin.status	grantable-not-granted	per-role via roles:
 grantable	admin.config.show	grantable-not-granted	per-role via roles:
 grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
-expect_reject "verb-vocabulary-drift/term-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_reject_because "verb-vocabulary-drift/term-with-no-disposition" \
+  "+action	admin.status" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT: a stale manifest entry for a term the code no longer has.
 fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
@@ -507,7 +508,8 @@ grantable	admin.status	grantable-not-granted	per-role via roles:
 grantable	admin.config.show	grantable-not-granted	per-role via roles:
 grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
-expect_reject "verb-vocabulary-drift/stale-manifest-entry" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_reject_because "verb-vocabulary-drift/stale-manifest-entry" \
+  "-action	admin.retired" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT: a grammar capability with no recorded disposition — R7 covers BOTH
 # closed vocabularies, so a capability added to the grammar must be inventoried.
@@ -518,7 +520,8 @@ grantable	admin.status	grantable-not-granted	per-role via roles:
 grantable	admin.config.show	grantable-not-granted	per-role via roles:
 grantable	admin.subject.list	grantable-not-granted	per-role via roles:
 ')"
-expect_reject "verb-vocabulary-drift/capability-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_reject_because "verb-vocabulary-drift/capability-with-no-disposition" \
+  "+capability	Read" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT: a GRANTABLE term with no recorded disposition (#162). The grantable
 # list is a fourth closed vocabulary — a term an operator can write into
@@ -529,26 +532,69 @@ kernel-action	kernel.contain	not-granted	no Verb variant
 capability	Read	granted	the only capability
 grantable	admin.status	grantable-not-granted	per-role via roles:
 ' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "admin.config.show"];')"
-expect_reject "verb-vocabulary-drift/grantable-with-no-disposition" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_reject_because "verb-vocabulary-drift/grantable-with-no-disposition" \
+  "+grantable	admin.config.show" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # ACCEPT: the clean fixture passes, and reports the full count. Without this
 # every control above would still report neg-ok against a gate that rejects
 # EVERYTHING — including a correct repo. The count is asserted with its
 # leading ": " and trailing " terms," because a bare `7 terms` also matches
-# `17 terms`. Seven = 2 actions + kernel.contain + Read + 3 grantable.
+# `17 terms`.
 # The grantable set is narrowed to the fixture's OWN action vocabulary. The
 # shared handler.rs heredoc defines two actions, so admin.status is the only
 # grantable term that has an action behind it -- and the subset rule added for
 # #162 means a fixture claiming the other two is not clean. It caught this
 # fixture the moment it was written, which is the control working.
 # Five = 2 actions + kernel.contain + Read + 1 grantable.
-fx="$(vocab_fixture 'action	liveness.ping	granted	shipped
-action	admin.status	not-granted	enumerated
+# Rationales carry the #181 clause vocabulary: the clause check runs LAST in
+# the gate, so a CLEAN fixture must satisfy it (the five reject fixtures above
+# keep short rationales because the inventory/subset checks fire first).
+CLEAN_VOCAB='action	liveness.ping	granted	shipped; the fixture liveness term
+action	admin.status	not-granted	unbuilt — answers Unauthorized like every refusal
 kernel-action	kernel.contain	not-granted	no Verb variant
-capability	Read	granted	the only capability
-grantable	admin.status	grantable-not-granted	per-role via roles:
-' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+capability	Read	granted	the only grammar capability
+grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:`
+'
+fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#181, durable): a row whose disposition and rationale DISAGREE — the
+# rationale lacks its (kind, disposition) clause. The one-time capture of the
+# real 51-row defect is evidence in the PR; THIS fixture is the control that
+# re-runs on every PR (the repo's own negative-control discipline: a one-off
+# observation is not a control).
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/unbuilt — answers Unauthorized like every refusal/enumerated, decided/')" \
+  'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/rationale-lacks-its-clause" \
+  "rationale lacks its clause" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#181, durable): a THREE-field row. Before the arity check, a row
+# with no disposition and no rationale passed green — `cut -f1,2` never read
+# fields 3-4 — so the arity assertion is new coverage with its own control.
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/^action	admin.status	not-granted	.*$/action	admin.status	not-granted/')" \
+  'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/three-field-row" \
+  "without exactly four non-empty fields" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#181, durable): a FIVE-field row — a TAB inside a rationale. This is
+# the arity check's UNIQUE coverage: a three-field row is also caught by the
+# clause check (index("", clause)==0), so with the arity block deleted the
+# three-field probe merely rejects for the wrong reason — but a tab-bearing
+# rationale sails through everything else (observed: the arity-deleted gate
+# ACCEPTS it at EXIT=0). The clause table's parsing assumes exactly four
+# fields; this is the probe that makes that assumption enforced.
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/^\(action	admin.status	not-granted	.*\)$/\1	extra-field/')" \
+  'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/five-field-row" \
+  "without exactly four non-empty fields" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#181, durable): an INVENTED disposition. The clause table fails
+# closed — a (kind, disposition) pair outside the six-pair table must never
+# pass by falling off it.
+fx="$(vocab_fixture "$(printf '%s' "$CLEAN_VOCAB" | sed 's/^action	admin.status	not-granted	.*$/action	admin.status	pending	someone will decide later/')" \
+  'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/invented-disposition" \
+  "unrecognized (kind, disposition)" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT: a grantable term with no matching `action` term (#162). Manifest
 # exactness alone does NOT catch this -- both kinds carry their own rows and
@@ -561,7 +607,8 @@ capability	Read	granted	the only capability
 grantable	admin.status	grantable-not-granted	per-role via roles:
 grantable	session.ghost	grantable-not-granted	NO action term behind it
 ' 'pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "session.ghost"];')"
-expect_reject "verb-vocabulary-drift/grantable-not-a-real-action" "$fx/ci/gates/verb-vocabulary-drift.sh"
+expect_reject_because "verb-vocabulary-drift/grantable-not-a-real-action" \
+  "no matching action term" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
 # ---- config-disclosure-drift (#162): the admin.config.show surface ----

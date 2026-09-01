@@ -325,6 +325,7 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
     match resp.result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
             assert_eq!(
                 e.message, "not authorized",
                 "wire message is the fixed generic string"
@@ -366,14 +367,21 @@ async fn unbound_uid_is_denied_everything_including_ping() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
+    // Retargeted (#181): the trail now names the FACT — the subject resolves
+    // to no role — rather than the mechanism ("no applicable authorizer").
+    // This was the only byte-level pin of the historical string; the fallback
+    // is pinned at its own unit test in verdict.rs now.
     assert!(
-        req.outcome.reason.contains("no applicable authorizer"),
-        "fail-closed NotApplicable→Deny: {}",
+        req.outcome.reason.contains("subject resolves to no role"),
+        "case-1 note (was the collapsed historical string): {}",
         req.outcome.reason
     );
 }
@@ -413,7 +421,10 @@ async fn user_role_pings_but_cannot_whoami() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&whoami).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("whoami narrows to admin: {other:?}"),
     }
 }
@@ -582,7 +593,10 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     .await
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("symlink alias must refuse: {other:?}"),
     }
     let needle = b"SECRET";
@@ -649,7 +663,10 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     .await
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("hardlink alias must refuse (nlink_exactly_one): {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -705,7 +722,10 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     // Deny at the PDP rather than a PEP unavailability. ADR-0009's "it produces a
     // verdict instead of a failure" — the trail records a decision, not an outage.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("group-writable home must still be refused: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -803,7 +823,10 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     .await
     .expect("timeout deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("elapsed decide must deny: {other:?}"),
     }
     assert!(
@@ -936,7 +959,10 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // operator wrote for a path outside the home does NOT yield the bytes, and the
     // trail says so as a decision rather than as a delivery failure.
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("a grant outside the enrolled home must not deliver: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -964,7 +990,10 @@ async fn an_unhonorable_obligation_fails_closed() {
     .await
     .expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("unknown obligation must deny: {other:?}"),
     }
     assert!(
@@ -1034,11 +1063,14 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
         .await
         .expect("a frame");
         match maknae_proto::decode_response(&frame).unwrap().result {
-            RespResult::Err(e) => assert_eq!(
-                e.code,
-                ProtoErrCode::Unauthorized,
-                "{verb:?} must deny without leaking implementation state"
-            ),
+            RespResult::Err(e) => {
+                assert_eq!(
+                    e.code,
+                    ProtoErrCode::Unauthorized,
+                    "{verb:?} must deny without leaking implementation state"
+                );
+                assert_eq!(e.message, "not authorized", "no note may reach the wire");
+            }
             other => panic!("expected Unauthorized for {verb:?}, got {other:?}"),
         }
     }
@@ -1287,7 +1319,10 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
         .await
         .expect("a frame");
         match maknae_proto::decode_response(&frame).unwrap().result {
-            RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}"),
+            RespResult::Err(e) => {
+                assert_eq!(e.code, ProtoErrCode::Unauthorized, "{verb:?}");
+                assert_eq!(e.message, "not authorized", "no note may reach the wire");
+            }
             other => panic!("{verb:?} disclosed without a grant: {other:?}"),
         }
         assert_eq!(request_record(&emit.records()).outcome.result, "deny");
@@ -1462,7 +1497,10 @@ async fn config_show_without_a_grant_discloses_nothing() {
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("an ungranted config.show must disclose NOTHING, got {other:?}"),
     }
     // NOTE: no "the section names are absent from the frame" assertion here.
@@ -1510,11 +1548,14 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
     match maknae_proto::decode_response(&frame).unwrap().result {
         // The code that was OBSERVED, not merely "not NotImplemented" -- which
         // would also pass for Internal, Timeout, or any code added later.
-        RespResult::Err(e) => assert_eq!(
-            e.code,
-            ProtoErrCode::Unauthorized,
-            "without a grant this must be refused by authz, never reach dispatch"
-        ),
+        RespResult::Err(e) => {
+            assert_eq!(
+                e.code,
+                ProtoErrCode::Unauthorized,
+                "without a grant this must be refused by authz, never reach dispatch"
+            );
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
         other => panic!("expected an error, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
@@ -1561,9 +1602,14 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
 }
 
 /// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
-/// and only then refused. Driven with a permissive authorizer because the real
-/// PDP grants no `[N]` term (see the suite above) — this exercises the PEP's
-/// ordering, not a decision.
+/// and only then refused — with the SAME wire answer as every refusal.
+/// (Operator ruling 2026-09-02, superseding the #67 NOOP contract's wire half:
+/// "unauthorized is all that is published to the wire" — implementation state
+/// is never a wire disclosure, on the permitted path either; an extension that
+/// wants to expose not-implemented does so through its own channel. The audit
+/// half stands unchanged: permit / posture not-implemented is the trail's
+/// truth.) Driven with a permissive authorizer because the real PDP grants no
+/// unbuilt term — this exercises the PEP's ordering, not a decision.
 #[tokio::test]
 async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     let fx = Fixture::new("noop-permit");
@@ -1579,8 +1625,14 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::NotImplemented),
-        other => panic!("expected NotImplemented, got {other:?}"),
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(
+                e.message, "not authorized",
+                "build state is not a wire disclosure"
+            );
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.action, "admin.contain");
@@ -1657,5 +1709,151 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
         recs.iter()
             .map(|r| (r.outcome.result.clone(), r.outcome.posture.clone()))
             .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #181 — the trail distinguishes WHY an absence denied; the wire never does.
+// Written RED against the un-annotated decide (S2 of the plan), turned green
+// by S3's annotations. Every wire assertion is the SAME generic Unauthorized:
+// the roadmap and the policy shape are audit-only disclosures.
+// ---------------------------------------------------------------------------
+
+/// Case 3: an enumerated-but-unbuilt term, asked by the role that would own
+/// it. The trail states the roadmap fact; the wire stays indistinguishable
+/// from unauthorized (ruling R1 -- fingerprinting denied).
+#[tokio::test]
+async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
+    let fx = Fixture::new("note-unbuilt-admin");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminContain,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(
+        req.outcome.reason, "term enumerated, not implemented: admin.contain",
+        "the ADMIN trail carries the roadmap fact"
+    );
+}
+
+/// Case 2 for a non-admin: role-reach outranks build-state. A user asking the
+/// same unbuilt term reads their OWN operational fact -- their reach -- not
+/// the roadmap, which is admin-visible only.
+#[tokio::test]
+async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
+    let fx = Fixture::new("note-unbuilt-user");
+    fx.write_policy(BINDINGS_ROOT_USER);
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminContain,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role user: no rule for admin.contain",
+        "a non-admin trail reads role-reach, never build-state"
+    );
+}
+
+/// Case 2 at the grant surface: a grantable term with NO grant written. The
+/// absence is a policy question ("a grant could exist; none does") and the
+/// trail says so by term.
+#[tokio::test]
+async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
+    let fx = Fixture::new("note-nogrant");
+    fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings, but NO `roles:` key
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role admin: no rule for admin.status",
+        "a written deny would say 'denied by role grant'; an ABSENCE says this"
+    );
+}
+
+/// Case 5: a delegated, OS-readable object that no capability entry matches.
+/// Preconditions per the plan: a REAL delegated fd (without one, the os-dac
+/// gate denies first with `os dac:`); the file inside the fixture home
+/// (confinement); and a NARROW allow list -- under the shipped `Read(~/**)`
+/// every in-home path AllowMatches and this test would Permit instead.
+#[tokio::test]
+async fn an_unmatched_read_names_the_missing_capability_entry() {
+    let fx = Fixture::new("note-nocap");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"root\"]\n",
+    );
+    std::fs::write(fx.dir.join("outside.txt"), b"not under any entry").unwrap();
+    let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
+    let emit = RecEmit::new();
+    let frame = drive_read(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+    )
+    .await
+    .expect("a deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no note may reach the wire");
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(
+        req.outcome.reason, "role admin: no capability entry for fs.read",
+        "role and term only -- no rule for fs.read EXISTS; no entry MATCHED, \
+         and the path stays out of the reason"
     );
 }
