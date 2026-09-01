@@ -9,6 +9,9 @@
 # Three decisions, and 'mask' is the common and correct one:
 #   disclose  the value ships in the clear
 #   mask      the value is withheld; the KEY still appears (<value set>)
+#   always    ships BY CONSTRUCTION on a non-allowlist surface (StatusView,
+#             returned whole by admin.status). Still a recorded decision, and
+#             a new field on that struct still fails the gate until one exists.
 #   omit      the key does not appear at all — its EXISTENCE is the disclosure
 #
 # 'disclose' and 'omit' rows must match DISCLOSABLE/SUPPRESSED in document.rs
@@ -37,3 +40,7 @@ omit	core.handling	PRESENCE says this deployment configured an above-baseline cl
 omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)
 mask	audit.siem	an offload endpoint with no schema, no validator and no consumer; common shapes embed a credential in the URL
 omit	lake	registered but INERT (docs/configuration.md §5): keys and shape unvalidated, deployer-authored, unenumerable — same condition as audit.au3_1 (prefix)
+always	status.version	the daemon's own version; an operator debugging needs it and any peer that handshook knows the protocol already
+always	status.protocol_version	every peer that completed a handshake already has it
+always	status.listener	the socket the caller is already connected to
+always	status.authz_backend	which PDP produced a verdict; the point of the field

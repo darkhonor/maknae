@@ -97,10 +97,17 @@
 #   call returns None whether the body forwards or is stubbed. Any assertion
 #   available to a non-root test is satisfied by both.
 #
-# It is the exact shape of the sibling `decide` wrapper two impls above, which
-# is NOT in this list only because `Verdict` has no `Default` -- cargo-mutants
-# marks that one unviable rather than missed. Same unkillable structure, two
-# different report categories.
+# Corrected 2026-09-01, from an actual run rather than an assumption. This note
+# previously argued by analogy: "the sibling `decide` wrapper is in the same
+# unkillable boat and is only categorised differently, because `Verdict` has no
+# `Default`." BOTH HALVES WERE FALSE. `Verdict` derives `Default`
+# (`verdict.rs:16`), and `verdict.rs:11-15` says it was made so ON PURPOSE
+# "so cargo-mutants can generate viable `-> Default::default()` mutants for
+# combine/decide, so the fail-closed core is actually mutation-exercised" --
+# and that mutant is CAUGHT. Lifting this exclusion and re-running reports
+# exactly one missed mutant, this one, out of 105.
+#
+# So the exclusion stands on its own argument, not on a sibling's:
 #
 # COMPENSATING CONTROLS, both real:
 #   - `subjects_with_loader` -- everything the wrapper delegates to, including

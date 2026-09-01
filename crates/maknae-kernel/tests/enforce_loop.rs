@@ -1126,7 +1126,42 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     assert_eq!(request_record(&emit.records()).outcome.result, "permit");
 }
 
-/// Neither new term discloses without a grant. The authorization decision is
+/// A backend that CANNOT enumerate yields an explicit refusal, never an empty
+/// list. This is the enforcement site of the claim the whole binding fix was
+/// written to protect, and until now nothing tested it.
+///
+/// `AlwaysPermit` implements only `decide`, so its `subjects()` takes the seam
+/// default of `None` -- exactly what a backend that cannot enumerate returns,
+/// and what the shipped `authz.yaml` (no `bindings:` key) produces through
+/// `-basic`. Replacing the kernel's `None` arm with
+/// `Payload::SubjectList(vec![])` left every other test on this branch green,
+/// and would tell an operator "nobody is bound" while the default-role
+/// fallback was live.
+#[tokio::test]
+async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
+    let fx = Fixture::new("subjlist-unavailable");
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.principal,
+        Arc::new(AlwaysPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Internal),
+        RespResult::Ok(maknae_proto::Payload::SubjectList(b)) => panic!(
+            "an inability to enumerate must NOT render as a binding list -- \
+             an empty list is the claim `nobody is bound`, got {b:?}"
+        ),
+        other => panic!("expected an explicit refusal, got {other:?}"),
+    }
+}
+
+/// Neither new term discloses without a grant./// Neither new term discloses without a grant. The authorization decision is
 /// the gate, not the dispatch.
 #[tokio::test]
 async fn the_new_terms_disclose_nothing_without_a_grant() {
@@ -1333,7 +1368,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
 // assert the actual disclosure
 // (`a_granted_status_reports_real_posture_from_the_real_pdp`,
 // `a_granted_config_show_discloses_the_redacted_view_and_nothing_else`,
-// `a_granted_subject_list_reports_live_bindings`). Keeping it retargeted at an
+// `a_granted_subject_list_reports_the_policy_file_bindings`). Keeping it retargeted at an
 // ungrantable term would have tested the NOOP path, which
 // `a_permitted_unbuilt_term_is_audited_then_refused` already pins.
 

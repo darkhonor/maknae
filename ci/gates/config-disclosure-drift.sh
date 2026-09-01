@@ -54,6 +54,14 @@ SURFACE=(
   # covers both spellings -- and the check below enforces that precondition
   # rather than leaving it as an assumption.
   "crates/maknae-config/src/ceiling.rs|Ceiling|core.handling.ceiling|7"
+  # `admin.status` is a SECOND disclosure surface. `StatusView` carries
+  # `transport.socket_path` (as `listener`), and `admin.status` /
+  # `admin.config.show` are INDEPENDENT grants -- a role granted only the
+  # former receives it without the latter, so the argument that "config.show
+  # discloses it anyway" does not cover this path. Adding `au3_1`,
+  # `vault.addr` or `principal.home` to this struct later would otherwise pass
+  # every gate here. Prefix `status.` so its fields carry their own decisions.
+  "crates/maknae-proto/src/wire.rs|StatusView|status|4"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their
@@ -379,7 +387,13 @@ if ! dupes=$(comm -23 "$tmp/man_paths_dup" "$tmp/man_paths") || [ -n "${dupes:-}
   echo "FAIL: duplicate manifest path(s) — two decisions for one path:"
   printf '  %s\n' $dupes; exit 1
 fi
-awk -F'\t' '$1!="mask"{print $1 "\t" $2}' "$tmp/man_raw" | sort -u > "$tmp/man_code"
+# Only `disclose`/`omit` are CODE-BACKED -- they must appear in DISCLOSABLE /
+# SUPPRESSED. `mask` is the default and appears in neither. `always` is a
+# fourth disposition for a field that ships BY CONSTRUCTION on a different
+# surface (`StatusView`, which `admin.status` returns whole) -- there is no
+# allowlist entry to match, but the field still needs a recorded decision, and
+# check 4b still forces one for every struct field.
+awk -F'\t' '$1=="disclose" || $1=="omit"{print $1 "\t" $2}' "$tmp/man_raw" | sort -u > "$tmp/man_code"
 
 # 4a. The code's two lists must match the manifest's non-mask rows exactly.
 if ! diff -u "$tmp/man_code" "$tmp/code" > "$tmp/d1"; then

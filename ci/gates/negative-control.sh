@@ -557,7 +557,18 @@ cfg_fixture() { # <manifest> [extra-struct-field] [extra-disclosable-entry]
   local fixture
   fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
-           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src"
+           "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
+           "$fixture/crates/maknae-proto/src"
+  # `StatusView` is the second disclosure surface (admin.status returns it
+  # whole); the gate's SURFACE table names it, so a fixture needs it too.
+  cat > "$fixture/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub struct StatusView {
+    pub version: String,
+    pub protocol_version: u16,
+    pub listener: String,
+    pub authz_backend: String,
+}
+FIX
   # The gate cross-checks its SURFACE list against the section registry, so a
   # fixture needs one.
   cat > "$fixture/crates/maknae-kernel/src/boot.rs" <<'FIX'
@@ -655,6 +666,10 @@ disclose	principal	readable via getpwuid anyway
 disclose	audit.jsonl_path	the log the operator is looking for
 omit	vault.insecure_plaintext_secret_path	presence is the finding
 omit	core.handling	presence says an above-baseline ceiling is configured
+always	status.version	ships by construction
+always	status.protocol_version	ships by construction
+always	status.listener	ships by construction
+always	status.authz_backend	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 
@@ -701,7 +716,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 12 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 16 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -832,7 +847,7 @@ expect_reject "config-disclosure-drift/duplicate-code-entry" "$fx/ci/gates/confi
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided, 23 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 16 paths decided, 27 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
@@ -840,7 +855,7 @@ expect_accept "config-disclosure-drift/clean-fixture-passes" ": 12 paths decided
 # (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
 # control; asserting it here means any future silent shrink is a red build.
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 24 paths decided, 23 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 28 paths decided, 27 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----

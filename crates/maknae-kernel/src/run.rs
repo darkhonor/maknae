@@ -2247,15 +2247,6 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Boot-gate integration tests (spec §5.4/§5.2-§5.3, Task 7). Full `run_inner`
-// over a real temp config dir (the boot.rs / maknae-vault client.rs fixture
-// pattern) — the authz gate now sits BEFORE the plane client is even
-// constructed, so cases (a)/(b) need no live Vault at all; case (c) reaches
-// past the gate into client construction + the posture record and is expected
-// to fail LATER, at `mint()` (no live Vault in a unit test), which proves it
-// got past the gate.
-#[cfg(unix)]
 #[cfg(test)]
 mod subject_list_offload_tripwire {
     /// STRUCTURAL TRIPWIRE, deliberately — not a behavioural test.
@@ -2283,14 +2274,30 @@ mod subject_list_offload_tripwire {
         // strings would otherwise be found as if they were the production arm.
         // (They were: an index-based split landed between the shared-arm
         // pattern and the payload arm, and the tripwire failed on clean source.)
-        let prod = &src[..src
-            .find("mod subject_list_offload_tripwire")
-            .expect("this module")];
+        // Cut at the FIRST test module, not just this one. `rfind` over
+        // everything above would silently retarget onto the first future unit
+        // test that writes the same arm pattern, where it would pass or fail
+        // for reasons unrelated to the offload.
+        let cut = src
+            .find("\nmod tests {")
+            .or_else(|| src.find("mod subject_list_offload_tripwire"))
+            .expect("a test module");
+        let prod = &src[..cut];
         let arm_start = prod
             .rfind("Dispatch::SubjectListRequested => {")
             .expect("the payload arm exists");
         let arm = &prod[arm_start..];
-        let body = &arm[..arm.find("match enumerated {").expect("arm shape")];
+        let with_comments = &arm[..arm.find("match enumerated {").expect("arm shape")];
+        // CODE only. The needles are plain `contains`, and this arm carries a
+        // long explanatory comment naming every one of them -- so a regression
+        // that inlined the call while keeping the prose would have satisfied
+        // the whole loop.
+        let body: String = with_comments
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = body.as_str();
         for needle in [
             "authz_decide_breaker()",
             "begin_attempt_at",
@@ -2313,6 +2320,15 @@ mod subject_list_offload_tripwire {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Boot-gate integration tests (spec §5.4/§5.2-§5.3, Task 7). Full `run_inner`
+// over a real temp config dir (the boot.rs / maknae-vault client.rs fixture
+// pattern) — the authz gate now sits BEFORE the plane client is even
+// constructed, so cases (a)/(b) need no live Vault at all; case (c) reaches
+// past the gate into client construction + the posture record and is expected
+// to fail LATER, at `mint()` (no live Vault in a unit test), which proves it
+// got past the gate.
+#[cfg(unix)]
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;

@@ -49,6 +49,19 @@ pub trait Authorizer {
     ///
     /// Defaulted rather than required: a backend that does not name itself
     /// reports `unknown`, which is honest.
+    ///
+    /// **MUST NOT perform I/O, and MUST NOT block.** The kernel calls this
+    /// inline on an async worker, unlike [`Authorizer::subjects`], which it
+    /// offloads to the blocking pool under a timeout and circuit breaker.
+    ///
+    /// The asymmetry is deliberate and is a property of the two contracts, not
+    /// of the call sites. `subjects` is REQUIRED to be live — bindings are
+    /// re-read per request so a containment edit bites on the next one — so
+    /// reading a policy file is what implementing it correctly means. A
+    /// backend's own NAME is an identifier it already knows; resolving one
+    /// from a version file, a `dlopen`'d handle, or an IPC probe would pin a
+    /// tokio worker with no timeout and no breaker, which is the failure the
+    /// `subjects` offload exists to prevent. Compute the name at construction.
     fn backend_name(&self) -> String {
         "unknown".to_string()
     }
@@ -83,10 +96,11 @@ mod tests {
             None,
             "the default must be `cannot enumerate`, NOT an empty list"
         );
-        assert_eq!(OnlyDecides.backend_name(), "unknown");
-        assert!(
-            !OnlyDecides.backend_name().is_empty(),
-            "an empty name is not an honest answer"
+        assert_eq!(
+            OnlyDecides.backend_name(),
+            "unknown",
+            "a backend that does not name itself says so; an empty string is not \
+             an honest answer"
         );
     }
 
