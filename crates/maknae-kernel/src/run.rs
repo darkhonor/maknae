@@ -113,10 +113,11 @@ pub struct WhereCtx {
 /// `handle` still holds raw configuration in the same scope as the arm that
 /// answers `admin.config.show`: `cfg` (the whole `transport` section --
 /// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
-/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). A future
-/// `admin.status` arm wanting "which socket am I on?" finds `cfg.socket_path`
-/// sitting right there. **Any new arm that reaches for one of those owes the
-/// same disclosure argument this one made** -- the boot-time redaction protects
+/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). That debt has since been
+/// PAID once: the `admin.status` arm wanting "which socket am I on?" found
+/// `cfg.socket_path` sitting right there, and `listener` is disclosed under
+/// ADR-0010 decision 16 with its own argument and its own gate row. **Any
+/// further arm that reaches for one of those owes the same argument** -- the boot-time redaction protects
 /// the `Document`, not the request path in general.
 ///
 /// It is also a BOOT SNAPSHOT. The authz policy is deliberately re-read per
@@ -350,6 +351,10 @@ pub async fn handle<S, E, P>(
     authorizer: Arc<P>,
     principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
+    // Captured ONCE at boot from the same authorizer (static TCB: the backend
+    // set cannot change in-process, so per-request asking could only repeat
+    // this string while running operand code inline on the worker).
+    authz_backend_name: Arc<String>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -755,7 +760,11 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::Pong | Dispatch::WhoamiRequested | Dispatch::ConfigShowRequested => {
+        Dispatch::Pong
+        | Dispatch::WhoamiRequested
+        | Dispatch::ConfigShowRequested
+        | Dispatch::StatusRequested
+        | Dispatch::SubjectListRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -783,6 +792,166 @@ pub async fn handle<S, E, P>(
                 // Already redacted at boot; this arm only hands it over. No
                 // redaction happens here, deliberately -- see `ConfigView`.
                 Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
+                Dispatch::StatusRequested => Payload::Status(maknae_proto::StatusView {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: PROTOCOL_VERSION,
+                    listener: cfg.socket_path.display().to_string(),
+                    // Asked of the PDP, not hardcoded -- ONCE, at boot, where
+                    // a blocking backend hangs startup loudly instead of
+                    // eating a tokio worker per granted request (the seam doc's
+                    // "MUST NOT block" is a contract, not an enforcement).
+                    // Panic-guarded and sanitized at capture; the request path
+                    // runs no operand code for this field.
+                    authz_backend: (*authz_backend_name).clone(),
+                }),
+                // LIVE, via the seam. `None` means the backend cannot
+                // enumerate, and that is reported as unavailable below --
+                // never as an empty list, which would claim "no bindings
+                // exist" and is a different, dangerous answer.
+                // OFFLOADED, bounded, and breaker-admitted -- the SAME
+                // discipline the decide path gets 250 lines above, and for the
+                // same reason stated there: `subjects()` reaches
+                // `load_authz`, which is sync file I/O on /etc/maknae. Called
+                // inline it pins a tokio worker for as long as that read
+                // blocks, and N granted calls against a wedged NFS/FUSE mount
+                // starve the runtime -- with the breaker unable to trip,
+                // because it never sees them.
+                //
+                // The seam's `-> Option<..>` signature is what made this look
+                // synchronous-and-cheap at the call site. It is a policy file
+                // read.
+                Dispatch::SubjectListRequested => {
+                    let subj_breaker = authz_decide_breaker();
+                    let admission = { subj_breaker.lock().await.begin_attempt_at(Instant::now()) };
+                    let enumerated = match admission {
+                        BreakerAdmission::RefuseOpen => Err("enumeration circuit breaker open"),
+                        BreakerAdmission::RefuseAtCapacity => {
+                            Err("enumeration blocking worker budget exhausted")
+                        }
+                        BreakerAdmission::Admit => {
+                            let a = Arc::clone(&authorizer);
+                            let out = tokio::time::timeout(
+                                authz_decide_timeout,
+                                tokio::task::spawn_blocking(move || {
+                                    maknae_security::guarded_subjects(&*a)
+                                }),
+                            )
+                            .await;
+                            match out {
+                                Ok(Ok(Some(v))) => {
+                                    subj_breaker.lock().await.record_success();
+                                    Ok(v)
+                                }
+                                // The backend ANSWERED, and its answer is "I
+                                // cannot enumerate" -- permanent, benign, and
+                                // the shipped default's state. An auditor must
+                                // be able to tell it from a wedged mount.
+                                Ok(Ok(None)) => {
+                                    subj_breaker.lock().await.record_success();
+                                    Err("backend does not enumerate bindings")
+                                }
+                                // A JOIN failure is not counted against the
+                                // breaker -- same as the decide path, where a
+                                // panicked/cancelled task is not evidence that
+                                // the filesystem is wedged.
+                                Ok(Err(_join)) => {
+                                    subj_breaker.lock().await.record_success();
+                                    Err("enumeration failed (join)")
+                                }
+                                // A TIMEOUT is, and it is the signal that
+                                // trips: repeated blocking reads against a
+                                // stalled mount must stop spawning more.
+                                Err(_elapsed) => {
+                                    if subj_breaker.lock().await.record_timeout_at(Instant::now())
+                                        == BreakerTransition::Tripped
+                                    {
+                                        eprintln!(
+                                            "maknaed: authorization decision circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more policy work",
+                                            authz_decide_timeout.as_secs()
+                                        );
+                                    }
+                                    Err("enumeration timed out")
+                                }
+                            }
+                        }
+                    };
+                    match enumerated {
+                        Ok(mut b) => {
+                            b.sort_by(|x, y| x.role.cmp(&y.role));
+                            Payload::SubjectList(
+                                b.into_iter()
+                                    .map(|s| maknae_proto::RoleBindingView {
+                                        role: s.role,
+                                        members: s.members,
+                                    })
+                                    .collect(),
+                            )
+                        }
+                        Err(why) => {
+                            // A SECOND record, correcting the posture.
+                            //
+                            // The record for this request was appended as
+                            // `permit / authorized` before dispatch, and the
+                            // enumeration then refused -- so the trail asserted
+                            // an authorized-and-SERVED admin.subject.list for a
+                            // request whose caller received `Internal`.
+                            // ADR-0019 pins `unavailable` in the posture domain
+                            // precisely so a Permit-then-not-performed cannot
+                            // read as a completed action, and the read PEP maps
+                            // these same four conditions -- breaker open, at
+                            // capacity, timeout, join failure -- to
+                            // `deny`/`unavailable`.
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                // The SPECIFIC condition. Five paths reach
+                                // here and only one is benign: "this backend
+                                // does not enumerate" is the shipped default's
+                                // permanent state, while "the breaker is open"
+                                // is an incident. Collapsing them made the
+                                // POSTURE parity with the read PEP true and the
+                                // REASON parity false -- which the comment
+                                // claimed.
+                                &format!("binding enumeration unavailable: {why}"),
+                                "unavailable",
+                                &au3_1,
+                            )
+                            .await;
+                            // Gated on the CORRECTIVE record's own result, not
+                            // the admission record's. An earlier comment here
+                            // argued a guard would be a literal `if true` --
+                            // which is true of `appended`, and irrelevant: the
+                            // value in hand is a SECOND, freshly meaningful
+                            // bool. Discarding it left the degraded-sink case
+                            // with a trail whose only surviving record says
+                            // `permit / authorized / authorized` -- affirming a
+                            // disclosure that did not happen, the exact failure
+                            // this corrective record was added to prevent --
+                            // while `emit_request_outcome` printed "withholding
+                            // the frame" and the frame went out anyway.
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    ProtoErrCode::Internal,
+                                    "binding enumeration unavailable",
+                                )
+                                .await;
+                            }
+                            close_bounded(&mut stream).await;
+                            return;
+                        }
+                    }
+                }
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
             };
@@ -793,10 +962,11 @@ pub async fn handle<S, E, P>(
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
             if let Ok(bytes) = encode_response(&response) {
-                // SIZE-BOUNDED, like the read path. `ConfigView` is the only
-                // payload here that scales with input (one entry per config
-                // leaf); `Pong` and `Whoami` never approach the cap, so the
-                // check is free for them and load-bearing for the third.
+                // SIZE-BOUNDED, like the read path. TWO payloads here scale
+                // with input: `ConfigView` (one entry per config leaf) and
+                // `SubjectList` (one per `bindings:` entry). `Pong` and
+                // `Whoami` never approach the cap, so the check is free for
+                // them and load-bearing for the other two.
                 //
                 // Without it the daemon writes an oversized frame that the
                 // client's own `read_frame(frame_max_bytes)` refuses as a
@@ -806,13 +976,48 @@ pub async fn handle<S, E, P>(
                 // unchanged: a PERMIT whose delivery is refused is refused
                 // EXPLICITLY, never truncated and never silently oversized.
                 if bytes.len() > cfg.frame_max_bytes {
-                    write_error_bounded(
-                        &mut stream,
-                        &cfg,
-                        ProtoErrCode::TooLarge,
-                        "response exceeds the configured frame limit",
+                    // A CORRECTIVE record, the same shape the enumeration-
+                    // unavailable branch uses 60 lines above -- and for the
+                    // identical reason, which this arm missed because it emits
+                    // the record BEFORE discovering the oversize. (The read PEP
+                    // never has this problem: `read_budget` bounds the read, so
+                    // it computes the refusal first and emits once.)
+                    //
+                    // Without it the trail asserts an authorized-and-SERVED
+                    // disclosure for a caller that received TooLarge. ADR-0019
+                    // pins `refused-oversize` for exactly this, and the read
+                    // PEP already uses it; `permit` is retained because the
+                    // decision WAS a permit -- only the delivery was refused.
+                    let corrected = emit_request_outcome(
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        session_id,
+                        seq.next(),
+                        verb_to_action(&request.verb),
+                        None,
+                        None,
+                        "permit",
+                        "delivery refused: response exceeds the frame limit",
+                        "refused-oversize",
+                        &au3_1,
                     )
                     .await;
+                    // Same gate as every other outcome record on this loop:
+                    // if the correction cannot be recorded, the trail still
+                    // reads `permit / authorized / authorized`, so nothing may
+                    // go back to the caller.
+                    if may_respond(corrected) {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            ProtoErrCode::TooLarge,
+                            "response exceeds the configured frame limit",
+                        )
+                        .await;
+                    }
                     close_bounded(&mut stream).await;
                     return;
                 }
@@ -821,6 +1026,40 @@ pub async fn handle<S, E, P>(
                     write_frame(&mut stream, &bytes),
                 )
                 .await;
+            } else {
+                // NO PATH out of this arm may have recorded `authorized`
+                // without delivering. Practically unreachable -- ciborium into
+                // a Vec, for owned types -- but it is the third instance of
+                // the shape the last two rounds closed, on the same arm, and
+                // this branch widened it by adding a second variable-size
+                // payload. Recording it costs nothing; discovering it from a
+                // trail that says "served" would cost an incident.
+                let corrected = emit_request_outcome(
+                    &emit,
+                    &host,
+                    &socket,
+                    peer_uid,
+                    &peer_uri,
+                    session_id,
+                    seq.next(),
+                    verb_to_action(&request.verb),
+                    None,
+                    None,
+                    "permit",
+                    "delivery failed: response could not be encoded",
+                    "unavailable",
+                    &au3_1,
+                )
+                .await;
+                if may_respond(corrected) {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::Internal,
+                        "response encoding failed",
+                    )
+                    .await;
+                }
             }
         }
         // UNUSED, and that is the design showing through: the read arm no longer
@@ -1206,6 +1445,7 @@ pub async fn accept_loop<A, E, P>(
     authorizer: Arc<P>,
     principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
+    authz_backend_name: Arc<String>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1305,6 +1545,7 @@ where
                                 let authorizer = Arc::clone(&authorizer);
                                 let principal = Arc::clone(&principal);
                                 let config_view = Arc::clone(&config_view);
+                                let authz_backend_name = Arc::clone(&authz_backend_name);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1394,6 +1635,7 @@ where
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer, principal,
                                                 config_view,
+                                                authz_backend_name,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
@@ -1902,6 +2144,14 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             },
         ))
     };
+    // Asked of the PDP ONCE, at boot -- not per request. The backend set is
+    // fixed for the life of the process (static TCB, ADR-0002: no hot-swap),
+    // so a per-request call could only ever return the same string, while
+    // handing every granted `admin.status` an unbounded inline invocation of
+    // operand code on a tokio worker -- the seam doc's "MUST NOT block" is a
+    // contract, not an enforcement (codex round-11 P2). A backend that blocks
+    // here hangs BOOT, loudly, instead of quietly eating workers in service.
+    let authz_backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -1915,6 +2165,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         // Redact ONCE, here, at boot. The run loop receives only the view;
         // the unredacted Document does not travel with it.
         config_view,
+        authz_backend_name,
     )
     .await;
 
@@ -1944,6 +2195,8 @@ async fn serve_after_mint(
     principal: Arc<Principal>,
     // Already redacted at boot — the raw Document never reaches the run loop.
     config_view: Arc<ConfigView>,
+    // Captured at boot, same discipline as `config_view` (see run_inner).
+    authz_backend_name: Arc<String>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -1980,6 +2233,7 @@ async fn serve_after_mint(
         authorizer,
         principal,
         config_view,
+        authz_backend_name,
     )
     .await;
     Ok(outcome)
@@ -2140,6 +2394,84 @@ mod tests {
         let outcome = drain_handlers_bounded(&mut handlers, Duration::from_secs(5)).await;
         assert_eq!(outcome, DrainOutcome::Completed);
         assert!(handlers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod subject_list_offload_tripwire {
+    /// STRUCTURAL TRIPWIRE, deliberately — not a behavioural test.
+    ///
+    /// The property: `authorizer.subjects()` reaches `load_authz`, which is
+    /// sync file I/O on `/etc/maknae`, so it must run on the blocking pool
+    /// under the decide breaker and timeout. Called inline it pins a tokio
+    /// worker for as long as that read blocks, and N granted calls against a
+    /// wedged NFS/FUSE mount starve the runtime with the breaker unable to
+    /// trip, because it never sees them.
+    ///
+    /// That failure is not reproducible at unit scale — it needs a hung
+    /// filesystem and runtime saturation. A behavioural test that "passes"
+    /// against an inline call would be FALSE COVERAGE, which is worse than no
+    /// test: reverting the offload leaves it green. Verified: reverting to the
+    /// inline call keeps the whole e2e suite green.
+    ///
+    /// So this asserts the SHAPE instead, and says so in its name. It is the
+    /// labelled-tripwire form the project's standing rule prescribes for
+    /// exactly this case.
+    #[test]
+    fn subject_list_enumeration_is_offloaded_not_inline() {
+        let src = include_str!("run.rs");
+        // Cut this module off first: it reads its own file, so its own needle
+        // strings would otherwise be found as if they were the production arm.
+        // (They were: an index-based split landed between the shared-arm
+        // pattern and the payload arm, and the tripwire failed on clean source.)
+        // Cut at the FIRST test module, not just this one. `rfind` over
+        // everything above would silently retarget onto the first future unit
+        // test that writes the same arm pattern, where it would pass or fail
+        // for reasons unrelated to the offload.
+        let cut = src
+            .find("\nmod tests {")
+            .or_else(|| src.find("mod subject_list_offload_tripwire"))
+            .expect("a test module");
+        let prod = &src[..cut];
+        let arm_start = prod
+            .rfind("Dispatch::SubjectListRequested => {")
+            .expect("the payload arm exists");
+        let arm = &prod[arm_start..];
+        let with_comments = &arm[..arm.find("match enumerated {").expect("arm shape")];
+        // CODE only -- forward defence, and the rationale is corrected here
+        // rather than left overstated. An earlier version claimed this arm
+        // "carries a long explanatory comment naming every one of them, so a
+        // regression that kept the prose would have satisfied the loop". That
+        // was never true of any version: the long comment sits ABOVE the
+        // `rfind` anchor and is excluded by construction, and none of the five
+        // needles appears in the seven comment lines actually scanned. The
+        // strip is cheap insurance against a future comment that does; the
+        // claim that it was already load-bearing was argued, not measured.
+        let body: String = with_comments
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = body.as_str();
+        for needle in [
+            "authz_decide_breaker()",
+            "begin_attempt_at",
+            "tokio::time::timeout",
+            "spawn_blocking",
+            "record_timeout_at",
+        ] {
+            assert!(
+                body.contains(needle),
+                "`subjects()` must run under the same offload discipline as the \
+                 decide path — missing `{needle}`. If this is a deliberate \
+                 change, the sync policy read is back on the async worker."
+            );
+        }
+        assert!(
+            !body.contains("= authorizer.subjects();"),
+            "a bare inline `authorizer.subjects()` is the exact regression this \
+             tripwire exists to catch"
+        );
     }
 }
 

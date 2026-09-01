@@ -318,6 +318,15 @@ $ maknae whoami
 maknae://<deployment_id>/plane/cli uid=<your uid>
 ```
 
+The three `admin.*` subcommands are reachable from the same CLI —
+`maknae status` (daemon version, protocol version, listener, deciding backend),
+`maknae config-show` (the effective configuration, secrets rendered
+`<value set>`), and `maknae subject-list` (the role bindings the PDP is using
+right now, read live rather than from a boot snapshot). All three ship
+**ungranted**: nothing in the packaged `authz.yaml` names them, so each answers
+`not authorized` until a site adds a `roles:` grant. A refusal here is the
+default posture, not a fault to debug — check the grant before the daemon.
+
 Exit code `0` on both **when run as the enrolled principal**. A non-`maknae`-group
 uid, an in-group-but-NOT-enrolled uid (per-request deny since #77 — the CLI prints
 `maknae: daemon refused: Unauthorized: not authorized`), an expired/wrong-plane cert,
