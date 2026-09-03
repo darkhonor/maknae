@@ -75,6 +75,33 @@ impl Fixture {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // CANONICAL, or the delegated lane never matches (#216). `verify_delegated`
+        // prefix-checks the KERNEL-reported path of the subject's descriptor against
+        // this directory as `confined_beneath`, and the kernel reports the resolved
+        // form: on macOS `temp_dir()` is `$TMPDIR` under `/var`, a symlink to
+        // `/private/var`, so an unresolved home here fails `strip_prefix`, the OS
+        // answer is never established, and every delegated read denies with
+        // `os accessibility unknown` -- four tests red on darwin since PR #199,
+        // five as of #215, unseen because `maknae-kernel` is outside the macOS CI lane.
+        // The blast radius was larger than the reds. Two deny-asserting tests that
+        // delegate a descriptor were passing VACUOUSLY on darwin:
+        // `a_hardlink_alias_of_a_denied_file_is_refused` was denied at confinement
+        // before the nlink check it exists to prove -- `verify_delegated` runs
+        // `strip_prefix` BEFORE `check_target`, where nlink lives, and the test's
+        // `contains("os dac")` cannot tell the two apart. (ADR-0009 §5 said the
+        // reverse, "refused before confinement is even consulted"; corrected in
+        // place, dated, in this same change.)
+        // `a_permit_outside_the_anchored_root_is_refused_distinctly`
+        // was doubly masked -- the `/var` mismatch AND its
+        // unresolved absolute allow glob -- so deleting the confinement check
+        // outright would have left it green under its then `result == deny`-only
+        // assertion. NOT vacuous, for the record: the symlink-alias case was
+        // outright red (it asserts the resolved `.ssh` path), and the
+        // group-writable-home case fails at root soundness, which precedes
+        // confinement -- it reached its own check unaffected. Same remedy as `maknae-io`'s own
+        // `confinement_root()` fixture. A fixture that only works where the temp dir
+        // is a real directory is testing the host, not the code.
+        let dir = dir.canonicalize().expect("canonicalize the fixture home");
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
@@ -511,6 +538,156 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
 }
 
+/// #216-TRIPWIRE -- PINS CURRENT BEHAVIOUR, not a desired property. The enrolled home
+/// (`principal.home`) is written by `maknae enroll` VERBATIM from `getpwuid` --
+/// the directory service's value, not an operator's choice, and re-derived on every
+/// enroll -- and the daemon feeds that one value to at least THREE consumers: the
+/// delegated lane's confinement root (`handler::delegated_plan`, reached at decision
+/// time AND again inside the read PEP), which is prefix-checked against the
+/// KERNEL-reported path of the subject's descriptor; the `~` referent of every
+/// policy glob (`PathGlob::parse`); and the boot-time anchor probe in `run.rs`.
+/// (Enroll consumes it too, for the CLI dir and the `_maknae` read-ACL grant -- the
+/// surface the production ruling must cover.) Here the home is a SYMLINK to the real
+/// directory. The kernel reports the resolved form, the configured form never
+/// prefix-matches, the OS's answer is never established, and a read of the enrolled
+/// home -- one the operator's `Read(~/**)` grant was written to cover, and which the
+/// positive control below proves IS permitted under the canonical home -- is refused
+/// fail-closed with `os accessibility unknown`: the same fail-closed form mismatch
+/// ADR-0009 decision 4's macOS bullet names for firmlinks, and what a
+/// `/home -> /export/home` layout does to a real deployment whose passwd entry says
+/// `/home/alex`. (Once a descriptor verifies and the RESOLVED path is stamped, the
+/// symlinked home's `~` globs do not match it either -- see the next paragraph --
+/// which is why the name does not say "the policy permits".)
+///
+/// Canonicalizing ONLY `confined_beneath` does not make this read succeed: the `~`
+/// globs -- allow and deny alike -- still expand from the configured string, so the
+/// resolved path matches nothing and the deny merely changes reason
+/// (`no capability entry`). It becomes a genuine deny-turned-permit only where an
+/// operator wrote an ABSOLUTE allow glob covering the resolved path beside
+/// `~`-form denies: the allow matches, the denies never do. Either way the fix must
+/// establish one canonical form for every consumer; when it lands, this test is
+/// flipped DELIBERATELY. Until then: a spurious Deny, never a bypass -- and the
+/// authorizer here is built from the SAME symlinked principal the PEP sees, so a
+/// ROOT-only partial fix changes the asserted reason (to `no capability entry`)
+/// rather than silently satisfying it. A GLOB-only partial fix (canonical `~`
+/// referent, unresolved confinement root) still fails confinement and is
+/// invisible here -- one more reason the ruling must land at or above
+/// `Principal`, where neither half can be fixed alone.
+#[tokio::test]
+async fn a_symlinked_principal_home_denies_a_read_beneath_the_enrolled_home() {
+    let fx = Fixture::new("symroot");
+    fx.write_policy(SHIPPED_POLICY);
+    let content: &[u8] = b"reachable only via the link";
+    std::fs::write(fx.dir.join("notes.txt"), content).unwrap();
+    let me = nix::unistd::geteuid().as_raw();
+
+    // POSITIVE CONTROL: the identical object through the identical policy with the
+    // REAL (canonical) home is permitted and returns the bytes. This establishes
+    // that the object, the policy and the fixture are sound -- so the deny below
+    // is attributable to the home's FORM. (It does not by itself prove a descriptor
+    // was delegated through the link; the `std::fs::read` check before the second
+    // drive does that, because `drive_read` swallows a failed subject open and an
+    // undelivered descriptor yields the identical `os accessibility unknown`.)
+    let real_target = fx.dir.join("notes.txt").to_string_lossy().into_owned();
+    let ctl = RecEmit::new();
+    let frame = drive_read(
+        &fx.principal,
+        fx.authorizer(),
+        ctl.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: real_target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&real_target),
+    )
+    .await
+    .expect("positive control answers");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
+        other => panic!("positive control must PERMIT through the real home, got {other:?}"),
+    }
+    assert_eq!(request_record(&ctl.records()).outcome.result, "permit");
+
+    // The link lives BESIDE the canonical real dir -- same parent, so on both
+    // platforms the link-vs-real component is the ONLY form difference; anchored
+    // under the unresolved `temp_dir()` the darwin deny would be over-determined
+    // by the `/var -> /private/var` mismatch as well. It sits OUTSIDE `fx.dir`
+    // because it is about to BE the confinement root, not an object beneath one
+    // -- which also means `Fixture::drop` will not clean it, hence the explicit
+    // `remove_file` after the drive. `stat` of the root follows it to the real,
+    // 0700, euid-owned directory and the root-soundness check passes.
+    let link = fx
+        .dir
+        .parent()
+        .expect("canonical fixture dir has a parent")
+        .join(format!("enforce_symroot_link_{}", std::process::id()));
+    if std::fs::symlink_metadata(&link).is_ok() {
+        std::fs::remove_file(&link).expect("clear a stale entry at the fixture link path");
+    }
+    std::os::unix::fs::symlink(&fx.dir, &link).unwrap();
+    let via_link = maknae_config::Principal {
+        home: link.clone(),
+        ..fx.principal.clone()
+    };
+    // ONE principal for both consumers, as production wires it: the PDP expands
+    // `~` against the link, and the PEP confines beneath the link.
+    let pdp_via_link = Arc::new(
+        HermeticAuthorizer::new(fx.dir.join("authz.yaml"), via_link.clone(), seam_req())
+            .expect("policy constructs against the symlinked home"),
+    );
+    // The subject opens THROUGH the link, as a real client would with a home it
+    // was told about; the kernel still reports the resolved form.
+    let target = link.join("notes.txt").to_string_lossy().into_owned();
+    // The subject CAN open through the link -- so a descriptor IS delegated below,
+    // and the deny that follows is confinement's, not "no descriptor arrived".
+    assert_eq!(
+        std::fs::read(&target).expect("the subject can open the object through the link"),
+        content
+    );
+
+    let emit = RecEmit::new();
+    let frame = drive_read(
+        &via_link,
+        pdp_via_link,
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+    )
+    .await
+    .expect("a deny frame");
+    let _ = std::fs::remove_file(&link);
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized", "no reason may reach the wire");
+        }
+        other => panic!(
+            "a symlinked principal.home is expected to DENY today (#216); if this \
+             read succeeded, the canonical-form fix landed for BOTH consumers -- \
+             flip this test deliberately. Got {other:?}"
+        ),
+    }
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(
+        req.outcome.reason, "os dac: os accessibility unknown",
+        "the OS answer is never established through a mismatched confinement root; \
+         a partial fix that canonicalizes only the root would surface here as \
+         `no capability entry` instead"
+    );
+    // No verified object, so the trail records what was ASKED (the link form) and
+    // nothing to diverge from it: `run.rs`'s `object_path` falls back to the
+    // client's string when `verified_read` is `None`, and `object_asked` is
+    // `Some` only when the decided path differs from it.
+    assert_eq!(req.object.as_deref(), Some(target.as_str()));
+    assert!(req.object_requested.is_none());
+}
+
 #[tokio::test]
 async fn a_permitted_read_returns_the_file_bytes() {
     let fx = Fixture::new("readok");
@@ -641,11 +818,24 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRET").unwrap();
     std::fs::set_permissions(
         fx.dir.join(".ssh/id_rsa"),
-        std::fs::Permissions::from_mode(0o644), // other-readable so ONLY nlink refuses
+        // Other-readable. Historically this kept the PEP's mode check out of the way
+        // so ONLY nlink could refuse; under ADR-0009 `delegated_plan` sets the
+        // target's `owner`/`mode_mask` to `None`, so mode is never evaluated here
+        // and the line is now belt-and-braces (noted 2026-09-04, #216).
+        std::fs::Permissions::from_mode(0o644),
     )
     .unwrap();
     std::fs::hard_link(fx.dir.join(".ssh/id_rsa"), fx.dir.join("innocent")).unwrap();
     let target = fx.dir.join("innocent").to_string_lossy().into_owned();
+    // The subject CAN open the alias, so a descriptor IS delegated below and the
+    // `os dac` refusal that follows is not "no descriptor arrived". That rules
+    // out ONE of the two ways this pass goes vacuous; the other -- a confinement
+    // refusal upstream of the nlink check (#216) -- is held only by
+    // `Fixture::new`'s canonicalize, and this assertion cannot see it.
+    assert_eq!(
+        std::fs::read(&target).expect("the subject can open the hard-link alias"),
+        b"SECRET"
+    );
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
@@ -923,17 +1113,39 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // An operator-added absolute grant for a tree OUTSIDE the enrolled home. The
     // object is CREATED rather than borrowed from `/etc`: the old fixture granted
     // `Read(/etc/**)` and delegated `/etc/hostname`, neither of which exists on
-    // macOS — caught by the darwin-native CI job.
+    // macOS — caught by the darwin-native CI job in `maknae-io`'s PARALLEL fixture
+    // (`delegated.rs`, the `a_file` helper) and fixed here by inspection. Corrected
+    // 2026-09-04 (#216): this suite is outside `DARWIN_CRATES` and has never run on
+    // that job; the sentence as first written attributed the sibling's catch to it.
     let outside_dir =
         std::env::temp_dir().join(format!("enforce_offhome_obj_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside_dir);
     std::fs::create_dir_all(&outside_dir).unwrap();
+    // Canonical for fixture hygiene, matching `Fixture::new` (#216); it does not
+    // change this test's outcome. The grant below is never consulted: the object
+    // is outside `principal.home`, so `verify_delegated` fails confinement, no OS
+    // answer is stamped, and the `fs.read` arm's os-dac gate denies BEFORE
+    // `decide_fs` (the only caller of the glob matcher) ever runs. The reason
+    // assertion below is what pins that ordering: were the gate bypassed, the
+    // ASKED path is what gets stamped (no verified object), the glob written
+    // from the same variable matches it, and either matcher answer -- permit or
+    // `no capability entry` -- changes the reason. The mutant dies in both
+    // path forms.
+    let outside_dir = outside_dir
+        .canonicalize()
+        .expect("canonicalize the outside dir");
     let outside = outside_dir.join("obj");
     std::fs::write(&outside, b"outside the enrolled home").unwrap();
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow:\n    - \"Read({}/**)\"\n  deny: []\n",
         outside_dir.display()
     ));
+    // The subject CAN open the object, so a descriptor IS delegated and the
+    // refusal below is confinement's, not "no descriptor arrived".
+    assert_eq!(
+        std::fs::read(&outside).expect("the subject can open the outside object"),
+        b"outside the enrolled home"
+    );
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive_read(
@@ -967,6 +1179,21 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
+    // "Distinctly": a composed Deny at the PDP, not a delivery refusal. A
+    // `ReadRefusal::Refused` renders the same wire triple and the same
+    // `deny` result but can never carry this reason -- and the reason also
+    // proves the os-dac gate short-circuited before the absolute grant was
+    // evaluated: neither a matcher permit nor a `no capability entry` abstain
+    // renders it, so a gate-bypass mutant dies here (a confinement-deletion
+    // mutant delivers bytes and dies at the frame match above). What this
+    // reason cannot do is separate "outside the
+    // anchored root" from "root soundness failed" -- both render it (see the
+    // note on `Fixture::new`); "no descriptor arrived" is ruled out by the
+    // `std::fs::read` above.
+    assert_eq!(
+        req.outcome.reason, "os dac: os accessibility unknown",
+        "an object outside the enrolled home never establishes OS access"
+    );
     let leak = b"outside the enrolled home";
     assert!(
         !frame.windows(leak.len()).any(|w| w == leak),
