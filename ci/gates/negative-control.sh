@@ -3,7 +3,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # Materialize contaminated workspaces in temp dirs and assert the REAL gate scripts reject each
 # (root-override arg). A gate that cannot be shown to fire is not a control (spec §3 P2c).
-pass=0; total=0
+pass=0; total=0; skipped=0
 expect_reject() { # <label> <cmd...> — require a genuine rejection (a printed FAIL), not merely a non-zero exit
   local label="$1"; shift; total=$((total+1))
   local out rc
@@ -199,6 +199,7 @@ EOF
   expect_reject "p2/artifact-inventory-witness" "$here/p2-artifact-witness.sh" "$tmpD"
 else
   echo "neg-skip: [p2/artifact-inventory-witness] deferred to CI (needs cargo-auditable + rust-audit-info)"
+  skipped=$((skipped+1))
 fi
 
 # --- Fixture E: coverage-tiers gate (ADR-0016) — unclassified file must FAIL.
@@ -1172,6 +1173,158 @@ PY
 expect_reject_because "config-disclosure-drift/surface-order-does-not-decide-the-vec-rule" "SUBTREE" \
   "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: the wrapper strip itself stops working. The two probes above catch it
+# only through its CONSEQUENCE (a subtree read as a leaf), and only where a
+# fixture supplies a wrapped struct -- so on the real repo, where every wrapped
+# type happens to bottom out in a scalar, a dead strip changes no verdict and no
+# count. That is exactly how #217 survived its own review: the one-line `:a; ...; ta`
+# sed form is GNU-only, BSD sed ran NO substitution, printed `unused label`, and
+# EXITED 0, so `pipefail` saw nothing and every gate run on a Mac was green with
+# its depth check silently gone.
+#
+# The mutation is the STRIP STAGE replaced by `cat`, not the sed dialect
+# reverted: reverting would probe the host's sed rather than the gate, passing
+# on BSD and failing on GNU. Neutering the stage fails identically on both, so
+# this probe pins the post-condition on every platform.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
+s = p.read_text()
+# Anchor on the wrapper-strip EXPRESSION alone, not the whole pipeline: it is
+# one short line, it is what this probe is about, and neutering only it leaves
+# the qualifier normalisation running -- so the probe cannot pass for the
+# unrelated reason that qualifiers stopped being stripped.
+strip = """-e "s/^${wrappers}<//\""""
+dead = """-e 's/^__NO_WRAPPER_EVER__<//'"""
+assert s.count(strip) == 1, "the wrapper-strip anchor moved"
+p.write_text(s.replace(strip, dead))
+PY
+expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused" \
+  "still LEADS with a wrapper" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the same dead strip, reaching the WIRE branch. `$tmp/fields` is
+# sort -u'd, so the probe above always trips on `audit.siem` (config) and the
+# `(Option|Box|Arc|Vec)` spelling of the post-condition -- the one that needs
+# `Vec` present -- is never evaluated. Retyping `siem` to a scalar makes every
+# config row scalar, so the first offender becomes `binding.members`
+# (`Vec<String>`, wire) and the wire arm is the one under test.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+g = d / "ci/gates/config-disclosure-drift.sh"
+s = g.read_text()
+strip = """-e "s/^${wrappers}<//\""""
+dead = """-e 's/^__NO_WRAPPER_EVER__<//'"""
+assert s.count(strip) == 1, "the wrapper-strip anchor moved"
+g.write_text(s.replace(strip, dead))
+a = d / "crates/maknae-config/src/audit_cfg.rs"
+t = a.read_text()
+assert t.count("pub siem: Option<String>,") == 1, "the siem anchor moved"
+a.write_text(t.replace("pub siem: Option<String>,", "pub siem: String,"))
+PY
+expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused-on-the-wire-arm" \
+  "'binding.members' has type 'Vec<String>', which reduced to 'Vec<String'" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a field declaration the extractor cannot read. The awk emits a row
+# with an EMPTY type column, and the shell cannot see it -- `IFS=$'\t' read`
+# treats tab as IFS whitespace, so the run of tabs collapses and the row
+# arrives as fpath + kind-in-fty + empty kind. An in-loop guard is unreachable;
+# worse, the emptied kind used to fall through `case` to the CONFIG wrapper set,
+# applying the wrong per-row rule at unchanged counts and EXIT=0. Validated
+# before the loop with `awk -F'\t'`, which does not collapse separators.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-config/src/transport.rs"
+s = p.read_text()
+old = "    pub read_timeout_ms: u64,\n"
+new = "    pub read_timeout_ms:\n        u64,\n"
+assert s.count(old) == 1, "the transport field anchor moved"
+p.write_text(s.replace(old, new))
+PY
+expect_reject_because "config-disclosure-drift/unreadable-field-declaration" \
+  "malformed extracted field row" \
+  "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the OTHER line-wrap shape, which is the one that walks past an
+# emptiness test. Breaking inside the generic leaves the extractor a NON-empty
+# truncation (`Option<`), which then reduces to the empty string in the strip
+# and was swallowed by the scalar skip list's `''` arm -- a subtree scored a
+# leaf at unchanged counts and EXIT=0. Probed on BOTH surface kinds because
+# `Option<` empties on either wrapper set while `Vec<` empties only on the wire
+# arm, so a config-only probe would leave the wire arm's truncation uncovered.
+for _w in config wire; do
+  fx="$(cfg_fixture "$CFG_OK")"
+  python3 - "$fx" "$_w" <<'PY'
+import pathlib, sys
+d, which = pathlib.Path(sys.argv[1]), sys.argv[2]
+if which == "config":
+    p = d / "crates/maknae-config/src/transport.rs"
+    old, new = "    pub read_timeout_ms: u64,\n", "    pub read_timeout_ms: Option<\n        Principal,\n    >,\n"
+else:
+    p = d / "crates/maknae-proto/src/wire.rs"
+    old, new = "    pub members: Vec<String>,\n", "    pub members: Vec<\n        WhoamiView,\n    >,\n"
+s = p.read_text()
+assert s.count(old) == 1, "the %s wrap anchor moved" % which
+p.write_text(s.replace(old, new))
+PY
+  expect_reject_because "config-disclosure-drift/open-angle-wrapped-declaration-$_w" \
+    "malformed extracted field row" \
+    "$fx/ci/gates/config-disclosure-drift.sh"
+done
+
+# REJECT: the struct lookup ERRORS rather than simply not matching. `|| continue`
+# could not tell grep's no-match (1) from its error (2), and `2>/dev/null` threw
+# the evidence away, so an unreadable tree scored every field a leaf with the
+# gate green -- #217's shape one stage later in the same loop. An unreadable
+# file under the fixture's `crates/` makes the lookup for `Vec<String` (which
+# matches nothing) return 2.
+#
+# SKIPPED FOR root: `chmod 000` does not stop uid 0 reading the file, so grep
+# returns 1 (no match, no error) instead of 2, the branch never fires, and the
+# probe would report NEG-FAIL for a reason that is about the runner rather than
+# the gate. CI is an unprivileged `ubuntu-latest` runner, but this project ships
+# a container surface where root is ordinary.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [config-disclosure-drift/struct-lookup-error-is-not-a-leaf] running as root; chmod 000 cannot make grep error"
+  skipped=$((skipped+1))
+else
+  fx="$(cfg_fixture "$CFG_OK")"
+  printf 'unreadable\n' > "$fx/crates/maknae-config/src/locked.rs"
+  chmod 000 "$fx/crates/maknae-config/src/locked.rs"
+  expect_reject_because "config-disclosure-drift/struct-lookup-error-is-not-a-leaf" \
+    "ERRORED (grep" \
+    "$fx/ci/gates/config-disclosure-drift.sh"
+  chmod 644 "$fx/crates/maknae-config/src/locked.rs"
+fi
+
+# ACCEPT: a FULLY-QUALIFIED wrapper is a scalar leaf, not a dead strip. The
+# post-condition above rejects a value that still leads with a strippable
+# wrapper, and `std::sync::Arc<String>` reaches that shape only if qualifiers
+# are trimmed AFTER the loop -- which is what the pipeline used to do. On `main`
+# there was no post-condition, so `std::sync::Arc<String>` reduced to
+# `Arc<String` and was accepted as a leaf SILENTLY; the danger appeared only
+# once the post-condition was added against the old trim order, where this
+# spelling (live house style: `std::ops::RangeInclusive` in transport.rs, `Arc<`
+# 60+ times across crates/) hard-failed the gate while telling the maintainer to
+# go check a sed flag. This probe pins the corrected order.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
+expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
+  ": 20 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
+# too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
+# `Principal` and was rejected as a subtree on a surface where `Vec` is a leaf
+# by the documented exemption -- a live defect the strip reorder fixes, and one
+# the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
+expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
+  ": 20 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- `flatten` never recurses into `Value::Seq` and `render` masks the
 # sequence whole -- so demanding coverage there would block legitimate work.
@@ -1209,5 +1362,14 @@ expect_reject "external-authority-lint/unqualified-foreign-adr" "$fx/ci/gates/ex
 fx="$(ea_fixture "Microkosmos ADR 0006 defines the dual-client identity pattern used here.")"
 expect_reject "external-authority-lint/unqualified-microkosmos-adr" "$fx/ci/gates/external-authority-lint.sh"
 
-echo "negative-control: $pass/$total gates proven to fire"
+# The skip count is REPORTED, because `$total` is environment-dependent: probes
+# that need `cargo-auditable`, and the root-guarded one, drop out silently and
+# a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
+# compare their local number against the full count; this is what makes that
+# comparison possible.
+if [ "${skipped:-0}" -gt 0 ]; then
+  echo "negative-control: $pass/$total gates proven to fire (${skipped} skipped in this environment)"
+else
+  echo "negative-control: $pass/$total gates proven to fire"
+fi
 [ "$pass" = "$total" ]

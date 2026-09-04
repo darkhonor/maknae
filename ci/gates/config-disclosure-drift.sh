@@ -227,6 +227,13 @@ while read -r op; do
   [ -n "$op" ] || continue
   case "$op" in
     \"*\"*)  sec=$(printf '%s' "$op" | grep -oE '"[^"]+"' | head -1 | tr -d '"') ;;
+    # `2>/dev/null` is DELIBERATE here, unlike the struct lookup in the depth
+    # loop below. This site is already fail-closed by its own post-condition: an
+    # unresolvable operand leaves `$sec` empty and the `[ -z "$sec" ]` refusal
+    # immediately below exits 1, so a grep error cannot be mistaken for a
+    # resolved section. The residual cost is a diagnostic that names the symptom
+    # rather than the cause -- the same class this file corrects for `pub(crate)`
+    # elsewhere -- and not a fail-open.
     *)        c=$(printf '%s' "$op" | grep -oE '^[A-Za-z0-9_]+' | head -1)
               sec=$(grep -rhoE "const $c: &str = \"[^\"]+\"" crates/ 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | head -1 || true) ;;
   esac
@@ -416,6 +423,11 @@ for entry in "${SURFACE[@]}"; do
     if [ "$got" -eq 0 ]; then
       echo "  Zero: renamed, moved, made generic, or turned into a tuple struct?"
       echo "  (Visibility is NOT the cause — any visibility, or none, is matched.)"
+      # NOT a line-wrap hint here, deliberately: a wrapped declaration still
+      # emits exactly ONE row (continuation lines carry no `ident:`, so they
+      # contribute nothing), which leaves `$got` unchanged and lands the failure
+      # at the pre-loop row validation with its own wrap-specific message. A
+      # hint here would name a cause that cannot produce this symptom.
     else
       echo "  Fields were added or removed. Classify each one in $MANIFEST,"
       echo "  then update the count in this entry — deliberately, not to go green."
@@ -424,6 +436,53 @@ for entry in "${SURFACE[@]}"; do
   fi
 done
 sort -u "$tmp/fields" -o "$tmp/fields"
+
+# EVERY row is validated HERE, before the depth loop reads it, because that loop
+# structurally cannot check this for itself. `IFS=$'\t' read` treats tab as IFS
+# WHITESPACE, so a run of tabs collapses to ONE delimiter: a row whose TYPE
+# column is empty -- what the awk above emits for a declaration it cannot read,
+# e.g. a rustfmt-wrapped `pub name:` / `    Type,` -- arrives as
+# fpath + kind-in-fty + EMPTY kind. An in-loop `[ -z "$fty" ]` guard is
+# therefore UNREACHABLE (measured: the row yields fty=config, fkind=""), and the
+# emptied kind then falls through the `case` below to the CONFIG wrapper set,
+# silently applying the wrong per-row rule -- the defeat
+# `surface-order-does-not-decide-the-vec-rule` exists to close, reached through
+# a different door, at unchanged counts and EXIT=0.
+#
+# `awk -F'\t'` does NOT collapse separators, so it sees the empty column the
+# shell cannot. Kind is re-checked here too: it is a closed set where the
+# SURFACE table is read, and nothing re-checked it at the point of USE.
+# The ANGLE BALANCE test is the general form, and it is why this is not just an
+# empty-column check. A field declaration whose type spans lines has TWO shapes,
+# and only one of them empties the column: breaking after the colon yields an
+# empty type, but breaking inside the generic (`pub n: Option<` / `Foo,` / `>,`)
+# yields the NON-empty truncation `Option<`, which passes an emptiness test,
+# then reduces to the empty string in the strip and used to be swallowed by the
+# scalar skip list's `''` arm -- a subtree scored a leaf, unchanged counts,
+# EXIT=0, on both the config and wire arms. Unbalanced `<` vs `>` catches every
+# truncation shape, including ones nobody has met yet.
+#
+# Known, harmless false positive: a function-typed parameter (`Box<dyn Fn(u32)
+# -> u32>`) counts two `>` against one `<` and is refused as "truncated". It
+# fails in the SAFE direction and such a type is refused a few lines below
+# anyway for its `(` metacharacter; only the diagnostic would name the wrong
+# cause. No such field exists on any SURFACE struct today.
+if ! awk -F'\t' '
+    { o = gsub(/</, "<"); c = gsub(/>/, ">") }
+    NF != 3 || $2 == "" || o != c || ($3 != "config" && $3 != "wire") { print; bad = 1 }
+    END { exit bad ? 1 : 0 }
+  ' "$tmp/fields" > "$tmp/badfields"; then
+  echo "FAIL: malformed extracted field row(s) — empty or TRUNCATED type"
+  echo "  (unbalanced angle brackets), wrong column count, or an unknown surface"
+  echo "  kind. Nothing downstream can decide whether such a field is a subtree,"
+  echo '  and the shell cannot even see an empty type column (tab is IFS'
+  echo '  whitespace). A field declaration whose type spans lines is the usual'
+  echo '  cause, in either shape: `pub name:` then the type, or `pub name: Foo<`'
+  echo '  then the parameters. Fix the extractor or the declaration; never let'
+  echo "  it pass as a leaf:"
+  sed 's/^/    /' "$tmp/badfields"
+  exit 1
+fi
 
 
 # --- DEPTH. A field whose type is a config struct declared in this workspace
@@ -435,7 +494,10 @@ sort -u "$tmp/fields" -o "$tmp/fields"
 # Precedent already in the table: `Ceiling` has its own SURFACE entry. Nothing
 # enforced that it must.
 while IFS=$'\t' read -r fpath fty fkind; do
-  [ -n "$fty" ] || continue
+  # No empty-type guard here on purpose: it is unreachable in this loop (tab is
+  # IFS whitespace, so an empty middle column collapses and `$fty` is never
+  # empty). The row shape is validated once, before the loop, where `awk -F'\t'`
+  # can actually see it.
   # Strip wrappers to FIXPOINT: a single pass left `Option<Box<SiemConfig>>` as
   # `Box<SiemConfig` and matched nothing.
   #
@@ -455,11 +517,78 @@ while IFS=$'\t' read -r fpath fty fkind; do
   # config-surface exemption therefore did not exist, and reordering the SURFACE
   # array (a plausible grouping edit) silently restored the defeat this check
   # was added to close, at identical counts and EXIT=0.
+  # `config` is named, not defaulted. `*)` silently absorbed an empty or
+  # unrecognised kind into the config rule -- the wrong wrapper set, applied
+  # without a word. DELIBERATELY UNPROBED: the pre-loop validation already
+  # refuses any kind outside {config, wire}, so this arm is unreachable by
+  # construction and no negative control can reach it without first deleting
+  # that validation. It refuses rather than defaulting so the two cannot drift
+  # apart -- which is exactly how the empty-type guard and the `''` skip arm got
+  # out of step. Removing it does not change negative-control's count; that is a
+  # property of unreachable defence, not evidence the arm is unnecessary.
   case "$fkind" in
-    wire) wrappers='(Option|Box|Arc|Vec)' ;;
-    *)    wrappers='(Option|Box|Arc)' ;;
+    wire)   wrappers='(Option|Box|Arc|Vec)' ;;
+    config) wrappers='(Option|Box|Arc)' ;;
+    *) echo "FAIL: '$fpath' has surface kind '$fkind', which is neither"
+       echo "  'config' nor 'wire', so there is no rule to apply to it."
+       exit 1 ;;
   esac
-  bare=$(printf '%s' "$fty" | sed -E ":a; s/^${wrappers}<//; ta" | sed -E 's/>+$//' | sed 's/.*:://')
+  # `-e ':a' -e ... -e 'ta'`, NEVER the one-line `":a; s/...//; ta"`. A POSIX
+  # `sed` label extends to END OF LINE, so the one-line form defines a label
+  # literally named `a; s/^(Option|Box|Arc)<//; ta` and runs no substitution at
+  # all. GNU sed accepts it, so Linux CI was green from the day it landed in
+  # #213 (`bc334b5`, 2026-09-01; #214 then parameterised the alternation to
+  # `${wrappers}` and added the wire arm) while on any BSD userland every
+  # wrapped field scored as a LEAF: `Vec<MemberEntry>` stayed `Vec<MemberEntry`,
+  # the struct grep below matched nothing, and `|| continue` called a subtree a
+  # scalar. This gate's depth control, absent, EXIT=0.
+  #
+  # It was NOT silent. BSD sed printed `unused label` once per row -- 31
+  # warnings per run at the time of writing, one for each struct field -- and
+  # exited 0 anyway, so `pipefail` saw nothing and the diagnostics went to a
+  # stream no harness and no reader ever looked at. THAT is the transferable
+  # lesson, and it is why the fix is a post-condition rather than only a
+  # corrected flag: a check may not depend on a human noticing stderr. (#217)
+  #
+  # QUALIFIERS ARE NORMALISED INSIDE THE LOOP, and the ordering is the point.
+  # `s/.*:://` used to run AFTER the strip, greedily, which SYNTHESISED a
+  # leading wrapper out of an idiomatic fully-qualified type:
+  # `std::sync::Arc<String>` never matched `^(Option|Box|Arc)<`, survived the
+  # loop intact, and was then trimmed to `Arc<String` -- indistinguishable from
+  # a strip that did not run. Stripping `(::)?(Ident::)+` inside the loop and
+  # trimming only the HEAD afterwards resolves it, and incidentally fixes a
+  # live defect the old order carried: `Vec<crate::Principal>` on a CONFIG
+  # surface reduced to `Principal` and was rejected as a subtree, when `Vec` is
+  # a leaf there by the documented exemption.
+  bare=$(printf '%s' "$fty" \
+    | sed -E -e ':a' -e 's/^(::)?([A-Za-z_][A-Za-z0-9_]*::)+//' -e "s/^${wrappers}<//" -e 'ta' \
+    | sed -E 's/>+$//' \
+    | sed -E 's/^(::)?([A-Za-z_][A-Za-z0-9_]*::)+//')
+  # (That last trim is belt-and-braces and provably a no-op: the loop exits at
+  # fixpoint over the qualifier pattern, and `s/>+$//` only removes a suffix, so
+  # the head cannot acquire a qualifier afterwards. Kept so the invariant is
+  # stated at the point of use rather than inferred.)
+  # POST-CONDITION on that strip, and the reason a tool-dialect difference can
+  # no longer take this control away silently. The loop runs to FIXPOINT over
+  # BOTH substitutions, so afterwards no value may still LEAD with a wrapper
+  # this surface strips -- and, now that qualifiers are stripped inside the
+  # loop rather than trimmed after it, nothing downstream can manufacture that
+  # state either. It is therefore reachable only if the strip did not run.
+  # Checked against the SAME `$wrappers` the strip used, which keeps the
+  # config-surface exemption intact by construction: `Vec<String` is a
+  # legitimate residue there because `Vec` is not in that surface's set, and
+  # this check cannot see it.
+  # A here-string, not `printf | grep -q`: under `pipefail` an early-exiting
+  # `grep -q` can SIGPIPE the producer and turn a MATCH into a false negative --
+  # fail-open again, in the check written to close a fail-open.
+  if grep -qE "^${wrappers}<" <<<"$bare"; then
+    echo "FAIL: '$fpath' has type '$fty', which reduced to '$bare' —"
+    echo "  it still LEADS with a wrapper this surface strips, so the wrapper"
+    echo "  strip did not run. Every wrapped field on this surface would score"
+    echo "  as a leaf and this gate would pass with its depth check gone."
+    echo "  Check the sed above is the portable -e label form (#217)."
+    exit 1
+  fi
   # A dynamic-key map is a subtree whose keys nobody can enumerate -- the same
   # structural condition that moved `audit.au3_1` from mask to omit. Demand the
   # same coverage rather than letting a typed map ship its deployer-authored
@@ -478,8 +607,21 @@ while IFS=$'\t' read -r fpath fty fkind; do
   case "$bare" in
     Value) bare="__DYNAMIC_MAP__" ;;
   esac
+  # `''` is NOT a scalar and no longer shares the skip arm. An empty reduction
+  # means the type was TRUNCATED before the strip ever ran -- `Option<` reduces
+  # to nothing, and so does wire-side `Vec<` -- so this arm was scoring exactly
+  # the fields the depth check exists for as leaves. The pre-loop angle-balance
+  # test makes it unreachable; it refuses rather than skipping so the two cannot
+  # drift apart, which is how this pair got out of step in the first place.
+  if [ -z "$bare" ]; then
+    echo "FAIL: '$fpath' has type '$fty', which reduced to NOTHING — the type"
+    echo "  was truncated before the strip (a multi-line generic declaration"
+    echo "  yields just the opening 'Option<'). Treating that as a scalar is how"
+    echo "  a subtree ships as a leaf."
+    exit 1
+  fi
   case "$bare" in
-    ''|bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|str) continue ;;
+    bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|str) continue ;;
   esac
   # ANY visibility, or none -- `pub(crate) struct` and bare `struct` are live
   # house style in this workspace, including inside the very crate SURFACE
@@ -512,7 +654,32 @@ while IFS=$'\t' read -r fpath fty fkind; do
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
     # workspace enum a leaf by default.
-    grep -rqE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?(struct|enum) $bare([[:space:]<{(]|$)" crates/ 2>/dev/null || continue
+    # rc is READ, and stderr is NOT discarded. `|| continue` cannot tell grep's
+    # "no match" (1) from grep's "error" (2) -- an unreadable tree, a bad
+    # pattern, a resource limit -- and `2>/dev/null` deleted the evidence. Any
+    # error therefore scored EVERY field a leaf with the gate still green: the
+    # same "the tool complained and nobody heard it" shape as #217, in the same
+    # loop, one stage later. Only a genuine no-match may `continue`.
+    #
+    # `-q` is KEPT, and that makes rc unambiguous rather than ambiguous: a match
+    # short-circuits to 0 before the rest of the tree is read, so rc==2 means
+    # "no match AND something errored" -- exactly the state in which "not a
+    # struct" is not trustworthy. MEASURED on this BSD grep with an unreadable
+    # file under `crates/`, both traversal orders (unreadable sorting before and
+    # after the matching file): match -> 0, no-match+error -> 2. That matches
+    # what GNU documents, so a legitimate match is not turned into a hard
+    # failure on either userland.
+    set +e
+    grep -rqE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?(struct|enum) $bare([[:space:]<{(]|$)" crates/
+    grc=$?
+    set -e
+    if [ "$grc" -gt 1 ]; then
+      echo "FAIL: the struct lookup for '$fpath' (type '$bare') ERRORED (grep"
+      echo "  exit $grc), so this field's depth is unknown. Treating that as"
+      echo "  'not a struct' is how a subtree ships as a leaf (#217)."
+      exit 1
+    fi
+    [ "$grc" -eq 0 ] || continue
   fi
   covered=""
   for entry in "${SURFACE[@]}"; do
