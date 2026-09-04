@@ -16,6 +16,17 @@ for entry in (sys.argv[2].split() if len(sys.argv) > 2 else []):
     allow[k] = set(v.split(",")) if v else set()
 
 md = json.load(sys.stdin)
+# FLOOR (#219). This gate DISCOVERS its input -- the package set comes from
+# `cargo metadata`, not from a code constant -- so it has a zero-input case, and
+# it reported `ok` at rc 0 for one: a workspace whose `members = []` yields zero
+# packages, no iterations, and a clean bill of health for a dependency graph
+# nobody looked at. Demonstrated before this change. A manifest that resolves to
+# no packages is a broken invocation, never a clean workspace.
+if not md["packages"]:
+    print("FAIL: cargo metadata resolved ZERO packages — nothing was examined, so")
+    print("  'no optional privileged dependency' is not a finding. Wrong manifest,")
+    print("  an empty `members`, or a metadata invocation that silently degraded.")
+    sys.exit(1)
 bad = 0
 for pkg in md["packages"]:
     name = pkg["name"]

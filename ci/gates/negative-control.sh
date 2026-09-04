@@ -39,6 +39,36 @@ expect_reject_because() { # <label> <expected-FAIL-substring> <cmd...>
   fi
 }
 
+expect_reported_count() { # <label> <prefix-before-the-count> <expected> <cmd...>
+  # For gates that REPORT how much they examined. `$expected` is DERIVED at call
+  # time by a mechanism DIFFERENT from the one the gate uses -- `git ls-files`
+  # against a gate that walks with `find`, `awk` over the contract against a
+  # gate that reads it line-by-line -- so this is a cross-check, not a
+  # restatement.
+  #
+  # It is deliberately NOT a baked constant, and not a `>=` floor either. Both
+  # were written first and both were wrong for the same reason: a number
+  # measured once asserts that a fact held at one moment, which churns on
+  # ordinary work and trains a thoughtless bump, and a floor cannot see an
+  # ADDITION that goes unscanned -- the exact defect #219 is about. A derived
+  # equality catches a shrink, an unscanned addition, AND a prune or filter
+  # that silently changes what the gate walks, and it never needs editing when
+  # the corpus legitimately grows.
+  local label="$1" prefix="$2" expected="$3"; shift 3; total=$((total+1))
+  local out rc n
+  if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+  n="$(printf '%s' "$out" | sed -n "s/.*${prefix}\([0-9][0-9]*\).*/\1/p" | head -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$n" ] && [ "$n" = "$expected" ]; then
+    echo "pos-ok: [$label] gate accepted, examined $n (independently derived: $expected)"; pass=$((pass+1))
+  elif [ "$rc" -ne 0 ]; then
+    echo "POS-FAIL: [$label] gate rejected a CLEAN fixture (exit $rc): $out"
+  elif [ -z "$n" ]; then
+    echo "POS-FAIL: [$label] gate passed but reported no count after '$prefix': $out"
+  else
+    echo "POS-FAIL: [$label] gate examined $n but the independent derivation says $expected — the gate is walking a different set than it should: $out"
+  fi
+}
+
 expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must also PASS a clean fixture
   local label="$1" want="$2"; shift 2; total=$((total+1))
   local out rc
@@ -157,6 +187,76 @@ expect_reject_because "p2/cli-links-authz-basic" \
 expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
   "$here/p2-invert-tree.sh" "$(p2_fixture)"
 
+# ---- isolation-contract-lint (#219): a PRESENT file is not a SCANNED file ----
+# This gate had no probe at all before #219, because it resolved its root from
+# the CWD and could not be pointed at a fixture. It checks the contract file
+# EXISTS, then lints only table rows with exactly five columns -- so collapsing
+# every row to four columns left the whole property x profile enforcement matrix
+# unexamined and the gate reported `ok` at rc 0. Verified against the pre-change
+# gate on the REAL contract.
+ic_fixture() { # <table-row> — a tree holding a contract file with one table row
+  local fixture; fixture="$(mktemp -d)"
+  mkdir -p "$fixture/packaging"
+  { printf '# Isolation contract\n\n'
+    printf '| Property | A | B | C | D |\n'
+    printf '|---|---|---|---|---|\n'
+    printf '%s\n' "$1"
+  } > "$fixture/packaging/isolation-contract.md"
+  echo "$fixture"
+}
+expect_accept "isolation-contract/populated-table-passes" "isolation-contract-lint: ok" \
+  "$here/isolation-contract-lint.sh" "$(ic_fixture '| seccomp | ✓ | ✓ | deferred | ✓ |')"
+
+expect_reject_because "isolation-contract/blank-cell-is-refused" \
+  "is EMPTY" \
+  "$here/isolation-contract-lint.sh" "$(ic_fixture '| seccomp | ✓ | ✓ |  | ✓ |')"
+
+# The #219 case: the file is there, the table this gate reads is not.
+expect_reject_because "isolation-contract/zero-rows-linted-is-refused" \
+  "linted ZERO rows" \
+  "$here/isolation-contract-lint.sh" "$(ic_fixture '| seccomp | ✓ | ✓ | ✓ |')"
+
+# REJECT: the contract is present but UNREADABLE. `done < "$f"` made bash print
+# its own `Permission denied` and exit 1 with no FAIL line -- a mute failure,
+# and unprobeable by `expect_reject` until the root override above made this
+# gate fixturable at all. SKIPPED FOR root, which reads a 000 file regardless.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [isolation-contract/unreadable-contract-is-refused] running as root; chmod 000 cannot make the read fail"
+  skipped=$((skipped+1))
+else
+  fx_ic="$(ic_fixture '| seccomp | ✓ | ✓ | deferred | ✓ |')"
+  chmod 000 "$fx_ic/packaging/isolation-contract.md"
+  expect_reject_because "isolation-contract/unreadable-contract-is-refused" \
+    "is not readable" \
+    "$here/isolation-contract-lint.sh" "$fx_ic"
+  chmod 644 "$fx_ic/packaging/isolation-contract.md"
+fi
+
+# ---- p1-manifest-lint (#219): a resolved manifest is not a scanned one -------
+# (the gate's other probes are the two Fixture A cases far above)
+#
+# REJECT: a workspace that resolves to ZERO packages (#219). `p1-manifest-lint`
+# looked like a constant-input gate but is not: `p1_check.py` iterates whatever
+# `cargo metadata` discovers, so `members = []` gave zero iterations and `ok` at
+# rc 0 -- a clean bill of health for a dependency graph nobody looked at. Found
+# while writing the sweep's discover-vs-constant rule, which had mis-classified
+# this gate.
+tmpP0="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpP0/Cargo.toml"
+expect_reject_because "p1-manifest/zero-packages-is-refused" \
+  "resolved ZERO packages" \
+  "$here/p1-manifest-lint.sh" "$tmpP0"
+
+# REJECT: `cargo metadata` itself fails. Its stderr went to /dev/null and python
+# then died on empty stdin with a JSONDecodeError traceback, so the gate exited 1
+# printing no FAIL line -- mute, and unprobeable by `expect_reject`, which needs
+# one. The diagnostic now quotes cargo.
+tmpP1="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpP1/Cargo.toml"
+expect_reject_because "p1-manifest/metadata-failure-is-not-silent" \
+  "cargo metadata failed" \
+  "$here/p1-manifest-lint.sh" "$tmpP1"
+
 # Fixture C — bare workspace build in a workflow → must trip build-invocation-lint.sh
 tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC/.github/workflows/bad.yml"
@@ -166,6 +266,81 @@ expect_reject "build-invocation/workspace-build" "$here/build-invocation-lint.sh
 tmpC2="$(mktemp -d)"; mkdir -p "$tmpC2/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: |\n          cargo build \\\n            --workspace --release\n' > "$tmpC2/.github/workflows/bad.yml"
 expect_reject "build-invocation/multiline-workspace-build" "$here/build-invocation-lint.sh" "$tmpC2"
+
+# ACCEPT: a clean tree with a well-formed build must PASS, and must report what
+# it scanned. Without this the rejections above stay green against a gate that
+# refuses every fixture -- the hazard this file names for p2, and which a newly
+# added FLOOR is exactly the kind of change that could introduce.
+tmpC0="$(mktemp -d)"; mkdir -p "$tmpC0/.github/workflows"
+printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC0/.github/workflows/good.yml"
+expect_accept "build-invocation/clean-tree-passes" "build-invocation-lint: ok" \
+  "$here/build-invocation-lint.sh" "$tmpC0"
+
+# REJECT: ZERO scanned files (#219). An empty tree reported `ok` at rc 0 --
+# nothing examined, nothing found, indistinguishable from a clean scan. This is
+# the rc-0-with-no-matches case `find` reports as SUCCESS, which is why a floor
+# is needed in addition to reading the status.
+expect_reject_because "build-invocation/zero-files-scanned-is-refused" \
+  "scanned ZERO files" \
+  "$here/build-invocation-lint.sh" "$(mktemp -d)"
+
+# REJECT: the scan itself errors (#219). A nonexistent root printed NOTHING at
+# all -- find's message went to /dev/null and its exit status died inside a
+# process substitution -- and reported `ok`.
+expect_reject_because "build-invocation/scan-error-is-not-a-clean-tree" \
+  "the file scan errored" \
+  "$here/build-invocation-lint.sh" "$(mktemp -d)/nope"
+
+# REJECT: a file `find` listed but `awk` could not read (#219). find needs
+# permission on the DIRECTORY, not on the file, so an unreadable file was listed,
+# awk failed with `can't open file`, the process substitution swallowed the
+# status, the inner loop saw no lines, and a file carrying a REAL violation was
+# scanned as clean at `ok` / rc 0. Verified against the pre-change gate.
+#
+# SKIPPED FOR root, which reads a 000 file regardless, so the branch would never
+# fire and the probe would report NEG-FAIL for a property of the runner rather
+# than of the gate.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [build-invocation/unreadable-file-is-not-cleared] running as root; chmod 000 cannot make awk fail"
+  skipped=$((skipped+1))
+else
+  tmpC3="$(mktemp -d)"; mkdir -p "$tmpC3/.github/workflows"
+  printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC3/.github/workflows/bad.yml"
+  chmod 000 "$tmpC3/.github/workflows/bad.yml"
+  expect_reject_because "build-invocation/unreadable-file-is-not-cleared" \
+    "could not read" \
+    "$here/build-invocation-lint.sh" "$tmpC3"
+  chmod 644 "$tmpC3/.github/workflows/bad.yml"
+fi
+
+# REJECT: `cargo build` with NO `-p` at all -- the most likely violation of the
+# "exactly one -p" rule, and the one that could not be probed before #219.
+# Under `pipefail` the zero-match `grep -oE '-p'` failed the pipeline, the
+# assignment failed, and `set -e` killed the script BEFORE the FAIL printed:
+# rc 1 with nothing on stdout OR stderr. `expect_reject` requires a printed
+# FAIL, so the gate's central assertion had no coverage for its commonest case.
+tmpC4="$(mktemp -d)"; mkdir -p "$tmpC4/.github/workflows"
+printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --release\n' > "$tmpC4/.github/workflows/nop.yml"
+expect_reject_because "build-invocation/zero-p-is-refused" \
+  "exactly one -p (got 0)" \
+  "$here/build-invocation-lint.sh" "$tmpC4"
+
+# The `ci/gates` prune is this gate's one deliberate blind spot, and it was
+# unprobed: nothing showed that a `cargo build --workspace` string UNDER
+# `ci/gates/` is skipped rather than flagged, nor that the prune is scoped to
+# `ci/gates` and not to `ci/` wholesale. Both halves, one fixture each.
+tmpC5="$(mktemp -d)"; mkdir -p "$tmpC5/.github/workflows" "$tmpC5/ci/gates"
+printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC5/.github/workflows/good.yml"
+printf 'cargo build --workspace --release\n' > "$tmpC5/ci/gates/fixture-strings.sh"
+expect_accept "build-invocation/ci-gates-is-pruned" "build-invocation-lint: ok" \
+  "$here/build-invocation-lint.sh" "$tmpC5"
+
+tmpC6="$(mktemp -d)"; mkdir -p "$tmpC6/.github/workflows" "$tmpC6/ci"
+printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC6/.github/workflows/good.yml"
+printf 'cargo build --workspace --release\n' > "$tmpC6/ci/other.sh"
+expect_reject_because "build-invocation/prune-does-not-cover-all-of-ci" \
+  "workspace/all build" \
+  "$here/build-invocation-lint.sh" "$tmpC6"
 
 # Fixture D — artifact INVENTORY witness (the reliable P2b half): a CLI that links a privileged
 # crate must be caught by p2-artifact-witness via the cargo-auditable inventory. CI-gated: the
@@ -1340,21 +1515,83 @@ fx="$(cfg_fixture "$CFG_OK")"
 expect_accept "config-disclosure-drift/clean-fixture-passes" ": 20 paths decided, 31 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
-# ACCEPT, against the REAL repo: the gate's own summary counts are pinned.
+# ACCEPT, against the REAL repo: each gate's reported examined-set is
+# CROSS-CHECKED against an independent derivation. Not a baked number -- a
+# number measured once asserts only that a fact held at one moment; it churns on
+# ordinary work, trains a thoughtless bump, and cannot see an ADDITION that goes
+# unscanned, which is the defect this issue is about. Each expectation below is
+# computed here by a DIFFERENT mechanism than the gate uses, so the two can only
+# agree when the gate is walking the set it is supposed to walk.
+repo_root="$(cd "$here/../.." && pwd)"
+
+# The two `git ls-files` derivations need a real checkout. That is a legitimate
+# dependency -- tracked-vs-untracked is exactly what they cross-check, and this
+# file already has probes that need `cargo` -- but it must SKIP, not abort:
+# without this guard the whole run died mid-way with `fatal: not a git
+# repository` on a tree exported without `.git`, taking every later probe and
+# the summary line with it. Caught on the Linux test host.
+if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # `git ls-files` against a gate that walks with `find`: tracked files only, so
+  # this also pins that the walk does not wander into untracked trees. It walked
+  # the gitignored `.claude/worktrees/` before #219 and reported 14 from the main
+  # checkout where a worktree reported 7 -- a count that was a property of the
+  # developer's filesystem rather than of the repository.
+  exp_bi="$(cd "$repo_root" && git ls-files -- '*.sh' '*.mk' 'Makefile' 'makefile' 'GNUmakefile' \
+              'justfile' 'Justfile' 'Dockerfile*' '*/Dockerfile*' \
+              '.github/workflows/*.yml' '.github/workflows/*.yaml' \
+            | grep -v '^ci/gates/' | sort -u | wc -l | tr -d ' ')"
+  expect_reported_count "build-invocation/examined-set-matches-git" "ok (" "$exp_bi" \
+    "$here/build-invocation-lint.sh" "$repo_root"
+
+  # The gate's OWN exemption pattern is extracted rather than restated, so the
+  # derivation cannot drift from the rule it checks.
+  ea_exempt="$(sed -n "s/^EXEMPT_RE='\(.*\)'$/\1/p" "$here/external-authority-lint.sh")"
+  exp_ea="$(cd "$repo_root" && { git ls-files -- 'design/*.md' 'design/**/*.md'; \
+              git ls-files -- AGENTS.md README.md; } \
+            | sort -u | grep -Ev "$ea_exempt" | wc -l | tr -d ' ')"
+  expect_reported_count "external-authority-lint/examined-set-matches-git" "ok (" "$exp_ea" \
+    "$here/external-authority-lint.sh"
+else
+  echo "neg-skip: [build-invocation/examined-set-matches-git] not a git checkout; the tracked-set derivation needs one"
+  echo "neg-skip: [external-authority-lint/examined-set-matches-git] not a git checkout; the tracked-set derivation needs one"
+  skipped=$((skipped+2))
+fi
+
+# These two derive from files on disk, so they need no checkout.
+# `awk` over the table against a gate that reads it line-by-line.
+exp_ic="$(cd "$repo_root" && awk -F'|' 'NF-2==5' packaging/isolation-contract.md \
+          | grep -cvE '\|[[:space:]]*(Property|:?-{3,})')"
+expect_reported_count "isolation-contract/linted-rows-match-the-table" "ok (" "$exp_ic" \
+  "$here/isolation-contract-lint.sh" "$repo_root"
+
+# Member manifests on disk against what `cargo metadata` resolved.
+exp_p1="$(cd "$repo_root" && ls -d crates/*/Cargo.toml bins/*/Cargo.toml 2>/dev/null | wc -l | tr -d ' ')"
+expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1" \
+  "$here/p1-manifest-lint.sh" "$repo_root"
+
+# ACCEPT, against the REAL repo: config-disclosure-drift's own summary counts.
 # Round 8's probes all showed up first as a silent change to these two numbers
 # (23 -> 18 struct fields, EXIT=0). A count nobody asserts is a log line, not a
 # control; asserting it here means any future silent shrink is a red build.
+
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
   ": 32 paths decided, 31 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
 # The wording IS the control here, so the fixture is a wording fixture.
-ea_fixture() { # <line> — a bare dir (not a repo) holding one normative doc
+ea_fixture() { # <line> — a dir (not a repo) holding one normative doc + the root docs
   local fixture; fixture="$(mktemp -d)"
   mkdir -p "$fixture/ci/gates" "$fixture/design"
   cp "$here/external-authority-lint.sh" "$fixture/ci/gates/"
   printf '# doc\n\n%s\n' "$1" > "$fixture/design/some-design.md"
+  # AGENTS.md / README.md are REQUIRED by the gate (#219): AGENTS.md carries the
+  # authority doctrine it enforces, so their absence must fail rather than
+  # quietly shrink the corpus. The fixture supplies them so the requirement is
+  # enforced and still probeable -- previously their absence here was the whole
+  # reason the gate tolerated missing root docs.
+  printf '# agents\n' > "$fixture/AGENTS.md"
+  printf '# readme\n' > "$fixture/README.md"
   echo "$fixture"
 }
 fx="$(ea_fixture "Following the Knowledge Lake ADR-0004 authority model, the map separates two concerns.")"
@@ -1362,8 +1599,75 @@ expect_reject "external-authority-lint/unqualified-foreign-adr" "$fx/ci/gates/ex
 fx="$(ea_fixture "Microkosmos ADR 0006 defines the dual-client identity pattern used here.")"
 expect_reject "external-authority-lint/unqualified-microkosmos-adr" "$fx/ci/gates/external-authority-lint.sh"
 
+# ACCEPT: a QUALIFIED citation passes, and the gate reports what it scanned.
+# Same argument as the build-invocation accept probe: two rejections alone
+# cannot tell a working gate from one that refuses everything, and this file
+# just gained a floor that could make it the latter.
+fx="$(ea_fixture "Provenance, never authority: the Knowledge Lake ADR-0004 model informed this.")"
+expect_accept "external-authority-lint/qualified-citation-passes" \
+  "external-authority-lint: ok" "$fx/ci/gates/external-authority-lint.sh"
+
+# REJECT: the corpus is MISSING (#219). `find design … 2>/dev/null` with a
+# trailing `|| true` discarded the error text, the exit status AND the empty
+# case at once, so a tree with no `design/` reported `ok` -- clearing every rule
+# in the repo by default, in the gate whose entire subject is wording.
+fx_nodesign="$(mktemp -d)"; mkdir -p "$fx_nodesign/ci/gates"
+cp "$here/external-authority-lint.sh" "$fx_nodesign/ci/gates/"
+expect_reject_because "external-authority-lint/missing-corpus-is-refused" \
+  "could not list design/" \
+  "$fx_nodesign/ci/gates/external-authority-lint.sh"
+
+# REJECT: the corpus collapses to nothing through an OVER-BROAD EXEMPTION.
+# `find` reports zero matches as SUCCESS, so reading its status cannot catch an
+# empty corpus and the floor is what does. Now that the root documents are
+# required, an empty `design/` alone can no longer reach the floor (that is the
+# `missing-root-document` probe above) -- the reachable cause is an exemption
+# pattern that swallows everything, which is what this mutates the fixture's own
+# gate copy to produce. Probing the floor through the path it can actually be
+# reached by, rather than one an earlier check now intercepts.
+fx_empty="$(ea_fixture "Provenance, never authority: the Knowledge Lake ADR-0004 model informed this.")"
+python3 - "$fx_empty" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "ci/gates/external-authority-lint.sh"
+s = p.read_text()
+old = "EXEMPT_RE='^(design/reference-implementation-autopsy\\.md|design/reviews/|design/adr/README\\.md)'"
+assert s.count(old) == 1, "the EXEMPT_RE anchor moved"
+p.write_text(s.replace(old, "EXEMPT_RE='.'"))
+PY
+expect_reject_because "external-authority-lint/zero-files-scanned-is-refused" \
+  "scanned ZERO files" \
+  "$fx_empty/ci/gates/external-authority-lint.sh"
+
+# REJECT: a required root document is gone (#219). `AGENTS.md` carries the
+# authority doctrine this gate enforces; losing it used to shrink the corpus
+# silently because `ls … 2>/dev/null || true` tolerated its absence.
+fx="$(ea_fixture "Provenance, never authority: the Knowledge Lake ADR-0004 model informed this.")"
+rm -f "$fx/AGENTS.md"
+expect_reject_because "external-authority-lint/missing-root-document-is-refused" \
+  "required root document(s) absent" \
+  "$fx/ci/gates/external-authority-lint.sh"
+
+# REJECT: a corpus file `find` listed but `grep` cannot read (#219). `< <(grep …
+# || true)` collapsed grep's ERROR (2) into its no-match (1), so an unreadable
+# doc carrying a real unqualified citation was cleared at rc 0 -- while the
+# success line counted it as scanned. SKIPPED FOR root, which reads a 000 file
+# regardless.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "neg-skip: [external-authority-lint/unreadable-doc-is-not-cleared] running as root; chmod 000 cannot make grep fail"
+  skipped=$((skipped+1))
+else
+  fx="$(ea_fixture "Provenance, never authority: the Knowledge Lake ADR-0004 model informed this.")"
+  printf '# hidden\n\nFollowing the Knowledge Lake ADR-0004 authority model, this rests on it.\n' \
+    > "$fx/design/unreadable.md"
+  chmod 000 "$fx/design/unreadable.md"
+  expect_reject_because "external-authority-lint/unreadable-doc-is-not-cleared" \
+    "could not read" \
+    "$fx/ci/gates/external-authority-lint.sh"
+  chmod 644 "$fx/design/unreadable.md"
+fi
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
-# that need `cargo-auditable`, and the root-guarded one, drop out silently and
+# that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
 # compare their local number against the full count; this is what makes that
 # comparison possible.

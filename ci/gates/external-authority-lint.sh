@@ -33,12 +33,82 @@ QUALIFIER_RE='(provenance|informed (this|the)|never authority|not authoritative|
 
 # find, not `git ls-files`: the negative-control fixture is a bare directory,
 # and a gate that only runs inside a repo cannot be proven to fire outside one.
-files=$( { find design -name '*.md' 2>/dev/null; ls AGENTS.md README.md 2>/dev/null; } \
-        | grep -Ev "$EXEMPT_RE" || true)
+#
+# THE CORPUS'S OWN SOUNDNESS, established before its contents are trusted (#219).
+# This was `find design … 2>/dev/null` with a trailing `|| true`, which discarded
+# the error text, the exit status, AND the empty case at once: a tree with no
+# `design/` produced an empty list and reported `ok`. `design/` is the corpus
+# this gate exists to scan, so failing to list it is an error, not an empty
+# result.
+# `-L -type f`. `-type f` alone keeps a DIRECTORY named `*.md` out of the corpus
+# -- without it `grep` returns 2 on the directory and the read-the-status check
+# reports `could not read`, a hard failure naming the wrong cause. (Measured:
+# BSD grep also exits 2 on a directory operand, so that was a wrong-diagnostic
+# bug, not the BSD/GNU divergence it first looked like.) `-L` is what keeps a
+# SYMLINKED design doc IN: `-type f` alone uses `lstat`, so a symlink to a real
+# `.md` is `-type l` and would silently never be scanned -- an unscanned
+# normative document in the gate whose whole subject is wording.
+if ! design_md=$(find -L design -type f -name '*.md'); then
+  echo "FAIL external-authority-lint: could not list design/ — the corpus this"
+  echo "  gate scans. A corpus that cannot be read has not been cleared."
+  exit 1
+fi
+# `AGENTS.md` and `README.md` are REQUIRED, not optional. `AGENTS.md` carries
+# the very authority doctrine this gate enforces, so losing it to a rename must
+# not quietly shrink the corpus to 27 and still report `ok`.
+#
+# They were tolerated (`2>/dev/null || true`) only because the negative-control
+# fixture had neither, i.e. an artifact of what could be fixtured rather than a
+# property of the corpus -- the same excuse `isolation-contract-lint` stopped
+# accepting in this change when it took a root override so its floor could be
+# probed. The fixture now creates both, so the requirement is enforced AND
+# probeable. No `2>/dev/null` survives on any CODE line of this gate -- the only
+# remaining mentions are in these comments, describing what was removed.
+missing=""
+for r in AGENTS.md README.md; do [ -f "$r" ] || missing="$missing $r"; done
+if [ -n "$missing" ]; then
+  echo "FAIL external-authority-lint: required root document(s) absent:$missing"
+  echo "  These carry the authority doctrine this gate enforces; a corpus that"
+  echo "  has lost them has not been cleared."
+  exit 1
+fi
+root_md=$(printf '%s\n' AGENTS.md README.md)
+
+files=$(printf '%s\n%s\n' "$design_md" "$root_md" | grep -v '^$' | grep -Ev "$EXEMPT_RE" || true)
+
+# FLOOR. Zero files after exemptions is not "nothing to check", it is "nothing
+# was checked" -- and this gate's whole subject is wording, so an empty corpus
+# clears every rule in the repo by default. The real tree always has at least
+# AGENTS.md and README.md unexempted, and the fixture always has its one design
+# doc, so one is the legitimate minimum on every input this gate has.
+scanned=$(printf '%s\n' "$files" | grep -c . || true)
+if [ "$scanned" -eq 0 ]; then
+  echo "FAIL external-authority-lint: scanned ZERO files."
+  echo "  Nothing was examined, so 'no unqualified external citation' is not a"
+  echo "  finding. An exemption pattern that swallowed the whole corpus is the"
+  echo "  reachable cause; the required root documents are checked above."
+  exit 1
+fi
 
 bad=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
+  # The per-file read's OWN status, for the same reason as the corpus listing
+  # above -- and this is the call that does the actual checking. It was
+  # `< <(grep … || true)`, which collapses grep's ERROR (2) into its no-match
+  # (1): an unreadable `design/*.md` carrying a real unqualified citation was
+  # cleared at rc 0 while the success line counted it as scanned, so the count
+  # asserted more than the gate had examined. `--` guards a path that could
+  # begin with a dash.
+  set +e
+  hits=$(grep -nEi -e "$EXTERNAL_RE" -- "$f"); grc=$?
+  set -e
+  if [ "$grc" -gt 1 ]; then
+    echo "FAIL external-authority-lint: could not read '$f' (grep exit $grc)."
+    echo "  A file that cannot be read has not been cleared, and must not be"
+    echo "  counted as scanned."
+    exit 1
+  fi
   while IFS=: read -r n line; do
     [ -n "$n" ] || continue
     if ! printf '%s' "$line" | grep -Eqi "$QUALIFIER_RE"; then
@@ -46,7 +116,7 @@ while IFS= read -r f; do
       echo "    $(printf '%s' "$line" | cut -c1-140)"
       bad=1
     fi
-  done < <(grep -nEi "$EXTERNAL_RE" "$f" || true)
+  done <<< "$hits"
 done <<< "$files"
 
 if [ "$bad" -ne 0 ]; then
@@ -56,4 +126,4 @@ if [ "$bad" -ne 0 ]; then
   echo "See design/adr/README.md § Authority rule, and issue #34."
   exit 1
 fi
-echo "external-authority-lint: ok"
+echo "external-authority-lint: ok ($scanned files scanned)"
