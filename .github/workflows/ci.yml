@@ -41,7 +41,7 @@ concurrency:
 # to the workspace does not automatically extend macOS coverage; extend this
 # list deliberately when a crate becomes SDK-free.
 env:
-  DARWIN_CRATES: "maknae-io maknae-plane maknae-security maknae-proto maknae-config"
+  DARWIN_CRATES: "maknae-io maknae-plane maknae-security maknae-proto maknae-config maknae-audit-append"
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic"
 
 jobs:
@@ -234,7 +234,12 @@ jobs:
           set -euo pipefail
           pkgs=""
           for c in $DARWIN_CRATES; do pkgs="$pkgs -p $c"; done
-          cargo test $pkgs
+          # #222: make the unified-log round-trip a HARD FAILURE here rather
+          # than a skip. The macos runner user is admin and can read
+          # /var/db/diagnostics, so the skip branch is dead on CI -- which means
+          # a soft default would let this lane go green with zero round-trip
+          # evidence (the #219 ok-on-nothing class one level up).
+          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test $pkgs
       - name: Confirm the F_GETPATH lane actually ran
         if: steps.gate.outputs.run == '1'
         # The delegated suite is the macOS control for ADR-0009: on Linux it

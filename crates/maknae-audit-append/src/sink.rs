@@ -3,9 +3,10 @@
 //!
 //! Fail-closed (AU-5): [`AuditSink::open`] errors if the primary JSONL file
 //! cannot be opened at boot; [`AuditSink::append`] errors on a primary write
-//! failure. The journald mirror is best-effort (a non-blocking datagram send
-//! that drops on any error) — its absence never masks a primary-sink failure.
-//! macOS has no journald equivalent yet (#222).
+//! failure. The system-log mirror is best-effort — its absence or failure never
+//! masks a primary-sink failure. The mechanism is platform-selected at the
+//! import boundary below: a non-blocking journald datagram on Linux, a
+//! `syslog(3)` line into the unified log on macOS (#222).
 //!
 //! T3 (`coverage-tiers.toml`): I/O-bound, report-only coverage; the
 //! `tests/fail_closed.rs` integration test is the primary evidence.
@@ -286,9 +287,13 @@ impl AuditSink {
     /// produced the copy, so the two sinks never diverge silently.
     ///
     /// Never takes a breaker admission: the breaker bounds *blocking* backends,
-    /// and a non-blocking datagram send cannot wedge. Routing it through the
-    /// breaker would let a wedged primary suppress the last-chance mirror — the
-    /// exact inversion of this method's purpose.
+    /// and this send cannot wedge. Routing it through the breaker would let a
+    /// wedged primary suppress the last-chance mirror — the exact inversion of
+    /// this method's purpose.
+    ///
+    /// **The name says journald; the mechanism is platform-selected.** On macOS
+    /// this is a `syslog(3)` line into the unified log, not a datagram. One name
+    /// for two mechanisms is defensible; silence about it is not.
     fn mirror_journald(&self, rec: &AuditRecord, primary: PrimaryOutcome) {
         if let Some(m) = self.mirror.as_ref() {
             m.mirror(rec, primary);

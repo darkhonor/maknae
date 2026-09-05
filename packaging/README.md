@@ -186,7 +186,7 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
 
 ## Shipping the audit trail to a SIEM
 
-Maknae performs **no off-host audit egress** ([ADR-0019](../design/adr/ADR-0019-audit-record-model.md), amended 2026-09-05). The daemon writes two local sinks — the `_maknae`-owned append-only JSONL and a best-effort journald mirror — and off-host offload is the deployer's log agent tailing the JSONL.
+Maknae performs **no off-host audit egress** ([ADR-0019](../design/adr/ADR-0019-audit-record-model.md), amended 2026-09-05). The daemon writes two local sinks — the `_maknae`-owned append-only JSONL and a best-effort system-log mirror (journald on Linux, the unified log on macOS) — and off-host offload is the deployer's log agent tailing the JSONL.
 
 This satisfies AU-9(2), which requires audit storage on a physically separate system, **not** that Maknae be the transport. A home-lab deployment therefore needs no SIEM at all: zero configuration, zero cost.
 
@@ -257,7 +257,7 @@ input(type="imfile"
       Severity="info")
 ```
 
-### Or ship the journal instead — zero configuration, with one cost
+### Or ship the journal instead — zero configuration, with one cost (LINUX ONLY)
 
 The mirror needs no filesystem access at all (the standard `systemd-journal` reader story), and carries the full canonical record in `MAKNAE_RECORD`:
 
@@ -268,6 +268,8 @@ journalctl -t maknaed MAKNAE_OUTCOME=deny -o json --all
 Filterable fields: `MAKNAE_ACTION`, `MAKNAE_OUTCOME`, `MAKNAE_SUBJECT`, `MAKNAE_PRIMARY`. (`--all` matters: systemd renders fields at or over 4096 bytes as `null` without it, and `au3_1` is deployer-controlled.)
 
 `MAKNAE_PRIMARY` names which primary-sink condition produced the mirrored copy. **A value other than `ok` means that record is absent from the JSONL** — the primary sink refused or failed — so a trail reconstructed from the JSONL alone is incomplete for those entries.
+
+> **On macOS this section does not apply.** The mirror there is a `syslog(3)` line in the **unified log**, whose store (`/var/db/diagnostics`) is `drwxr-x--- root:admin`. A log agent would need `admin` to read it — a grant not to recommend for a log tailer — so there is no "ship the journal" path on darwin. That restriction is a **security property, not a limitation**: `_maknae` can write to the unified log and can never read or modify it, so the daemon cannot rewrite the trail it emitted. **On macOS the JSONL under the ACL procedure above is the offload path, and the unified-log copy is a tamper-resistant second record rather than a shipping surface.** One further asymmetry to carry into any tooling: the macOS line is undelimited, so it must be **parsed** — the structured prefix, then everything after the FIRST `MAKNAE_RECORD=` — never grepped whole the way `journalctl MAKNAE_OUTCOME=deny` matches a real field (ADR-0019, #222 amendment statement 5).
 
 > **The journald mirror is best-effort and drops records under backpressure** (a full journald buffer returns `EAGAIN` and the record is discarded). It is an operational convenience, **not** the AU-9(2) offload path — that is the durable JSONL, read via the ACL above. Do not rest a compliance claim on the journal copy.
 
