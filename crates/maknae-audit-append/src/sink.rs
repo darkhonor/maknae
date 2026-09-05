@@ -793,4 +793,402 @@ mod tests {
             "the primary append must still be durable"
         );
     }
+
+    // ----------------------------------------------------------------------
+    // macOS unified-log acceptance (#222, spec §5).
+    //
+    // WHY HERE AND NOT IN `tests/`: the four MAKNAE_PRIMARY markers can only be
+    // driven through the `sink.breaker` seam, which is pub(crate) and
+    // unreachable from an integration test. And `sink.rs` is MUTATION-EXCLUDED,
+    // so swapping the two refusal arms is caught by NO gate at all on macOS
+    // unless a test asserts each marker exactly.
+    //
+    // WHY AGAINST THE REAL LOGGER: `syslog(3)` has no in-process interception
+    // point. The Linux half proved delivery against a real bound socket; the
+    // honest macOS equivalent is the real system logger read back with
+    // `/usr/bin/log`. A fn-pointer seam would prove the plumbing and hide
+    // everything else.
+    // ----------------------------------------------------------------------
+
+    /// What the lane should do when the unified-log store cannot be read.
+    ///
+    /// **THREE states, not two.** A bare `-> bool` invites returning "skip" for
+    /// the fail case and silently inverting the property — and on CI the skip
+    /// branch is DEAD (the `macos-26` runner is admin), so an inverted guard
+    /// would leave the lane green with zero round-trip evidence. That is the
+    /// #219 ok-on-nothing class one level up.
+    #[cfg(target_os = "macos")]
+    #[derive(Debug, PartialEq, Eq)]
+    enum LaneAction {
+        Proceed,
+        /// Skip, with a loud reason. A skip here is a LANE GAP, not a pass.
+        Skip,
+        /// The lane demanded evidence and there is none.
+        Fail,
+    }
+
+    /// | `readable` | `required` | outcome |
+    /// |---|---|---|
+    /// | true | any | proceed |
+    /// | false | false | skip, loudly |
+    /// | false | true | fail |
+    #[cfg(target_os = "macos")]
+    fn macos_lane_action(readable: bool, required: bool) -> LaneAction {
+        match (readable, required) {
+            (true, _) => LaneAction::Proceed,
+            (false, false) => LaneAction::Skip,
+            (false, true) => LaneAction::Fail,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lane_action_covers_all_four_readable_required_combinations() {
+        assert_eq!(macos_lane_action(true, true), LaneAction::Proceed);
+        assert_eq!(macos_lane_action(true, false), LaneAction::Proceed);
+        assert_eq!(macos_lane_action(false, false), LaneAction::Skip);
+        assert_eq!(
+            macos_lane_action(false, true),
+            LaneAction::Fail,
+            "MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 must FAIL, never skip — a lane \
+             that silently skips its only round-trip evidence is green on nothing"
+        );
+    }
+
+    /// `/var/db/diagnostics` is `drwxr-x--- root:admin`, so a non-admin runner
+    /// cannot read the log at all. Probe it rather than guessing.
+    ///
+    /// NOT `maknae-io`'s `skip_or_fail`: it is pub(crate) in a crate this one
+    /// does not depend on, and it PANICS unless an opt-out env var is set —
+    /// wiring it would make CI red on an unreadable store.
+    #[cfg(target_os = "macos")]
+    fn macos_log_store_is_readable() -> bool {
+        std::process::Command::new("/usr/bin/log")
+            .args(["show", "--last", "1s", "--style", "json"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// `true` to proceed; `false` to skip. Panics when the lane required
+    /// evidence it cannot get.
+    #[cfg(target_os = "macos")]
+    fn macos_gate() -> bool {
+        let required = std::env::var("MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG").as_deref() == Ok("1");
+        match macos_lane_action(macos_log_store_is_readable(), required) {
+            LaneAction::Proceed => true,
+            LaneAction::Skip => {
+                eprintln!(
+                    "SKIP: /var/db/diagnostics is not readable by this user (root:admin). \
+                     This is a LANE GAP, not a pass. Set \
+                     MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 to make it a hard failure."
+                );
+                false
+            }
+            LaneAction::Fail => panic!(
+                "MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 but the unified-log store is \
+                 unreadable — the lane demanded round-trip evidence and there is none"
+            ),
+        }
+    }
+
+    /// A per-run nonce. `/usr/bin/log` LOGS ITS OWN INVOCATION including the
+    /// predicate text, and a PID-scoped query returns OS-emitted records the
+    /// process never asked for — so "the set is non-empty" is satisfied even
+    /// when the appender emitted nothing. The nonce is the discriminator; the
+    /// PID is only the query scope.
+    ///
+    /// `cargo test` also runs this whole module in ONE process, so the other
+    /// sink tests emit real `MAKNAE_*` records under the SAME pid. PID scoping
+    /// is exactly what fails to isolate them.
+    #[cfg(target_os = "macos")]
+    fn macos_nonce() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        // Low bits of the clock, plus a counter, so two nonces in one run (the
+        // sentinel and the oversize record) can never collide.
+        (t % 1_000_000_000) * 1_000 + COUNTER.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Every `eventMessage` this process emitted in the last two minutes.
+    ///
+    /// `--style json` JSON-ESCAPES the message, so it is decoded with
+    /// `serde_json` rather than byte-matched against raw output. Deliberately
+    /// NO `--info`: retrieval without it is what proves spec D4's default-level
+    /// decision.
+    #[cfg(target_os = "macos")]
+    fn macos_log_messages() -> Vec<String> {
+        let pred = format!("processIdentifier == {}", std::process::id());
+        let out = std::process::Command::new("/usr/bin/log")
+            .args([
+                "show",
+                "--last",
+                "2m",
+                "--style",
+                "json",
+                "--predicate",
+                &pred,
+            ])
+            .output()
+            .expect("/usr/bin/log must be executable");
+        if !out.status.success() {
+            return Vec::new();
+        }
+        let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        v.as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("eventMessage")?.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Poll with a bounded backoff (records take ~1s to appear). NOT a fixed
+    /// sleep, and NOT unbounded.
+    #[cfg(target_os = "macos")]
+    fn macos_await_nonce(nonce: u64) -> Vec<String> {
+        let needle = format!("session={nonce} ");
+        let mut waited = std::time::Duration::ZERO;
+        let ceiling = std::time::Duration::from_secs(15);
+        let mut step = std::time::Duration::from_millis(500);
+        loop {
+            let msgs = macos_log_messages();
+            if msgs.iter().any(|m| m.contains(&needle)) {
+                return msgs;
+            }
+            if waited >= ceiling {
+                return msgs;
+            }
+            std::thread::sleep(step);
+            waited += step;
+            step = (step * 2).min(std::time::Duration::from_secs(4));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_round_trip_delivers_the_record_byte_identical_to_the_jsonl() {
+        if !macos_gate() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_at(dir.path());
+        let sink = AuditSink::open(&cfg).unwrap();
+
+        // TWO nonces. The oversize record is DROPPED by the formatter, so if it
+        // shared the sentinel's nonce the negative could not be expressed at all.
+        let oversize_nonce = macos_nonce();
+        let sentinel_nonce = macos_nonce();
+
+        // Emit the oversize record FIRST. If it went last, "absent" could just
+        // mean "not yet delivered" — ok-on-nothing at one remove.
+        let mut big = sample_record();
+        big.session_id = oversize_nonce;
+        big.au3_1 = serde_json::json!({ "pad": "x".repeat(8192) });
+        sink.append(&big).await.unwrap();
+
+        let mut rec = sample_record();
+        rec.session_id = sentinel_nonce;
+        sink.append(&rec).await.unwrap();
+
+        let msgs = macos_await_nonce(sentinel_nonce);
+
+        // POSITIVE CONTROL FIRST: at least one record carrying THIS RUN's nonce
+        // — never merely "the set is non-empty".
+        let needle = format!("session={sentinel_nonce} ");
+        let mine: Vec<&String> = msgs.iter().filter(|m| m.contains(&needle)).collect();
+        assert!(
+            !mine.is_empty(),
+            "no unified-log record carried this run's nonce {sentinel_nonce}; \
+             {} records returned for this pid",
+            msgs.len()
+        );
+
+        // MAKNAE_RECORD is everything after the FIRST `MAKNAE_RECORD=`.
+        // `find`, NEVER `rfind`: under hostile input the last occurrence is
+        // inside the payload, so rfind returns attacker-chosen bytes.
+        let line = mine[0];
+        let at = line
+            .find("MAKNAE_RECORD=")
+            .expect("the delivered record must carry the anchor");
+        let delivered = &line[at + "MAKNAE_RECORD=".len()..];
+
+        // `write_line` pushes a '\n' onto the canonical JSON, so compare
+        // against the first LINE, not the whole file.
+        let jsonl = std::fs::read_to_string(&cfg.jsonl_path).unwrap();
+        let written = jsonl
+            .lines()
+            .find(|l| l.contains(&format!("\"session_id\":{sentinel_nonce}")))
+            .expect("the sentinel must be in the JSONL too");
+        assert_eq!(
+            delivered, written,
+            "the unified-log copy and the JSONL line must be byte-identical"
+        );
+
+        // The oversize record was DROPPED by the formatter, never truncated.
+        let dropped = format!("session={oversize_nonce} ");
+        assert!(
+            !msgs.iter().any(|m| m.contains(&dropped)),
+            "an oversize record must be DROPPED, not delivered truncated"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_delivers_each_of_the_four_primary_markers_exactly() {
+        if !macos_gate() {
+            return;
+        }
+        // Assert the EXACT marker for each outcome. A `refused-` prefix match
+        // passes with the two refusal markers SWAPPED, and sink.rs is
+        // mutation-excluded, so nothing else would catch that swap on macOS.
+        let dir = tempfile::tempdir().unwrap();
+
+        // ok
+        let n_ok = macos_nonce();
+        {
+            let sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+            let mut r = sample_record();
+            r.session_id = n_ok;
+            sink.append(&r).await.unwrap();
+        }
+        // refused-breaker-open: trip_after == 0 returns RefuseOpen
+        // UNCONDITIONALLY (blocking_guard.rs:79-81).
+        let n_breaker = macos_nonce();
+        {
+            let mut sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+            sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new(0)));
+            let mut r = sample_record();
+            r.session_id = n_breaker;
+            assert!(sink.append(&r).await.is_err(), "primary must refuse");
+        }
+        // refused-at-capacity: trip_after high enough not to trip, capacity 0.
+        let n_capacity = macos_nonce();
+        {
+            let mut sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+            sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new_with_limits(u8::MAX, 0)));
+            let mut r = sample_record();
+            r.session_id = n_capacity;
+            assert!(sink.append(&r).await.is_err(), "primary must refuse");
+        }
+        // write-failed: a read-only primary fd. The breaker admits, write_line
+        // fails EBADF, the join succeeds with an inner Err.
+        let n_failed = macos_nonce();
+        {
+            let mut sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+            sink.primary = Arc::new(Mutex::new(File::open("/dev/null").unwrap()));
+            let mut r = sample_record();
+            r.session_id = n_failed;
+            assert!(
+                sink.append(&r).await.is_err(),
+                "the primary write must fail"
+            );
+        }
+
+        let msgs = macos_await_nonce(n_failed);
+        for (nonce, marker) in [
+            (n_ok, "MAKNAE_PRIMARY=ok"),
+            (n_breaker, "MAKNAE_PRIMARY=refused-breaker-open"),
+            (n_capacity, "MAKNAE_PRIMARY=refused-at-capacity"),
+            (n_failed, "MAKNAE_PRIMARY=write-failed"),
+        ] {
+            let needle = format!("session={nonce} ");
+            let found = msgs
+                .iter()
+                .find(|m| m.contains(&needle))
+                .unwrap_or_else(|| panic!("no delivered record carried nonce {nonce}"));
+            assert!(
+                found.contains(marker),
+                "record {nonce} must carry the exact marker {marker}: {found}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_an_oversize_record_still_leaves_the_primary_append_ok() {
+        // Spec §5 bullet 4. Task 4's Linux gating removes
+        // `a_mirror_send_failure_never_fails_a_good_primary_append` on darwin
+        // with nothing replacing it; this is the replacement. Needs no log
+        // readback, so it runs even when the store is unreadable.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_at(dir.path());
+        let sink = AuditSink::open(&cfg).unwrap();
+        let mut big = sample_record();
+        big.au3_1 = serde_json::json!({ "pad": "x".repeat(8192) });
+        sink.append(&big)
+            .await
+            .expect("a dropped mirror must never fail a good primary append");
+        let jsonl = std::fs::read_to_string(&cfg.jsonl_path).unwrap();
+        assert_eq!(
+            jsonl.lines().count(),
+            1,
+            "the primary line must be durable even when the mirror drops"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_a_line_of_exactly_the_cap_arrives_unmarked_from_the_platform() {
+        if !macos_gate() {
+            return;
+        }
+        // THE ONLY assertion in this PR that can detect a wrong
+        // MACOS_SYSLOG_MAX — and that constant has been wrong TWICE (1024, then
+        // 1018, both read off a TRUNCATED record). Every other check compares a
+        // formatted line to the constant, i.e. the code against itself.
+        use crate::syslog_fmt::{format_line_unchecked, MACOS_SYSLOG_MAX};
+        let nonce = macos_nonce();
+
+        // Grow the pad against the record that ALREADY carries the nonce: the
+        // nonce appears TWICE in the line (`session=<n>` and `"session_id":<n>`),
+        // so a template-grown pad is the wrong length once it is substituted.
+        // BOUNDED — an unbounded loop here produces TIMEOUT mutants.
+        let mut at_cap = None;
+        for pad in 0..=MACOS_SYSLOG_MAX {
+            let mut r = sample_record();
+            r.session_id = nonce;
+            r.au3_1 = serde_json::json!({ "p": "x".repeat(pad) });
+            let len = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap().len();
+            if len == MACOS_SYSLOG_MAX {
+                at_cap = Some(r);
+                break;
+            }
+            assert!(len < MACOS_SYSLOG_MAX, "overshot at pad {pad} (len {len})");
+        }
+        let at_cap = at_cap.expect("a record of exactly the cap must be constructible");
+        let expected = format_line_unchecked(&at_cap, PrimaryOutcome::Ok).unwrap();
+        assert_eq!(expected.len(), MACOS_SYSLOG_MAX);
+
+        let dir = tempfile::tempdir().unwrap();
+        let sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+        sink.append(&at_cap).await.unwrap();
+
+        let msgs = macos_await_nonce(nonce);
+        let needle = format!("session={nonce} ");
+        let got = msgs
+            .iter()
+            .find(|m| m.contains(&needle))
+            .expect("a line of exactly the cap must be DELIVERED, not dropped");
+
+        // Truncation is MARKED, which makes this cheap and decisive.
+        assert!(
+            !got.ends_with("<\u{2026}>"),
+            "a line of exactly MACOS_SYSLOG_MAX bytes came back TRUNCATED — the \
+             cap constant is too high: {got}"
+        );
+        assert_eq!(
+            got.len(),
+            MACOS_SYSLOG_MAX,
+            "the delivered byte length must equal what was submitted"
+        );
+    }
 }
