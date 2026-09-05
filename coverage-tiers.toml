@@ -135,6 +135,13 @@ files = [
   # the two audit sinks diverge silently. Pure computation; the socket lives in
   # journal_io.rs, tiered separately.
   "crates/maknae-audit-append/src/journal.rs",
+  # #222's macOS unified-log formatter: a wrong oversize predicate ships
+  # CORRUPT JSON into the audit trail — the platform clips at 1015 bytes and
+  # marks the wreckage `<…>`, so an off-by-one keeps a record that is truncated
+  # mid-payload while still looking present. It also holds the D4b scrub, whose
+  # failure lets a subject forge structured fields into their own deny record.
+  # Pure; the syslog(3) call lives in syslog_io.rs, tiered separately.
+  "crates/maknae-audit-append/src/syslog_fmt.rs",
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
