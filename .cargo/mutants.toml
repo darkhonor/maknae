@@ -152,6 +152,11 @@ exclude_globs = [
   # crates (maknae-proto, maknae-audit-append) + the kernel's I/O-only files —
   # only the T1 decision logic (wire/frame/transport/audit_cfg/record/session/
   # authz/handler/supervisor) is mutated.
+  # UPDATED 2026-09-05 (#189): maknae-audit-append gained journal.rs (T1, the
+  # journald wire encoder) and journal_io.rs (T3, the socket). NEITHER is
+  # excluded — journal_io.rs measured 2 caught / 1 unviable / 0 missed, so the
+  # T3 tier needs no mutation exemption here, and taking one would retire
+  # coverage this note's argument never claimed.
   "crates/maknae-proto/src/error.rs",       # Display/Error declarations only
   "crates/maknae-audit-append/src/sink.rs", # file-open + blocking-write I/O
   "crates/maknae-audit-append/src/error.rs", # Display/Error declarations only
