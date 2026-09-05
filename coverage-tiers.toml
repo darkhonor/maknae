@@ -370,6 +370,10 @@ path = "crates/maknae-proto/src/error.rs"
 why = "Display/Error declarations only (ProtoCodecError/ProtoFrameError); no decision logic — the decode/frame decisions live in wire.rs/frame.rs (T1)"
 
 [[t3]]
+path = "crates/maknae-audit-append/src/journal_io.rs"
+why = "journald socket connect/send only — I/O-bound; every arm is a deliberate best-effort drop. The wire format it sends is journal.rs (T1, mutation-proven)."
+
+[[t3]]
 path = "crates/maknae-audit-append/src/sink.rs"
 why = "AuditSink open/append — file-open + blocking-write I/O; the record shape/canonicalization it appends is record.rs (T1). Mutation-excluded (mutants.toml)"
 

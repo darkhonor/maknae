@@ -13,6 +13,7 @@
 mod blocking_guard;
 mod error;
 mod journal;
+mod journal_io;
 mod record;
 mod session;
 mod sink;
