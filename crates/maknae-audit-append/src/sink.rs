@@ -12,7 +12,18 @@
 use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
 use crate::error::AuditError;
 use crate::journal::PrimaryOutcome;
-use crate::journal_io::{JournalMirror, DEFAULT_JOURNAL_SOCKET};
+// ONE name for the platform mirror, chosen here at the module boundary, so the
+// body of `open_with_journal` and `mirror_journald` is identical everywhere and
+// no call site carries a `cfg`.
+#[cfg(not(target_os = "macos"))]
+use crate::journal_io::{JournalMirror as Mirror, DEFAULT_JOURNAL_SOCKET};
+#[cfg(target_os = "macos")]
+use crate::syslog_io::SyslogMirror as Mirror;
+
+/// Inert on macOS: `syslog(3)` has no endpoint to point at. It exists so
+/// `open()` keeps ONE body across platforms rather than a `cfg` per call site.
+#[cfg(target_os = "macos")]
+const DEFAULT_JOURNAL_SOCKET: &str = "";
 use crate::record::{canonical_json, AuditRecord};
 use std::fs::File;
 use std::io::{ErrorKind, Write};
@@ -136,9 +147,14 @@ pub struct AuditSink {
     breaker: Arc<Mutex<BlockingBreaker>>,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
-    /// Best-effort journald mirror (ADR-0019 D3). `None` is a named absence —
-    /// darwin, non-systemd Linux, or journald unreachable at boot.
-    journal: Option<JournalMirror>,
+    /// Best-effort system-log mirror (ADR-0019 D3): journald on Linux
+    /// ([`crate::journal_io`]), the unified log on macOS ([`crate::syslog_io`]).
+    ///
+    /// `None` is a named absence. On Linux it is REACHABLE — non-systemd, or
+    /// journald unreachable at boot. On macOS it effectively is not: `syslog(3)`
+    /// has no endpoint that can be missing, so the macOS `open` is infallible in
+    /// practice and the `Option` is shape parity, not a guard.
+    mirror: Option<Mirror>,
 }
 
 impl AuditSink {
@@ -153,6 +169,12 @@ impl AuditSink {
 
     /// Test seam: the journal socket path is injectable so the round-trip is
     /// proven against a REAL bound socket rather than a stub.
+    ///
+    /// **On macOS the path is IGNORED** — `syslog(3)` has no injectable
+    /// endpoint. The parameter is kept so this signature is identical on both
+    /// platforms and the eighteen call sites below need no `cfg`. Delivery on
+    /// darwin is therefore proven differently: by the on-host round-trip that
+    /// reads the record back out of the real unified log.
     pub(crate) fn open_with_journal(
         cfg: &maknae_config::AuditConfig,
         journal: &Path,
@@ -167,7 +189,7 @@ impl AuditSink {
             primary: Arc::new(Mutex::new(file)),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
             path: cfg.jsonl_path.clone(),
-            journal: JournalMirror::open(journal),
+            mirror: Mirror::open(journal),
         })
     }
 
@@ -268,8 +290,8 @@ impl AuditSink {
     /// breaker would let a wedged primary suppress the last-chance mirror — the
     /// exact inversion of this method's purpose.
     fn mirror_journald(&self, rec: &AuditRecord, primary: PrimaryOutcome) {
-        if let Some(j) = self.journal.as_ref() {
-            j.mirror(rec, primary);
+        if let Some(m) = self.mirror.as_ref() {
+            m.mirror(rec, primary);
         }
     }
 }
@@ -579,6 +601,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")] // journald socket round-trip: the macOS mirror ignores the injected path, so no datagram ever arrives and recv_text's expect() would panic after its 2s timeout
     fn journal_receiver(dir: &std::path::Path) -> (std::os::unix::net::UnixDatagram, PathBuf) {
         let p = dir.join("journal.sock");
         let rx = std::os::unix::net::UnixDatagram::bind(&p).unwrap();
@@ -587,12 +610,14 @@ mod tests {
         (rx, p)
     }
 
+    #[cfg(target_os = "linux")] // journald socket round-trip: the macOS mirror ignores the injected path, so no datagram ever arrives and recv_text's expect() would panic after its 2s timeout
     fn recv_text(rx: &std::os::unix::net::UnixDatagram) -> String {
         let mut buf = vec![0u8; 128 * 1024];
         let n = rx.recv(&mut buf).expect("a datagram must arrive");
         String::from_utf8_lossy(&buf[..n]).to_string()
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_successful_append_mirrors_with_primary_ok() {
         let dir = tempfile::tempdir().unwrap();
@@ -602,6 +627,7 @@ mod tests {
         assert!(recv_text(&rx).contains("MAKNAE_PRIMARY=ok"));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_breaker_open_refusal_mirrors_refused_breaker_open() {
         // Assert the EXACT marker -- a `refused-` prefix match would pass with
@@ -624,6 +650,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn an_at_capacity_refusal_mirrors_refused_at_capacity() {
         // Reaching RefuseAtCapacity needs in_flight.len() >= max_in_flight, and
@@ -644,6 +671,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_primary_write_failure_mirrors_write_failed() {
         // The PR's headline fix, asserted. Without this the `write-failed`
@@ -665,6 +693,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_mirror_send_failure_never_fails_a_good_primary_append() {
         // THE load-bearing assertion. The receiver is bound at open time (so the
@@ -694,6 +723,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn an_absent_journal_socket_still_opens_the_sink() {
         let dir = tempfile::tempdir().unwrap();
@@ -703,6 +733,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_two_refusal_markers_are_not_interchangeable() {
         // A derived cross-check: whatever the two refusal paths emit, they must
@@ -730,6 +761,36 @@ mod tests {
             recv_text(&rx1),
             recv_text(&rx2),
             "the two refusal markers must be distinguishable"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_sink_holds_a_live_mirror_on_macos() {
+        // Assert the MIRROR, not the JSONL -- `append_writes_one_jsonl_line...`
+        // in tests/fail_closed.rs already makes the line-count assertion, and a
+        // test whose name says "mirror" must touch `sink.mirror`.
+        //
+        // On macOS the mirror needs no endpoint, so absence is not reachable the
+        // way it is on Linux. What must hold is the contract: the sink opens,
+        // the append succeeds, and the primary line is durable.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_at(dir.path());
+        let sink = AuditSink::open(&cfg).unwrap();
+        // Task 3 forbids `assert!(open(..).is_some())` as `assert!(true)`. This
+        // is different, and the difference is the point: `sink.rs` is
+        // MUTATION-EXCLUDED, so this is the only thing pinning that the macOS
+        // branch wires a mirror at all rather than leaving it `None`.
+        assert!(
+            sink.mirror.is_some(),
+            "macOS must hold a live mirror — syslog(3) needs no endpoint"
+        );
+        sink.append(&sample_record()).await.unwrap();
+        let jsonl = std::fs::read_to_string(&cfg.jsonl_path).unwrap();
+        assert_eq!(
+            jsonl.lines().count(),
+            1,
+            "the primary append must still be durable"
         );
     }
 }

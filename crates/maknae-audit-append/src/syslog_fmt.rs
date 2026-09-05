@@ -58,7 +58,6 @@ use crate::record::{canonical_json, AuditRecord};
 /// The acceptance test proves this against the PLATFORM, not against this
 /// constant: a record formatted to exactly `MACOS_SYSLOG_MAX` must round-trip
 /// unmarked through the real unified log.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) const MACOS_SYSLOG_MAX: usize = 1015;
 
 /// A value that has passed [`scrub`].
@@ -194,7 +193,6 @@ pub(crate) fn format_line_unchecked(
 /// than handed to a platform that would clip it mid-JSON and mark the wreckage
 /// with `<…>`. A dropped record is visibly absent; a truncated one is corrupt
 /// while looking present.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) fn format_record(
     rec: &AuditRecord,
     primary: PrimaryOutcome,

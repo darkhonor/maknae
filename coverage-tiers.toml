@@ -381,6 +381,10 @@ path = "crates/maknae-audit-append/src/journal_io.rs"
 why = "journald socket connect/send only — I/O-bound; every arm is a deliberate best-effort drop. The wire format it sends is journal.rs (T1, mutation-proven)."
 
 [[t3]]
+path = "crates/maknae-audit-append/src/syslog_io.rs"
+why = "openlog/syslog only — I/O-bound; every arm is a deliberate best-effort drop. The line format it sends, and every decision in it (the oversize cap, the D4b scrub), is syslog_fmt.rs (T1, mutation-proven)."
+
+[[t3]]
 path = "crates/maknae-audit-append/src/sink.rs"
 why = "AuditSink open/append — file-open + blocking-write I/O; the record shape/canonicalization it appends is record.rs (T1). Mutation-excluded (mutants.toml)"
 
