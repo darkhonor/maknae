@@ -145,6 +145,32 @@ allow maknaed_t var_run_t:dir { add_name write remove_name };
 allow maknaed_t var_run_t:sock_file { create setattr getattr unlink };
 allow maknaed_t self:unix_stream_socket { create bind listen accept read write getattr setopt getopt shutdown connectto };
 
+# #189 journald audit mirror: the appender writes the systemd native journal
+# protocol as a DATAGRAM. Nothing above grants unix_dgram_socket at all --
+# CONFIRMED against the COMPILED policy on el9, not by grepping this file:
+#   sesearch -A -s maknaed_t -t maknaed_t -c unix_dgram_socket   -> empty
+# so under enforcement the daemon cannot even create the socket, let alone
+# reach journald's.
+#
+# `logging_send_syslog_msg()` is the refpolicy interface for exactly this. On
+# el9 it is `typeattribute $1 syslog_client_type`, and that attribute carries
+# (measured with sesearch against a real member domain):
+#   allow syslog_client_type self:unix_dgram_socket { create connect write ... };
+#   allow syslog_client_type syslogd_t:unix_dgram_socket sendto;
+#   allow syslog_client_type devlog_t:sock_file          { append getattr open write };
+#   allow syslog_client_type syslogd_var_run_t:sock_file { append getattr open write };
+#
+# The last line is why the interface is correct here and a hand-rolled devlog_t
+# rule would NOT have been: on el9 `/run/systemd/journal/socket` is labeled
+# **syslogd_var_run_t**, not devlog_t (`ls -Z` on 10.110.11.58). Hand-rolling
+# would have shipped a rule that misses the real label -- which is the failure
+# this file's interface idiom (logging_log_file above) exists to avoid.
+#
+# Broader than ideal: the attribute also permits a syslogd_t stream connectto,
+# which a dgram-only writer does not need. Narrow if refpolicy ever exposes a
+# dgram-only journal interface.
+logging_send_syslog_msg(maknaed_t)
+
 # Vault egress is MANDATORY for maknae (unlike Microkosmos's opt-in) — the daemon
 # cannot function without Vault, so NO boolean. The operative least-privilege
 # control is the PORT LABEL: the operator MUST label their Vault port with
