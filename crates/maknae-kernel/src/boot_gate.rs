@@ -81,11 +81,13 @@ pub struct SiemOffloadUnsupported;
 
 impl std::fmt::Display for SiemOffloadUnsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The catalog string this is joined to already says "audit.siem is
+        // configured but off-host audit offload is not implemented", so this
+        // carries only what the operator must DO about it. Measured on
+        // 10.110.11.42: the two together previously said it twice.
         f.write_str(
-            "audit.siem is configured, but off-host audit offload is not implemented \
-             (tracked as issue #223). Maknae refuses to start rather than run with a \
-             configured control that does nothing. Remove the key; ship the audit \
-             JSONL with a host log agent instead — see packaging/README.md.",
+            "remove `audit.siem` (offload arrives with issue #223) and ship the \
+             audit JSONL with a host log agent instead — see packaging/README.md",
         )
     }
 }
