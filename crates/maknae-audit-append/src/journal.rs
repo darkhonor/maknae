@@ -25,10 +25,6 @@ const SYSLOG_IDENTIFIER: &str = "maknaed";
 /// No `Default` derive: on a type returned by a mutated function it makes a
 /// mutant equivalent-and-reported-missed, which is unkillable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Variants are constructed only from `sink.rs` (Task 3). Until then rustc
-// reports "variants are never constructed" -- a DIFFERENT dead_code lint from
-// the one an `#[allow]` on `encode` suppresses. DELETE this line in Task 3.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) enum PrimaryOutcome {
     /// The primary JSONL append succeeded; this is a true second copy.
     Ok,
@@ -99,11 +95,6 @@ pub(crate) fn push_field(buf: &mut Vec<u8>, name: &str, value: &[u8]) {
 /// copy and the JSONL line can never disagree. The filterable `MAKNAE_*` fields
 /// are duplicates of record content for `journalctl` querying, never a second
 /// source of truth.
-// No production caller until Task 3. rustc seeds an `#[allow(dead_code)]` item
-// as a LIVE ROOT, so this one attribute also keeps `push_field`,
-// `is_valid_field_name`, `as_field` and `SYSLOG_IDENTIFIER` live. Without it,
-// `clippy -D warnings` fails with five errors. DELETE in Task 3.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u8>, AuditError> {
     let canonical = canonical_json(rec)?;
     let subject = rec.subject.user.as_deref().unwrap_or("unknown");

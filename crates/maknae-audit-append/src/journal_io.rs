@@ -10,8 +10,6 @@ use std::path::Path;
 /// The systemd native journal submission socket.
 ///
 /// Its only caller is `AuditSink::open` (Task 3); the tests here use temp
-/// paths, so nothing references it yet. DELETE this attribute in Task 3.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) const DEFAULT_JOURNAL_SOCKET: &str = "/run/systemd/journal/socket";
 
 /// A best-effort, non-blocking journald mirror.
@@ -33,17 +31,10 @@ pub(crate) const DEFAULT_JOURNAL_SOCKET: &str = "/run/systemd/journal/socket";
 /// a journald restart (e.g. on package upgrade) silences the mirror until the
 /// daemon restarts. Acceptable for a sink whose failure is already silent by
 /// design; recorded in the PR body rather than worked around here.
-// Reached only from `#[cfg(test)]` until Task 3 wires it into `AuditSink`.
-// DELETE this attribute in Task 3.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) struct JournalMirror {
     sock: UnixDatagram,
 }
 
-// A lint level is per-item: an `#[allow]` on the STRUCT does NOT cover its
-// inherent methods, which rustc reports separately as "associated items `open`
-// and `mirror` are never used". DELETE in Task 3.
-#[allow(dead_code)] // wired in Task 3
 impl JournalMirror {
     /// `None` — a named, greppable absence — when the socket cannot be reached.
     pub(crate) fn open(path: &Path) -> Option<Self> {
