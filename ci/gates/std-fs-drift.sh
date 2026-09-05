@@ -34,7 +34,20 @@ requirements_pattern = re.compile(
 char_literal_pattern = re.compile(
     r"'(?:\\(?:u\{[0-9a-fA-F_]{1,6}\}|x[0-9a-fA-F]{2}|.)|[^\\'])'", re.DOTALL
 )
-found = set()
+# Keyed by path+content, NOT path:line -- a line number changes for reasons
+# unrelated to the property under review, so a line-keyed inventory fails on
+# every PR that edits anything above a call site, and trains reviewers to
+# regenerate it without reading. That inverts the gate's purpose.
+#
+# A LIST, not a set: duplicate content lines within one file are real (the
+# unix/non-unix cfg split in maknae-audit-append/src/sink.rs yields two
+# identical `let mut opts = std::fs::OpenOptions::new();` lines), and collapsing
+# them would hide a newly added identical call site. Multiplicity is part of the
+# reviewed inventory.
+#
+# Operator ruling 2026-09-05 (#189); the sweep of the remaining line-number
+# coupled gates is #224.
+found = []
 
 def mask_noncode(source):
     """Blank comments and literals while preserving byte offsets and newlines."""
@@ -146,16 +159,23 @@ for rel in files:
     match = forbidden_import.search(fs_source)
     if match:
         number = fs_source.count("\n", 0, match.start()) + 1
-        found.add(f"__VIOLATION__ {rel}:{number}: aliased or unqualified std::fs import is forbidden")
+        found.append(f"__VIOLATION__ {rel}:{number}: aliased or unqualified std::fs import is forbidden")
+    # Per LINE, not per match: a single line can match `fs_pattern` twice (e.g.
+    # `let mut opts = std::fs::OpenOptions::new();` matches both the `std::fs`
+    # and the `OpenOptions::` alternatives). The old line-keyed set collapsed
+    # those; without the line number a naive list would emit both and inflate
+    # the inventory. Collect line numbers first.
+    hits = set()
     for match in fs_pattern.finditer(fs_source):
-        number = fs_source.count("\n", 0, match.start()) + 1
-        found.add(f"{rel}:{number}|{lines[number - 1].strip()}")
+        hits.add(fs_source.count("\n", 0, match.start()) + 1)
+    for number in sorted(hits):
+        found.append(f"{rel}|{lines[number - 1].strip()}")
     for number, line in enumerate(scan_source.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("//"):
             continue
         if requirements_pattern.search(stripped):
-            found.add(f"{rel}:{number}|{stripped}")
+            found.append(f"{rel}|{stripped}")
 if found:
     print("\n".join(sorted(found)))
 PY
@@ -168,7 +188,7 @@ fi
 
 reviewed="$(mktemp)"
 trap 'rm -f "$tmp" "$reviewed"' EXIT
-awk '!/^#/ && NF' "$allow" | sort >"$reviewed"
+awk '!/^#/ && NF' "$allow" | LC_ALL=C sort >"$reviewed"
 if ! diff -u "$reviewed" "$tmp" >/dev/null; then
   echo "FAIL: production std::fs inventory differs from the exact reviewed allowlist"
   diff -u "$reviewed" "$tmp" || true
