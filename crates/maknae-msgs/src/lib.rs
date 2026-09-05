@@ -30,6 +30,10 @@ pub enum MsgId {
     /// (`authz.yaml` + the enrolled `principal`) could not be resolved — the
     /// daemon refuses to start.
     AuthzConfigRefused,
+    /// #189: `audit.siem` is configured but off-host audit offload is not
+    /// implemented (#223) — the daemon refuses to start rather than run with a
+    /// configured control that does nothing.
+    AuditOffloadUnsupported,
     /// PR-J1 Task 7 (spec §5.2): a non-fatal boot warning — this boot's
     /// credential posture is not hardware/OS-root-of-trust sealed.
     PostureDegraded,
@@ -92,6 +96,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::DaemonNotRunning,
     MsgId::DaemonStartFailed,
     MsgId::AuthzConfigRefused,
+    MsgId::AuditOffloadUnsupported,
     MsgId::PostureDegraded,
     MsgId::EnrollPreflightFailed,
     MsgId::EnrollProbeStarted,
@@ -258,6 +263,7 @@ mod tests {
                 | MsgId::DaemonNotRunning
                 | MsgId::DaemonStartFailed
                 | MsgId::AuthzConfigRefused
+                | MsgId::AuditOffloadUnsupported
                 | MsgId::PostureDegraded
                 | MsgId::EnrollPreflightFailed
                 | MsgId::EnrollProbeStarted
@@ -278,7 +284,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 28;
+        const VARIANT_COUNT: usize = 29;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

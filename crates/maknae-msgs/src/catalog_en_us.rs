@@ -17,6 +17,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::AuthzConfigRefused => {
             "maknae daemon refused to start: the authorization policy could not be loaded"
         }
+        MsgId::AuditOffloadUnsupported => {
+            "maknae daemon refused to start: audit.siem is configured but off-host audit offload is not implemented"
+        }
         MsgId::PostureDegraded => {
             "warning: this boot's credential posture is not hardware-root-of-trust sealed"
         }

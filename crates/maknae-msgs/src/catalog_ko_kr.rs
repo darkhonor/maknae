@@ -20,6 +20,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::AuthzConfigRefused => {
             "maknae 데몬이 시작을 거부했어요: 권한 정책을 불러올 수 없어요"
         }
+        MsgId::AuditOffloadUnsupported => {
+            "maknae 데몬이 시작을 거부했어요: audit.siem이 설정되어 있지만 외부 감사 전송은 아직 구현되지 않았어요"
+        }
         MsgId::PostureDegraded => {
             "경고: 이번 부팅의 자격 증명 상태가 하드웨어 신뢰 루트로 봉인되지 않았어요"
         }

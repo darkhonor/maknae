@@ -72,6 +72,43 @@ fn authz_boot_gate_with(
     Ok((authorizer, principal))
 }
 
+/// `audit.siem` is configured, but off-host audit offload is not implemented.
+///
+/// No `Default` derive — this type is returned by a mutated function, where a
+/// `Default` makes the mutant equivalent-and-unkillable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiemOffloadUnsupported;
+
+impl std::fmt::Display for SiemOffloadUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "audit.siem is configured, but off-host audit offload is not implemented \
+             (tracked as issue #223). Maknae refuses to start rather than run with a \
+             configured control that does nothing. Remove the key; ship the audit \
+             JSONL with a host log agent instead — see packaging/README.md.",
+        )
+    }
+}
+
+/// Fail closed when the config promises offload the daemon cannot perform.
+///
+/// **Pure predicate, deliberately here and not in `run.rs`.** `run.rs` is T3 and
+/// mutation-excluded — it is orchestration, and its decisions live in the T1
+/// files — so a refusal decision placed there would never be mutation-tested.
+///
+/// **Deliberately not in the parser either.** Erroring during parse would make
+/// `AuditConfig.siem == Some(_)` unreachable at runtime, stranding the
+/// `document.rs` disclosure-mask logic the key is retained for (operator ruling
+/// 2026-09-05: the key stays, reserved for #223). Parse normally; refuse here.
+pub fn audit_offload_boot_gate(
+    cfg: &maknae_config::AuditConfig,
+) -> Result<(), SiemOffloadUnsupported> {
+    match cfg.siem {
+        Some(_) => Err(SiemOffloadUnsupported),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +238,43 @@ mod tests {
             refusal.to_string().contains("bindings invalid"),
             "AuthzBasicError's own prefix must survive: {refusal}"
         );
+    }
+
+    fn audit_cfg(siem: Option<&str>) -> maknae_config::AuditConfig {
+        maknae_config::AuditConfig {
+            jsonl_path: std::path::PathBuf::from("/var/log/maknae/audit.jsonl"),
+            siem: siem.map(String::from),
+            au3_1: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn an_unset_siem_permits_boot() {
+        assert!(audit_offload_boot_gate(&audit_cfg(None)).is_ok());
+    }
+
+    #[test]
+    fn a_configured_siem_refuses_boot() {
+        assert_eq!(
+            audit_offload_boot_gate(&audit_cfg(Some("https://siem.example.mil:8443/ingest"))),
+            Err(SiemOffloadUnsupported)
+        );
+    }
+
+    #[test]
+    fn even_an_empty_siem_string_refuses_boot() {
+        // PRESENCE of the key is the signal, not its content -- an empty string
+        // is still an operator asserting they configured offload.
+        assert_eq!(
+            audit_offload_boot_gate(&audit_cfg(Some(""))),
+            Err(SiemOffloadUnsupported)
+        );
+    }
+
+    #[test]
+    fn the_refusal_message_names_the_key_and_the_tracking_issue() {
+        let m = SiemOffloadUnsupported.to_string();
+        assert!(m.contains("audit.siem"), "must name the key: {m}");
+        assert!(m.contains("223"), "must point at the tracking issue: {m}");
     }
 }
