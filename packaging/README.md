@@ -183,3 +183,92 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
   generic-node bind (needed by the Vault client connect as proven on Rocky 10);
   tightening this egress-only daemon to drop listen-capability is future hardening.
 - **macOS / OCI / Compose-Podman** — deferred (#76 / #81 / TBD).
+
+## Shipping the audit trail to a SIEM
+
+Maknae performs **no off-host audit egress** ([ADR-0019](../design/adr/ADR-0019-audit-record-model.md), amended 2026-09-05). The daemon writes two local sinks — the `_maknae`-owned append-only JSONL and a best-effort journald mirror — and off-host offload is the deployer's log agent tailing the JSONL.
+
+This satisfies AU-9(2), which requires audit storage on a physically separate system, **not** that Maknae be the transport. A home-lab deployment therefore needs no SIEM at all: zero configuration, zero cost.
+
+### Granting the agent read access
+
+The audit directory is **`0700 _maknae:_maknae`** and the file is `0640 _maknae:_maknae`. **No group membership grants access** — no group can traverse a `0700` directory — and `maknae` is the *operator* group for the daemon's UDS, not a log-reader group. [`maknae.sysusers`](common/maknae.sysusers) forbids on-disk cross-membership between the two identities, so do **not** add your agent to `maknae`.
+
+The lockdown is deliberate. Grant your agent exactly what it needs, with a POSIX ACL. **The file is append-only (`chattr +a`), and the kernel refuses any write-xattr operation on an append-only inode** — `setfacl` returns `Operation not permitted`, and `CAP_LINUX_IMMUTABLE` does not bypass it. So the flag must be lifted for the duration of the grant:
+
+```bash
+sudo setfacl -m u:vector:x /var/log/maknae            # traverse the directory
+sudo chattr  -a /var/log/maknae/audit.jsonl           # +a blocks setfacl (EPERM)
+sudo setfacl -m u:vector:r /var/log/maknae/audit.jsonl
+sudo chattr  +a /var/log/maknae/audit.jsonl           # restore append-only NOW
+```
+
+Substitute your agent's service user (`fluent-bit`, `promtail`, `splunk`, …). This grants read and nothing else: no write, no directory listing beyond traversal, and the `0700` default stays in place for everyone else.
+
+**Verify access, not the ACL entry:**
+
+```bash
+sudo -u vector test -r /var/log/maknae/audit.jsonl && echo "agent can read"
+```
+
+That distinction is not pedantry — see the first bullet below.
+
+**Three things that will bite you if you skip them:**
+
+- **Re-run the grant after every package upgrade.** The packages re-assert `0700` on the directory on *every* install, and a `chmod` recomputes the POSIX ACL mask from the group bits. The named-user entry **survives while its effect does not**:
+  ```
+  after setfacl : user:vector:r--   mask::r--     -> test -r  READ OK
+  after upgrade : user:vector:--x   mask::---     -> test -r  READ DENIED
+  ```
+  So `getfacl` looks correct on a grant that no longer works. **Troubleshoot with `getfacl … | grep effective` and the `test -r` probe above** — never with "the entry is there, so DAC is fine."
+- **The ACL does not survive the file being recreated.** `audit.jsonl` is package-`%ghost` (created first-install only). A restore or manual rotation that recreates it drops the ACL — re-apply it with the same four commands.
+- **On an SELinux host, DAC is necessary but not sufficient.** The sink is typed `maknae_audit_t` via `logging_log_file()` ([`maknae.te`](common/maknae.te)), i.e. a generic log-file type. A *confined* agent domain reads it only if its own policy calls `logging_read_generic_logs()`; an unconfined agent is unaffected. Check `ausearch -m AVC` **only after** `test -r` confirms DAC is granted.
+
+### Agent configurations
+
+**Vector** — `/etc/vector/vector.yaml`:
+```yaml
+sources:
+  maknae_audit:
+    type: file
+    include: ["/var/log/maknae/audit.jsonl"]
+transforms:
+  parse:
+    type: remap
+    inputs: ["maknae_audit"]
+    source: '. = parse_json!(.message)'
+```
+
+**Fluent Bit** — `/etc/fluent-bit/fluent-bit.conf`:
+```ini
+[INPUT]
+    Name    tail
+    Path    /var/log/maknae/audit.jsonl
+    Parser  json
+    Tag     maknae.audit
+```
+
+**rsyslog** (`imfile`) — `/etc/rsyslog.d/maknae.conf`:
+```
+module(load="imfile")
+input(type="imfile"
+      File="/var/log/maknae/audit.jsonl"
+      Tag="maknae-audit"
+      Severity="info")
+```
+
+### Or ship the journal instead — zero configuration, with one cost
+
+The mirror needs no filesystem access at all (the standard `systemd-journal` reader story), and carries the full canonical record in `MAKNAE_RECORD`:
+
+```bash
+journalctl -t maknaed MAKNAE_OUTCOME=deny -o json --all
+```
+
+Filterable fields: `MAKNAE_ACTION`, `MAKNAE_OUTCOME`, `MAKNAE_SUBJECT`, `MAKNAE_PRIMARY`. (`--all` matters: systemd renders fields at or over 4096 bytes as `null` without it, and `au3_1` is deployer-controlled.)
+
+`MAKNAE_PRIMARY` names which primary-sink condition produced the mirrored copy. **A value other than `ok` means that record is absent from the JSONL** — the primary sink refused or failed — so a trail reconstructed from the JSONL alone is incomplete for those entries.
+
+> **The journald mirror is best-effort and drops records under backpressure** (a full journald buffer returns `EAGAIN` and the record is discarded). It is an operational convenience, **not** the AU-9(2) offload path — that is the durable JSONL, read via the ACL above. Do not rest a compliance claim on the journal copy.
+
+> **`audit.siem` is not implemented.** The key is reserved for a future native export seam ([#223](https://github.com/darkhonor/maknae/issues/223)). Setting it makes `maknaed` **refuse to start**, with exit code 4 — deliberately: a control an operator believes is running is worse than one they know is absent. Use a log agent, as above.

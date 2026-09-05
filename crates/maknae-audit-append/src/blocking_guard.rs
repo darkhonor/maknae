@@ -62,13 +62,24 @@ impl Default for BlockingBreaker {
 
 impl BlockingBreaker {
     pub fn new(trip_after: u8) -> Self {
+        Self::new_with_limits(trip_after, AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT)
+    }
+
+    /// Both limits explicit. [`Self::new`] delegates here with the shipped
+    /// constant, so there is one construction path and no duplicated field list.
+    ///
+    /// Exists because [`BreakerAdmission::RefuseAtCapacity`] is otherwise
+    /// unreachable from a test: `max_in_flight` is private and `new()` hardcodes
+    /// it, which would leave one of #189's four `MAKNAE_PRIMARY` markers
+    /// unproven in a mutation-excluded file (`sink.rs`).
+    pub fn new_with_limits(trip_after: u8, max_in_flight: u8) -> Self {
         Self {
             in_flight: VecDeque::new(),
             last_refusal_logged_at: None,
             stale_reclaims: 0,
             next_attempt_id: 0,
             trip_after,
-            max_in_flight: AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT,
+            max_in_flight,
             stale_after: AUDIT_APPEND_STALE_AFTER,
             max_stale_reclaims: AUDIT_APPEND_MAX_STALE_RECLAIMS,
             refusal_log_every: AUDIT_APPEND_BREAKER_REFUSAL_LOG_EVERY,
@@ -126,6 +137,18 @@ impl BlockingBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `new()` must delegate with the SHIPPED constant. Without this a mutant
+    /// that swaps the second argument (e.g. to 0 or 1) survives, because every
+    /// other test constructs breakers whose behaviour does not depend on it.
+    #[test]
+    fn new_delegates_with_the_shipped_max_in_flight() {
+        let a = BlockingBreaker::new(3);
+        let b = BlockingBreaker::new_with_limits(3, AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT);
+        assert_eq!(a.max_in_flight, b.max_in_flight);
+        assert_eq!(a.max_in_flight, AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT);
+        assert_ne!(a.max_in_flight, 0, "a 0 capacity would refuse every append");
+    }
 
     #[test]
     fn audit_threshold_and_refusal_log_values_are_pinned() {

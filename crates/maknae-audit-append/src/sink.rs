@@ -3,13 +3,16 @@
 //!
 //! Fail-closed (AU-5): [`AuditSink::open`] errors if the primary JSONL file
 //! cannot be opened at boot; [`AuditSink::append`] errors on a primary write
-//! failure. The journald/unified-log mirror is best-effort (Stage 3a: a
-//! no-op stub) — its absence never masks a primary-sink failure.
+//! failure. The journald mirror is best-effort (a non-blocking datagram send
+//! that drops on any error) — its absence never masks a primary-sink failure.
+//! macOS has no journald equivalent yet (#222).
 //!
 //! T3 (`coverage-tiers.toml`): I/O-bound, report-only coverage; the
 //! `tests/fail_closed.rs` integration test is the primary evidence.
 use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
 use crate::error::AuditError;
+use crate::journal::PrimaryOutcome;
+use crate::journal_io::{JournalMirror, DEFAULT_JOURNAL_SOCKET};
 use crate::record::{canonical_json, AuditRecord};
 use std::fs::File;
 use std::io::{ErrorKind, Write};
@@ -133,6 +136,9 @@ pub struct AuditSink {
     breaker: Arc<Mutex<BlockingBreaker>>,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
+    /// Best-effort journald mirror (ADR-0019 D3). `None` is a named absence —
+    /// darwin, non-systemd Linux, or journald unreachable at boot.
+    journal: Option<JournalMirror>,
 }
 
 impl AuditSink {
@@ -142,6 +148,15 @@ impl AuditSink {
     /// Fails closed: an unopenable primary sink is an `Err`, never a silent
     /// no-op sink.
     pub fn open(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
+        Self::open_with_journal(cfg, Path::new(DEFAULT_JOURNAL_SOCKET))
+    }
+
+    /// Test seam: the journal socket path is injectable so the round-trip is
+    /// proven against a REAL bound socket rather than a stub.
+    pub(crate) fn open_with_journal(
+        cfg: &maknae_config::AuditConfig,
+        journal: &Path,
+    ) -> Result<Self, AuditError> {
         let file = open_audit_file(&cfg.jsonl_path)?;
         // Validate the OPENED fd (not the path) — fail closed on an insecure or
         // symlinked pre-existing audit file (AU-9). A symlink already failed the
@@ -152,6 +167,7 @@ impl AuditSink {
             primary: Arc::new(Mutex::new(file)),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
             path: cfg.jsonl_path.clone(),
+            journal: JournalMirror::open(journal),
         })
     }
 
@@ -190,7 +206,7 @@ impl AuditSink {
                     rec.event, rec.action, rec.session_id
                 );
                 }
-                self.mirror_journald(rec);
+                self.mirror_journald(rec, PrimaryOutcome::RefusedBreakerOpen);
                 return Err(AuditError::WritePrimary(
                     "audit append circuit breaker open".into(),
                 ));
@@ -207,7 +223,7 @@ impl AuditSink {
                     rec.event, rec.action, rec.session_id
                 );
                 }
-                self.mirror_journald(rec);
+                self.mirror_journald(rec, PrimaryOutcome::RefusedAtCapacity);
                 return Err(AuditError::WritePrimary(
                     "audit append worker capacity exhausted".into(),
                 ));
@@ -222,17 +238,40 @@ impl AuditSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_success(attempt);
-        let result = joined.map_err(|e| {
+        // The `?` used to return HERE, so a join failure -- the case where the
+        // primary is most obviously wedged -- reached NEITHER sink. Mirror
+        // first, then propagate.
+        let joined = joined.map_err(|e| {
             AuditError::WritePrimary(format!("blocking write task panicked/was cancelled: {e}"))
-        })?;
-        self.mirror_journald(rec);
-        result
+        });
+        // Borrow, never move: `joined` is consumed by the `?` below. Named
+        // `outcome`, NOT `primary` -- `primary` is already bound above as the
+        // Arc<Mutex<File>> clone.
+        let outcome = match &joined {
+            Ok(Ok(())) => PrimaryOutcome::Ok,
+            _ => PrimaryOutcome::WriteFailed,
+        };
+        self.mirror_journald(rec, outcome);
+        joined?
     }
 
-    /// Best-effort journald/macOS-unified-log mirror (ADR-0019 "two sinks").
-    /// Stage 3a stub: intentionally a no-op. Its absence never relieves the
-    /// fail-closed requirement on the primary sink above.
-    fn mirror_journald(&self, _rec: &AuditRecord) {}
+    /// Best-effort journald mirror (ADR-0019 D3).
+    ///
+    /// **Called on every outcome path after canonicalization, including
+    /// refusals — deliberately.** Three of the four call sites fire precisely
+    /// *because* the primary did not durably write, so when the primary is
+    /// wedged this is the last-chance record. `primary` marks which condition
+    /// produced the copy, so the two sinks never diverge silently.
+    ///
+    /// Never takes a breaker admission: the breaker bounds *blocking* backends,
+    /// and a non-blocking datagram send cannot wedge. Routing it through the
+    /// breaker would let a wedged primary suppress the last-chance mirror — the
+    /// exact inversion of this method's purpose.
+    fn mirror_journald(&self, rec: &AuditRecord, primary: PrimaryOutcome) {
+        if let Some(j) = self.journal.as_ref() {
+            j.mirror(rec, primary);
+        }
+    }
 }
 
 fn write_line(file: &Mutex<File>, line: &str) -> Result<(), AuditError> {
@@ -333,7 +372,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        let sink = AuditSink::open(&cfg).unwrap();
+        let sink = AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap();
         for i in 0..3u64 {
             let mut rec = sample_record();
             rec.seq = i + 1;
@@ -357,7 +400,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        let mut sink = AuditSink::open(&cfg).unwrap();
+        let mut sink = AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap();
         sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new(0)));
 
         assert!(sink.append(&sample_record()).await.is_err());
@@ -373,7 +420,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        assert!(AuditSink::open(&cfg).is_err());
+        assert!(AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+        )
+        .is_err());
     }
 
     // ---- fail-closed audit-file integrity (O_NOFOLLOW + fstat) --------------
@@ -414,7 +465,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        assert!(AuditSink::open(&cfg).is_ok());
+        assert!(AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+        )
+        .is_ok());
         let meta = std::fs::metadata(&path).unwrap();
         assert!(meta.file_type().is_file(), "created audit file is regular");
         assert_eq!(meta.uid(), nix::unistd::geteuid().as_raw(), "owned by us");
@@ -435,8 +490,14 @@ mod tests {
         let right_cfg = left_cfg.clone();
 
         let (left, right) = tokio::join!(
-            tokio::task::spawn_blocking(move || AuditSink::open(&left_cfg)),
-            tokio::task::spawn_blocking(move || AuditSink::open(&right_cfg)),
+            tokio::task::spawn_blocking(move || AuditSink::open_with_journal(
+                &left_cfg,
+                std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+            )),
+            tokio::task::spawn_blocking(move || AuditSink::open_with_journal(
+                &right_cfg,
+                std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+            )),
         );
 
         assert!(left.unwrap().is_ok());
@@ -459,7 +520,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        assert!(AuditSink::open(&cfg).is_err());
+        assert!(AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+        )
+        .is_err());
     }
 
     // (c) A symlink at the audit path is refused (O_NOFOLLOW → ELOOP on open), so a
@@ -477,7 +542,11 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        assert!(AuditSink::open(&cfg).is_err());
+        assert!(AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -488,9 +557,179 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         };
-        let sink = AuditSink::open(&cfg).unwrap();
+        let sink = AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap();
         AuditEmit::emit(&sink, &sample_record()).await.unwrap();
         let contents = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
         assert_eq!(contents.lines().count(), 1);
+    }
+
+    /// The `AuditConfig` these tests need. Authored here because the crate has
+    /// NO existing helper -- every AuditConfig in this module is an inline
+    /// literal. `siem` stays `None`: the field is retained by operator ruling
+    /// and this task must not change its shape.
+    fn cfg_at(dir: &std::path::Path) -> maknae_config::AuditConfig {
+        maknae_config::AuditConfig {
+            jsonl_path: dir.join("audit.jsonl"),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        }
+    }
+
+    fn journal_receiver(dir: &std::path::Path) -> (std::os::unix::net::UnixDatagram, PathBuf) {
+        let p = dir.join("journal.sock");
+        let rx = std::os::unix::net::UnixDatagram::bind(&p).unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        (rx, p)
+    }
+
+    fn recv_text(rx: &std::os::unix::net::UnixDatagram) -> String {
+        let mut buf = vec![0u8; 128 * 1024];
+        let n = rx.recv(&mut buf).expect("a datagram must arrive");
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_successful_append_mirrors_with_primary_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
+        sink.append(&sample_record()).await.unwrap();
+        assert!(recv_text(&rx).contains("MAKNAE_PRIMARY=ok"));
+    }
+
+    #[tokio::test]
+    async fn a_breaker_open_refusal_mirrors_refused_breaker_open() {
+        // Assert the EXACT marker -- a `refused-` prefix match would pass with
+        // the two markers swapped, and sink.rs is mutation-excluded so nothing
+        // else would catch the swap.
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let mut sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
+        // `trip_after == 0` makes begin_attempt_at return RefuseOpen
+        // UNCONDITIONALLY (blocking_guard.rs:79-81), so this reaches the
+        // breaker-open arm and never the at-capacity arm.
+        sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new(0)));
+        assert!(
+            sink.append(&sample_record()).await.is_err(),
+            "primary must refuse"
+        );
+        assert!(
+            recv_text(&rx).contains("MAKNAE_PRIMARY=refused-breaker-open"),
+            "breaker-open refusal must carry its own exact marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_at_capacity_refusal_mirrors_refused_at_capacity() {
+        // Reaching RefuseAtCapacity needs in_flight.len() >= max_in_flight, and
+        // max_in_flight is a private field `new()` hardcodes -- hence the
+        // new_with_limits seam. trip_after high enough not to trip; capacity 0
+        // so the first attempt is at capacity immediately.
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let mut sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
+        sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new_with_limits(u8::MAX, 0)));
+        assert!(
+            sink.append(&sample_record()).await.is_err(),
+            "primary must refuse"
+        );
+        assert!(
+            recv_text(&rx).contains("MAKNAE_PRIMARY=refused-at-capacity"),
+            "at-capacity refusal must carry its own exact marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_primary_write_failure_mirrors_write_failed() {
+        // The PR's headline fix, asserted. Without this the `write-failed`
+        // marker ships unproven -- and sink.rs is mutation-excluded, so there is
+        // no other net. Seam: swap the primary handle for a READ-ONLY fd after
+        // open. The breaker admits normally, `write_line` runs and fails EBADF,
+        // and the join succeeds with an inner Err -- the `Ok(Err(_))` arm.
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let mut sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
+        sink.primary = Arc::new(Mutex::new(File::open("/dev/null").unwrap()));
+        assert!(
+            sink.append(&sample_record()).await.is_err(),
+            "the primary write must fail"
+        );
+        assert!(
+            recv_text(&rx).contains("MAKNAE_PRIMARY=write-failed"),
+            "a failed primary write must mirror with its own exact marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mirror_send_failure_never_fails_a_good_primary_append() {
+        // THE load-bearing assertion. The receiver is bound at open time (so the
+        // mirror is Some and the send path is real), then torn down before the
+        // append -- so `send` returns ECONNREFUSED and the DROP path is
+        // genuinely exercised, not merely the `None` branch.
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let cfg = cfg_at(dir.path());
+        let sink = AuditSink::open_with_journal(&cfg, &jpath).unwrap();
+        drop(rx);
+        std::fs::remove_file(&jpath).ok();
+        assert!(
+            sink.append(&sample_record()).await.is_ok(),
+            "a mirror failure must not fail the primary"
+        );
+        // Observe that the mirror really failed rather than trusting the name:
+        // the primary line landed even though no datagram could be delivered.
+        let jsonl = std::fs::read_to_string(&cfg.jsonl_path).unwrap();
+        assert!(
+            jsonl.lines().count() >= 1,
+            "the primary append must still be durable"
+        );
+        assert!(
+            !jpath.exists(),
+            "the peer really is gone, so `send` really failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_journal_socket_still_opens_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            AuditSink::open_with_journal(&cfg_at(dir.path()), &dir.path().join("nope.sock"))
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_refusal_markers_are_not_interchangeable() {
+        // A derived cross-check: whatever the two refusal paths emit, they must
+        // DIFFER. This is what dies if an implementer swaps the two arms.
+        // Both sides append THE SAME record, so the datagrams can differ only in
+        // MAKNAE_PRIMARY; two different records would make assert_ne! vacuous.
+        let dir = tempfile::tempdir().unwrap();
+        // tempdir() creates only the root; bind into a missing subdir is ENOENT.
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::create_dir_all(dir.path().join("b")).unwrap();
+        let (rx1, j1) = journal_receiver(&dir.path().join("a"));
+        let (rx2, j2) = journal_receiver(&dir.path().join("b"));
+
+        let mut open_sink =
+            AuditSink::open_with_journal(&cfg_at(&dir.path().join("a")), &j1).unwrap();
+        open_sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new(0)));
+        let mut cap_sink =
+            AuditSink::open_with_journal(&cfg_at(&dir.path().join("b")), &j2).unwrap();
+        cap_sink.breaker = Arc::new(Mutex::new(BlockingBreaker::new_with_limits(u8::MAX, 0)));
+
+        let r = sample_record();
+        assert!(open_sink.append(&r).await.is_err());
+        assert!(cap_sink.append(&r).await.is_err());
+        assert_ne!(
+            recv_text(&rx1),
+            recv_text(&rx2),
+            "the two refusal markers must be distinguishable"
+        );
     }
 }

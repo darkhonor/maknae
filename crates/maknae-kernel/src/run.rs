@@ -1752,13 +1752,18 @@ enum RunError {
     /// this is constructed.
     Authz(String),
     /// Any other startup failure.
+    /// #189: `audit.siem` is configured but off-host offload is unimplemented
+    /// (#223). Its own variant, so it maps to its own exit code.
+    AuditOffload(String),
     Other(String),
 }
 
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::Authz(m) | RunError::Other(m) => write!(f, "{m}"),
+            RunError::Authz(m) | RunError::AuditOffload(m) | RunError::Other(m) => {
+                write!(f, "{m}")
+            }
         }
     }
 }
@@ -1768,6 +1773,12 @@ impl std::fmt::Display for RunError {
 /// process-supervision script can tell "refused: unauthorized/unresolvable authz
 /// policy" apart from every other startup failure without parsing stderr.
 const AUTHZ_REFUSAL_EXIT_CODE: u8 = 3;
+
+/// The distinct process exit code for [`RunError::AuditOffload`] (#189). Same
+/// reasoning as the authz code above: an operator scripting startup can tell
+/// "config promises an audit control that is not implemented" apart from every
+/// other startup failure without parsing stderr.
+const AUDIT_OFFLOAD_REFUSAL_EXIT_CODE: u8 = 4;
 
 /// The `maknaed` entrypoint. Builds a Tokio runtime and drives the async orchestration;
 /// any boot/config/credential failure fails closed to a non-zero `ExitCode` (the daemon
@@ -1791,6 +1802,10 @@ pub fn run(config_dir: &Path) -> ExitCode {
             Err(RunError::Authz(e)) => {
                 eprintln!("maknaed: refusing to start: {e}");
                 ExitCode::from(AUTHZ_REFUSAL_EXIT_CODE)
+            }
+            Err(RunError::AuditOffload(e)) => {
+                eprintln!("maknaed: refusing to start: {e}");
+                ExitCode::from(AUDIT_OFFLOAD_REFUSAL_EXIT_CODE)
             }
             Err(RunError::Other(e)) => {
                 eprintln!("maknaed: refusing to start: {e}");
@@ -1857,6 +1872,52 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
         maknae_msgs::MsgId::AuthzConfigRefused,
     );
     RunError::Authz(format!("{catalog}: {reason}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+/// #189: the AU-3 boot refusal record for a configured-but-unimplemented
+/// `audit.siem`. Mirrors [`refuse_authz_boot`]'s shape exactly — same record
+/// fields, same emit-failure handling — differing only in the action it records
+/// and the catalog string it renders. Placed AFTER the audit sink opens, per the
+/// ordering rule stated for the authz gate: a fail-closed refusal that emits no
+/// record is a refusal with no trail.
+async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
+    sink: &E,
+    host: &str,
+    socket: &str,
+    uid: u32,
+    session_id: u64,
+    seq: u64,
+    au3_1: &serde_json::Value,
+    reason: String,
+) -> RunError {
+    let rec = make_record(
+        "boot",
+        host,
+        socket,
+        uid,
+        None,
+        None,
+        None,
+        session_id,
+        seq,
+        "audit.offload",
+        None,
+        "deny",
+        &reason,
+        "unauthorized",
+        au3_1,
+    );
+    if let Err(e) = sink.emit(&rec).await {
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on boot audit-offload refusal — refusal proceeded without a durable record: {e}"
+        );
+    }
+    let catalog = maknae_msgs::msg(
+        maknae_msgs::detect_locale(),
+        maknae_msgs::MsgId::AuditOffloadUnsupported,
+    );
+    RunError::AuditOffload(format!("{catalog}: {reason}"))
 }
 
 /// Read the root-owned boot posture marker (`<config_dir>/private/posture.yaml`,
@@ -1988,6 +2049,23 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let host = hostname();
     let socket = transport.socket_path.display().to_string();
     let euid = nix::unistd::geteuid().as_raw();
+
+    // #189: a configured `audit.siem` promises off-host offload that does not
+    // exist until #223. Fail closed -- and audit the refusal, per the ordering
+    // rule stated for the authz gate below.
+    if let Err(e) = crate::boot_gate::audit_offload_boot_gate(&audit_cfg) {
+        return Err(refuse_audit_offload_boot(
+            sink.as_ref(),
+            &host,
+            &socket,
+            euid,
+            boot_session_id(&session_ids),
+            Seq::new().next(),
+            &audit_cfg.au3_1,
+            e.to_string(),
+        )
+        .await);
+    }
 
     // --- AUTHZ GATE (#77, spec D1): the daemon constructs its PDP at boot or
     // refuses to start. Ordering: audit sink first (above), so the refusal is
