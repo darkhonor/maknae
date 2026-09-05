@@ -130,6 +130,11 @@ files = [
   # 95% floor; NOT ratchet_cohort).
   "crates/maknae-config/src/authz.rs",
   "crates/maknae-audit-append/src/record.rs",
+  # #189's journald wire encoder: a malformed field name corrupts the entire
+  # datagram (not merely its own field), and a wrong PrimaryOutcome arm makes
+  # the two audit sinks diverge silently. Pure computation; the socket lives in
+  # journal_io.rs, tiered separately.
+  "crates/maknae-audit-append/src/journal.rs",
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
@@ -363,6 +368,10 @@ why = "in-process mTLS negative suite (Stage 2, Task 10); #[cfg(test)] unit modu
 [[t3]]
 path = "crates/maknae-proto/src/error.rs"
 why = "Display/Error declarations only (ProtoCodecError/ProtoFrameError); no decision logic — the decode/frame decisions live in wire.rs/frame.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-audit-append/src/journal_io.rs"
+why = "journald socket connect/send only — I/O-bound; every arm is a deliberate best-effort drop. The wire format it sends is journal.rs (T1, mutation-proven)."
 
 [[t3]]
 path = "crates/maknae-audit-append/src/sink.rs"

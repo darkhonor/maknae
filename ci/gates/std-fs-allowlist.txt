@@ -1,61 +1,61 @@
 # Enrollment is one privileged create/chmod/chown transaction. maknae-io has no
 # chown-capable transaction contract; wrapping only the byte write would split it.
-bins/maknae/src/enroll/artifact_write.rs:119|std::fs::set_permissions(
-bins/maknae/src/enroll/artifact_write.rs:121|std::fs::Permissions::from_mode(artifact.mode),
-bins/maknae/src/enroll/artifact_write.rs:130|std::fs::create_dir_all(&artifact.path).map_err(|e| io_err(&artifact.path, e))?;
-bins/maknae/src/enroll/artifact_write.rs:140|std::fs::write(&artifact.path, bytes).map_err(|e| io_err(&artifact.path, e))?;
-bins/maknae/src/enroll/mod.rs:712|let _ = std::fs::remove_file(&out_path);
-bins/maknae/src/enroll/mod.rs:742|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
+bins/maknae/src/enroll/artifact_write.rs|std::fs::set_permissions(
+bins/maknae/src/enroll/artifact_write.rs|std::fs::Permissions::from_mode(artifact.mode),
+bins/maknae/src/enroll/artifact_write.rs|std::fs::create_dir_all(&artifact.path).map_err(|e| io_err(&artifact.path, e))?;
+bins/maknae/src/enroll/artifact_write.rs|std::fs::write(&artifact.path, bytes).map_err(|e| io_err(&artifact.path, e))?;
+bins/maknae/src/enroll/mod.rs|let _ = std::fs::remove_file(&out_path);
+bins/maknae/src/enroll/mod.rs|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
 
 # #77 read-path grant: the AppArmor local include is a root-context, warn-on-failure
 # provisioning write to /etc/apparmor.d/local (not a maknae-managed artifact tree);
 # maknae-io's anchored-write contract targets maknae artifact dirs and would add an
 # anchor for a foreign, distro-owned path — the same enrollment-transaction rationale
 # as artifact_write above.
-bins/maknae/src/enroll/mod.rs:1209|let _ = std::fs::create_dir_all(local_dir);
-bins/maknae/src/enroll/mod.rs:1221|if let Err(e) = std::fs::write(&inc, snippet) {
+bins/maknae/src/enroll/mod.rs|let _ = std::fs::create_dir_all(local_dir);
+bins/maknae/src/enroll/mod.rs|if let Err(e) = std::fs::write(&inc, snippet) {
 
 # Enrollment input reads intentionally preserve their existing caller-selected symlink and
 # permission semantics. maknae-io has no follow-final-symlink read contract; migration would
 # be a behavior change and belongs to the enrollment I/O contract work, not this storage pass.
-bins/maknae/src/enroll/mod.rs:857|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1301|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1317|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
-bins/maknae/src/enroll/mod.rs:1359|Some(root_path) => match std::fs::read_to_string(&root_path) {
+bins/maknae/src/enroll/mod.rs|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
+bins/maknae/src/enroll/mod.rs|Some(root_path) => match std::fs::read_to_string(&root_path) {
 
 # Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
 # opens per call and intentionally has a different lifecycle/durability contract.
-crates/maknae-audit-append/src/sink.rs:14|use std::fs::File;
-crates/maknae-audit-append/src/sink.rs:34|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:37|let mut opts = std::fs::OpenOptions::new();
-crates/maknae-audit-append/src/sink.rs:94|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs:96|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs|use std::fs::File;
+crates/maknae-audit-append/src/sink.rs|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs|let mut opts = std::fs::OpenOptions::new();
+crates/maknae-audit-append/src/sink.rs|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
+crates/maknae-audit-append/src/sink.rs|let mut opts = std::fs::OpenOptions::new();
 
 # The DEFINITIONS of the three named requirement-free identifiers (issue #132). Each
 # says "OS DAC is sufficient at this scope" once, in one reviewed place, so a caller
 # can no longer express that decision anonymously — the gate inventories the identifier
 # as well as the struct-literal fields, and the identifier is what a caller writes.
-crates/maknae-io/src/checks.rs:43|pub const OS_DAC: AnchorRequired = AnchorRequired {
-crates/maknae-io/src/checks.rs:44|owner: None,
-crates/maknae-io/src/checks.rs:45|mode_mask: None,
-crates/maknae-io/src/checks.rs:59|pub const OS_DAC: DescendantRequired = DescendantRequired {
-crates/maknae-io/src/checks.rs:60|owner: None,
-crates/maknae-io/src/checks.rs:61|mode_mask: None,
-crates/maknae-io/src/checks.rs:87|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
-crates/maknae-io/src/checks.rs:88|owner: None,
-crates/maknae-io/src/checks.rs:89|mode_mask: None,
+crates/maknae-io/src/checks.rs|pub const OS_DAC: AnchorRequired = AnchorRequired {
+crates/maknae-io/src/checks.rs|owner: None,
+crates/maknae-io/src/checks.rs|mode_mask: None,
+crates/maknae-io/src/checks.rs|pub const OS_DAC: DescendantRequired = DescendantRequired {
+crates/maknae-io/src/checks.rs|owner: None,
+crates/maknae-io/src/checks.rs|mode_mask: None,
+crates/maknae-io/src/checks.rs|pub const OS_DAC_REGULAR: TargetRequired = TargetRequired {
+crates/maknae-io/src/checks.rs|owner: None,
+crates/maknae-io/src/checks.rs|mode_mask: None,
 
 # read_absolute pins the configured path's parent; OS DAC is the named directory
 # requirement while the caller supplies the target artifact requirements. Named ONCE
 # here since issue #137 — maknae-config::loader, maknae-config::authz and maknae-vault
 # each carried their own copy of this anchor requirement until the adapter absorbed
 # absolutization and they were deleted.
-crates/maknae-io/src/anchor.rs:362|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
+crates/maknae-io/src/anchor.rs|let anchor = open_anchor_resolved(parent, AnchorRequired::OS_DAC, pref)?;
 
 # read_storage carries no requirement of its own beyond regular-file: it reads
 # non-sensitive artifacts (CA pins, sealed-source blobs), and every caller needing a
 # permission gate applies it separately (client::read_secret_credential's 0o077 mask).
-crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
+crates/maknae-vault/src/lib.rs|let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
 
 # owner: None means OS DAC is sufficient for OWNERSHIP at that scope; the mode
 # requirement standing beside it is named explicitly, and stronger artifact
@@ -63,20 +63,20 @@ crates/maknae-vault/src/lib.rs:90|let target = maknae_io::TargetRequired::OS_DAC
 # where applicable). loader.rs:34 is CONFIG_ARTIFACT, the named const that replaced
 # `read_secure_required(path, None, Some(0o007))` — the positional spelling issue #132
 # reported as invisible to this inventory.
-crates/maknae-config/src/loader.rs:34|owner: None,
-crates/maknae-config/src/loader.rs:182|owner: None,
-crates/maknae-config/src/loader.rs:224|owner: None,
-crates/maknae-config/src/loader.rs:270|owner: None,
-crates/maknae-vault/src/client.rs:137|owner: None,
+crates/maknae-config/src/loader.rs|owner: None,
+crates/maknae-config/src/loader.rs|owner: None,
+crates/maknae-config/src/loader.rs|owner: None,
+crates/maknae-config/src/loader.rs|owner: None,
+crates/maknae-vault/src/client.rs|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.
-crates/maknae-vault/src/socket.rs:16|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {
-crates/maknae-vault/src/socket.rs:56|match std::fs::symlink_metadata(path) {
-crates/maknae-vault/src/socket.rs:75|std::fs::remove_file(path)
-crates/maknae-vault/src/socket.rs:107|let _ = std::fs::remove_file(path);
-crates/maknae-vault/src/socket.rs:119|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-crates/maknae-vault/src/stream.rs:208|let _ = std::fs::remove_file(&self.path);
-crates/maknae-vault/src/stream.rs:247|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/socket.rs|let meta = std::fs::metadata(dir).map_err(|e| VaultError::InsecureSocketDir {
+crates/maknae-vault/src/socket.rs|match std::fs::symlink_metadata(path) {
+crates/maknae-vault/src/socket.rs|std::fs::remove_file(path)
+crates/maknae-vault/src/socket.rs|let _ = std::fs::remove_file(path);
+crates/maknae-vault/src/socket.rs|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
+crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(path);
 
 # The read PEP's target requirement (handler.rs::delegated_plan). These two `None`s
 # are DELIBERATE and, since ADR-0009 (2026-08-30), load-bearing rather than merely
@@ -92,8 +92,8 @@ crates/maknae-vault/src/stream.rs:247|let _ = std::fs::remove_file(path);
 # load-bearing three ways
 # (ADR-0009 decision 5). Do not "complete" these fields; #186 owed-bullet 1 was
 # corrected for exactly this reason.
-crates/maknae-kernel/src/handler.rs:420|owner: None,
-crates/maknae-kernel/src/handler.rs:421|mode_mask: None,
+crates/maknae-kernel/src/handler.rs|owner: None,
+crates/maknae-kernel/src/handler.rs|mode_mask: None,
 
 # ADR-0009 open_for_delegation — the SUBJECT's own open, performed by the untrusted
 # CLIENT under its own credentials. This is the ONE std::fs call in the crate whose
@@ -105,4 +105,4 @@ crates/maknae-kernel/src/handler.rs:421|mode_mask: None,
 # require, on this very descriptor, and duplicating them here would put policy in an
 # untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
 # lifecycle stays in one crate and the client needs no exemption of its own.
-crates/maknae-io/src/delegated.rs:159|Ok(OwnedFd::from(std::fs::File::open(path)?))
+crates/maknae-io/src/delegated.rs|Ok(OwnedFd::from(std::fs::File::open(path)?))
