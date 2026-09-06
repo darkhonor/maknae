@@ -12,6 +12,17 @@ use nix::sys::stat::{FileStat, Mode as NixMode};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 
+// Unique implementation names let the mutation gate exclude only code absent
+// from the native build. Aliases preserve the callers' platform-neutral API.
+#[cfg(target_os = "macos")]
+pub(crate) use macos_fd_path as fd_path;
+#[cfg(not(target_os = "linux"))]
+pub(crate) use portable_probe_openat2 as probe_openat2;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) use unsupported_fd_path as fd_path;
+#[cfg(target_os = "linux")]
+pub(crate) use {linux_fd_path as fd_path, linux_probe_openat2 as probe_openat2};
+
 /// Widen `mode_t` to `u32`. The cast is load-bearing on darwin, where `mode_t` is
 /// `u16`, and a no-op on Linux, where it is already `u32` -- so `unnecessary_cast`
 /// fires on Linux ONLY. Found by running clippy on Linux (Debian 13, rustc 1.94.1):
@@ -54,8 +65,10 @@ pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
 //   O_RDONLY, everywhere            O_RDONLY IS 0 -- `empty()` is the same value, so
 //                                   this is a no-op, not a survivor.
 //   open_dir_at O_NONBLOCK          O_DIRECTORY makes a FIFO ENOTDIR before any block.
-//   open_dir_handle, all five       Target is `.`: always a directory, never a symlink.
-//                                   (Its O_CLOEXEC is the documented fdopendir case.)
+//   open_dir_handle, all five       Historical duplicate union targeting `.`.
+//                                   Corrected 2026-09-06 (#126): now reuses
+//                                   open_dir_at before Dir::from_fd; its flags
+//                                   are held before fdopendir changes the fd.
 //   open_temp_excl O_NOFOLLOW,      O_CREAT|O_EXCL means a freshly created regular
 //     O_NONBLOCK                    inode -- a planted name is EEXIST, nothing blocks.
 //   openat2_resolve O_DIRECTORY     Only the want_dir branch, reached solely by
@@ -65,7 +78,7 @@ pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
 //
 // Everything else is RED or HANGs, i.e. held. Two are held by HANGING rather than
 // failing -- open_read_target's and open_append's O_NONBLOCK -- which is why the FIFO
-// tests use a bounded wait on a worker thread.
+// tests now use killable, reaped child processes (corrected 2026-09-06, #126).
 //
 // LANE MATTERS. Lines inside `#[cfg(target_os = "linux")]` are dead code on darwin, so
 // a darwin sweep reports them GREEN whatever the truth is. Probed separately on Debian
@@ -116,24 +129,12 @@ pub(crate) fn open_read_target<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<Ow
     )
 }
 
-/// Re-open the pinned directory as a Dir handle. Dir::openat BORROWS the dirfd;
-/// Dir::from_fd would consume and Drop-close it, destroying the anchor pin.
-///
-/// `O_DIRECTORY`, `O_NOFOLLOW` and `O_NONBLOCK` are all redundant BY CONSTRUCTION here
-/// and deliberately kept: the target is `.`, which is always a directory and can never
-/// be a symlink. All three survive deletion green for that reason, not for want of a
-/// test.
+/// Open a fresh directory descriptor, then transfer only that descriptor to Dir.
+/// The anchor remains borrowed. Reusing open_dir_at also gives enumeration the
+/// same atomic O_CLOEXEC acquisition as directory walks, before fdopendir can
+/// obscure a missing flag by setting FD_CLOEXEC afterwards.
 pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> {
-    nix::dir::Dir::openat(
-        dirfd,
-        ".",
-        OFlag::O_RDONLY
-            | OFlag::O_DIRECTORY
-            | OFlag::O_NOFOLLOW
-            | OFlag::O_NONBLOCK
-            | OFlag::O_CLOEXEC,
-        NixMode::empty(),
-    )
+    nix::dir::Dir::from_fd(open_dir_at(dirfd, ".")?)
 }
 
 /// The crate's ONLY `fstat` call site, and it takes an fd — never a path. The
@@ -145,7 +146,7 @@ pub(crate) fn open_dir_handle<F: AsFd>(dirfd: &F) -> nix::Result<nix::dir::Dir> 
 /// permission on the object's directories at all. That is what lets a subject's
 /// `0700` home be served without granting the daemon `+x` or `+r` on it (#194).
 #[cfg(target_os = "linux")]
-pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
+pub(crate) fn linux_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
     use std::os::fd::AsRawFd;
     let link = format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd());
     nix::fcntl::readlink(link.as_str()).map(std::path::PathBuf::from)
@@ -166,17 +167,10 @@ pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
 /// need two roots in a prefix relationship across the firmlink boundary, which is a
 /// misconfiguration rather than a firmlink artifact.
 ///
-/// **WRITTEN AND COMPILE-CHECKED FOR arm64-darwin; NEVER RUN.** CI is `ubuntu-latest`
-/// only and all three standing test hosts are Linux, so the only machine that can
-/// verify this is **Wrathion**, the operator's Apple Silicon host. macOS is a
-/// **deployment target** (isolation contract, corrected 2026-08-30), so that is a
-/// release-gating condition rather than a footnote.
-///
-/// Implementing it means the WHOLE existing delegated suite becomes the macOS control
-/// the moment it is built there — no mac-only test is needed, and none is added,
-/// because a test that cannot run is not a control.
+/// Corrected 2026-09-06 (#126): this lane runs on native macOS CI and the
+/// operator's Apple Silicon host. The delegated suite exercises F_GETPATH.
 #[cfg(target_os = "macos")]
-pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
+pub(crate) fn macos_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
     let mut buf = std::path::PathBuf::new();
     nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETPATH(&mut buf))?;
     Ok(buf)
@@ -185,7 +179,7 @@ pub(crate) fn fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> {
 /// Fail closed on any platform with no lane: the kernel cannot be asked, so the answer
 /// is UNKNOWN, and ADR-0009 decision 8 makes unknown deny.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
+pub(crate) fn unsupported_fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
     Err(nix::errno::Errno::ENOSYS)
 }
 
@@ -261,12 +255,12 @@ pub(crate) fn openat2_resolve<F: AsFd>(
 /// about openat2 availability. Uses the full production flag set: a probe under a
 /// weaker set does not establish that the real call succeeds.
 #[cfg(target_os = "linux")]
-pub(crate) fn probe_openat2<F: AsFd>(dirfd: &F) -> Result<(), nix::errno::Errno> {
+pub(crate) fn linux_probe_openat2<F: AsFd>(dirfd: &F) -> Result<(), nix::errno::Errno> {
     openat2_resolve(dirfd, ".", true).map(|_| ())
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn probe_openat2<F: AsFd>(_dirfd: &F) -> Result<(), nix::errno::Errno> {
+pub(crate) fn portable_probe_openat2<F: AsFd>(_dirfd: &F) -> Result<(), nix::errno::Errno> {
     Err(nix::errno::Errno::ENOSYS)
 }
 
@@ -400,14 +394,8 @@ mod tests {
         assert!(is_cloexec(&fd), "read target fd must be FD_CLOEXEC");
     }
 
-    /// Pins the END STATE only, and CANNOT detect a missing `O_CLOEXEC` at the call
-    /// site -- measured: strip the flag from `open_dir_handle` and this test still
-    /// passes, because `nix::dir::Dir::openat` forwards flags verbatim to `openat`
-    /// and then `fdopendir` sets `FD_CLOEXEC` itself, afterwards. The gap that
-    /// creates is real -- between those two calls the fd is exec-inheritable -- but
-    /// it is not observable from outside the function, so no assertion here can hold
-    /// it. The call-site flag is held by review and by the comment on
-    /// `open_dir_handle`, NOT by this test. Do not read a green here as covering it.
+    /// This checks the converted handle's end state. Acquisition is separately
+    /// held by open_dir_at_sets_cloexec, before Dir::from_fd invokes fdopendir.
     #[test]
     fn open_dir_handle_ends_up_cloexec() {
         let d = tmp();
@@ -450,5 +438,66 @@ mod tests {
         }
         let fd = openat2_resolve(&parent, "a/f", false).expect("openat2 resolve");
         assert!(is_cloexec(&fd), "openat2 fd must be FD_CLOEXEC");
+    }
+
+    /// A live socket is writable but cannot be synchronized to storage. These
+    /// assertions hold the error contract; they do not claim crash durability.
+    #[test]
+    fn synchronization_refuses_a_live_socket() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(fsync_fd(&socket), Err(nix::errno::Errno::EINVAL));
+        assert_eq!(sync_data(&socket), Err(nix::errno::Errno::EINVAL));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openat2_directory_requirement_rejects_a_regular_file() {
+        let d = tmp();
+        std::fs::write(d.path().join("file"), b"not a directory").unwrap();
+        let parent = open_parent_by_path(d.path()).unwrap();
+        assert_eq!(
+            openat2_resolve(&parent, "file", true).unwrap_err(),
+            nix::errno::Errno::ENOTDIR
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_reports_an_unusable_directory_descriptor() {
+        let d = tmp();
+        let file = std::fs::File::create(d.path().join("file")).unwrap();
+        assert_eq!(probe_openat2(&file), Err(nix::errno::Errno::ENOTDIR));
+    }
+
+    #[test]
+    fn directory_handle_owns_a_new_descriptor_and_preserves_the_anchor() {
+        let d = tmp();
+        std::fs::write(d.path().join("sentinel"), b"anchor remains usable").unwrap();
+        let parent = open_parent_by_path(d.path()).unwrap();
+        {
+            let directory = open_dir_handle(&parent).unwrap();
+            assert_ne!(parent.as_raw_fd(), directory.as_fd().as_raw_fd());
+        }
+        let fd = open_read_target(&parent, "sentinel").unwrap();
+        let mut file = std::fs::File::from(fd);
+        let mut bytes = String::new();
+        std::io::Read::read_to_string(&mut file, &mut bytes).unwrap();
+        assert_eq!(bytes, "anchor remains usable");
+    }
+
+    #[test]
+    fn directory_handle_refuses_a_regular_file_descriptor() {
+        let file = tempfile::tempfile().unwrap();
+        assert_eq!(
+            open_dir_handle(&file).unwrap_err(),
+            nix::errno::Errno::ENOTDIR
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fd_path_refuses_a_descriptor_without_a_filesystem_path() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(fd_path(&socket).unwrap_err(), nix::errno::Errno::EBADF);
     }
 }

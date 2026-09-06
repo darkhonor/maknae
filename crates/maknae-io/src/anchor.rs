@@ -1254,40 +1254,46 @@ mod tests {
     /// file-type check.
     #[test]
     fn readable_bytes_beyond_st_size_are_refused_on_a_fifo() {
-        let d = dir(0o750);
-        let a = anchor_at(d.path(), "cfg");
-        let fifo = a.path.join("p");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        crate::testutil::isolated(
+            "anchor::tests::readable_bytes_beyond_st_size_are_refused_on_a_fifo",
+            || {
+                let d = dir(0o750);
+                let a = anchor_at(d.path(), "cfg");
+                let fifo = a.path.join("p");
+                nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                    .unwrap();
 
-        // A reader must exist before a writer can open, so the test holds one open for
-        // the duration; that also keeps the written bytes buffered in the pipe.
-        let _rd = nix::fcntl::open(
-            &fifo,
-            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
-            nix::sys::stat::Mode::empty(),
-        )
-        .unwrap();
-        let wr = nix::fcntl::open(
-            &fifo,
-            nix::fcntl::OFlag::O_WRONLY,
-            nix::sys::stat::Mode::empty(),
-        )
-        .unwrap();
-        nix::unistd::write(&wr, b"UNACCOUNTED").unwrap();
+                // A reader must exist before a writer can open, so the test holds one open for
+                // the duration; that also keeps the written bytes buffered in the pipe.
+                let _rd = nix::fcntl::open(
+                    &fifo,
+                    nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
+                    nix::sys::stat::Mode::empty(),
+                )
+                .unwrap();
+                let wr = nix::fcntl::open(
+                    &fifo,
+                    nix::fcntl::OFlag::O_WRONLY,
+                    nix::sys::stat::Mode::empty(),
+                )
+                .unwrap();
+                nix::unistd::write(&wr, b"UNACCOUNTED").unwrap();
 
-        let err = a
-            .read(Path::new("p"), None, t_req())
-            .expect_err("bytes beyond st_size must be refused, not silently dropped");
-        assert!(
-            matches!(
-                err,
-                IoError::SizeChanged {
-                    expected: 0,
-                    got: 1,
-                    ..
-                }
-            ),
-            "expected SizeChanged, got {err:?}"
+                let err = a
+                    .read(Path::new("p"), None, t_req())
+                    .expect_err("bytes beyond st_size must be refused, not silently dropped");
+                assert!(
+                    matches!(
+                        err,
+                        IoError::SizeChanged {
+                            expected: 0,
+                            got: 1,
+                            ..
+                        }
+                    ),
+                    "expected SizeChanged, got {err:?}"
+                );
+            },
         );
     }
 
@@ -1393,52 +1399,39 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_openat2_lane_does_not_block_on_a_fifo() {
-        let d = dir(0o750);
-        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
-        if a.probed_capability() != Strategy::Openat2 {
-            crate::testutil::skip_or_fail(
-                "the_openat2_lane_does_not_block_on_a_fifo",
-                "openat2 is not available, so the fast lane cannot be exercised",
-            );
-            return;
-        }
-        let sub = a.path.join("config.d");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
-        nix::unistd::mkfifo(
-            &sub.join("pipe"),
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
-        )
-        .unwrap();
+        crate::testutil::isolated(
+            "anchor::tests::the_openat2_lane_does_not_block_on_a_fifo",
+            || {
+                let d = dir(0o750);
+                let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+                if a.probed_capability() != Strategy::Openat2 {
+                    crate::testutil::skip_or_fail(
+                        "the_openat2_lane_does_not_block_on_a_fifo",
+                        "openat2 is not available, so the fast lane cannot be exercised",
+                    );
+                    return;
+                }
+                let sub = a.path.join("config.d");
+                std::fs::create_dir(&sub).unwrap();
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+                nix::unistd::mkfifo(
+                    &sub.join("pipe"),
+                    nix::sys::stat::Mode::from_bits_truncate(0o600),
+                )
+                .unwrap();
 
-        // Two components + no descendant requirement => select() picks Openat2.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let req = TargetRequired {
-                owner: None,
-                mode_mask: None,
-                nlink_exactly_one: false,
-                regular_file: true,
-                max_bytes: None,
-            };
-            let _ = tx.send(
-                a.read(Path::new("config.d/pipe"), None, req)
-                    .map(|o| o.effective_strategy),
-            );
-        });
-
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                "read did not return within 10s on a FIFO through the openat2 lane. \
-                 Most likely openat2_resolve lost O_NONBLOCK, so open(2) is waiting \
-                 for a writer that will never come — but a starved runner looks the \
-                 same, so check the flags before concluding."
-            ),
-            Err(e) => panic!("worker died: {e:?}"),
-            Ok(Ok(lane)) => panic!("a FIFO must not read as a regular file (lane {lane:?})"),
-            Ok(Err(IoError::NotRegularFile { .. })) => {}
-            Ok(Err(other)) => panic!("expected NotRegularFile, got {other:?}"),
-        }
+                // Two components + no descendant requirement selects the fast lane.
+                let req = TargetRequired {
+                    owner: None,
+                    mode_mask: None,
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                };
+                let error = a.read(Path::new("config.d/pipe"), None, req).unwrap_err();
+                assert!(matches!(error, IoError::NotRegularFile { .. }), "{error:?}");
+            },
+        );
     }
 
     /// A final name whose TEMP form exceeds NAME_MAX is refused — documented limit.
@@ -1629,37 +1622,28 @@ mod tests {
     /// instead of returning ENOTDIR: `maknaed` hangs at startup rather than failing
     /// closed. The exclusion is what made the absence invisible.
     ///
-    /// Run on a worker thread with a bounded wait, deliberately: the failure mode under
-    /// test is a HANG, and a test that reproduces it by hanging tells CI nothing except
-    /// that the job timed out. This way it fails with a sentence.
+    /// Run in a bounded child process: a broken open must fail this witness and
+    /// release its resources, rather than consuming the mutation job timeout.
     #[test]
     fn anchor_parent_that_is_a_fifo_is_refused_and_does_not_block() {
-        let d = dir(0o750);
-        let fifo = d.path().join("pipe");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-        let target = fifo.join("cfg"); // anchor whose PARENT is the FIFO
+        crate::testutil::isolated(
+            "anchor::tests::anchor_parent_that_is_a_fifo_is_refused_and_does_not_block",
+            || {
+                let d = dir(0o750);
+                let fifo = d.path().join("pipe");
+                nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                    .unwrap();
+                let target = fifo.join("cfg"); // anchor whose PARENT is the FIFO
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(open_anchor(&target, none_req(), StrategyPref::Auto).map(|_| ()));
-        });
-
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                "open_anchor did not return within 10s on a FIFO parent. Most likely \
-                 row 0 lost O_DIRECTORY, so open(2) is waiting for a writer that will \
-                 never come — but a starved runner produces the same symptom, so \
-                 check the flags before concluding. (The worker stays blocked for the \
-                 life of the test binary; harmless, and only on an already-red run.)"
-            ),
-            Err(e) => panic!("worker died: {e:?}"),
-            Ok(Ok(())) => panic!("a FIFO parent must not yield a usable anchor"),
-            Ok(Err(IoError::Io { path, kind })) => {
-                assert_eq!(kind, crate::error::IoKind::NotADirectory);
-                assert_eq!(path, fifo, "must name the parent that is not a directory");
-            }
-            Ok(Err(other)) => panic!("expected Io{{NotADirectory}}, got {other:?}"),
-        }
+                match open_anchor(&target, none_req(), StrategyPref::Auto).unwrap_err() {
+                    IoError::Io { path, kind } => {
+                        assert_eq!(kind, crate::error::IoKind::NotADirectory);
+                        assert_eq!(path, fifo);
+                    }
+                    other => panic!("expected Io{{NotADirectory}}, got {other:?}"),
+                }
+            },
+        );
     }
 
     /// A non-UTF-8 ANCHOR basename is reported as such, not as "ends in `..`".
@@ -2221,39 +2205,28 @@ mod tests {
     /// O_NONBLOCK makes reachable at all (without it the open blocks forever).
     #[test]
     fn fifo_read_target_refused_as_not_regular() {
-        let d = dir(0o750);
-        let a = anchor_at(d.path(), "cfg");
-        nix::unistd::mkfifo(
-            &a.path.join("f"),
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
-        )
-        .unwrap();
-        let req = TargetRequired {
-            owner: None,
-            mode_mask: None,
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: None,
-        };
-        // BOUNDED WAIT, like the other FIFO tests. This test is what holds
-        // `open_read_target`'s O_NONBLOCK, and it holds it by HANGING if the flag goes
-        // — which tells CI nothing except that the job timed out, and on a metered
-        // runner costs the full job budget. Same shape as its two siblings.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(a.read(Path::new("f"), None, req).map(|_| ()));
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                "read did not return within 10s on a FIFO. Most likely \
-                 open_read_target lost O_NONBLOCK, so open(2) is waiting for a writer \
-                 that will never come — a starved runner looks the same, so check the \
-                 flags before concluding."
-            ),
-            Err(e) => panic!("worker died: {e:?}"),
-            Ok(Ok(())) => panic!("a FIFO must not read as a regular file"),
-            Ok(Err(e)) => assert!(matches!(e, IoError::NotRegularFile { .. }), "got {e:?}"),
-        }
+        crate::testutil::isolated(
+            "anchor::tests::fifo_read_target_refused_as_not_regular",
+            || {
+                let d = dir(0o750);
+                let a = anchor_at(d.path(), "cfg");
+                nix::unistd::mkfifo(
+                    &a.path.join("f"),
+                    nix::sys::stat::Mode::from_bits_truncate(0o600),
+                )
+                .unwrap();
+                let req = TargetRequired {
+                    owner: None,
+                    mode_mask: None,
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                };
+
+                let error = a.read(Path::new("f"), None, req).unwrap_err();
+                assert!(matches!(error, IoError::NotRegularFile { .. }), "{error:?}");
+            },
+        );
     }
 
     fn m(x: u32) -> Mode {
@@ -2538,41 +2511,31 @@ mod tests {
     /// transfer, and NotRegularFile would be the wrong expectation.
     #[test]
     fn append_to_a_fifo_is_enxio_at_the_open() {
-        let d = dir(0o750);
-        let a = anchor_at(d.path(), "cfg");
-        nix::unistd::mkfifo(
-            &a.path.join("f"),
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
-        )
-        .unwrap();
-        // BOUNDED WAIT: this test holds `open_append`'s O_NONBLOCK, and without the
-        // flag the write-open blocks rather than returning ENXIO.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(
-                a.append(Path::new("f"), None, t_append(), b"y", m(0o640))
-                    .map(|_| ()),
-            );
-        });
-        let e = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
-                "append did not return within 10s on a readerless FIFO. Most likely \
-                 open_append lost O_NONBLOCK — a starved runner looks the same, so \
-                 check the flags before concluding."
-            ),
-            Err(e) => panic!("worker died: {e:?}"),
-            Ok(Ok(())) => panic!("a readerless FIFO must not accept an append"),
-            Ok(Err(e)) => e,
-        };
-        match e {
-            IoError::Io {
-                kind: crate::error::IoKind::Other { raw },
-                ..
-            } => {
-                assert_eq!(raw, nix::errno::Errno::ENXIO as i32, "expected ENXIO");
-            }
-            other => panic!("expected Io{{Other{{ENXIO}}}}, got {other:?}"),
-        }
+        crate::testutil::isolated(
+            "anchor::tests::append_to_a_fifo_is_enxio_at_the_open",
+            || {
+                let d = dir(0o750);
+                let a = anchor_at(d.path(), "cfg");
+                nix::unistd::mkfifo(
+                    &a.path.join("f"),
+                    nix::sys::stat::Mode::from_bits_truncate(0o600),
+                )
+                .unwrap();
+
+                let e = a
+                    .append(Path::new("f"), None, t_append(), b"y", m(0o640))
+                    .unwrap_err();
+                match e {
+                    IoError::Io {
+                        kind: crate::error::IoKind::Other { raw },
+                        ..
+                    } => {
+                        assert_eq!(raw, nix::errno::Errno::ENXIO as i32, "expected ENXIO");
+                    }
+                    other => panic!("expected Io{{Other{{ENXIO}}}}, got {other:?}"),
+                }
+            },
+        );
     }
 
     /// Lands in the anchor's directory — anchor-swap fixture, same reason as publish.
