@@ -72,20 +72,13 @@ a macOS-only cost, and sequencing the two together avoids standing it up twice.
 
 CI verifies macOS in two layers, neither of which is a substitute for the other:
 
-1. **Cross-compile check** (`darwin-cross`, on the Linux runner) — proves the workspace's
-   Rust-only crates *build* for `aarch64-` and `x86_64-apple-darwin`. Free, no Mac needed. It
-   earned its place immediately: it caught `RecvFlags::CMSG_CLOEXEC` not existing on darwin,
-   which meant `maknae-io::recv_delegated` did not compile there at all — a security-relevant
-   delta (`FD_CLOEXEC` must then be set explicitly) that a Linux-only CI would never surface.
+1. **Cross-compile check** (`darwin-cross`, on the Linux runner) — proves the workspace's Rust-only crates build for `aarch64-apple-darwin`, the supported Apple Silicon target. No hosted Mac is needed. It caught `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant `maknae-io::recv_delegated` did not compile there at all. The corresponding `FD_CLOEXEC` handling must be checked on the supported platform.
 2. **Native test run** (`darwin-native`, on a pinned **`macos-26`** runner) — executes the
    suites for the crates that build without a macOS SDK. This is what turned "written" into
-   "verified": the ADR-0009 `fcntl(F_GETPATH)` lane is green there, 18 delegated tests, with the
+   "verified": the ADR-0009 `fcntl(F_GETPATH)` lane is green there, 20 delegated tests, with the
    job asserting the suite was *collected* rather than trusting an exit code.
 
-   **Wrathion runs macOS 26 on Apple Silicon, so the runner has OS-version and architecture
-   parity with it.** For this surface CI is an equivalent lane, not a stand-in — and it repeats
-   on every change rather than once. The image is pinned by name for exactly that reason;
-   `macos-latest` would re-point silently and quietly change what "verified" means.
+   **Wrathion runs macOS 26 on Apple Silicon, so the runner has OS-version and architecture parity with it.** The native lane runs when a covered crate or one of its dependencies changes, including after merges; documentation-only changes skip the runner. The image is pinned by name so an image rollout cannot silently change what was verified.
 
 **Not covered by either:** `maknae-vault` and everything above it. `aws-lc-fips-sys` and `ring`
 have build scripts requiring a macOS SDK, so they cannot be cross-checked from Linux, and a

@@ -41,7 +41,7 @@ File an issue with a summary, the use case, and a proposed approach. Call out an
 
 Maknae is a Rust workspace. The toolchain version is pinned via [`rust-toolchain.toml`](rust-toolchain.toml) and installed automatically by [`rustup`](https://rustup.rs/) on first build (`cargo`, `rustc`, `clippy`, `rustfmt` come with it).
 
-The pre-push gates need a few cargo subcommands and helpers beyond rustup. **Derive the authoritative list from [`.github/workflows/ci.yml`](.github/workflows/ci.yml)** — it installs exactly what the gate runs, so it stays current as the gate evolves. As of this writing that is `cargo-deny` (supply-chain policy, against [`deny.toml`](deny.toml)), `cargo-llvm-cov` + the `llvm-tools` component (coverage), `cargo-mutants` (the mutation gate), and `python3` / `bash` for the `ci/gates/*` scripts. Install the cargo subcommands with `cargo install <name>` (CI runners already have them).
+The pre-push gates need a few cargo subcommands and helpers beyond rustup. **Derive the authoritative list from [`.github/workflows/ci.yml`](.github/workflows/ci.yml)** — it installs exactly what the gate runs, so it stays current as the gate evolves. As of this writing that is `cargo-deny` (supply-chain policy, against [`deny.toml`](deny.toml)), `cargo-llvm-cov` + the `llvm-tools` component (coverage), `cargo-mutants` (the mutation gate), and `python3` / `bash` for the `ci/gates/*` scripts. Install the cargo subcommands with `cargo install <name>` using the versions in CI; for reproducible mutation results use `cargo install cargo-mutants --version 27.1.0 --locked`.
 
 ### Cloning on Windows — turn symlinks on *first*
 
@@ -65,7 +65,7 @@ cargo build --workspace
 
 ## The pre-push gate
 
-CI (`.github/workflows/ci.yml`) runs a fail-closed gate on every push — a `build-and-gate` job and a `mutation` job. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
+CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. The lightweight job always runs external-authority lint, including on documentation-only updates. Unknown inputs or missing history select all; unreadable selection authority fails. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
 
 At minimum, before every commit:
 
@@ -77,7 +77,7 @@ done
 cargo test --workspace
 ```
 
-Before you push, run the heavier gates the CI job runs (derive the current, authoritative set from `ci.yml`):
+For source changes, run the applicable heavier gates before pushing (derive the current, authoritative set from `ci.yml`; documentation-only changes still run `ci/gates/external-authority-lint.sh`):
 
 ```bash
 cargo deny check
@@ -88,8 +88,21 @@ ci/gates/build-invocation-lint.sh
 ci/gates/isolation-contract-lint.sh
 ci/gates/negative-control.sh
 bash ci/gates/coverage-tiers.sh --root .            # risk-tiered coverage (ADR-0016)
-bash ci/gates/coverage-tiers.sh --root . --mutants-all   # mutation gate (slow; run before push)
 ```
+
+Enable the local hook with `git config core.hooksPath ci/hooks`. It reads the incoming pre-push ref updates (remote old SHA to local new SHA), so it works with any remote name and checks merge pushes correctly. It runs aggregate coverage for source changes. Mutations are opt-in with `MAKNAE_PRE_PUSH_MUTANTS=1 git push`; a push of a ref other than the current checkout is refused because local gates cannot attest to that ref's contents.
+
+Inspect the same selection before running expensive work (Python 3.11 or newer):
+
+```bash
+python3 ci/affected.py --event pull_request --base=main --head=HEAD
+# Use actual endpoint SHAs and --event push to inspect a merge/push update.
+# Copy the reported mutation package names into:
+bash ci/gates/coverage-tiers.sh --root . --mutants maknae-io maknae-config
+# Use --mutants-all when selection widens to every mutation package.
+```
+
+Selection is whole-crate mutation, never changed-line-only mutation. All dependency kinds, including target-specific dev/build dependencies, participate in reverse closure. Manifest, lockfile, toolchain, CI/gate, mutation configuration, unknown path, and uncertain dependency changes widen to all packages. Empty diffs also widen rather than claiming assurance over nothing. Coverage remains a complete report for every source change: the per-file floors and cohort ratchet cannot safely consume partial reports. This deliberately retains the expensive aggregate coverage boundary while avoiding repeated unrelated mutation and macOS work within the 3000 hosted-minute monthly budget. CI pins cargo-mutants to 27.1.0 and caches only its executable by OS, architecture, toolchain and version; mutation results are freshly measured each run. Native macOS mutation debugging remains local; CI adds no hosted macOS mutation job. The #126 serial measurement on the four-vCPU Rocky 9 host was 86.62 seconds for the prior I/O gate and 153.92 seconds for the revised gate: about 67 additional seconds. This is a local comparison, not a hosted billing guarantee. The cold all-package job previously approached 30 minutes, so its job ceiling is 35 minutes; per-mutant timeouts are unchanged. Native syscall mutation runs and individual flag-removal experiments belong on the development hosts before pushing, so repeated debugging does not consume hosted minutes.
 
 Two gates deserve a note:
 

@@ -397,6 +397,12 @@ if [ "$mutants_mode" != "" ]; then
     while IFS= read -r feat; do
       [ -n "$feat" ] && extra_mutants_flags+=(--features "$feat")
     done < <(toml_mutants_features_for "$cname")
+    if [ "$cname" = "maknae-io" ]; then
+      if ! native_exclusion="$(bash "$here/mutation-platform.sh")"; then
+        fail "cannot select native syscall mutants"; continue
+      fi
+      extra_mutants_flags+=(--exclude-re "$native_exclusion")
+    fi
     if ! (cd "$root" && cargo mutants --package "$cname" "${extra_mutants_flags[@]}"); then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
     fi
