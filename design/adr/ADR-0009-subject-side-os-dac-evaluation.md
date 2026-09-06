@@ -55,6 +55,14 @@ A remote subject therefore has no process, no uid, and no file descriptors on th
 
 ## Decision
 
+### Mutation extension (2026-09-07, #158) — accepted direction; implementation pending
+
+The operator confirmed that namespace mutations must work within the OS's actual permission-check timing. An existing parent-directory descriptor identifies a location; it does **not** pre-authorize creation, unlink, or mkdir by another process. For these operations Maknae may authorize a **subject-side attempt** after the composed PDP permits its intended paths and the primary audit sink durably records intent. The supported CLI then performs the operation under the subject's own credentials, where the OS accepts or refuses it. Completion is explicitly **client-reported**; neither an attempt authorization nor a client report is evidence that the daemon performed or independently verified the effect. A disconnect leaves an incomplete operation, never an implied rollback or permission to replay.
+
+This extends the existing-object proof below without changing its meaning: reads and replacement through an already-open writable file descriptor retain descriptor-backed OS access and daemon-side execution. Namespace preparation instead verifies an existing directory descriptor and constructs intended paths from its kernel-reported location and validated child components. Directory verification has its own type requirement; the regular-file `nlink_exactly_one` rule is not applicable to directories. A parent descriptor must never produce `os_accessible=true` for the intended mutation. Users and admins have identical filesystem authority, bounded by universal path policy, mandatory composition, and actual subject OS permissions.
+
+The guarantee for namespace operations is authorization issuance and attributed reporting. An altered CLI can ignore authorization or falsify a report; the daemon does not enforce every filesystem effect of a process that already possesses the user's OS authority. This extension does not introduce a privileged subject executor or resolve the separately parked execution-isolation work.
+
 ### 1. The subject's OS access is established by the subject's own `open(2)`. The daemon never assumes credentials.
 
 On the local lane the client process **is** the subject — that is where `SO_PEERCRED` gets its uid. The client opens the file itself and delegates the resulting file descriptor to the daemon over `SCM_RIGHTS` ancillary data on the existing UDS.
