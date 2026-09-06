@@ -675,8 +675,139 @@ mod tests {
         let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
         assert_eq!(&buf[..got.bytes], b"FRAME");
         assert_eq!(got.fds.len(), 1);
+        let flags = nix::fcntl::fcntl(&got.fds[0], nix::fcntl::FcntlArg::F_GETFD)
+            .expect("inspect the received descriptor before any wrapper can change its flags");
+        assert!(
+            nix::fcntl::FdFlag::from_bits_truncate(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC),
+            "delegated authority must not leak across exec"
+        );
         let received = std::fs::File::from(got.fds.into_iter().next().expect("one fd"));
         assert_eq!(received.metadata().expect("stat").ino(), want);
+    }
+
+    /// A full nonblocking socket must report its OS error without transferring the
+    /// descriptor. Claiming success would lose the request; transferring on failure
+    /// would duplicate its authority when the caller retries.
+    #[test]
+    fn a_backpressured_send_can_retry_without_losing_or_duplicating_the_descriptor() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = std::fs::File::open(a_file(dir.path(), "obj", b"retry sentinel")).expect("open");
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        tx.set_nonblocking(true).expect("nonblocking sender");
+        rx.set_nonblocking(true).expect("nonblocking receiver");
+        let mut queued = 0;
+        loop {
+            match tx.write(&[0x5a; 4096]) {
+                Ok(0) => panic!("socket made no progress"),
+                Ok(n) => queued += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("fill socket: {e}"),
+            }
+            assert!(
+                queued < 16 * 1024 * 1024,
+                "socket never reached backpressure"
+            );
+        }
+        assert!(
+            queued > 0,
+            "premise: the socket accepted data before filling"
+        );
+        let blocked = send_delegated(tx.as_fd(), b"FRAME", file.as_fd())
+            .expect_err("a full socket must not claim it sent the frame");
+        // Darwin reports EMSGSIZE for ancillary data on a full Unix socket,
+        // even though the plain write that filled it reported WouldBlock.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            blocked.raw_os_error(),
+            Some(nix::errno::Errno::EMSGSIZE as i32)
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            blocked.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "{blocked:?}"
+        );
+
+        let mut buf = [0; 4096];
+        let mut drained = 0;
+        while drained < queued {
+            let got = recv_delegated(rx.as_fd(), &mut buf).expect("drain queued bytes");
+            assert!(got.bytes > 0, "peer must remain connected");
+            assert!(
+                got.fds.is_empty(),
+                "failed send must not transfer authority"
+            );
+            assert!(buf[..got.bytes].iter().all(|b| *b == 0x5a));
+            drained += got.bytes;
+        }
+        assert_eq!(drained, queued);
+        assert_eq!(
+            recv_delegated(rx.as_fd(), &mut buf)
+                .expect_err("failed send must leave no extra frame or descriptor queued")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            send_delegated(tx.as_fd(), b"FRAME", file.as_fd()).expect("retry after draining"),
+            5
+        );
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("receive the retry");
+        assert_eq!(&buf[..got.bytes], b"FRAME");
+        assert_eq!(
+            got.fds.len(),
+            1,
+            "retry must transfer exactly one descriptor"
+        );
+        let received = std::fs::File::from(got.fds.into_iter().next().expect("one fd"));
+        assert_eq!(
+            received.metadata().expect("received inode").ino(),
+            file.metadata().expect("sent inode").ino()
+        );
+        assert_eq!(
+            recv_delegated(rx.as_fd(), &mut buf)
+                .expect_err("retry must leave no duplicate frame or descriptor queued")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    /// Valid metadata is not read authority: an untrusted peer can delegate an
+    /// O_WRONLY descriptor. Reopening its path would wrongly use the daemon's own
+    /// authority; swallowing the read error would turn refusal into empty success.
+    #[test]
+    fn a_write_only_delegated_descriptor_is_refused_at_read_time() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = confinement_root(root.path());
+        let path = a_file(&home, "write-only", b"must not be disclosed by reopening");
+        let fd = OwnedFd::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open write-only"),
+        );
+        let requirements = || DelegatedRequired {
+            confined_beneath: home.clone(),
+            root_required: maknae_io_root_req(),
+            target: target(),
+        };
+        assert_eq!(
+            verify_delegated(fd.as_fd(), requirements())
+                .expect("premise: confinement and target metadata are valid")
+                .path,
+            path
+        );
+        assert_eq!(
+            read_delegated(&fd, requirements()).expect_err("write authority is not read authority"),
+            IoError::Io {
+                path,
+                kind: crate::IoKind::Other {
+                    raw: nix::errno::Errno::EBADF as i32,
+                },
+            }
+        );
     }
 
     /// The SUBJECT's open — the first step of the delegation lifecycle, and the one
