@@ -31,6 +31,10 @@
 > and Phase 1 disclosing nothing. Those are enforced by gates and tests, not by
 > this document.
 
+## Filesystem scope correction — 2026-09-07 (#158)
+
+The admin role governs Maknae management, not filesystem privilege (operator ruling). Ordinary users and admins use the same universal `permissions:` path policy and their own OS authority established through ADR-0009 descriptor delegation. Neither an admin role nor an action grant may widen filesystem access beyond what the subject's OS permissions allow. The `user` role now reaches the implemented `fs.read` path; its earlier liveness-only baseline was #85's initial scope, preserved during #162's disclosure work, not the intended development experience. Guest liveness-only and adversary containment remain unchanged. `Write` is a distinct path capability, with no per-role filesystem action grant; its grammar and shipped deny counterparts do not by themselves implement mutation verbs. Decisions 4 and 14 continue to separate management grants from universal path permissions.
+
 ## Context
 
 `authz.yaml`'s grammar is a durable operator-facing contract — `maknae-config/src/authz.rs` treats it as one, and the `verb-vocabulary-drift` gate inventories every term it can name — yet no ADR governed it. Two surfaces already lived there: `permissions:`, which decides **path** access by capability pattern, and `bindings:` (#85), which maps identities to roles. Neither decides an **action**.

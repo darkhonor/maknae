@@ -698,6 +698,163 @@ async fn a_symlinked_principal_home_denies_a_read_beneath_the_enrolled_home() {
 }
 
 #[tokio::test]
+async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
+    let fx = Fixture::new("ordinary-user-development");
+    let me = nix::unistd::geteuid();
+    let user = nix::unistd::User::from_uid(me).unwrap().unwrap();
+    fx.write_policy(&format!(
+        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  user: [{:?}]\n",
+        user.name
+    ));
+    let target = fx.dir.join("development-sentinel.txt");
+    let sentinel = b"ordinary-user-development-158: genuine composed read";
+    std::fs::write(&target, sentinel).unwrap();
+    let emit = RecEmit::new();
+    let authorizer = composed(&fx, "UNCLASSIFIED");
+    let frame = drive_read(
+        &fx.principal,
+        authorizer.clone(),
+        emit.clone(),
+        me.as_raw(),
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+        },
+        Duration::from_secs(5),
+        &target,
+    )
+    .await
+    .expect("authorized user receives a response");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(Payload::ReadContent(bytes)) => assert_eq!(&*bytes.0, sentinel),
+        other => panic!("ordinary development requires a real read, got {other:?}"),
+    }
+    let records = emit.records();
+    let rec = request_record(&records);
+    assert_eq!(rec.outcome.result, "permit");
+    assert_eq!(rec.source.uid, me.as_raw());
+    assert_eq!(rec.object.as_deref(), target.to_str());
+
+    // Filesystem access grants no management authority to this same user.
+    let management = drive(
+        &fx.principal,
+        authorizer.clone(),
+        RecEmit::new(),
+        me.as_raw(),
+        maknae_proto::Verb::Whoami,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(maknae_proto::decode_response(&management).unwrap().result,
+        RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
+    );
+
+    // Reuse the same PDP: a containment edit must bite on the next read,
+    // even though the subject can still open and delegate the same object.
+    fx.write_policy(&format!(
+        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  adversary: [{:?}]\n",
+        user.name,
+    ));
+    let emit = RecEmit::new();
+    let contained = drive_read(
+        &fx.principal,
+        authorizer,
+        emit.clone(),
+        me.as_raw(),
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+        },
+        Duration::from_secs(5),
+        &target,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(maknae_proto::decode_response(&contained).unwrap().result,
+        RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
+    );
+    let records = emit.records();
+    assert!(request_record(&records)
+        .outcome
+        .reason
+        .contains("subject contained"));
+}
+
+#[tokio::test]
+async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
+    let fx = Fixture::new("shared-filesystem-refusals");
+    let me = nix::unistd::geteuid();
+    let user = nix::unistd::User::from_uid(me).unwrap().unwrap();
+    let target = fx.dir.join("denied-development-sentinel.txt");
+    let sentinel = b"158: never disclose this denied development file";
+    std::fs::write(&target, sentinel).unwrap();
+    for role in ["user", "admin"] {
+        fx.write_policy(&format!(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/denied-development-sentinel.txt)\"]\nbindings:\n  {role}: [{:?}]\n",
+            user.name,
+        ));
+        // The descriptor really arrives: this must reach the path deny,
+        // not pass vacuously because the OS proof was missing.
+        let emit = RecEmit::new();
+        let frame = drive_read(
+            &fx.principal,
+            composed(&fx, "UNCLASSIFIED"),
+            emit.clone(),
+            me.as_raw(),
+            maknae_proto::Verb::Read {
+                path: target.to_str().unwrap().into(),
+            },
+            Duration::from_secs(5),
+            &target,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
+        );
+        let records = emit.records();
+        let rec = request_record(&records);
+        assert!(
+            rec.outcome
+                .reason
+                .contains("Read(~/denied-development-sentinel.txt)"),
+            "{role}: {}",
+            rec.outcome.reason
+        );
+        assert!(!frame.windows(sentinel.len()).any(|w| w == sentinel));
+
+        // A universally allowed path still needs subject OS authority.
+        let emit = RecEmit::new();
+        let frame = drive(
+            &fx.principal,
+            composed(&fx, "UNCLASSIFIED"),
+            emit.clone(),
+            me.as_raw(),
+            maknae_proto::Verb::Read {
+                path: fx.dir.join("allowed.txt").to_str().unwrap().into(),
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(maknae_proto::decode_response(&frame).unwrap().result,
+            RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
+        );
+        let records = emit.records();
+        assert!(
+            request_record(&records)
+                .outcome
+                .reason
+                .contains("os accessibility unknown"),
+            "{role}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_permitted_read_returns_the_file_bytes() {
     let fx = Fixture::new("readok");
     fx.write_policy(SHIPPED_POLICY);
@@ -1281,7 +1438,7 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
 #[tokio::test]
 async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     let fx = Fixture::new("noop-unauth");
-    fx.write_policy(BINDINGS_ROOT_USER); // root -> user: liveness only
+    fx.write_policy(BINDINGS_ROOT_USER); // root -> user: no management grant
     for verb in [
         maknae_proto::Verb::AdminStatus,
         maknae_proto::Verb::SessionNew,

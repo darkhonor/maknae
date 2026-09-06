@@ -61,7 +61,8 @@ action	mcp.prompt.get	not-granted	enumerated, decided, unbuilt — answers Unaut
 action	mcp.sampling.create	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 kernel-action	kernel.contain	not-granted	no Verb variant (D2); reachable by no client
 kernel-action	kernel.session.terminate	not-granted	no Verb variant (D2); reachable by no client
-capability	Read	granted	the only grammar capability; Bash retired by #67
+capability	Read	granted	grammar capability; shipped Read allow; Bash retired by #67
 grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.config.show	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.subject.list	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
+capability	Write	not-granted	grammar capability; no shipped allow; distinct from Read, deny counterparts prepared for #158

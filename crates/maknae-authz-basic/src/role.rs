@@ -6,6 +6,9 @@
 //! `bindings:` refuses the policy (the `advesary`-typo rule).
 
 /// One of the four shipped roles.
+/// `Admin` adds Maknae management authority; it does not add filesystem
+/// privilege. `User` and `Admin` share the implemented filesystem policy path
+/// and subject-side OS-DAC requirement (#158, operator ruling 2026-09-07).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
     Admin,

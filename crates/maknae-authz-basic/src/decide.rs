@@ -315,6 +315,17 @@ pub(crate) fn decide_loaded(
     // Step 3 — role gates over the closed class vocabulary.
     let class = class_of(&req.action.0);
     match role {
+        // #158, operator ruling 2026-09-07: admin governs Maknae management,
+        // not filesystem privilege. Users and admins use the SAME subject OS
+        // proof and universal path policy. Key the implemented term exactly;
+        // adding a path to an unbuilt fs verb must never grant it Read access.
+        Role::Admin | Role::User if req.action.0 == "fs.read" => match os_dac_gate(req) {
+            OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req, role.key()),
+            OsDacGate::Deny(why) => Verdict::Deny {
+                reason: format!("os dac: {why}"),
+            },
+            OsDacGate::Indeterminate => Verdict::Indeterminate,
+        },
         Role::Adversary => Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
         },
@@ -375,28 +386,6 @@ pub(crate) fn decide_loaded(
                     req.action.0
                 )),
             },
-            // Keyed like the admin arm above, and for the same reason. Without
-            // it, safety rests on a remote `if let Verb::Read` in another crate:
-            // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
-            // an unbuilt fs term reaching it with a path would match `Read(~/**)`.
-            // Keying here makes the property provable in the file that decides,
-            // and makes unbuilt fs terms abstain (NotApplicable) rather than
-            // report Indeterminate — which is a PDP-malfunction signal, not a
-            // "this term has no behaviour yet" signal.
-            // OS DAC first, and ONLY for terms that name an object: `liveness.ping`
-            // and `admin.whoami` name none, so discretionary access to an object is
-            // not a question they raise. `-basic` IS the DAC layer (ADR-0020 §5), and
-            // a DAC decision that ignores the OS's own discretionary controls is not
-            // a complete DAC decision (ADR-0009).
-            Some(Class::Fs) if req.action.0 == "fs.read" => match os_dac_gate(req) {
-                // Satisfied: the OS permits it, so the policy decides.
-                // NotApplicable: OS DAC is not this lane's control, so likewise.
-                OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req, "admin"),
-                OsDacGate::Deny(why) => Verdict::Deny {
-                    reason: format!("os dac: {why}"),
-                },
-                OsDacGate::Indeterminate => Verdict::Indeterminate,
-            },
             Some(Class::Fs) => Verdict::NotApplicable {
                 note: Some(format!(
                     "term enumerated, not implemented: {}",
@@ -425,10 +414,8 @@ pub(crate) fn decide_loaded(
     }
 }
 
-/// Step 4 — the capability grammar, admin-only, `fs.*`-only (spec §4.4).
-/// `role_key` names the caller's role in case-5 testimony only — the one call
-/// site sits inside `Role::Admin`, so the role is statically known there (the
-/// same pattern `evaluate3_action`'s key uses, #162).
+/// Universal filesystem capability grammar (#158). `role_key` supplies audit
+/// testimony only; it does not select a different path permission set.
 fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
@@ -683,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_and_user_permit_only_liveness() {
+    fn guest_stays_liveness_only_and_user_can_read() {
         for (role_key, ident, uid) in [("guest", "guestic", 700_u32), ("user", "usery", 701)] {
             let lp = lp_with(Some(&[(role_key, &[ident])]), &[(ident, uid)]);
             for action in ALL_ACTIONS {
@@ -692,7 +679,7 @@ mod tests {
                     &principal(),
                     &request(None, Some(uid as i64), action, Some("/home/operator/x")),
                 );
-                if *action == "liveness.ping" {
+                if *action == "liveness.ping" || (role_key == "user" && *action == "fs.read") {
                     assert!(
                         matches!(v, Verdict::Permit { .. }),
                         "{role_key} {action}: {v:?}"
@@ -713,28 +700,44 @@ mod tests {
     }
 
     #[test]
-    fn user_not_applicable_where_admin_is_permitted_on_fs() {
-        // The C2 discriminator (spec §7): the untrusted runtime's default role
-        // never inherits the capability grammar.
+    fn user_and_admin_share_filesystem_permissions_and_os_refusals() {
         let lp = lp_with(
             Some(&[("admin", &["alex"]), ("user", &["usery"])]),
             &[("alex", OPERATOR_UID), ("usery", 701)],
         );
-        let action = "fs.read";
-        let path = Some("/home/operator/notes.txt");
-        let admin_v = decide_loaded(
-            &lp,
-            &principal(),
-            &request(None, Some(OPERATOR_UID as i64), action, path),
-        );
-        let user_v = decide_loaded(&lp, &principal(), &request(None, Some(701), action, path));
-        assert!(matches!(admin_v, Verdict::Permit { .. }), "{admin_v:?}");
-        assert_eq!(
-            user_v,
-            Verdict::NotApplicable {
-                note: Some("role user: no rule for fs.read".into())
-            }
-        );
+        for uid in [OPERATOR_UID, 701] {
+            let mut req = request(
+                None,
+                Some(uid as i64),
+                "fs.read",
+                Some("/home/operator/notes.txt"),
+            );
+            assert_eq!(decide_loaded(&lp, &principal(), &req), permit_with_audit());
+            req.resource.0.insert(
+                RESOURCE_PATH,
+                AttrValue::Str("/home/operator/.ssh/key".into()),
+            );
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "denied by policy entry Read(~/.ssh/**)".into(),
+                }
+            );
+            req.resource.0.insert(
+                RESOURCE_PATH,
+                AttrValue::Str("/home/operator/notes.txt".into()),
+            );
+            req.resource.0.insert(
+                maknae_security::RESOURCE_OS_ACCESSIBLE,
+                AttrValue::Bool(false),
+            );
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "os dac: os dac refuses this subject this object".into(),
+                }
+            );
+        }
     }
 
     #[test]
@@ -1252,27 +1255,13 @@ mod tests {
         }
     }
 
-    /// GOLDEN MATRIX (#162 step 0) — 4 roles x 8 (action, path) columns, written
-    /// BEFORE the action-grant surface exists and never edited after.
-    ///
-    /// Its whole value is that it predates the change: every cell here must be
-    /// byte-identical once `roles:` lands, because this fixture is `lp_with`,
-    /// which hard-wires `shipped_policy()` — and that has no `roles:` key, so
-    /// the grant map stays empty and the three grant-sensitive terms keep
-    /// answering `NotApplicable`. The grant path is asserted separately, against
-    /// its own fixture. **If you find yourself editing a cell below, stop.**
-    ///
-    /// *(Corrected 2026-09-02, #181 — the never-edit claim is NARROWED, not
-    /// voided: every `Verdict` CELL below is byte-identical to the pre-#181
-    /// matrix — same variant, same permits, same denies — and the only change
-    /// is `na()` gaining the absence's note argument, because absences now
-    /// carry audit-only testimony. No verdict changed; the notes are the new
-    /// behaviour, and pinning them exactly is what the zero-missed rule
-    /// demands. A change to any VERDICT cell still means stop.)*
-    ///
-    /// Full `Verdict` equality, never `matches!`: the variant alone collapses
-    /// adversary-deny, policy-deny and OS-DAC deny into one cell, and a pin that
-    /// cannot tell them apart cannot detect the regression it exists for.
+    /// GOLDEN MATRIX: roles against management and filesystem requests.
+    /// Corrected 2026-09-07, #158: the prior "never edit any verdict" rule
+    /// preserved #85's initial user-liveness-only scope beyond its purpose.
+    /// Operator-approved ordinary development changes exactly the two user
+    /// fs.read cells: a matching allow permits and an explicit path deny denies.
+    /// Management, guest, containment, and unknown-action cells are unchanged.
+    /// Full verdict equality distinguishes each refusal's actual reason.
     #[test]
     fn golden_matrix_pins_every_role_against_every_class() {
         let lp = lp_with(
@@ -1359,7 +1348,7 @@ mod tests {
                 "fs.read",
                 Some("/home/operator/x"),
                 permit(),
-                na("role user: no rule for fs.read"),
+                permit(),
                 na("role guest: no rule for fs.read"),
                 contained(),
             ),
@@ -1367,7 +1356,7 @@ mod tests {
                 "fs.read",
                 Some("/home/operator/.ssh/k"),
                 policy_deny(),
-                na("role user: no rule for fs.read"),
+                policy_deny(),
                 na("role guest: no rule for fs.read"),
                 contained(),
             ),
@@ -1486,16 +1475,16 @@ mod tests {
             &request(
                 Some(AGENT_SUBJECT),
                 Some(OPERATOR_UID as i64),
-                "fs.read",
-                Some("/home/operator/x"),
+                "admin.whoami",
+                None,
             ),
         );
         assert_eq!(
             v,
             Verdict::NotApplicable {
-                note: Some("role user: no rule for fs.read".into())
+                note: Some("role user: no rule for admin.whoami".into())
             },
-            "agent must not inherit admin's grammar"
+            "agent must not inherit admin management authority"
         );
     }
 
