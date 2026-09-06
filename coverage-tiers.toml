@@ -159,6 +159,11 @@ files = [
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
+  # #158: namespace/report evidence, descriptor mutations, and durable audit admission.
+  "crates/maknae-kernel/src/mutation_exchange.rs",
+  "crates/maknae-kernel/src/mutation.rs",
+  "crates/maknae-io/src/mutation.rs",
+  "crates/maknae-io/src/audit_append.rs",
   "crates/maknae-vault/src/supervisor.rs",
   # maknae-msgs: the compiled-in en_US/ko_KR message catalog (spec §4.3, PR-J1
   # Task 1). lib.rs owns detect_locale (env-var precedence: LC_MESSAGES then
@@ -210,7 +215,13 @@ floor_production_region = 90
 # than diverging from it. What IS at stake here is availability and descriptor
 # exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
 # CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
-files = ["crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs"]
+files = [
+  "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
+  # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
+  # kernel-observed completion. Guard failures can damage the subject's own
+  # files or misreport progress; real filesystem/ack tests remain required.
+  "bins/maknae/src/mutation.rs",
+]
 
 [project]
 # Cohort ratchet (ADR-0016 §4): the floor applies to ratchet_cohort ONLY —
@@ -659,3 +670,7 @@ why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure 
 path = "crates/maknae-io/src/write.rs"
 anchor = "append_raw(&fd, bytes).map_err"
 why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test; a pure errno passthrough. The ENXIO-at-the-open case beside it IS covered, by append_to_a_fifo_is_enxio_at_the_open"
+
+[[t3]]
+path = "crates/maknae-proto/src/mutation.rs"
+why = "Mutation exchange serde data declarations and bounds only; report validation is kernel mutation_exchange.rs (T1)."

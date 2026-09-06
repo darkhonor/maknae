@@ -18,6 +18,7 @@ workspace = true
 [target.'cfg(unix)'.dependencies]
 # fs   — openat/openat2/renameat/fstat/fstatat/fcntl. Without it none of the fd-relative
 #        primitives this crate exists to provide are reachable.
+# uio  — pwrite for offset-independent replacement of a delegated writable fd.
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
 # NOT "user": nothing in production calls geteuid/Uid/User/Group — grep every module up
@@ -28,7 +29,7 @@ workspace = true
 #        AGENTS.md holds up as the minimal-TCB I/O primitive. Workspace feature
 #        unification hid it — maknae-kernel::groupres enables "user" — so it only shows
 #        in a standalone `cargo build -p maknae-io`. Moved to dev-dependencies.
-nix = { version = "0.31", default-features = false, features = ["fs", "dir"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "dir", "uio"] }
 # net — recvmsg with SCM_RIGHTS, for ADR-0009 subject-delegated descriptors. THE reason
 #       this is rustix and not another nix feature: `unsafe_code = "forbid"` is set
 #       workspace-wide and cannot be locally overridden, and nix's

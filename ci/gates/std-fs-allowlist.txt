@@ -26,10 +26,6 @@ bins/maknae/src/enroll/mod.rs|Some(root_path) => match std::fs::read_to_string(&
 # Audit holds one persistent append fd and sync_data()s the hot path. Anchor::append
 # opens per call and intentionally has a different lifecycle/durability contract.
 crates/maknae-audit-append/src/sink.rs|use std::fs::File;
-crates/maknae-audit-append/src/sink.rs|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs|let mut opts = std::fs::OpenOptions::new();
-crates/maknae-audit-append/src/sink.rs|fn open_options(kind: AuditOpenKind) -> std::fs::OpenOptions {
-crates/maknae-audit-append/src/sink.rs|let mut opts = std::fs::OpenOptions::new();
 
 # The DEFINITIONS of the three named requirement-free identifiers (issue #132). Each
 # says "OS DAC is sufficient at this scope" once, in one reviewed place, so a caller
@@ -106,3 +102,19 @@ crates/maknae-kernel/src/handler.rs|mode_mask: None,
 # untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
 # lifecycle stays in one crate and the client needs no exemption of its own.
 crates/maknae-io/src/delegated.rs|Ok(OwnedFd::from(std::fs::File::open(path)?))
+
+# #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
+crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
+
+# #158 delegated directories prove location; subject namespace syscalls decide OS permission.
+crates/maknae-io/src/mutation.rs|owner: None,
+crates/maknae-io/src/mutation.rs|mode_mask: None,
+
+# #158: CLI verifies the granted parent location; OS checks namespace access at
+# each syscall under the CLI user. The CLI must not invent daemon owner policy.
+bins/maknae/src/mutation.rs|root_required: AnchorRequired::OS_DAC,
+# #158: maknae-io's audit appender converts already checked owned descriptors to
+# persistent File handles for the primary writer and same-parent fsync.
+crates/maknae-io/src/audit_append.rs|use std::fs::File;
+crates/maknae-io/src/audit_append.rs|let parent = File::from(syscall::open_parent_by_path(&parent_path).map_err(io::Error::from)?);
+crates/maknae-io/src/audit_append.rs|.map(File::from)

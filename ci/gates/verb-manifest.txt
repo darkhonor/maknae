@@ -37,12 +37,12 @@ action	session.elicit.create	not-granted	enumerated, decided, unbuilt — answer
 action	session.elicit.complete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.compact	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.read	granted	shipped; decided through the capability grammar
-action	fs.write	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	fs.delete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	fs.write	granted	shipped; Write path policy shared by user/admin; daemon replacement through subject-writable fd, exclusive creation as audited subject-side attempt (#158)
+action	fs.delete	granted	shipped; Write path policy shared by user/admin; audited subject-side delete attempt, recursive scopes require whole-subtree authority (#158)
 action	fs.move	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.stat	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	fs.mkdir	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	fs.mkdir	granted	shipped; Write path policy shared by user/admin; audited subject-side mkdir attempt, every parents prefix decided (#158)
 action	fs.link	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.chmod	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.chown	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -65,4 +65,4 @@ capability	Read	granted	grammar capability; shipped Read allow; Bash retired by 
 grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.config.show	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.subject.list	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
-capability	Write	not-granted	grammar capability; no shipped allow; distinct from Read, deny counterparts prepared for #158
+capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)

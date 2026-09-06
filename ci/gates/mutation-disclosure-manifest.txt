@@ -1,0 +1,22 @@
+# Exact reachable mutation-grant disclosure schema (#158).
+# decision<TAB>field-or-variant:type<TAB>rationale
+# These are authorized attempt parameters, never independently verified effects.
+always	MutationGrant.id:MutationId	connection-local correlation, never a bearer capability
+always	MutationGrant.limits:MutationLimits	bounded attempt parameters needed by the subject executor
+always	MutationGrant.scope:MutationScope	only prepared resources already permitted by the composed PDP
+always	MutationId.intent_seq:u64	the durable intent that authorized this attempt
+always	MutationId.session_id:u64	the caller's live connection correlation
+always	MutationLimits.deadline_ms:u64	configured attempt duration; the CLI conservatively anchors before its request
+always	MutationLimits.max_depth:u16	the caller needs the enforced traversal depth bound
+always	MutationLimits.max_effects:u32	the caller needs the enforced effect count bound
+always	MutationScope.Directories.paths:Vec<String>	verified intended path or prefixes, disclosed only after their composed Permit
+always	MutationScope.Directories:variant	closed authorized scope shape; every contained field is separately inventoried
+always	MutationScope.Exact.effect:ReportedEffect	the operation requested for the authorized exact path
+always	MutationScope.Exact.path:String	verified intended path or prefixes, disclosed only after their composed Permit
+always	MutationScope.Exact:variant	closed authorized scope shape; every contained field is separately inventoried
+always	MutationScope.RecursiveDelete.root:String	verified intended path or prefixes, disclosed only after their composed Permit
+always	MutationScope.RecursiveDelete:variant	closed authorized scope shape; every contained field is separately inventoried
+always	ReportedEffect.CreatedDirectory:variant	closed requested effect kind, with no content or additional resource
+always	ReportedEffect.CreatedFile:variant	closed requested effect kind, with no content or additional resource
+always	ReportedEffect.DeletedEntry:variant	closed requested effect kind, with no content or additional resource
+always	ReportedEffect.ReplacedFile:variant	closed requested effect kind, with no content or additional resource

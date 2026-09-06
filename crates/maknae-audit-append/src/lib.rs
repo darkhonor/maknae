@@ -21,7 +21,11 @@ mod syslog_fmt;
 mod syslog_io;
 
 pub use error::AuditError;
-pub use record::{canonical_json, AuditRecord, Integrity, Outcome, Source, Subject, Where};
+pub use record::{
+    canonical_json, AuditRecord, Integrity, MutationAudit, MutationEffectKind,
+    MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase, MutationStatus,
+    Outcome, Source, Subject, Where,
+};
 pub use session::{Seq, SessionIds};
 pub use sink::{AuditEmit, AuditSink};
 

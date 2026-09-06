@@ -3,10 +3,24 @@
 //! decision logic of its own).
 mod cli;
 mod enroll;
+mod mutation;
 
 use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    cli::run_cli().await
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("maknae: cannot start runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(cli::run_cli());
+    // A timed-out namespace syscall may still be running. Runtime teardown
+    // must not wait forever for it; this does not imply cancellation or rollback.
+    runtime.shutdown_timeout(std::time::Duration::ZERO);
+    result
 }

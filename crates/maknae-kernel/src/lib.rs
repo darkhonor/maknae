@@ -12,6 +12,8 @@ pub mod classification;
 mod composition;
 mod groupres;
 mod handler;
+mod mutation;
+mod mutation_exchange;
 mod posture;
 mod run;
 pub use authz::*;
@@ -24,6 +26,7 @@ pub use handler::{
     build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
     KERNEL_ACTIONS,
 };
+pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
 };

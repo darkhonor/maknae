@@ -92,8 +92,20 @@
 #     fixture-satisfiable requirement, and `wrapper_subjects_delegate_and_read_live`
 #     proves it returns Some, reads live, and re-reads after a file edit.
 # What is NOT covered is the one-line choice of loader. Reviewed and accepted.
+# Corrected 2026-09-07 (#158): 28 syscall XOR exemptions now include the six
+# disjoint unions in macos_mutation_directory_flags, open_mutation_directory_at,
+# and open_writable_delegation; audit_append::flags adds six. The executable
+# disjoint-bit proofs live in each module's xor_equivalence tests, while real
+# descriptor tests hold append, nofollow, CLOEXEC, exclusive create and wx-only
+# access. O_SEARCH already includes O_DIRECTORY, so the redundant O_DIRECTORY
+# operand was removed before exempting the remaining O_SEARCH|O_CLOEXEC union.
+# Linux native proof: five mutants tested in4s, two caught/one unviable;
+# the two disjoint O_PATH|O_DIRECTORY|O_CLOEXEC XOR replacements survive as
+# algebraically identical. The executable bit proof passes natively on Rocky9.
+# Only | -> ^ in these named functions is exempt: & mutations remain tested.
 exclude_re = [
-  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append)$",
+  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_writable_delegation)$",
+  "^crates/maknae-io/src/audit_append\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in flags$",
   "maknae-plane.*::poll_flush",
   # NARROWED to the one replacement the argument covers. The broad form also
   # suppressed the two KILLABLE mutants on the same method -- including

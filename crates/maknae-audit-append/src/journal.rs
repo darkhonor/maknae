@@ -213,6 +213,7 @@ mod tests {
             action: "fs.read".into(),
             object: Some("/home/byeori/.ssh/id_rsa".into()),
             object_requested: None,
+            mutation: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: reason.into(),

@@ -150,6 +150,41 @@ impl AuthzPolicy {
         }
         Match3::NoMatch
     }
+
+    /// Authorize the whole subtree for recursive deletion (#158). A point grant
+    /// cannot authorize destruction of descendants. Denies use conservative
+    /// intersection; allows require a provable literal-prefix/** covering grant.
+    /// This examines policy only, never a potentially changing directory walk.
+    pub fn evaluate_write_subtree(&self, root: &Path) -> Match3 {
+        let Some(text) = root.to_str() else {
+            return Match3::NoMatch;
+        };
+        if !text.starts_with('/')
+            || text.contains('\0')
+            || (text != "/" && text[1..].split('/').any(|c| matches!(c, "" | "." | "..")))
+        {
+            return Match3::NoMatch;
+        }
+        if let Some(i) = self.deny.iter().position(
+            |pattern| matches!(pattern, Pattern::Write(glob) if glob.may_intersect_subtree(text)),
+        ) {
+            return Match3::DenyMatch {
+                source: self
+                    .deny_sources
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "<unknown deny entry>".into()),
+            };
+        }
+        if self
+            .allow
+            .iter()
+            .any(|pattern| matches!(pattern, Pattern::Write(glob) if glob.covers_subtree(text)))
+        {
+            return Match3::AllowMatch;
+        }
+        Match3::NoMatch
+    }
 }
 
 /// One `Capability(specifier)` entry. `Read` and `Write` are independent
@@ -240,6 +275,32 @@ impl PathGlob {
         };
         let comps: Vec<&str> = s.split('/').filter(|c| !c.is_empty()).collect();
         match_segs(&self.segments, &comps)
+    }
+
+    fn covers_subtree(&self, root: &str) -> bool {
+        let Some((GlobSeg::DoubleStar, prefix)) = self.segments.split_last() else {
+            return false;
+        };
+        let mut components = root.split('/').filter(|c| !c.is_empty());
+        prefix.iter().all(|seg| match seg {
+            // Exact component equality is sufficient even when the actual
+            // directory name contains '*': that glob matches its own text.
+            // Other wildcard matches are deliberately not inferred here.
+            GlobSeg::Comp(literal) => components.next() == Some(literal.as_str()),
+            _ => false,
+        })
+    }
+
+    fn may_intersect_subtree(&self, root: &str) -> bool {
+        let prefix = self.segments.iter().map_while(|seg| match seg {
+            GlobSeg::Comp(literal) if !literal.contains('*') => Some(literal.as_str()),
+            _ => None,
+        });
+        // Either prefix may end first. Only a conflicting fixed component proves
+        // disjointness; a wildcard could reach anywhere after its fixed prefix.
+        prefix
+            .zip(root.split('/').filter(|c| !c.is_empty()))
+            .all(|(a, b)| a == b)
     }
 }
 
@@ -789,9 +850,10 @@ mod tests {
     #[test]
     fn shipped_default_validates_clean() {
         let policy = parse_policy(SHIPPED_DEFAULT, Some(&home())).unwrap();
-        assert_eq!(policy.allow.len(), 1);
+        assert_eq!(policy.allow.len(), 2);
         assert_eq!(policy.deny.len(), 18);
         assert!(matches!(policy.allow[0], Pattern::Read(_)));
+        assert!(matches!(policy.allow[1], Pattern::Write(_)));
         assert_eq!(
             policy
                 .deny
@@ -807,6 +869,32 @@ mod tests {
                 .filter(|p| matches!(p, Pattern::Write(_)))
                 .count(),
             9
+        );
+    }
+
+    #[test]
+    fn shipped_write_authority_is_limited_to_projects() {
+        let policy = parse_policy(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        assert_eq!(
+            policy.evaluate3(&Request::Write(&home().join("projects/code.rs"))),
+            Match3::AllowMatch
+        );
+        for relative in [
+            "notes",
+            "projects-other/code.rs",
+            ".ssh/key",
+            ".bashrc",
+            ".maknae/config.yaml",
+        ] {
+            assert_ne!(
+                policy.evaluate3(&Request::Write(&home().join(relative))),
+                Match3::AllowMatch,
+                "{relative}"
+            );
+        }
+        assert_eq!(
+            policy.evaluate_write_subtree(&home().join("projects/repo")),
+            Match3::AllowMatch
         );
     }
 
@@ -892,6 +980,153 @@ mod tests {
             }
         }
         assert!(reads > 0, "the shipped deny inventory must not disappear");
+    }
+
+    #[test]
+    fn recursive_write_requires_whole_subtree_authority() {
+        for (allow, root, expected) in [
+            (
+                "Write(/h/u/projects/**)",
+                "/h/u/projects/p",
+                Match3::AllowMatch,
+            ),
+            (
+                "Write(/h/u/projects/**)",
+                "/h/u/projects",
+                Match3::AllowMatch,
+            ),
+            ("Write(/h/u/projects/p)", "/h/u/projects/p", Match3::NoMatch),
+            (
+                "Write(/h/u/projects/p/*)",
+                "/h/u/projects/p",
+                Match3::NoMatch,
+            ),
+            (
+                "Write(/h/u/projects/*/**)",
+                "/h/u/projects/p",
+                Match3::NoMatch,
+            ),
+            ("Write(/h/**/p/**)", "/h/u/projects/p", Match3::NoMatch),
+            ("Write(/**)", "/", Match3::AllowMatch),
+            ("Read(/h/u/projects/**)", "/h/u/projects/p", Match3::NoMatch),
+            (
+                "Write(/h/u/projects/**)",
+                "/h/u/projects-other",
+                Match3::NoMatch,
+            ),
+            (
+                "Write(/h/u/projects/p/**)",
+                "/h/u/projects",
+                Match3::NoMatch,
+            ),
+        ] {
+            let yaml = format!("schema_version: 1\npermissions:\n  allow: [\"{allow}\"]\n");
+            let policy = parse_policy(&yaml, None).unwrap();
+            assert_eq!(
+                policy.evaluate_write_subtree(Path::new(root)),
+                expected,
+                "{allow} on {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_write_denies_possible_descendants_with_original_provenance() {
+        for (deny, intersects) in [
+            ("Write(/h/u/projects/p/secret/**)", true),
+            ("Write(/h/u/projects/p/secret)", true),
+            ("Write(/h/u/projects/p)", true),
+            ("Write(/h/u/projects/**)", true),
+            ("Write(/h/u/**/.aws/**)", true),
+            ("Write(/**/secret)", true),
+            ("Write(/h/u/proj*/secret)", true),
+            ("Write(/h/u/.ssh/**)", false),
+            ("Write(/h/u/projects/private/**)", false),
+            ("Write(/h/u/projects/p-other/**)", false),
+            ("Read(/h/u/projects/p/secret/**)", false),
+        ] {
+            let yaml = format!("schema_version: 1\npermissions:\n  allow: [\"Write(/h/u/projects/**)\"]\n  deny: [\"{deny}\"]\n");
+            let policy = parse_policy(&yaml, None).unwrap();
+            let expected = if intersects {
+                Match3::DenyMatch {
+                    source: deny.into(),
+                }
+            } else {
+                Match3::AllowMatch
+            };
+            assert_eq!(
+                policy.evaluate_write_subtree(Path::new("/h/u/projects/p")),
+                expected,
+                "{deny}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_write_rejects_malformed_roots_and_absent_grants() {
+        let policy = parse_policy(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
+            None,
+        )
+        .unwrap();
+        for root in [
+            "",
+            "h/u",
+            "/h//u",
+            "/h/./u",
+            "/h/../u",
+            "/h/u/",
+            "/h/u\0bad",
+        ] {
+            assert_eq!(
+                policy.evaluate_write_subtree(Path::new(root)),
+                Match3::NoMatch,
+                "{root:?}"
+            );
+        }
+        let empty = parse_policy("schema_version: 1\npermissions: {}\n", None).unwrap();
+        assert_eq!(
+            empty.evaluate_write_subtree(Path::new("/h/u")),
+            Match3::NoMatch
+        );
+        let deny_only = parse_policy(
+            "schema_version: 1\npermissions:\n  deny: [\"Write(/h/u/secret/**)\"]\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            deny_only.evaluate_write_subtree(Path::new("/h/u")),
+            Match3::DenyMatch {
+                source: "Write(/h/u/secret/**)".into()
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_write_never_normalizes_invalid_utf8_into_a_grant() {
+        use std::os::unix::ffi::OsStrExt;
+        let policy = parse_policy(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.evaluate_write_subtree(Path::new(std::ffi::OsStr::from_bytes(b"/h/\xff"))),
+            Match3::NoMatch
+        );
+    }
+
+    #[test]
+    fn recursive_write_retains_denial_without_source_metadata() {
+        let mut policy = parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n  deny: [\"Write(/h/u/secret/**)\"]\n", None).unwrap();
+        policy.deny_sources.clear();
+        assert_eq!(
+            policy.evaluate_write_subtree(Path::new("/h/u")),
+            Match3::DenyMatch {
+                source: "<unknown deny entry>".into()
+            }
+        );
     }
 
     #[test]
@@ -1486,7 +1721,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let policy = via_seam.expect("seam loads a fixture the current euid owns");
-        assert_eq!(policy.allow.len(), 1);
+        assert_eq!(policy.allow.len(), 2);
         // The PRODUCTION door on the same fixture must still demand root
         // ownership — proves adding the seam weakened nothing.
         assert!(

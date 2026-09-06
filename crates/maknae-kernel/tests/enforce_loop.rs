@@ -1442,7 +1442,11 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     for verb in [
         maknae_proto::Verb::AdminStatus,
         maknae_proto::Verb::SessionNew,
-        maknae_proto::Verb::FsWrite,
+        maknae_proto::Verb::FsWrite {
+            path: "/home/test/x".into(),
+            content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
+            mode: maknae_proto::WriteMode::Existing,
+        },
     ] {
         let emit = RecEmit::new();
         let frame = drive(

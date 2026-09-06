@@ -997,6 +997,7 @@ name = "maknae-audit-append"
 version = "0.0.0"
 dependencies = [
  "maknae-config",
+ "maknae-io",
  "nix",
  "serde",
  "serde_json",

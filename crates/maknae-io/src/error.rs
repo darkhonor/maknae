@@ -5,15 +5,19 @@ use std::path::PathBuf;
 
 /// Errno collapsed to the discriminants consumers actually need. Owned rather than
 /// `nix::errno::Errno`: re-exporting nix's type would make nix semver-public API of
-/// this crate, and `maknae-config` has no nix dependency. PR B needs exactly two
-/// (`NotADirectory`, `NotFound`) — a symlink is mapped to `Symlink` before it ever
-/// becomes an `IoKind`.
+/// this crate, and `maknae-config` has no nix dependency. Mutation callers also need
+/// typed collision and nonempty-directory outcomes; no caller should branch on
+/// numeric errno diagnostics. A symlink is mapped to `Symlink` before `IoKind`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoKind {
     NotFound,
     NotADirectory,
     PermissionDenied,
+    /// Exclusive creation or mkdir collided with an existing entry.
+    AlreadyExists,
+    /// Nonrecursive directory removal refused because children remain.
+    DirectoryNotEmpty,
     /// The platform errno as i32. **Diagnostics only — never match on it**: ELOOP is
     /// 40 on Linux and 62 on macOS, so a numeric match would be wrong on the dev host.
     Other {
@@ -52,6 +56,26 @@ pub enum IoKind {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoError {
+    /// The cooperative namespace deadline elapsed before starting the syscall.
+    DeadlineElapsed {
+        path: PathBuf,
+    },
+    /// A mutation path is malformed, nonabsolute or exceeds its bounded encoding.
+    InvalidMutationPath {
+        path: PathBuf,
+    },
+    /// The held descriptor no longer has the path on which authorization was based.
+    MutationPathChanged {
+        path: PathBuf,
+    },
+    /// Read-only and append descriptors are not existing-file replacement evidence.
+    NotWritableDescriptor {
+        path: PathBuf,
+    },
+    /// A recursive descent encountered a different filesystem device.
+    DifferentFilesystem {
+        path: PathBuf,
+    },
     Symlink {
         path: PathBuf,
     },
@@ -138,6 +162,23 @@ pub enum IoError {
 impl std::fmt::Display for IoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DeadlineElapsed { path } => {
+                write!(f, "mutation deadline elapsed: {}", path.display())
+            }
+            Self::InvalidMutationPath { path } => {
+                write!(f, "invalid mutation path: {}", path.display())
+            }
+            Self::MutationPathChanged { path } => {
+                write!(f, "mutation path changed: {}", path.display())
+            }
+            Self::NotWritableDescriptor { path } => write!(
+                f,
+                "descriptor is not writable without append: {}",
+                path.display()
+            ),
+            Self::DifferentFilesystem { path } => {
+                write!(f, "different filesystem refused: {}", path.display())
+            }
             Self::Symlink { path } => write!(f, "symlink refused: {}", path.display()),
             Self::NotRegularFile { path } => write!(f, "not a regular file: {}", path.display()),
             Self::InsecurePermissions { path, mode } => {
@@ -216,6 +257,10 @@ mod tests {
     #[test]
     fn display_strings_the_crate_reasons_about() {
         let p = PathBuf::from("/etc/maknae/cfg");
+        assert_eq!(
+            IoError::DeadlineElapsed { path: p.clone() }.to_string(),
+            "mutation deadline elapsed: /etc/maknae/cfg"
+        );
         assert_eq!(
             IoError::Symlink { path: p.clone() }.to_string(),
             "symlink refused: /etc/maknae/cfg"

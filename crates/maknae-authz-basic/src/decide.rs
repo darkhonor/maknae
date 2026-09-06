@@ -210,6 +210,9 @@ fn permit_with_audit() -> Verdict {
 /// `/`; bare `/` passes vacuously). Returns the offending component on
 /// violation.
 fn canonical_violation(path: &str) -> Option<&'static str> {
+    if path.contains('\0') {
+        return Some("NUL byte");
+    }
     if !path.starts_with('/') {
         return Some("not absolute");
     }
@@ -320,12 +323,22 @@ pub(crate) fn decide_loaded(
         // proof and universal path policy. Key the implemented term exactly;
         // adding a path to an unbuilt fs verb must never grant it Read access.
         Role::Admin | Role::User if req.action.0 == "fs.read" => match os_dac_gate(req) {
-            OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req, role.key()),
+            OsDacGate::Satisfied | OsDacGate::NotApplicable => {
+                decide_fs(lp, req, role.key(), FsScope::Read)
+            }
             OsDacGate::Deny(why) => Verdict::Deny {
                 reason: format!("os dac: {why}"),
             },
             OsDacGate::Indeterminate => Verdict::Indeterminate,
         },
+        Role::Admin | Role::User
+            if matches!(req.action.0.as_str(), "fs.write" | "fs.delete" | "fs.mkdir") =>
+        {
+            match mutation_scope(req) {
+                Ok(scope) => decide_fs(lp, req, role.key(), scope),
+                Err(verdict) => verdict,
+            }
+        }
         Role::Adversary => Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
         },
@@ -416,7 +429,55 @@ pub(crate) fn decide_loaded(
 
 /// Universal filesystem capability grammar (#158). `role_key` supplies audit
 /// testimony only; it does not select a different path permission set.
-fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
+enum FsScope {
+    Read,
+    Write,
+    WriteSubtree,
+}
+
+fn mutation_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
+    use maknae_security::{
+        FsOperation, CONTEXT_DAC_LANE, CONTEXT_FS_OPERATION, RESOURCE_OS_ACCESSIBLE,
+    };
+    let refuse = |reason: &str| Verdict::Deny {
+        reason: reason.into(),
+    };
+    if req.context.0.str(CONTEXT_DAC_LANE) != Some("local") {
+        return Err(refuse("filesystem mutation requires a local subject"));
+    }
+    let operation = req
+        .context
+        .0
+        .str(CONTEXT_FS_OPERATION)
+        .and_then(FsOperation::parse)
+        .ok_or_else(|| refuse("filesystem mutation preparation absent or invalid"))?;
+    let scope = match (req.action.0.as_str(), operation) {
+        ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
+        | ("fs.delete", FsOperation::DeleteEntry)
+        | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
+        ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
+        _ => {
+            return Err(refuse(
+                "filesystem mutation preparation does not match action",
+            ))
+        }
+    };
+    if operation == FsOperation::WriteExisting {
+        match os_dac_gate(req) {
+            OsDacGate::Satisfied => {}
+            OsDacGate::Deny(why) => return Err(refuse(&format!("os dac: {why}"))),
+            OsDacGate::Indeterminate => return Err(Verdict::Indeterminate),
+            OsDacGate::NotApplicable => {
+                return Err(refuse("filesystem mutation requires OS access"))
+            }
+        }
+    } else if req.resource.0.get(RESOURCE_OS_ACCESSIBLE).is_some() {
+        return Err(refuse("namespace attempt cannot carry an OS preapproval"));
+    }
+    Ok(scope)
+}
+
+fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope) -> Verdict {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
         // Required at THIS point of use: absent or wrong-typed → Indeterminate.
@@ -429,10 +490,13 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
             reason: format!("non-canonical resource path ({offense})"),
         };
     }
-    match lp
-        .policy
-        .evaluate3(&maknae_config::Request::Read(std::path::Path::new(path)))
-    {
+    let path = std::path::Path::new(path);
+    let matched = match scope {
+        FsScope::Read => lp.policy.evaluate3(&maknae_config::Request::Read(path)),
+        FsScope::Write => lp.policy.evaluate3(&maknae_config::Request::Write(path)),
+        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path),
+    };
+    match matched {
         maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
             // Audit-only provenance (spec §4.4): this reason reaches the
             // audit record; #77's wiring must never copy it onto the wire.
@@ -533,6 +597,164 @@ mod tests {
             resource: Resource(r),
             action: Action(action.into()),
             context: Context(c),
+        }
+    }
+
+    /// The production role and capability decision, with kernel preparation facts.
+    #[test]
+    fn filesystem_mutation_attempts_share_user_and_admin_policy() {
+        for role in ["admin", "user"] {
+            let mut lp = lp_with(
+                Some(&[(role, &["operator"])]),
+                &[("operator", OPERATOR_UID)],
+            );
+            lp.policy = maknae_config::parse_authz(
+                "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\"]\n",
+                Some(std::path::Path::new("/home/operator")),
+            ).unwrap();
+            for (action, operation, existing) in [
+                ("fs.write", "write-existing", true),
+                ("fs.write", "write-create", false),
+                ("fs.delete", "delete-entry", false),
+                ("fs.delete", "delete-tree", false),
+                ("fs.mkdir", "mkdir", false),
+            ] {
+                let mut req = read_req(Some("local"), existing.then_some(AttrValue::Bool(true)));
+                req.action.0 = action.into();
+                req.context
+                    .0
+                    .insert("fs_operation", AttrValue::Str(operation.into()));
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/projects/sentinel-158".into()),
+                );
+                assert!(
+                    matches!(
+                        decide_loaded(&lp, &principal(), &req),
+                        Verdict::Permit { .. }
+                    ),
+                    "{role} {operation} must reach its universal Write grant"
+                );
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/projects/private/sentinel-158".into()),
+                );
+                let refused = decide_loaded(&lp, &principal(), &req);
+                assert!(
+                    matches!(refused, Verdict::Deny { ref reason } if reason.contains("Write(~/projects/private/**)")),
+                    "wrong refusal: {refused:?}"
+                );
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/read-only-sentinel-158".into()),
+                );
+                assert!(
+                    matches!(
+                        decide_loaded(&lp, &principal(), &req),
+                        Verdict::NotApplicable { .. }
+                    ),
+                    "Read authority must not imply Write"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_preparation_cannot_substitute_for_other_os_evidence() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+            Some(std::path::Path::new("/home/operator")),
+        )
+        .unwrap();
+        for (action, operation, lane, accessible) in [
+            ("fs.write", "write-existing", "local", None),
+            (
+                "fs.write",
+                "write-existing",
+                "local",
+                Some(AttrValue::Bool(false)),
+            ),
+            (
+                "fs.write",
+                "write-create",
+                "local",
+                Some(AttrValue::Bool(true)),
+            ),
+            ("fs.mkdir", "mkdir", "local", Some(AttrValue::Bool(false))),
+            (
+                "fs.delete",
+                "delete-entry",
+                "local",
+                Some(AttrValue::Int(1)),
+            ),
+            (
+                "fs.write",
+                "write-existing",
+                "remote",
+                Some(AttrValue::Bool(true)),
+            ),
+            ("fs.write", "write-create", "remote", None),
+            ("fs.delete", "write-create", "local", None),
+            ("fs.write", "mkdir", "local", None),
+            ("fs.mkdir", "unknown", "local", None),
+            ("fs.read", "write-create", "local", None),
+        ] {
+            let mut req = read_req(Some(lane), accessible);
+            req.action.0 = action.into();
+            req.context
+                .0
+                .insert("fs_operation", AttrValue::Str(operation.into()));
+            assert!(
+                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+                "{action} {operation} {lane}"
+            );
+        }
+        let mut req = read_req(Some("local"), Some(AttrValue::Bool(true)));
+        req.action.0 = "fs.write".into();
+        assert!(
+            matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+            "bare positive OS access is not a prepared write"
+        );
+        req.context
+            .0
+            .insert("fs_operation", AttrValue::Str("write-existing".into()));
+        req.resource
+            .0
+            .insert(maknae_security::RESOURCE_OS_ACCESSIBLE, AttrValue::Int(1));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn mutation_capability_checks_reject_noncanonical_paths_before_matching() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
+            None,
+        )
+        .unwrap();
+        for path in [
+            "relative",
+            "/home//operator/x",
+            "/home/operator/../x",
+            "/home/operator/x/",
+            "/home/operator/\0x",
+        ] {
+            let mut req = read_req(Some("local"), Some(AttrValue::Bool(true)));
+            req.action.0 = "fs.write".into();
+            req.context
+                .0
+                .insert("fs_operation", AttrValue::Str("write-existing".into()));
+            req.resource
+                .0
+                .insert(RESOURCE_PATH, AttrValue::Str(path.into()));
+            assert!(
+                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+                "{path:?}"
+            );
         }
     }
 
@@ -1397,8 +1619,8 @@ mod tests {
             ("session.prompt", Class::Session),
             ("terminal.create", Class::Terminal),
             ("mcp.tool.call", Class::Mcp),
-            ("fs.write", Class::Fs),
-            ("fs.delete", Class::Fs),
+            ("fs.move", Class::Fs),
+            ("fs.link", Class::Fs),
             ("kernel.contain", Class::Kernel),
         ] {
             assert_eq!(class_of(action), Some(expect), "{action} must resolve");

@@ -39,8 +39,8 @@ use maknae_audit_append::{
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
-    decode_request, encode_response, read_frame, write_frame, Payload, RespResult, Response, Verb,
-    PROTOCOL_VERSION,
+    decode_request, encode_response, read_frame_zeroizing, write_frame, Payload, RespResult,
+    Response, Verb, PROTOCOL_VERSION,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -285,6 +285,7 @@ fn make_record(
         action: action.to_string(),
         object: object.map(str::to_string),
         object_requested: None,
+        mutation: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -453,7 +454,7 @@ pub async fn handle<S, E, P>(
     // 2. Read exactly one request frame, bounded by read_timeout + the frame cap.
     let read = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        read_frame(&mut stream, cfg.frame_max_bytes),
+        read_frame_zeroizing(&mut stream, cfg.frame_max_bytes),
     )
     .await;
     let body = match read {
@@ -551,6 +552,46 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
+    }
+
+    if matches!(
+        request.verb,
+        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. }
+    ) {
+        let record = make_record(
+            "request",
+            &host,
+            &socket,
+            peer_uid,
+            None,
+            None,
+            Some(&peer_uri),
+            session_id,
+            seq.next(),
+            verb_to_action(&request.verb),
+            None,
+            "deny",
+            "mutation not prepared",
+            "unauthorized",
+            &au3_1,
+        );
+        crate::mutation::handle(
+            &mut stream,
+            &request.verb,
+            peer_uid,
+            lane,
+            &delegated,
+            Arc::clone(&authorizer),
+            Arc::clone(&emit),
+            Arc::clone(&principal),
+            &cfg,
+            &seq,
+            record,
+            authz_decide_timeout,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
     }
 
     // Decide on the BLOCKING pool (the per-request policy re-read is sync file
@@ -731,6 +772,36 @@ pub async fn handle<S, E, P>(
     // actually produced (the invariant gates DISCLOSURE — content read into
     // daemon memory whose record cannot append is dropped undisclosed).
     match dispatch_verb(&request.verb) {
+        Dispatch::MutationRequested => {
+            let appended = emit_request_outcome(
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                object_path.as_deref(),
+                object_asked.as_deref(),
+                "deny",
+                "mutation dispatch reached without prepared evidence",
+                "unauthorized",
+                &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::Unauthorized,
+                    "not authorized",
+                )
+                .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
         Dispatch::NoBehaviour => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // (#181, 2026-09-02: only an EXTENSION grant can produce that
@@ -969,7 +1040,9 @@ pub async fn handle<S, E, P>(
                     }
                 }
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
-                Dispatch::NoBehaviour => unreachable!("outer match routes NoBehaviour"),
+                Dispatch::NoBehaviour | Dispatch::MutationRequested => {
+                    unreachable!("outer match routes unprepared operations")
+                }
             };
             let response = Response {
                 protocol_version: PROTOCOL_VERSION,
@@ -2435,7 +2508,7 @@ fn hostname() -> String {
 /// RFC3339 UTC timestamp (millisecond precision) with no date-library dependency, via
 /// Howard Hinnant's days-from-civil algorithm. `ts` is an AU-3 correlation field, not a
 /// security decision — but it is pinned by a unit test so a drift is caught.
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

@@ -2,6 +2,7 @@ schema_version: 1
 permissions:
   allow:
     - "Read(~/**)"
+    - "Write(~/projects/**)"
   deny:
     - "Read(~/.ssh/**)"
     - "Read(~/.gnupg/**)"

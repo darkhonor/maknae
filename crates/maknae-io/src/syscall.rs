@@ -101,6 +101,42 @@ pub(crate) fn open_parent_by_path(p: &Path) -> nix::Result<OwnedFd> {
     )
 }
 
+#[cfg(target_os = "linux")]
+use linux_mutation_directory_flags as mutation_directory_flags;
+#[cfg(target_os = "macos")]
+use macos_mutation_directory_flags as mutation_directory_flags;
+
+// Mutation pins must not require permission to enumerate a directory. nix 0.31's
+// typed flags expose Linux O_PATH and Apple's O_SEARCH; the installed Apple SDK
+// sys/fcntl.h and open(2) document O_SEARCH as directory search access. Config/read
+// anchors keep their O_RDONLY lane. Neither flag proves child mutation permission.
+#[cfg(target_os = "linux")]
+fn linux_mutation_directory_flags() -> OFlag {
+    OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mutation_directory_flags() -> OFlag {
+    // O_SEARCH already includes O_DIRECTORY on Apple.
+    OFlag::O_SEARCH | OFlag::O_CLOEXEC
+}
+
+/// Open a subject directory for pathname operations, following its final alias so
+/// the kernel-reported path is what the daemon decides. This performs no effect.
+pub(crate) fn open_mutation_directory(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(path, mutation_directory_flags(), NixMode::empty())
+}
+
+/// Mutation descent needs search/path access; only directory enumeration needs read.
+pub(crate) fn open_mutation_directory_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<OwnedFd> {
+    nix::fcntl::openat(
+        fd,
+        leaf,
+        mutation_directory_flags() | OFlag::O_NOFOLLOW,
+        NixMode::empty(),
+    )
+}
+
 /// Open a directory relative to a pinned dirfd, refusing symlinks at this component.
 ///
 /// `O_NONBLOCK` here is redundant BY CONSTRUCTION and deliberately kept: `O_DIRECTORY`
@@ -184,6 +220,10 @@ pub(crate) fn macos_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn unsupported_fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
     Err(nix::errno::Errno::ENOSYS)
+}
+
+pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {
+    nix::sys::stat::stat(path)
 }
 
 pub(crate) fn fstat<F: AsFd>(fd: &F) -> nix::Result<FileStat> {
@@ -331,6 +371,44 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
     nix::unistd::fdatasync(fd)
 }
 
+/// Subject open follows aliases so policy decides the kernel-reported target.
+/// No create/truncate: preparation must have no effect before durable intent.
+pub(crate) fn open_writable_delegation(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(
+        path,
+        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        NixMode::empty(),
+    )
+}
+
+/// Inspect the access mode without changing the shared file description's flags.
+pub(crate) fn is_nonappend_writable<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = OFlag::from_bits_truncate(nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL)?);
+    let access = flags & OFlag::O_ACCMODE;
+    Ok((access == OFlag::O_WRONLY || access == OFlag::O_RDWR) && !flags.contains(OFlag::O_APPEND))
+}
+
+pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
+    nix::sys::uio::pwrite(fd, bytes, offset)
+}
+
+pub(crate) fn truncate_fd<F: AsFd>(fd: &F, length: i64) -> nix::Result<()> {
+    nix::unistd::ftruncate(fd, length)
+}
+
+pub(crate) fn mkdir_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<()> {
+    nix::sys::stat::mkdirat(fd, leaf, NixMode::S_IRWXU)
+}
+
+pub(crate) fn remove_at<F: AsFd>(fd: &F, leaf: &str, directory: bool) -> nix::Result<()> {
+    let flags = if directory {
+        nix::unistd::UnlinkatFlags::RemoveDir
+    } else {
+        nix::unistd::UnlinkatFlags::NoRemoveDir
+    };
+    nix::unistd::unlinkat(fd, leaf, flags)
+}
+
 #[cfg(test)]
 mod tests {
     //! Every open verb must set `FD_CLOEXEC`.
@@ -367,6 +445,65 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn nofollow_directory_open_refuses_outside_sentinel_parent() {
+        let d = tmp();
+        let outside = tmp();
+        let sentinel = outside.path().join("nofollow-sentinel");
+        std::fs::write(&sentinel, b"safe").unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.path().join("link")).unwrap();
+        let fd = open_parent_by_path(d.path()).unwrap();
+        assert!(open_dir_at(&fd, "link").is_err());
+        assert!(open_mutation_directory_at(&fd, "link").is_err());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"safe");
+    }
+
+    #[test]
+    fn mutation_xor_equivalence_requires_disjoint_platform_flag_bits() {
+        // This is the executable algebra supporting the narrowly named XOR
+        // exemptions; the descriptor tests separately hold actual behavior.
+        let mut groups = vec![
+            vec![OFlag::O_WRONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC],
+            vec![mutation_directory_flags(), OFlag::O_NOFOLLOW],
+        ];
+        #[cfg(target_os = "macos")]
+        groups.push(vec![OFlag::O_SEARCH, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "linux")]
+        groups.push(vec![OFlag::O_PATH, OFlag::O_DIRECTORY, OFlag::O_CLOEXEC]);
+        for group in groups {
+            let mut bits = OFlag::empty();
+            for flag in group {
+                assert!(
+                    !bits.intersects(flag),
+                    "XOR exemption requires disjoint flags"
+                );
+                assert_eq!(bits | flag, bits ^ flag);
+                bits |= flag;
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_directory_pins_set_cloexec() {
+        let d = tmp();
+        let fd = open_mutation_directory(d.path()).unwrap();
+        assert!(is_cloexec(&fd));
+        std::fs::create_dir(d.path().join("child")).unwrap();
+        let child = open_mutation_directory_at(&fd, "child").unwrap();
+        assert!(is_cloexec(&child));
+    }
+
+    #[test]
+    fn writable_delegation_open_sets_cloexec_and_never_creates() {
+        let d = tmp();
+        let p = d.path().join("flags");
+        std::fs::write(&p, b"safe").unwrap();
+        let fd = open_writable_delegation(&p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert!(is_nonappend_writable(&fd).unwrap());
+        assert!(open_writable_delegation(&d.path().join("absent")).is_err());
     }
 
     #[test]
