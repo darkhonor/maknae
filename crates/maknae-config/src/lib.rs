@@ -63,7 +63,7 @@ pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
-pub use policy::BasicPolicy;
+pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
 pub use value::Value;

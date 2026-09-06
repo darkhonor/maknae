@@ -379,8 +379,9 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
   same commands into a denied connection — an audited `deny`/`unauthorized` record, no
   response, non-zero CLI exit. Admission is the TRANSPORT half.
 - **Per-request AUTHORIZATION (#77)** — the DECISION half: every admitted request is
-  decided by the PDP (`maknae-authz-basic` behind the `maknae-security` seam), policy
-  re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`;
+  decided by the PDP — the `Composition` of `maknae-authz-basic` and the
+  classification-ceiling operand, behind the `maknae-security` seam (#148/#154) —
+  policy re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`;
   `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
   `not authorized`, the trail says which pattern and which object. Re-roling or
   removing an identity ALREADY KNOWN at boot bites on the NEXT request, no

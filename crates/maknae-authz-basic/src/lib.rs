@@ -296,6 +296,37 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     }
 }
 
+/// The NON-REMOVABLE baseline operand of the authorization composition
+/// (ADR-0008 decision 1; #154).
+///
+/// **Sealed.** Only this crate can implement it, and it implements it for
+/// exactly two types: [`BasicAuthorizer`] (production) and, under the
+/// `hermetic-test-seam` feature only, `HermeticAuthorizer` — which wraps a real
+/// `BasicAuthorizer` with the loader requirement parameterized, so the kernel's
+/// unprivileged integration suites can construct a composition without a
+/// root-owned policy file. `ci/gates/feature-resolution-pin.sh` pins production
+/// resolution featureless, so in a shipped binary the ONLY `Baseline` is
+/// `-basic`.
+///
+/// Why a sealed trait rather than the ADR's literal `baseline: BasicAuthorizer`
+/// field: the field form cannot be constructed off-root, which would have left
+/// every kernel composition test unwritable. The property the ADR names — the
+/// absent state is not expressible — holds identically: `Composition` requires
+/// a `B: Baseline`, and nothing outside this crate can satisfy that bound.
+pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync + 'static {}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for BasicAuthorizer {}
+impl Baseline for BasicAuthorizer {}
+
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+impl sealed::Sealed for HermeticAuthorizer {}
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+impl Baseline for HermeticAuthorizer {}
+
 /// Test-only, requirement-parameterized door over the SAME production decide
 /// sequence (#77; the PR #139 pattern applied at the decide layer): the
 /// loader's `TargetRequired` is the caller's, everything else — eager

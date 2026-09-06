@@ -196,7 +196,9 @@ which names the **classification system** the enclave operates under (ADR-0022).
 > from the ones **compiled into the build** (`US`, the default; `AUS`); then it
 > validates the ceiling **through the selected system** (`ceiling_from_core`). A name
 > the build does not carry refuses boot (`UnknownClassificationPolicy`); config names a
-> system, it never adds one. The rule and errors below describe that read.
+> system, it never adds one. The rule and errors below describe that read. *(Corrected
+> 2026-09-06, #148: the ceiling is enforced on every content request — see the box at
+> the end of this section — not merely read at boot.)*
 
 **The rule** (applied when the ceiling is read):
 
@@ -215,7 +217,7 @@ which names the **classification system** the enclave operates under (ADR-0022).
 | Posture | When |
 |---|---|
 | **`Public`** (reach-only) | the ceiling's **parsed values** equal the baseline |
-| **`Gated`** | the ceiling differs from the baseline in **any** way — higher, lower, or lateral (e.g. a higher level, CUI, SCI, a releasability set, a non-public *or empty* dissemination, or an accreditation reference) |
+| **`Gated`** *(the INGEST gate's bit — it has no bearing on the per-request ceiling operand, which reads the level only; see the box below)* | the ceiling differs from the baseline in **any** way — higher, lower, or lateral (e.g. a higher level, CUI, SCI, a releasability set, a non-public *or empty* dissemination, or an accreditation reference) |
 
 The comparison is on the **parsed ceiling values**, not the source text — cosmetic YAML
 differences (quoting, whitespace, key order, flow vs. block) that parse to the same
@@ -277,6 +279,27 @@ A level the selected system does not rank — a typo, a caveat-bearing marking, 
 system's level — is **invalid** and refuses the load. It never silently becomes `Gated`.
 (Corrected 2026-09-06: case variants such as `secret` are accepted; earlier text made
 them a refusal, which was the live bug #148's sibling.)
+
+> **What the ceiling does at runtime (#148 / #154, 2026-09-06).** The declared **level**,
+> in the declared **system**, is a mandatory operand of the authorization composition
+> (ADR-0008 decision 1; ADR-0022), evaluated on **every** request beside the RBAC baseline,
+> deny-overrides. Control-plane verbs (`admin.*`, `liveness.*`, `kernel.*`) are unaffected.
+> For every other verb (today `fs.*`, `session.*`, `terminal.*`, `mcp.*`, and any namespace
+> added later): content whose marking's **first token** ranks **at or below** the declared
+> level flows; content marked **above** it is refused (the deny reason names the operand:
+> `ceiling: …`). Caveats after `//` are opaque here and belong to the DCS library. A first
+> token of **another** compiled-in system is refused **by name** (`PROTECTED` under a `US`
+> enclave: *"a level of the AUS system, not US"*) — the kernel maps nothing between
+> systems. **Unmarked content is the system's lowest level** (`UNCLASSIFIED`;
+> `UNOFFICIAL` under `AUS`) — at or below every ceiling — so a HomeLab with no `handling`
+> block, a small business that declares CUI, and an enterprise that declares SECRET all
+> serve their unmarked content out of the box; no labeler is needed for any tier to
+> function. A labeler ([#229](https://github.com/darkhonor/maknae/issues/229)) only makes
+> *higher* markings expressible. Only `classification` is consulted here: `sci`,
+> `releasable_to`, the CUI fields and `accreditation_ref` have **no bearing** on this
+> operand (an ATO is a US-government artifact; most deployments will never have one).
+> The boot trail records what will be enforced: the `authz` boot record's reason reads
+> `authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: SECRET`.
 
 ---
 

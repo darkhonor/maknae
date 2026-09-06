@@ -15,7 +15,7 @@ use maknae_vault::VaultError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     /// An enumerated term with no behaviour. Reached only after a Permit —
-    /// which, while `-basic` is the sole operand, NOTHING can produce for an
+    /// which, while `-basic` is the only operand that GRANTS (corrected 2026-09-06, #148/#154: the ceiling operand is composed too, but it never `Permit`s, so the arm stays unreachable), NOTHING can produce for an
     /// unbuilt term (grants are code-bounded to `GRANTABLE_ACTIONS`,
     /// ADR-0010), so this arm is production-unreachable TODAY. It is reachable
     /// by construction the moment an extension operand grants a term `-basic`
@@ -1108,6 +1108,76 @@ mod tests {
             Verb::McpPromptGet,
             Verb::McpSamplingCreate,
         ]
+    }
+
+    /// #148: every term is EXACTLY one of control plane or content-bearing, and
+    /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
+    /// (57 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
+    /// `action` rows (critical-review round 1 of PR B: the manifest is
+    /// extracted from `verb_to_action`, which the compiler forces a new
+    /// variant into; `all_verbs()` is hand-written and was not) -- so a new
+    /// verb cannot land unpartitioned: an `admin.*` term is control plane;
+    /// every `fs.*`/`session.*`/`terminal.*`/`mcp.*` term moves content and is
+    /// evaluated against the ceiling.
+    #[test]
+    fn every_verb_partitions_into_control_plane_or_content() {
+        use crate::ceiling_authz::is_control_plane;
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../ci/gates/verb-manifest.txt"),
+        )
+        .expect("the verb manifest is readable from the crate root");
+        let mut manifest_actions: Vec<&str> = manifest
+            .lines()
+            .filter(|l| l.starts_with("action\t"))
+            .map(|l| l.split('\t').nth(1).unwrap())
+            .collect();
+        manifest_actions.sort_unstable();
+        let mut ours: Vec<&str> = all_verbs().iter().map(|v| verb_to_action(v)).collect();
+        ours.sort_unstable();
+        assert_eq!(
+            ours, manifest_actions,
+            "all_verbs() and verb-manifest.txt disagree -- a verb landed in one and not the other"
+        );
+        let mut control = 0usize;
+        let mut content = 0usize;
+        for v in all_verbs() {
+            let action = verb_to_action(&v);
+            let expected_control = action.starts_with("liveness.") || action.starts_with("admin.");
+            assert_eq!(
+                is_control_plane(action),
+                expected_control,
+                "{action} is {} but the operand says otherwise",
+                if expected_control {
+                    "control plane"
+                } else {
+                    "content"
+                }
+            );
+            if expected_control {
+                control += 1;
+            } else {
+                content += 1;
+            }
+        }
+        for k in KERNEL_ACTIONS {
+            assert!(
+                is_control_plane(k),
+                "kernel pseudo-action {k} is control plane"
+            );
+        }
+        // Both halves are non-empty -- a partition that put everything on one
+        // side would satisfy the loop above vacuously if the expectation were
+        // wrong in the same direction.
+        // Both halves non-empty -- a partition that put everything on one side
+        // would satisfy the loop vacuously if the expectation were wrong in the
+        // same direction. (A `control + content == len` assert was removed as
+        // tautological: the loop increments exactly once per verb.)
+        assert!(
+            control > 0 && content > 0,
+            "control={control} content={content}"
+        );
     }
 
     /// The kernel actions have no `Verb` variant (#67 D2) but are still

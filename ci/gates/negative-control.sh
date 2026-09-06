@@ -1668,6 +1668,151 @@ else
   chmod 644 "$fx/design/unreadable.md"
 fi
 
+# ---------------------------------------------------------------------------
+# authz-composition-drift (ADR-0008 decision 1; #154 / #148). A gate whose whole
+# purpose is "the baseline cannot be removed" must be SEEN rejecting each way of
+# removing it. One minimal fixture, at least one corruption per `fail(` CALL
+# SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
+# 4 found the hand count wrong twice): the gate has 21 `fail(` sites; the
+# 29 probes below map onto every one of them by their `why` substring
+# (a probe's `why` is a literal substring of exactly the message it targets),
+# and the two parameterized sites -- `missing <file>` and `missing <base>/` --
+# are probed once per parameter value (3 files, 2 bases). A probe whose `why`
+# matches no site, or a site no probe matches, is the failure this note is
+# guarding against; re-derive after any edit to either file.
+composition_fixture() { # -> prints the fixture root; a MINIMAL tree the gate accepts
+  local f; f="$(mktemp -d)"
+  mkdir -p "$f/ci/gates" "$f/crates/maknae-kernel/src" "$f/crates/maknae-authz-basic/src" "$f/crates/maknae-config/src" "$f/crates/maknae-vault/src" "$f/bins/maknaed/src"
+  cp "$here/authz-composition-drift.sh" "$f/ci/gates/"
+  cat > "$f/crates/maknae-kernel/src/run.rs" <<'RS'
+fn boot() {
+    let (authorizer, principal) = match authz_boot_gate(dir, p) { Ok(x) => x, Err(e) => return };
+    // from the gate's own return value; a `;` in a comment is not a boundary
+    let authorizer = crate::composition::build_pdp(&boot, authorizer);
+    let composition_rec = make_record(
+        "boot",
+        &host,
+        "authz",
+        None,
+        "permit",
+        &format!("authorization composition: {name}; system: {sys}; ceiling: {lvl}"),
+        "authorized",
+    );
+    if let Err(e) = sink.emit(&composition_rec).await { eprintln!("{e}"); }
+}
+#[cfg(test)]
+mod tests {}
+RS
+  cat > "$f/crates/maknae-kernel/src/composition.rs" <<'RS'
+pub struct Composition<B: Baseline> {
+    baseline: B,
+    ceiling: CeilingAuthorizer,
+}
+#[cfg(test)]
+mod tests {}
+RS
+  printf 'const LAKE_SECTION: &str = "lake";\n' > "$f/crates/maknae-kernel/src/boot.rs"
+  # The defining file for the ceiling operand: its own `new` is exempt BY PATH (check 6).
+  printf 'pub struct CeilingAuthorizer;\nimpl CeilingAuthorizer { pub fn new() -> Self { CeilingAuthorizer } }\nfn own() { let _ = CeilingAuthorizer::new(); }\n#[cfg(test)]\nmod tests {}\n' > "$f/crates/maknae-kernel/src/ceiling_authz.rs"
+  cat > "$f/crates/maknae-authz-basic/src/lib.rs" <<'RS'
+pub trait Baseline: Authorizer + sealed::Sealed + Send + Sync + 'static {}
+mod sealed { pub trait Sealed {} }
+impl sealed::Sealed for BasicAuthorizer {}
+impl Baseline for BasicAuthorizer {}
+RS
+  printf 'const SECTION: &str = "audit";\n' > "$f/crates/maknae-config/src/lib.rs"
+  printf 'pub const VAULT_SECTION: &str = "vault";\n' > "$f/crates/maknae-vault/src/config.rs"
+  printf 'fn main() {}\n' > "$f/bins/maknaed/src/main.rs"
+  printf '%s' "$f"
+}
+composition_reject() { # <label> <expected-FAIL-substring> <python-patch-over-fixture>
+  local label="$1" why="$2" patch="$3" f
+  f="$(composition_fixture)"
+  python3 - "$f" <<PY
+import sys, pathlib, re
+root = pathlib.Path(sys.argv[1])
+$patch
+PY
+  expect_reject_because "authz-composition-drift/$label" "$why" "$f/ci/gates/authz-composition-drift.sh" "$f"
+}
+# check 1 -- construction
+composition_reject "conditional-construction" "construction must be unconditional" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("let authorizer = crate::composition::build_pdp(", "let authorizer = if cfg.use_basic { crate::composition::build_pdp("))'
+composition_reject "baseline-from-config-not-gate" "the boot gate's \`authorizer\` binding" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("build_pdp(&boot, authorizer)", "build_pdp(&boot, selected_backend)"))'
+composition_reject "ceiling-not-from-boot" "fed \`&boot\`" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("build_pdp(&boot, authorizer)", "build_pdp(&some_other_config, authorizer)"))'
+composition_reject "direct-construction-in-run" "must go through \`build_pdp\`" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("#[cfg(test)]", "fn other() { let _ = crate::composition::Composition::new(a, b); }\n#[cfg(test)]"))'
+composition_reject "two-call-sites" "expected exactly ONE production" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("#[cfg(test)]", "fn other() { let x = build_pdp(&b, a); }\n#[cfg(test)]"))'
+composition_reject "gate-does-not-precede" "does not precede the composition" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("match authz_boot_gate(dir, p)", "match some_other_source(dir, p)"))'
+# check 2 -- the fields
+composition_reject "optional-baseline-field" "absent state expressible" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("baseline: B,", "baseline: Option<B>,"))'
+composition_reject "vector-baseline" "absent state expressible" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("baseline: B,", "baseline: Vec<Box<dyn Authorizer>>,"))'
+composition_reject "no-baseline-bound" "no \`pub struct Composition<B: Baseline>" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("Composition<B: Baseline>", "Composition<B>"))'
+composition_reject "baseline-field-removed" "no named \`baseline\` field" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("    baseline: B,\n", ""))'
+composition_reject "optional-ceiling-field" "must be the bare \`CeilingAuthorizer\`" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("ceiling: CeilingAuthorizer,", "ceiling: Option<CeilingAuthorizer>,"))'
+composition_reject "composition-file-missing" "missing crates/maknae-kernel/src/composition.rs" \
+  '(root/"crates/maknae-kernel/src/composition.rs").unlink()'
+composition_reject "ceiling-field-removed" "no named \`ceiling\` field" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text().replace("    ceiling: CeilingAuthorizer,\n", ""))'
+# check 3 -- the sealed trait
+composition_reject "unsealed-trait" "not bounded by" \
+  'p=root/"crates/maknae-authz-basic/src/lib.rs"; p.write_text(p.read_text().replace("Authorizer + sealed::Sealed +", "Authorizer +"))'
+composition_reject "foreign-baseline-impl" "outside the owning crate" \
+  'p=root/"crates/maknae-kernel/src/composition.rs"; p.write_text(p.read_text()+"impl Baseline for VendorPdp {}\n")'
+composition_reject "third-impl-in-owning-crate" "not one of the two permitted baselines" \
+  'p=root/"crates/maknae-authz-basic/src/lib.rs"; p.write_text(p.read_text()+"impl Baseline for LenientAuthorizer {}\n")'
+composition_reject "basic-impl-absent" "impl Baseline for BasicAuthorizer\` is absent" \
+  'p=root/"crates/maknae-authz-basic/src/lib.rs"; p.write_text(p.read_text().replace("impl Baseline for BasicAuthorizer {}\n", ""))'
+# check 4 -- config vocabulary, INSIDE and OUTSIDE maknae-config. The second
+# probe appends a section CONSTANT to kernel boot.rs; what the gate matches is
+# its "backend" literal -- the probe proves the SCAN REACHES that file, not that
+# the gate understands section registration.
+composition_reject "config-names-the-pdp" "configuration expresses extensions only" \
+  'p=root/"crates/maknae-config/src/lib.rs"; p.write_text(p.read_text()+"const K: &str = \"authz_backend\";\n")'
+composition_reject "section-const-outside-config-crate" "configuration expresses extensions only" \
+  'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"const AUTHZ_BACKEND_SECTION: &str = \"backend\";\n")'
+# check 5 -- boot-time evidence
+composition_reject "evidence-emit-removed" "constructed but never EMITTED" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit(&composition_rec).await { eprintln!(\"{e}\"); }\n", ""))'
+composition_reject "run-file-missing" "missing crates/maknae-kernel/src/run.rs" \
+  '(root/"crates/maknae-kernel/src/run.rs").unlink()'
+composition_reject "basic-lib-missing" "missing crates/maknae-authz-basic/src/lib.rs" \
+  '(root/"crates/maknae-authz-basic/src/lib.rs").unlink()'
+composition_reject "bin-names-the-pdp" "configuration expresses extensions only" \
+  'p=root/"bins/maknaed/src/main.rs"; p.write_text(p.read_text()+"const K: &str = \"pdp\";\n")'
+composition_reject "crates-dir-missing" "missing crates/ -- the production scan" \
+  'import shutil; shutil.rmtree(root/"crates")'
+composition_reject "bins-dir-missing" "missing bins/" \
+  'import shutil; shutil.rmtree(root/"bins")'
+composition_reject "evidence-reason-lacks-system-and-ceiling" "must carry '; system:" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("; system: {sys}; ceiling: {lvl}", ""))'
+# check 6 -- constructor call sites outside the defining files
+composition_reject "composition-new-in-another-kernel-module" "calls \`Composition::new(\` outside its defining file" \
+  'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = crate::composition::Composition::new(a, b); }\n")'
+composition_reject "ceiling-new-in-a-bin" "calls \`CeilingAuthorizer::new(\` outside its defining file" \
+  'p=root/"bins/maknaed/src/main.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = maknae_kernel::CeilingAuthorizer::new(c, p); }\n")'
+composition_reject "evidence-record-removed" "boot composition evidence record" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(re.sub(r"    let composition_rec = make_record\(.*?\n    \);\n", "", p.read_text(), flags=re.S))'
+f="$(composition_fixture)"; expect_accept "authz-composition-drift/clean-fixture" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
+# A commented-out or test-module construction is NOT a site (comments blanked; production half only).
+f="$(composition_fixture)"; python3 - "$f" <<'PYFIX'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-kernel/src/boot.rs"
+p.write_text(p.read_text() + "// let _ = Composition::new(a, b);\n/* CeilingAuthorizer::new(c, p) */\n#[cfg(test)]\nmod tests { fn t() { let _ = crate::composition::Composition::new(a, b); } }\n")
+PYFIX
+expect_accept "authz-composition-drift/commented-or-test-construction-is-not-a-site" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
+expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" "$here/authz-composition-drift.sh" "$here/../.."
+
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to

@@ -21,11 +21,13 @@ mod verdict;
 pub use authorizer::{Authorizer, SubjectBinding};
 pub use classification::{first_token, ClassificationPolicy, Level};
 pub use compose::{
-    combine, guarded_backend_name, guarded_decide, guarded_subjects, ConjunctionAuthorizer,
+    combine, compose_backend_name, compose_decide, compose_subjects, guarded_backend_name,
+    guarded_decide, guarded_subjects, ConjunctionAuthorizer,
 };
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{
-    Action, Context, Lane, Request, Resource, Subject, CONTEXT_DAC_LANE, RESOURCE_OS_ACCESSIBLE,
+    Action, Context, Lane, Request, Resource, Subject, CONTEXT_DAC_LANE, RESOURCE_CLASSIFICATION,
+    RESOURCE_OS_ACCESSIBLE,
 };
 pub use value::{AttrValue, Attributes};
 // NOTE: `Verdict` and `Decision` implement `Default` as a deliberate *fail-closed
