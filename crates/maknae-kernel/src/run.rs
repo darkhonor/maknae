@@ -355,6 +355,9 @@ pub async fn handle<S, E, P>(
     // set cannot change in-process, so per-request asking could only repeat
     // this string while running operand code inline on the worker).
     authz_backend_name: Arc<String>,
+    // Captured ONCE at boot from the booted config (ADR-0022): the system
+    // `core.handling.policy` selected, by name.
+    classification_policy_name: Arc<String>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -815,6 +818,7 @@ pub async fn handle<S, E, P>(
                     // Panic-guarded and sanitized at capture; the request path
                     // runs no operand code for this field.
                     authz_backend: (*authz_backend_name).clone(),
+                    classification_policy: (*classification_policy_name).clone(),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -1458,6 +1462,7 @@ pub async fn accept_loop<A, E, P>(
     principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
+    classification_policy_name: Arc<String>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1558,6 +1563,8 @@ where
                                 let principal = Arc::clone(&principal);
                                 let config_view = Arc::clone(&config_view);
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
+                                let classification_policy_name =
+                                    Arc::clone(&classification_policy_name);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1648,6 +1655,7 @@ where
                                                 authorizer, principal,
                                                 config_view,
                                                 authz_backend_name,
+                                                classification_policy_name,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
@@ -2242,6 +2250,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // contract, not an enforcement (codex round-11 P2). A backend that blocks
     // here hangs BOOT, loudly, instead of quietly eating workers in service.
     let authz_backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+    // The classification system this enclave runs under, as boot selected it
+    // from `core.handling.policy` (ADR-0022) -- captured here for the same
+    // reason as the backend name: fixed for the life of the process.
+    let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -2256,6 +2268,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         // the unredacted Document does not travel with it.
         config_view,
         authz_backend_name,
+        classification_policy_name,
     )
     .await;
 
@@ -2287,6 +2300,7 @@ async fn serve_after_mint(
     config_view: Arc<ConfigView>,
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
+    classification_policy_name: Arc<String>,
 ) -> Result<ServeOutcome, String> {
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
@@ -2324,6 +2338,7 @@ async fn serve_after_mint(
         principal,
         config_view,
         authz_backend_name,
+        classification_policy_name,
     )
     .await;
     Ok(outcome)

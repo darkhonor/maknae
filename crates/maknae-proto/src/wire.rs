@@ -311,6 +311,12 @@ pub struct StatusView {
     /// backend_name`). An operator debugging a verdict needs to know WHICH
     /// PDP produced it; with the DCS library present this is not `-basic`.
     pub authz_backend: String,
+    /// Which classification SYSTEM this enclave operates under
+    /// (`core.handling.policy`, ADR-0022): the name the kernel's registry
+    /// selected at boot -- `US` unless the operator declared another this
+    /// build carries. An operator reading a ceiling refusal needs to know
+    /// which ladder ranked it.
+    pub classification_policy: String,
 }
 
 /// One role and the identities bound to it.

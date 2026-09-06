@@ -333,6 +333,7 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("protocol_version {}", s.protocol_version);
             println!("listener         {}", s.listener);
             println!("authz_backend    {}", s.authz_backend);
+            println!("classification_policy {}", s.classification_policy);
             Ok(())
         }
         (Verb::AdminConfigShow, Payload::ConfigView(v)) => {

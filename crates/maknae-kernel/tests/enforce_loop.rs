@@ -252,6 +252,7 @@ where
         Arc::new(fx_principal.clone()),
         Arc::clone(&config_view),
         backend_name,
+        Arc::new("US".to_string()),
         timeout,
         maknae_security::Lane::Local,
         delegated,
@@ -1347,6 +1348,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
             assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
             assert_eq!(s.authz_backend, "maknae-authz-basic");
+            assert_eq!(s.classification_policy, "US");
             // EXACT, like its siblings. This was the one field where any
             // non-empty string passed; the test crate is `maknae-kernel`, the
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
