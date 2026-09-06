@@ -1,6 +1,6 @@
 # ADR-0022: A `ClassificationPolicy` seam — the kernel ships the US system, `maknae-classification-aus` ships PSPF, `rust-dcs` brings the lattice, and one non-public switch governs egress
 
-- **Status:** Proposed (operator-directed 2026-09-06, settled in discussion the same day; lands via two PRs — see Consequences)
+- **Status:** Accepted (operator-ratified 2026-09-06 at PR B, as a snapshot to work from — "we can adjust as needed later"; proposed and settled in discussion the same day; landed via two PRs, #230 and #231 — see Consequences). The `rust-dcs` references stand deliberately: this is the boundary both projects must delineate, and it is recorded on both sides.
 - **Date:** 2026-09-06
 - **Deciders:** Alex Ackerman (operator)
 
