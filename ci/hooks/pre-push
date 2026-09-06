@@ -1,8 +1,42 @@
 #!/usr/bin/env bash
-# Opt-in pre-push hook (ADR-0016): runs the coverage-tiers gate's default
-# stage set (partition + coverage + ratchet + workflow-sync). Never the
-# mutation stage (minutes-long; CI is the enforcement of record).
-# Enable per-clone: git config core.hooksPath ci/hooks   (see README.md)
+# Opt-in via git config core.hooksPath ci/hooks. Compare the actual ref update,
+# including pushes to remotes other than origin; no guessed origin/main base.
+# MAKNAE_PRE_PUSH_MUTANTS=1 additionally runs selected whole-crate mutations.
 set -euo pipefail
 root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
-exec bash "$root/ci/gates/coverage-tiers.sh" --root "$root"
+selection="$(mktemp)"
+trap 'rm -f "$selection"' EXIT
+build=0
+mutants=""
+while read -r local_ref local_oid _remote_ref remote_oid; do
+  # Deleting a ref introduces no code. New refs have an all-zero remote oid;
+  # the selector widens those to full checks because history is unavailable.
+  [[ "$local_oid" =~ ^0+$ ]] && continue
+  base="$remote_oid"
+  if [ "$local_oid" != "$(git -C "$root" rev-parse HEAD)" ]; then
+    # Gate runs in this checkout, so it cannot attest to another ref's content.
+    echo "FAIL: pre-push checks require checking out $local_ref first" >&2
+    exit 1
+  fi
+  python3 "$root/ci/affected.py" --root "$root" --event push \
+    --base="$base" --head="$local_oid" >"$selection"
+  cat "$selection"
+  if python3 -c 'import json,sys; sys.exit(not json.load(open(sys.argv[1]))["build"])' "$selection"; then
+    build=1
+  fi
+  selected="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["mutants"]))' "$selection")"
+  mutants="$mutants $selected"
+done
+if [ "$build" = 1 ]; then
+  bash "$root/ci/gates/coverage-tiers.sh" --root "$root"
+  if [ "${MAKNAE_PRE_PUSH_MUTANTS:-0}" = 1 ]; then
+    # Names are validated by the selector; deduplicate across ref updates.
+    mutants="$(printf '%s\n' "$mutants" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+    if [ -n "${mutants// /}" ]; then
+      read -r -a packages <<< "$mutants"
+      bash "$root/ci/gates/coverage-tiers.sh" --root "$root" --mutants "${packages[@]}"
+    fi
+  fi
+else
+  echo "SKIP: documentation-only updates (or ref deletions)"
+fi

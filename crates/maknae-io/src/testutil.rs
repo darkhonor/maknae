@@ -47,8 +47,72 @@ pub(crate) fn skip_or_fail(what: &str, why: &str) {
     }
 }
 
+pub(crate) use tests::isolated;
+
 #[cfg(test)]
 mod tests {
+    /// Re-exec one test so an intentionally broken blocking syscall can be killed
+    /// and reaped. A completion file proves the exact test body actually ran; an
+    /// empty libtest selection exits zero and is not a passing witness.
+    pub(crate) fn isolated(name: &str, case: impl FnOnce()) {
+        isolated_with_timeout(name, std::time::Duration::from_secs(5), case);
+    }
+
+    fn isolated_with_timeout(name: &str, timeout: std::time::Duration, case: impl FnOnce()) {
+        const CHILD: &str = "MAKNAE_IO_ISOLATED_TEST";
+        const COMPLETE: &str = "MAKNAE_IO_ISOLATED_COMPLETE";
+        if let Some(selected) = std::env::var_os(CHILD) {
+            assert_eq!(selected, name, "unexpected isolated test selected");
+            case();
+            std::fs::write(std::env::var_os(COMPLETE).expect("completion path"), name)
+                .expect("record completed witness");
+            return;
+        }
+
+        // Child fixtures are beneath this parent-owned directory, so a killed
+        // child cannot leave FIFO fixtures behind. Files avoid full-pipe deadlocks.
+        let scratch = tempfile::tempdir().unwrap();
+        let log_path = scratch.path().join("child.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let proof = scratch.path().join("complete");
+        struct Reap(std::process::Child);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Reap(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(CHILD, name)
+                .env(COMPLETE, &proof)
+                .env("TMPDIR", scratch.path())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                drop(child); // kill AND reap before reporting a failure
+                panic!("isolated test {name} exceeded {timeout:?}; child killed and reaped");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let output = std::fs::read_to_string(log_path).unwrap();
+        assert!(status.success(), "isolated test {name} failed: {output}");
+        assert_eq!(
+            std::fs::read_to_string(proof).ok().as_deref(),
+            Some(name),
+            "isolated test body did not complete: {output}"
+        );
+    }
+
     /// `skip_or_fail` is itself a control, so it needs one.
     ///
     /// It is invisible to `cargo mutants` (cfg(test) modules are not mutated) and no
@@ -73,5 +137,21 @@ mod tests {
              branch cannot be exercised and this control is inert on this host"
         );
         super::skip_or_fail("a_control", "a simulated reason");
+    }
+
+    #[test]
+    #[should_panic(expected = "child killed and reaped")]
+    fn a_blocked_child_is_a_bounded_failure() {
+        isolated_with_timeout(
+            "testutil::tests::a_blocked_child_is_a_bounded_failure",
+            std::time::Duration::from_millis(100),
+            || std::thread::sleep(std::time::Duration::from_secs(60)),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "isolated test body did not complete")]
+    fn an_empty_test_selection_is_not_success() {
+        super::isolated("no_such_maknae_io_test_126", || {});
     }
 }
