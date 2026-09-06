@@ -17,13 +17,13 @@ on:
 # queued run and that commit is never validated at all. Keying `push` runs by
 # `github.run_id` gives each its own group, so a `main` run can neither be
 # queued behind nor displaced by another: every commit that lands on the default
-# branch gets a complete run, which is what the branch-protection evidence chain
+# branch gets a distinct classified run, which is what the branch-protection evidence chain
 # is relying on. PR supersession is unaffected — those still share a per-ref group.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# MUTANTS_PATHS: consumed by the mutation job's change gate AND verified by
+# MUTANTS_PATHS: retained as the drift-checked inventory, verified by
 # ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
 # (drift = gate FAIL). Comma-separated repo-relative crate dirs. Do not add a
 # second MUTANTS_PATHS: line anywhere in this file (multi-match = hard FAIL).
@@ -31,8 +31,7 @@ concurrency:
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
 # DARWIN_CRATES: the crates that build for macOS WITHOUT a macOS SDK — i.e. no
 # aws-lc-fips-sys and no ring. Consumed by both darwin jobs: the cross-check
-# passes them as `-p` flags, the native job derives `crates/<name>` for its
-# change gate. maknae-vault and everything above it are deliberately absent —
+# passes selected members as `-p` flags, as does the native job. maknae-vault and everything above it are deliberately absent —
 # their build scripts need an SDK, so they can be neither cross-checked from
 # Linux nor (yet) built on a hosted runner. That exclusion is the honest scope
 # of macOS CI coverage, and packaging/macos/README.md says so.
@@ -45,7 +44,33 @@ env:
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus"
 
 jobs:
+  affected:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.select.outputs.build }}
+      mutants: ${{ steps.select.outputs.mutants }}
+      darwin: ${{ steps.select.outputs.darwin }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Selector fixtures (including negative cases)
+        run: python3 -m unittest discover -s ci/tests -v
+      - name: Select affected packages
+        id: select
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          read -r -a darwin <<< "$DARWIN_CRATES"
+          python3 ci/affected.py --base="$BASE" --head="$HEAD" --event="$EVENT" --darwin "${darwin[@]}" --github-output "$GITHUB_OUTPUT"
+
   build-and-gate:
+    needs: affected
+    # On selector failure, run the full gate rather than silently skipping a required check.
+    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
     runs-on: ubuntu-latest
     # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
     # this a regression burns the 360-minute default and emits no diagnostic.
@@ -119,10 +144,8 @@ jobs:
           if-no-files-found: warn
 
   mutation:
-    # Change-gated, required-check-safe: always starts; SKIPs unless a
-    # security-critical crate (MUTANTS_PATHS) changed; runs UNCONDITIONALLY on
-    # push (push = main by the trigger set — if the trigger set ever widens,
-    # revisit the base resolution here).
+    needs: affected
+    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '') }}
     runs-on: ubuntu-latest
     # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
     # this a regression burns the 360-minute default and emits no diagnostic.
@@ -131,38 +154,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Change gate
-        id: gate
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "run=1" >>"$GITHUB_OUTPUT"; exit 0
-          fi
-          base="${{ github.event.pull_request.base.sha }}"
-          changed="$(git diff --name-only "$base"...HEAD)"
-          run=0
-          IFS=',' read -r -a paths <<<"$MUTANTS_PATHS"
-          for p in "${paths[@]}"; do
-            p="$(printf '%s' "$p" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-            if printf '%s\n' "$changed" | grep -Eq "^${p}(/|$)"; then run=1; fi
-          done
-          if [ "$run" = "0" ]; then echo "SKIP: no mutants_crates paths changed"; fi
-          echo "run=$run" >>"$GITHUB_OUTPUT"
+      - name: Require a trustworthy selection
+        env:
+          SELECTOR_RESULT: ${{ needs.affected.result }}
+        run: test "$SELECTOR_RESULT" = success
       - name: Install toolchain (pinned)
-        if: steps.gate.outputs.run == '1'
         run: rustup show
-      - name: Install cargo-mutants
-        if: steps.gate.outputs.run == '1'
-        run: cargo install cargo-mutants --locked
-      - name: Mutation gate (zero missed; TIMEOUT = investigate)
-        if: steps.gate.outputs.run == '1'
-        run: bash ci/gates/coverage-tiers.sh --root . --mutants-all
+      - name: Cache cargo-mutants executable
+        id: mutants-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-27.1.0
+      - name: Install cargo-mutants 27.1.0
+        if: steps.mutants-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
+        env:
+          PACKAGES: ${{ needs.affected.outputs.mutants }}
+        run: |
+          test -n "$PACKAGES"
+          read -r -a packages <<< "$PACKAGES"
+          bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}"
 
   # macOS is a DEPLOYMENT TARGET (packaging/isolation-contract.md). These two jobs
   # are the only automated macOS coverage that exists; neither substitutes for the
   # other, and both are honestly narrower than the platform.
 
   darwin-cross:
+    needs: affected
+    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
+    env:
+      PACKAGES: ${{ needs.affected.outputs.darwin }}
     # Free, no Mac required, and it pays for itself: adding this locally caught
     # `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant
     # maknae-io::recv_delegated did not compile there AT ALL. Off Linux a received
@@ -172,6 +195,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Require a trustworthy selection
+        run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
         run: rustup show
       - name: Add darwin targets
@@ -181,20 +206,24 @@ jobs:
       - name: Cross-compile check (both darwin arches)
         run: |
           set -euo pipefail
-          pkgs=""
-          for c in $DARWIN_CRATES; do pkgs="$pkgs -p $c"; done
+          pkgs=()
+          test -n "$PACKAGES"
+          read -r -a packages <<< "$PACKAGES"
+          for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
           # Apple Silicon first: it is the fleet arch and the operator's own host.
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
             echo "::group::cargo check --target $t"
-            cargo check $pkgs --target "$t" --all-targets
+            cargo check "${pkgs[@]}" --target "$t" --all-targets
             echo "::endgroup::"
           done
 
   darwin-native:
-    # Change-gated like `mutation`: always starts so it is required-check-safe,
-    # SKIPs unless a crate it actually covers changed. macOS minutes bill at a
-    # multiplier on a private repo, so running this on every unrelated PR is real
-    # money for no signal.
+    needs: affected
+    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
+    env:
+      PACKAGES: ${{ needs.affected.outputs.darwin }}
+    # Both PR and main pushes use dependency-aware selection. Docs-only changes
+    # skip this job before allocating a macOS runner (private-repo minute budget).
     #
     # A cross-compile check proves the code BUILDS for macOS. This proves it
     # WORKS there — the difference that turns ADR-0009's F_GETPATH lane from
@@ -210,40 +239,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Change gate
-        id: gate
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "run=1" >>"$GITHUB_OUTPUT"; exit 0
-          fi
-          base="${{ github.event.pull_request.base.sha }}"
-          changed="$(git diff --name-only "$base"...HEAD)"
-          run=0
-          for c in $DARWIN_CRATES; do
-            if printf '%s\n' "$changed" | grep -Eq "^crates/${c}(/|$)"; then run=1; fi
-          done
-          # The workflow itself changing must re-verify the job it defines.
-          if printf '%s\n' "$changed" | grep -Eq "^\.github/workflows/"; then run=1; fi
-          if [ "$run" = "0" ]; then echo "SKIP: no darwin-covered crate changed"; fi
-          echo "run=$run" >>"$GITHUB_OUTPUT"
+      - name: Require a trustworthy selection
+        run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
-        if: steps.gate.outputs.run == '1'
         run: rustup show
       - name: Test the SDK-free crates natively
-        if: steps.gate.outputs.run == '1'
         run: |
           set -euo pipefail
-          pkgs=""
-          for c in $DARWIN_CRATES; do pkgs="$pkgs -p $c"; done
+          pkgs=()
+          test -n "$PACKAGES"
+          read -r -a packages <<< "$PACKAGES"
+          for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
           # #222: make the unified-log round-trip a HARD FAILURE here rather
           # than a skip. The macos runner user is admin and can read
           # /var/db/diagnostics, so the skip branch is dead on CI -- which means
           # a soft default would let this lane go green with zero round-trip
           # evidence (the #219 ok-on-nothing class one level up).
-          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test $pkgs
+          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test "${pkgs[@]}"
       - name: Confirm the F_GETPATH lane actually ran
-        if: steps.gate.outputs.run == '1'
+        if: contains(format(' {0} ', needs.affected.outputs.darwin), ' maknae-io ')
         # The delegated suite is the macOS control for ADR-0009: on Linux it
         # exercises /proc/self/fd, here it exercises fcntl(F_GETPATH). A green
         # workspace that silently skipped it would prove nothing, so assert the

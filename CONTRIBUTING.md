@@ -65,7 +65,7 @@ cargo build --workspace
 
 ## The pre-push gate
 
-CI (`.github/workflows/ci.yml`) runs a fail-closed gate on every push — a `build-and-gate` job and a `mutation` job. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
+CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. Unknown inputs or missing history select all; unreadable selection authority fails. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
 
 At minimum, before every commit:
 
@@ -90,6 +90,19 @@ ci/gates/negative-control.sh
 bash ci/gates/coverage-tiers.sh --root .            # risk-tiered coverage (ADR-0016)
 bash ci/gates/coverage-tiers.sh --root . --mutants-all   # mutation gate (slow; run before push)
 ```
+
+Enable the local hook with `git config core.hooksPath ci/hooks`. It reads the incoming pre-push ref updates (remote old SHA to local new SHA), so it works with any remote name and checks merge pushes correctly. It runs aggregate coverage for source changes. Mutations are opt-in with `MAKNAE_PRE_PUSH_MUTANTS=1 git push`; a push of a ref other than the current checkout is refused because local gates cannot attest to that ref's contents.
+
+Inspect the same selection before running expensive work (Python 3.11 or newer):
+
+```bash
+python3 ci/affected.py --event pull_request --base=main --head=HEAD
+# Use actual endpoint SHAs and --event push to inspect a merge/push update.
+# Copy the reported mutation package names into:
+bash ci/gates/coverage-tiers.sh --root . --mutants maknae-io maknae-config
+```
+
+Selection is whole-crate mutation, never changed-line-only mutation. All dependency kinds, including target-specific dev/build dependencies, participate in reverse closure. Manifest, lockfile, toolchain, CI/gate, mutation configuration, unknown path, and uncertain dependency changes widen to all packages. Empty diffs also widen rather than claiming assurance over nothing. Coverage remains a complete report for every source change: the per-file floors and cohort ratchet cannot safely consume partial reports. This deliberately retains the expensive aggregate coverage boundary while avoiding repeated unrelated mutation and macOS work within the 3000 hosted-minute monthly budget. CI pins cargo-mutants to 27.1.0 and caches only its executable by OS, architecture, toolchain and version; mutation results are freshly measured each run. Native macOS mutation debugging remains local; CI adds no hosted macOS mutation job.
 
 Two gates deserve a note:
 
