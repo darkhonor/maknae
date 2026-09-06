@@ -3,8 +3,14 @@
 //! [`combine`] folds operand verdicts with **deny-overrides + indeterminate-
 //! blocks + NotApplicable-identity** — deliberately stronger than XACML
 //! deny-overrides, which would let `Permit ∧ Indeterminate → Permit` (a
-//! fail-open we reject). [`ConjunctionAuthorizer`] is the reusable combinator
-//! the kernel holds when more than one backend is installed.
+//! fail-open we reject). [`ConjunctionAuthorizer`] is the homogeneous N-ary
+//! combinator over boxed operands. *(Corrected 2026-09-06, #148/#154: the
+//! kernel's PRODUCTION composer is `maknae_kernel::Composition` — baseline
+//! and ceiling as named fields — which folds through the same free functions
+//! [`compose_decide`] / [`compose_backend_name`] / [`compose_subjects`] this
+//! type uses. `ConjunctionAuthorizer` has no production constructor today; it
+//! is retained for the first extension-bearing build, not to be wired beside
+//! `Composition`.)*
 //!
 //! *(Corrected 2026-08-31 per #108 and [ADR-0008]: this line previously read
 //! "`DCS_MAC ∧ OS_MAC ∧ DAC`", describing the fold as a conjunction of named
@@ -194,9 +200,9 @@ fn strip_control(raw: &str) -> String {
 }
 
 /// Holds N backends; `decide` composes their verdicts via [`combine`], each
-/// behind [`guarded_decide`]. Spec §13/§14 (N-ary operand fold). The kernel
-/// constructs this in a DCS build; a non-DCS build can use a single backend
-/// directly (still via `guarded_decide`).
+/// behind [`guarded_decide`]. Spec §13/§14 (N-ary operand fold). *(Corrected
+/// 2026-09-06, #148/#154: the kernel constructs `maknae_kernel::Composition`,
+/// not this; see the module doc.)*
 pub struct ConjunctionAuthorizer {
     operands: Vec<Box<dyn Authorizer>>,
 }

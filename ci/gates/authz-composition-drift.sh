@@ -36,7 +36,8 @@
 #      false pass.
 #   5. (boot-time evidence) run.rs CONSTRUCTS the boot composition record --
 #      one `make_record(` call carrying "boot", "authz", "permit" and a reason
-#      that starts "authorization composition: " -- AND EMITS it
+#      that starts "authorization composition: " and carries the SYSTEM and
+#      the ceiling LEVEL (`; system: {..}; ceiling: {..}`) -- AND EMITS it
 #      (`sink.emit(&composition_rec)`), both in the production half. Its VALUE is
 #      asserted by the root-only boot test on a test host.
 #
@@ -169,6 +170,13 @@ for p in all_rs:
 if run:
     calls = [m for m in re.finditer(r"make_record\s*\((.*?)\n\s*\)\s*;", run, re.S)]
     evidence = [c for c in calls if '"boot"' in c.group(1) and '"authz"' in c.group(1) and '"permit"' in c.group(1) and 'authorization composition: ' in c.group(1)]
+    # The record's VALUE half (critical-review round 1 of PR B): the reason must
+    # carry the classification SYSTEM and the ceiling LEVEL -- the two values
+    # the operand enforces -- or the trail says which operands compose but not
+    # what they will refuse. Content-keyed on the format string's fixed parts.
+    for c in evidence:
+        if '; system: {' not in c.group(1) or '; ceiling: {' not in c.group(1):
+            fail("run.rs: the boot composition evidence record's reason must carry '; system: {..}; ceiling: {..}' -- the values the operand enforces")
     if len(evidence) != 1:
         fail(f"run.rs: expected exactly ONE boot composition evidence record (make_record with \"boot\", \"authz\", \"permit\" and an 'authorization composition: ' reason), found {len(evidence)}")
     if "sink.emit(&composition_rec)" not in run:

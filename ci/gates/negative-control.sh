@@ -1673,8 +1673,8 @@ fi
 # purpose is "the baseline cannot be removed" must be SEEN rejecting each way of
 # removing it. One minimal fixture, at least one corruption per `fail(` CALL
 # SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
-# 4 found the hand count wrong twice): the gate has 19 `fail(` sites; the
-# 26 probes below map onto every one of them by their `why` substring
+# 4 found the hand count wrong twice): the gate has 20 `fail(` sites; the
+# 27 probes below map onto every one of them by their `why` substring
 # (a probe's `why` is a literal substring of exactly the message it targets),
 # and the two parameterized sites -- `missing <file>` and `missing <base>/` --
 # are probed once per parameter value (3 files, 2 bases). A probe whose `why`
@@ -1695,7 +1695,7 @@ fn boot() {
         "authz",
         None,
         "permit",
-        &format!("authorization composition: {name}"),
+        &format!("authorization composition: {name}; system: {sys}; ceiling: {lvl}"),
         "authorized",
     );
     if let Err(e) = sink.emit(&composition_rec).await { eprintln!("{e}"); }
@@ -1791,6 +1791,8 @@ composition_reject "crates-dir-missing" "missing crates/ -- the production scan"
   'import shutil; shutil.rmtree(root/"crates")'
 composition_reject "bins-dir-missing" "missing bins/" \
   'import shutil; shutil.rmtree(root/"bins")'
+composition_reject "evidence-reason-lacks-system-and-ceiling" "must carry '; system:" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("; system: {sys}; ceiling: {lvl}", ""))'
 composition_reject "evidence-record-removed" "boot composition evidence record" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(re.sub(r"    let composition_rec = make_record\(.*?\n    \);\n", "", p.read_text(), flags=re.S))'
 f="$(composition_fixture)"; expect_accept "authz-composition-drift/clean-fixture" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"

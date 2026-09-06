@@ -1111,14 +1111,35 @@ mod tests {
     }
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
-    /// the split is what the vocabulary says it is. Pinned over the whole
-    /// 59-term vocabulary (57 client action terms + the two `kernel.*`
-    /// pseudo-actions) so a new verb cannot land unclassified: an `admin.*` term is
-    /// control plane; every `fs.*`/`session.*`/`terminal.*`/`mcp.*` term moves
-    /// content and is evaluated against the ceiling.
+    /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
+    /// (57 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
+    /// `action` rows (critical-review round 1 of PR B: the manifest is
+    /// extracted from `verb_to_action`, which the compiler forces a new
+    /// variant into; `all_verbs()` is hand-written and was not) -- so a new
+    /// verb cannot land unpartitioned: an `admin.*` term is control plane;
+    /// every `fs.*`/`session.*`/`terminal.*`/`mcp.*` term moves content and is
+    /// evaluated against the ceiling.
     #[test]
     fn every_verb_partitions_into_control_plane_or_content() {
         use crate::ceiling_authz::is_control_plane;
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../ci/gates/verb-manifest.txt"),
+        )
+        .expect("the verb manifest is readable from the crate root");
+        let mut manifest_actions: Vec<&str> = manifest
+            .lines()
+            .filter(|l| l.starts_with("action\t"))
+            .map(|l| l.split('\t').nth(1).unwrap())
+            .collect();
+        manifest_actions.sort_unstable();
+        let mut ours: Vec<&str> = all_verbs().iter().map(|v| verb_to_action(v)).collect();
+        ours.sort_unstable();
+        assert_eq!(
+            ours, manifest_actions,
+            "all_verbs() and verb-manifest.txt disagree -- a verb landed in one and not the other"
+        );
         let mut control = 0usize;
         let mut content = 0usize;
         for v in all_verbs() {

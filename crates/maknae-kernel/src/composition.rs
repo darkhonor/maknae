@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn unmarked_content_flows_under_a_secret_ceiling_exactly_as_the_baseline_decides() {
-        // The operator's ruling, at the composition: unmarked is UNCLASSIFIED,
+        // The operator's ruling, at the composition: unmarked is the system's lowest level,
         // so a SECRET deployment serves it -- the composed verdict is the
         // baseline's, note and all.
         let (g, basic) = fixture("secret-identity", READ_POLICY);

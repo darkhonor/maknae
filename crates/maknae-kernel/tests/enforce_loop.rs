@@ -2178,7 +2178,7 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
 /// presence (it passes with the ceiling swapped out of the fold); it is a
 /// regression guard against re-introducing the equality/deny-unlabeled
 /// semantics, not a proof the operand is consulted. That proof is the status
-/// test below (the composed name) and the composition unit tests with a
+/// test above (the composed name) and the composition unit tests with a
 /// stamped label -- nothing in the request path stamps one yet.
 #[tokio::test]
 async fn under_a_secret_ceiling_unmarked_content_is_served_as_unclassified() {

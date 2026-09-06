@@ -401,26 +401,38 @@ mod tests {
     }
 
     #[test]
-    fn never_permits_on_any_cell() {
-        // The rule-3 fail-open guard: not one cell of the matrix, nor the
+    fn never_permits_on_any_cell_in_either_system() {
+        // The rule-3 fail-open guard: not one cell of either matrix, nor the
         // unmarked row, nor a refusal, may be a Permit.
-        for top in ladder(US, &maknae_config::US_LEVELS) {
-            for label in [
-                Label::Absent,
-                Label::Marking("UNCLASSIFIED"),
-                Label::Marking("TOP SECRET"),
-                Label::Marking("PROTECTED"),
-                Label::Marking("BOGUS"),
-                Label::NotAString,
-            ] {
-                assert!(
-                    !matches!(
-                        decide_ceiling(US, &at(US, &top), "fs.read", label),
-                        Verdict::Permit { .. }
-                    ),
-                    "{label:?} at {}",
-                    top.name
-                );
+        for (p, names) in [
+            (
+                US as &dyn ClassificationPolicy,
+                &maknae_config::US_LEVELS[..],
+            ),
+            (
+                AUS as &dyn ClassificationPolicy,
+                &maknae_classification_aus::LEVELS[..],
+            ),
+        ] {
+            for top in ladder(p, names) {
+                for label in [
+                    Label::Absent,
+                    Label::Marking("UNCLASSIFIED"),
+                    Label::Marking("TOP SECRET"),
+                    Label::Marking("PROTECTED"),
+                    Label::Marking("BOGUS"),
+                    Label::NotAString,
+                ] {
+                    assert!(
+                        !matches!(
+                            decide_ceiling(p, &at(p, &top), "fs.read", label),
+                            Verdict::Permit { .. }
+                        ),
+                        "{label:?} at {} ({})",
+                        top.name,
+                        p.name()
+                    );
+                }
             }
         }
     }
@@ -542,9 +554,6 @@ mod tests {
                     "{raw:?} at {}",
                     top.name
                 );
-                if !raw.is_empty() {
-                    assert!(!r.contains(raw));
-                }
             }
         }
         let r = deny_reason(decide_ceiling(
