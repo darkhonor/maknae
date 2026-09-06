@@ -203,6 +203,8 @@ async fn durable_intent_precedes_existing_empty_truncation_and_completion() {
     );
     assert_eq!(std::fs::read(target).unwrap(), b"");
     let records = records.snapshot();
+    assert_eq!(records[1].object_requested, None);
+    assert_eq!(records[2].object_requested, None);
     assert_eq!(
         records[1].mutation.as_ref().unwrap().phase,
         maknae_audit_append::MutationPhase::Intent
@@ -244,6 +246,81 @@ async fn read_allow_and_missing_evidence_cannot_write() {
         assert!(matches!(response.result, RespResult::Err(_)));
         assert_eq!(std::fs::read(target).unwrap(), b"untouched");
     }
+}
+
+#[tokio::test]
+async fn missing_write_descriptor_preserves_preparation_failure_in_audit() {
+    let fx = Fixture::new("missing_descriptor_audit", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"missing-descriptor-must-preserve-me").unwrap();
+    let records = Records::new(0);
+    let response = drive(&fx, b"forbidden-replacement", records.clone(), false)
+        .await
+        .unwrap();
+    assert!(matches!(response.result, RespResult::Err(_)));
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"missing-descriptor-must-preserve-me"
+    );
+    let records = records.snapshot();
+    assert_eq!(
+        records.len(),
+        2,
+        "no mutation intent follows invalid evidence"
+    );
+    let refusal = &records[1];
+    assert_eq!(refusal.object.as_deref(), target.to_str());
+    assert_eq!(refusal.outcome.result, "deny");
+    assert!(
+        refusal.outcome.reason.contains("descriptor missing"),
+        "audit must distinguish absent evidence from worker/policy failure: {refusal:?}"
+    );
+    assert!(refusal.mutation.is_none());
+}
+
+#[tokio::test]
+async fn permitted_alias_write_audits_requested_and_verified_objects() {
+    let fx = Fixture::new("permitted_alias_audit", "Write");
+    let target = fx.root.join("unique-verified-alias-write-sentinel");
+    let alias = fx.root.join("unique-requested-write-alias");
+    std::fs::write(&target, b"original-alias-target").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let fd = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&alias)
+        .unwrap()
+        .into();
+    let records = Records::new(0);
+    let (mut client, task, body) = fx.start(
+        Verb::FsWrite {
+            path: alias.to_str().unwrap().into(),
+            content: Bytes::new(b"verified-alias-effect".to_vec().into()),
+            mode: WriteMode::Existing,
+        },
+        Some(fd),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    assert!(matches!(
+        next_response(&mut client).await.unwrap().result,
+        RespResult::Ok(Payload::MutationComplete)
+    ));
+    task.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"verified-alias-effect");
+    let records = records.snapshot();
+    assert_eq!(records.len(), 3);
+    for record in &records[1..] {
+        assert_eq!(record.object.as_deref(), target.to_str());
+        assert_eq!(record.object_requested.as_deref(), alias.to_str());
+    }
+    assert_eq!(
+        records[1].mutation.as_ref().unwrap().authorized_paths,
+        vec![target.to_str().unwrap()]
+    );
+    assert_eq!(
+        records[2].mutation.as_ref().unwrap().status,
+        maknae_audit_append::MutationStatus::Applied
+    );
 }
 
 struct GateRecords {
@@ -617,6 +694,81 @@ async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
 }
 
 #[tokio::test]
+async fn mkdir_depth_limit_grants_128_prefixes_and_refuses_129_before_intent() {
+    for (depth, allowed) in [(128, true), (129, false)] {
+        let fx = Fixture::new(&format!("mkdir_depth_{depth}"), "Write");
+        // Short components keep both the request and the grant inside frame/path
+        // limits, isolating the number of namespace effects that can be granted.
+        let mut components = vec!["d".to_string(); depth];
+        components[0] = "unique-depth-sentinel".into();
+        let target = fx.root.join(components.join("/"));
+        let records = Records::new(0);
+        let (mut client, task) = namespace_start(
+            &fx,
+            records.clone(),
+            Verb::FsMkdir {
+                path: target.to_str().unwrap().into(),
+                parents: true,
+                components,
+            },
+        )
+        .await;
+        let response = next_response(&mut client).await;
+        if !allowed {
+            let records = records.snapshot();
+            assert!(
+                records.iter().all(|record| record.mutation.is_none()),
+                "over-depth requests must be refused before any mutation intent: {records:?}"
+            );
+        }
+        let response = response.expect("valid requests and explicit preparation refusals respond");
+        if allowed {
+            let RespResult::Ok(Payload::MutationAttempt(grant)) = response.result else {
+                panic!(
+                    "128 missing prefixes must be authorizable: {:?}",
+                    records.snapshot()
+                );
+            };
+            let maknae_proto::MutationScope::Directories { paths } = grant.scope else {
+                panic!("mkdir parents requires explicit prefix scope");
+            };
+            assert_eq!(paths.len(), 128);
+            assert_eq!(
+                paths.first().unwrap(),
+                fx.root.join("unique-depth-sentinel").to_str().unwrap()
+            );
+            assert_eq!(paths.last().unwrap(), target.to_str().unwrap());
+            assert_eq!(
+                records.snapshot()[1]
+                    .mutation
+                    .as_ref()
+                    .unwrap()
+                    .authorized_paths,
+                paths
+            );
+        } else {
+            assert!(
+                matches!(response.result, RespResult::Err(_)),
+                "129 prefixes must not receive a grant"
+            );
+        }
+        drop(client);
+        task.await.unwrap();
+        assert!(!fx.root.join("unique-depth-sentinel").exists());
+        if !allowed {
+            let records = records.snapshot();
+            assert_eq!(
+                records.len(),
+                2,
+                "over-depth requests must not commit intent"
+            );
+            assert!(records[1].mutation.is_none());
+            assert_eq!(records[1].outcome.result, "deny");
+        }
+    }
+}
+
+#[tokio::test]
 async fn noop_mkdir_success_is_client_reported_with_zero_effects() {
     let fx = Fixture::new("noop_mkdir", "Write");
     let records = Records::new(0);
@@ -848,6 +1000,145 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
         64
     );
     assert!(!fx.root.join("x").exists());
+}
+
+#[tokio::test]
+async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_not() {
+    let fx = Fixture::new("exact_grant_frame", "Write");
+    let target = fx.root.join("unique-created-client-sentinel");
+    // Measure an actual composed-policy grant. The next connection uses the
+    // same request, correlation and timeout, so only its frame budget changes.
+    let (mut client, task) = namespace_start(&fx, Records::new(0), create_verb(&fx)).await;
+    let grant_bytes = maknae_proto::read_frame(&mut client, 65536).await.unwrap();
+    assert!(matches!(
+        maknae_proto::decode_response(&grant_bytes).unwrap().result,
+        RespResult::Ok(Payload::MutationAttempt(_))
+    ));
+    drop(client);
+    task.await.unwrap();
+    for (shortfall, allowed) in [(1, false), (0, true)] {
+        let records = Records::new(0);
+        let mut config = maknae_config::transport_from_section(None).unwrap();
+        config.frame_max_bytes = grant_bytes.len() - shortfall;
+        let (mut client, task, body) = fx.start_with_config(
+            create_verb(&fx),
+            Some(std::fs::File::open(&fx.root).unwrap().into()),
+            records.clone(),
+            config,
+        );
+        assert!(body.len() < grant_bytes.len() - 1);
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        if allowed {
+            let RespResult::Ok(Payload::MutationAttempt(grant)) = next_response(&mut client)
+                .await
+                .expect("a grant exactly at the cap fits")
+                .result
+            else {
+                panic!("expected composed-policy grant at exact frame budget");
+            };
+            assert!(!target.exists(), "the grant has no daemon namespace effect");
+            std::fs::write(&target, b"exact-frame-client-effect").unwrap();
+            send_report(
+                &mut client,
+                &maknae_proto::MutationReport::Batch {
+                    id: grant.id,
+                    first_index: 0,
+                    effects: vec![maknae_proto::EffectEntry {
+                        path: target.to_str().unwrap().into(),
+                        effect: maknae_proto::ReportedEffect::CreatedFile,
+                    }],
+                },
+            )
+            .await;
+            assert_eq!(ack(&mut client).await.unwrap().next_index, 1);
+            send_report(
+                &mut client,
+                &maknae_proto::MutationReport::Finished {
+                    id: grant.id,
+                    next_index: 1,
+                    outcome: maknae_proto::ReportedFinish::Success,
+                    stopped_at: None,
+                },
+            )
+            .await;
+            assert_eq!(ack(&mut client).await.unwrap().next_index, 1);
+            task.await.unwrap();
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                b"exact-frame-client-effect"
+            );
+            let records = records.snapshot();
+            let completion = records.last().unwrap().mutation.as_ref().unwrap();
+            assert_eq!(
+                completion.status,
+                maknae_audit_append::MutationStatus::ReportedSuccess
+            );
+            assert_eq!(
+                completion.origin,
+                maknae_audit_append::MutationOrigin::ClientReported
+            );
+        } else {
+            assert!(next_response(&mut client).await.is_none());
+            task.await.unwrap();
+            assert!(!target.exists());
+            let records = records.snapshot();
+            assert_eq!(records.len(), 2, "withheld grant must not accept effects");
+            assert_eq!(
+                records[1].mutation.as_ref().unwrap().phase,
+                maknae_audit_append::MutationPhase::Intent
+            );
+        }
+    }
+}
+
+#[test]
+fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
+    use maknae_proto::{MutationAck, MutationGrant, MutationId, MutationLimits, MutationScope};
+    // CBOR integers grow monotonically up to their type's maximum. Include
+    // u32::MAX even though a live exchange caps next_index at 4096.
+    let largest_ack = maknae_proto::encode_mutation_ack(&MutationAck {
+        id: MutationId {
+            session_id: u64::MAX,
+            intent_seq: u64::MAX,
+        },
+        next_index: u32::MAX,
+    })
+    .unwrap();
+    // Empty strings/collections and zero integers are lower bounds even for
+    // shapes that live authorization would refuse. Every real scope is larger.
+    for scope in [
+        MutationScope::Exact {
+            path: String::new(),
+            effect: maknae_proto::ReportedEffect::CreatedFile,
+        },
+        MutationScope::RecursiveDelete {
+            root: String::new(),
+        },
+        MutationScope::Directories { paths: Vec::new() },
+    ] {
+        let smallest_grant = maknae_proto::encode_response(&maknae_proto::Response {
+            protocol_version: 0,
+            result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
+                id: MutationId {
+                    session_id: 0,
+                    intent_seq: 0,
+                },
+                scope,
+                limits: MutationLimits {
+                    max_effects: 0,
+                    max_depth: 0,
+                    deadline_ms: 0,
+                },
+            })),
+        })
+        .unwrap();
+        assert!(
+            largest_ack.len() < smallest_grant.len(),
+            "a frame cap that admitted a grant must fit every ack (ack {}, grant {})",
+            largest_ack.len(),
+            smallest_grant.len()
+        );
+    }
 }
 
 struct FailWrites<S> {

@@ -206,6 +206,11 @@ jobs:
       - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
         env:
           PACKAGES: ${{ needs.affected.outputs.mutants }}
+          # Mutation evidence needs test assertions, not debugger symbols. #238
+          # exceeded this job's 35m budget; two representative kernel mutant
+          # rebuilds on Rocky9 fell from 7.08s to 2.46s without symbols. Keep the
+          # normal test profile's assertions/overflow checks and all gate scope.
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           test -n "$PACKAGES"
           read -r -a packages <<< "$PACKAGES"

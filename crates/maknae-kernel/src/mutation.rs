@@ -662,12 +662,13 @@ async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         let Ok(bytes) = maknae_proto::encode_mutation_ack(&ack) else {
             return;
         };
-        if bytes.len() > cfg.frame_max_bytes
-            || !matches!(
-                tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
-                Ok(Ok(()))
-            )
-        {
+        // The grant already fit this immutable frame budget. Even an ack with
+        // maximal integer fields is smaller than every grant encoding; the
+        // encoding-bound invariant is checked in mutation_loop.rs.
+        if !matches!(
+            tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
+            Ok(Ok(()))
+        ) {
             return;
         }
         if terminal {
