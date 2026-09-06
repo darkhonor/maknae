@@ -2,6 +2,13 @@
 //!
 //! T3 by tier: this file is `connect`/`send` and nothing else. The wire format
 //! it sends lives in [`crate::journal`] (T1, mutation-proven).
+//!
+//! **Not `cfg`-gated, deliberately.** `UnixDatagram` is portable and darwin
+//! simply has no journald socket to `connect()` to, so absence is STRUCTURAL —
+//! identical code everywhere. What darwin lacks is a production CALLER: since
+//! #222 `sink.rs` selects the unified-log mirror there instead, so the items
+//! below are dead on macOS and only on macOS.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 use crate::journal::{encode, PrimaryOutcome};
 use crate::record::AuditRecord;
 use std::os::unix::net::UnixDatagram;

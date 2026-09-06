@@ -19,7 +19,20 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
 # O_NOFOLLOW (via `nix::libc`) + `geteuid` (feature `user`) for the fail-closed
 # integrity check on the OPENED audit fd (regular file, owner=euid, not
 # group/world-writable). `custom_flags` + `MetadataExt` keep this `unsafe`-free.
-nix = { version = "0.31", default-features = false, features = ["user"] }
+# "syslog" (#222) — the macOS unified-log mirror. NOT a new dependency: `nix`
+# is already here for the checks above, and `syslog = []` is a bare feature gate
+# that pulls no further crates (prove it with `git diff --exit-code Cargo.lock`;
+# `cargo tree -d` lists only DUPLICATED packages and would not show a genuinely
+# new single-copy one).
+#
+# WHY THE VERBATIM PAYLOAD IS SAFE — this is a control, not trivia.
+# `nix-0.31.3/src/syslog.rs:82-96` calls `libc::syslog(priority, "%s", message)`.
+# That `%s` indirection is the ONLY reason a deployer-supplied `au3_1` or a
+# subject-controlled `object` containing `%n`/`%s` inside MAKNAE_RECORD is not a
+# FORMAT-STRING VULNERABILITY IN A PRIVILEGED DAEMON. A future hand-rolled
+# `libc::syslog(pri, msg.as_ptr())` would reintroduce it silently; recorded here
+# so that change is visible as the regression it would be.
+nix = { version = "0.31", default-features = false, features = ["user", "syslog"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

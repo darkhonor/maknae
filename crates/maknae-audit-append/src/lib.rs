@@ -17,6 +17,8 @@ mod journal_io;
 mod record;
 mod session;
 mod sink;
+mod syslog_fmt;
+mod syslog_io;
 
 pub use error::AuditError;
 pub use record::{canonical_json, AuditRecord, Integrity, Outcome, Source, Subject, Where};
