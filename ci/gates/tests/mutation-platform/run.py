@@ -122,7 +122,8 @@ class PlatformSelection(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
             self.assertEqual(arguments.read_text().splitlines(),
-                             ["mutants", "--package", "maknae-io", "--exclude-re", expected])
+                             ["mutants", "--package", "maknae-io", "--exclude-re", expected,
+                              "--minimum-test-timeout", "60"])
 
 
 if __name__ == "__main__":
