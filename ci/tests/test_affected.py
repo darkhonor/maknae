@@ -153,6 +153,27 @@ class AffectedTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn('FAIL: cannot establish', proc.stderr)
 
+    def test_docs_only_workflow_still_rejects_external_authority(self):
+        self.write('AGENTS.md', 'Local authority.\n')
+        self.write('design/contract.md', 'Local decision.\n')
+        self.base = self.commit()
+        self.write('design/contract.md', 'Follow Knowledge Lake ADR-0001.\n')
+        self.commit()
+        self.assertFalse(self.select()['build'])
+        workflow = (SELECTOR.parent.parent / '.github/workflows/ci.yml').read_text()
+        affected = workflow.split('  affected:\n', 1)[1].split('\n  build-and-gate:', 1)[0]
+        # This wiring assertion is load-bearing: the real lint below must run
+        # in the job that docs-only updates cannot skip, before Rust jobs.
+        self.assertIn('run: ci/gates/external-authority-lint.sh', affected)
+        self.assertNotIn('        if:', affected)
+        gate = SELECTOR.parent / 'gates/external-authority-lint.sh'
+        self.write('ci/gates/external-authority-lint.sh', gate.read_text())
+        proc = subprocess.run(['bash', 'ci/gates/external-authority-lint.sh'],
+                              cwd=self.root, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('design/contract.md:1 cites an external', proc.stdout)
+
+
     def hook(self, base, mutations=False):
         # A recording shell gate proves invocation/selection, not coverage itself.
         self.write('ci/affected.py', SELECTOR.read_text())

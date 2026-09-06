@@ -65,7 +65,7 @@ cargo build --workspace
 
 ## The pre-push gate
 
-CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. Unknown inputs or missing history select all; unreadable selection authority fails. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
+CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. The lightweight job always runs external-authority lint, including on documentation-only updates. Unknown inputs or missing history select all; unreadable selection authority fails. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
 
 At minimum, before every commit:
 
