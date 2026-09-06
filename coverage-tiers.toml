@@ -46,6 +46,14 @@ files = [
   # construction refusal mapping — a wrong arm is a daemon serving without a
   # decider.
   "crates/maknae-kernel/src/boot_gate.rs",
+  # #148 / #154: the per-request classification-ceiling operand and the
+  # composition root. A wrong arm in the operand passes classified content
+  # past the declared ceiling (or permits where it must abstain, which folds to
+  # a fail-open under rule 3); a wrong shape in the composition makes the
+  # baseline removable. Both are pure; the I/O-free fold they use lives in
+  # maknae-security/compose.rs (T1).
+  "crates/maknae-kernel/src/ceiling_authz.rs",
+  "crates/maknae-kernel/src/composition.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",

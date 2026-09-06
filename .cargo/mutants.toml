@@ -183,6 +183,12 @@ exclude_globs = [
   # (T3, the syslog(3) call). NEITHER is excluded HERE either: syslog_io.rs has
   # exactly one unkillable mutant, and it is excluded by the method-scoped
   # `exclude_re` above rather than by a glob over the file.
+  # UPDATED 2026-09-06 (#148/#154): maknae-kernel gained ceiling_authz.rs (T1,
+  # the per-request ceiling operand — 17 caught, 1 unviable, 0 missed) and
+  # composition.rs (T1, the composition root incl. build_pdp — 5 caught, 6 unviable,
+  # 0 missed). NEITHER is excluded; both are fully killable. These figures
+  # are WRITTEN FROM a `cargo mutants --file` run (measure.sh), not typed: a
+  # review round found this header carrying numbers no run had produced.
   "crates/maknae-proto/src/error.rs",       # Display/Error declarations only
   "crates/maknae-audit-append/src/sink.rs", # file-open + blocking-write I/O
   "crates/maknae-audit-append/src/error.rs", # Display/Error declarations only

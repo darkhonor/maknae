@@ -39,6 +39,41 @@ pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 /// structurally inapplicable — which is why the lane must be read first.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 
+/// The resource attribute carrying the CONTENT'S CLASSIFICATION MARKING, as a
+/// string. Its FIRST token (everything before the first `//`) is ranked by the
+/// classification system the enclave selected (`ClassificationPolicy::level_of`
+/// is the one normalizer: case-insensitive, separators not normalized); what
+/// follows `//` -- caveats, compartments, releasability -- is opaque to the
+/// kernel's ceiling operand and belongs to the external DCS library.
+///
+/// Defined HERE, beside [`RESOURCE_OS_ACCESSIBLE`] and [`CONTEXT_DAC_LANE`], for
+/// the same reason those are: a key whose spelling can drift between the writer
+/// and the reader is a decision that silently stops being made.
+///
+/// **Absent means the system's lowest level** (operator ruling 2026-09-06,
+/// #148; US `UNCLASSIFIED`, AUS `UNOFFICIAL`): unmarked content is the default
+/// level, at or below every ceiling, and flows. Absent is a legitimate,
+/// evaluated state, never a silent pass-through -- and never a refusal.
+///
+/// **The value's CONTRACT, for the writer this key waits for:** a marking of
+/// the ENCLAVE'S OWN system whose first token is one of that system's level
+/// names (`SECRET//NOFORN` ranks as SECRET; `CUI//SP-PRVCY` as UNCLASSIFIED).
+/// A first token the selected system does not carry is refused, unwaivably,
+/// under deny-overrides -- naming the compiled-in system that does carry it
+/// when one does (ADR-0022 decision 5; the kernel maps nothing between
+/// systems). Stamping the marking is the WRITER's job (`rust-dcs`'s
+/// `dcs-label` where DCS is installed; #229 otherwise). Nothing populates the
+/// key yet.
+///
+/// **Provenance rule for that writer:** stamped by the trust plane from the
+/// OBJECT's own label (a SPIF marking, a filesystem attribute the kernel read),
+/// **never from a request attribute a client can supply.** The risk is a
+/// client-supplied DOWNGRADE: a marking at or below the ceiling is an abstention,
+/// so a client that could write `UNCLASSIFIED` over `TOP SECRET` would remove a
+/// mandatory refusal -- the inform-but-not-authorize inversion AGENTS.md
+/// principle 2 forbids.
+pub const RESOURCE_CLASSIFICATION: &str = "classification";
+
 /// Which boundary a request arrived on.
 ///
 /// **Derived from the accepting listener and from nothing else.** Never from a request

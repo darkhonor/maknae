@@ -2116,3 +2116,140 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
          and the path stays out of the reason"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #148 / #154. THE COMPOSITION: baseline ∧ ceiling, deny-overrides, per request.
+// ---------------------------------------------------------------------------
+
+/// The production PDP shape -- `Composition<Baseline>` -- built the way
+/// `run_inner` builds it, over the hermetic door.
+fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<HermeticAuthorizer>> {
+    use maknae_config::ClassificationPolicy;
+    const US: &maknae_config::BasicPolicy = &maknae_config::BasicPolicy;
+    let mut ceiling = maknae_config::Ceiling::baseline_for(US);
+    ceiling.classification = US.level_of(level).expect("a US level");
+    let basic =
+        HermeticAuthorizer::new(fx.dir.join("authz.yaml"), fx.principal.clone(), seam_req())
+            .expect("fixture policy constructs");
+    Arc::new(maknae_kernel::Composition::new(
+        basic,
+        maknae_kernel::CeilingAuthorizer::new(ceiling, US),
+    ))
+}
+
+/// `admin.status` under an ABOVE-BASELINE ceiling still answers -- the control
+/// plane carries no content, so the ceiling abstains -- and it names BOTH
+/// operands. This is the diagnosability property: an operator whose reads are
+/// being refused can still ask the daemon which deciders it composes.
+#[tokio::test]
+async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
+    let fx = Fixture::new("composed-status");
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
+    );
+    let emit = RecEmit::new();
+    let frame = drive_with(
+        &fx.principal,
+        composed(&fx, "SECRET"),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminStatus,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
+        nondefault_transport(),
+        Arc::new("US".to_string()),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Status(s)) => {
+            assert_eq!(s.authz_backend, "maknae-authz-basic+maknae-ceiling");
+        }
+        other => panic!("expected a Status payload, got {other:?}"),
+    }
+    assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+}
+
+/// The #148 ruling, end to end: under a SECRET ceiling, a read the shipped
+/// policy permits of UNMARKED content returns the bytes -- unmarked is
+/// UNCLASSIFIED, at or below every ceiling. No deployment tier needs a labeler
+/// to function. HONESTY NOTE: this test is invariant to the ceiling operand's
+/// presence (it passes with the ceiling swapped out of the fold); it is a
+/// regression guard against re-introducing the equality/deny-unlabeled
+/// semantics, not a proof the operand is consulted. That proof is the status
+/// test below (the composed name) and the composition unit tests with a
+/// stamped label -- nothing in the request path stamps one yet.
+#[tokio::test]
+async fn under_a_secret_ceiling_unmarked_content_is_served_as_unclassified() {
+    let fx = Fixture::new("composed-read-secret");
+    fx.write_policy(SHIPPED_POLICY);
+    let content: &[u8] = b"unmarked-content-is-UNCLASSIFIED";
+    std::fs::write(fx.dir.join("notes.bin"), content).unwrap();
+    std::fs::set_permissions(
+        fx.dir.join("notes.bin"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let target = fx.dir.join("notes.bin").to_string_lossy().into_owned();
+
+    let emit = RecEmit::new();
+    let me = nix::unistd::geteuid().as_raw();
+    let frame = drive_read(
+        &fx.principal,
+        composed(&fx, "SECRET"),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
+        other => panic!("a SECRET ceiling must SERVE unmarked content: {other:?}"),
+    }
+    let rec = request_record(&emit.records()).clone();
+    assert_eq!(rec.action, "fs.read");
+    assert_eq!(rec.outcome.result, "permit");
+}
+
+/// The identity half: at BASELINE the composition decides exactly what the
+/// baseline alone decides -- the same permitted read returns the same bytes.
+/// Without this, a ceiling that denied everything would pass the test above.
+#[tokio::test]
+async fn at_baseline_the_composition_permits_what_the_baseline_permits() {
+    let fx = Fixture::new("composed-read-baseline");
+    fx.write_policy(SHIPPED_POLICY);
+    let content: &[u8] = b"baseline-bytes";
+    std::fs::write(fx.dir.join("notes.bin"), content).unwrap();
+    std::fs::set_permissions(
+        fx.dir.join("notes.bin"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let target = fx.dir.join("notes.bin").to_string_lossy().into_owned();
+    let emit = RecEmit::new();
+    let me = nix::unistd::geteuid().as_raw();
+    let frame = drive_read(
+        &fx.principal,
+        composed(&fx, "UNCLASSIFIED"),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+    )
+    .await
+    .expect("permitted read answers");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
+        other => panic!("expected content, got {other:?}"),
+    }
+    assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+}

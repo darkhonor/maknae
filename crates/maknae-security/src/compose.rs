@@ -205,16 +205,77 @@ impl ConjunctionAuthorizer {
     pub fn new(operands: Vec<Box<dyn Authorizer>>) -> Self {
         Self { operands }
     }
+
+    fn refs(&self) -> Vec<&dyn Authorizer> {
+        self.operands.iter().map(|b| b.as_ref()).collect()
+    }
+}
+
+/// Fold N operands' verdicts through [`combine`], each behind the
+/// [`guarded_decide`] panic boundary. The composition rule, factored out of
+/// [`ConjunctionAuthorizer`] so a HETEROGENEOUS composer — one whose baseline is
+/// a named field rather than a vector element (ADR-0008 decision 1) — folds by
+/// exactly the same rule. Operand ORDER is the caller's: pass the baseline
+/// first, so its absence-testimony outranks (rule 4, #181).
+pub fn compose_decide(operands: &[&dyn Authorizer], req: &Request) -> Verdict {
+    combine(operands.iter().map(|a| guarded_decide(*a, req)).collect())
+}
+
+/// Name every operand, in composition order, with each name panic-guarded and
+/// sanitized ONCE at [`guarded_backend_name`], the choke point the kernel calls.
+/// See the note on the method this was lifted from.
+pub fn compose_backend_name(operands: &[&dyn Authorizer]) -> String {
+    // Panic-guarded RAW names, joined; sanitization happens ONCE, at
+    // `guarded_backend_name` -- the choke point the kernel calls. Running
+    // each operand through the full guard here double-sanitized the
+    // composed path: the inner pass truncated and marked, the outer pass
+    // stripped the `~` (outside the kept charset -- the same property that
+    // makes it unforgeable) and the result landed at exactly the cap, so
+    // no marker was re-applied and a truncated `authz_backend` reported as
+    // complete. Sanitize-once makes the marker idempotent by construction.
+    operands
+        .iter()
+        .map(|a| {
+            let raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
+                .unwrap_or_else(|_| "unknown".to_string());
+            // An operand whose name sanitizes to NOTHING renders `unknown`,
+            // not an empty slot: `sanitize_backend_name` documents that
+            // "sanitized away is indistinguishable from did not answer",
+            // and the sanitize-once fix silently regressed it to
+            // `+maknae-authz-basic` for a first operand of pure escapes.
+            // `sanitize_backend_name` never returns "" -- it maps an
+            // emptied name to `unknown` itself -- so THAT is the signal;
+            // an `.is_empty()` check here is dead, which the test caught.
+            if sanitize_backend_name(&raw) == "unknown" {
+                "unknown".to_string()
+            } else {
+                raw
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Enumerable ONLY when exactly one operand can enumerate; a panic refuses the
+/// whole enumeration. See the note on the method this was lifted from.
+pub fn compose_subjects(operands: &[&dyn Authorizer]) -> Option<Vec<SubjectBinding>> {
+    let mut answers = Vec::new();
+    for a in operands {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects())) {
+            Err(_) => return None,
+            Ok(Some(list)) => answers.push(list),
+            Ok(None) => {}
+        }
+    }
+    match answers.len() {
+        1 => answers.pop(),
+        _ => None,
+    }
 }
 
 impl Authorizer for ConjunctionAuthorizer {
     fn decide(&self, req: &Request) -> Verdict {
-        combine(
-            self.operands
-                .iter()
-                .map(|a| guarded_decide(a.as_ref(), req))
-                .collect(),
-        )
+        compose_decide(&self.refs(), req)
     }
 
     /// Names every operand, in composition order.
@@ -225,36 +286,7 @@ impl Authorizer for ConjunctionAuthorizer {
     /// the deciding backend is NOT `-basic`, and an operator needs to know
     /// which one produced a verdict.
     fn backend_name(&self) -> String {
-        // Panic-guarded RAW names, joined; sanitization happens ONCE, at
-        // `guarded_backend_name` -- the choke point the kernel calls. Running
-        // each operand through the full guard here double-sanitized the
-        // composed path: the inner pass truncated and marked, the outer pass
-        // stripped the `~` (outside the kept charset -- the same property that
-        // makes it unforgeable) and the result landed at exactly the cap, so
-        // no marker was re-applied and a truncated `authz_backend` reported as
-        // complete. Sanitize-once makes the marker idempotent by construction.
-        self.operands
-            .iter()
-            .map(|a| {
-                let raw =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.backend_name()))
-                        .unwrap_or_else(|_| "unknown".to_string());
-                // An operand whose name sanitizes to NOTHING renders `unknown`,
-                // not an empty slot: `sanitize_backend_name` documents that
-                // "sanitized away is indistinguishable from did not answer",
-                // and the sanitize-once fix silently regressed it to
-                // `+maknae-authz-basic` for a first operand of pure escapes.
-                // `sanitize_backend_name` never returns "" -- it maps an
-                // emptied name to `unknown` itself -- so THAT is the signal;
-                // an `.is_empty()` check here is dead, which the test caught.
-                if sanitize_backend_name(&raw) == "unknown" {
-                    "unknown".to_string()
-                } else {
-                    raw
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("+")
+        compose_backend_name(&self.refs())
     }
 
     /// Enumerable ONLY when exactly one operand can enumerate.
@@ -274,18 +306,7 @@ impl Authorizer for ConjunctionAuthorizer {
     /// composed decision it does not describe. An operand that failed is not an
     /// operand that declined, so any panic refuses the whole enumeration.
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
-        let mut answers = Vec::new();
-        for a in &self.operands {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.subjects())) {
-                Err(_) => return None,
-                Ok(Some(list)) => answers.push(list),
-                Ok(None) => {}
-            }
-        }
-        match answers.len() {
-            1 => answers.pop(),
-            _ => None,
-        }
+        compose_subjects(&self.refs())
     }
 }
 
