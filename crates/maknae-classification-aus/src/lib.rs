@@ -49,6 +49,14 @@ pub const LEVELS: [&str; 6] = [
 pub struct AusPspf;
 
 impl AusPspf {
+    /// Is `l` exactly one of this system's levels (tag, rank AND name agree)?
+    fn is_level(&self, l: &Level) -> bool {
+        l.policy == NAME
+            && LEVELS
+                .get(l.rank)
+                .is_some_and(|n| n.eq_ignore_ascii_case(&l.name))
+    }
+
     fn level(&self, rank: usize) -> Level {
         Level {
             policy: NAME.into(),
@@ -76,7 +84,10 @@ impl ClassificationPolicy for AusPspf {
     }
 
     fn dominates(&self, ceiling: &Level, content: &Level) -> Option<bool> {
-        if ceiling.policy != NAME || content.policy != NAME {
+        // BOTH must be levels of THIS system -- name AND rank, not just the
+        // policy tag: `Level`'s fields are public, and a forged
+        // `{policy: NAME, rank: 99}` would otherwise dominate everything.
+        if !self.is_level(ceiling) || !self.is_level(content) {
             return None;
         }
         Some(content.rank <= ceiling.rank)

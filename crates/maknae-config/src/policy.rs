@@ -26,6 +26,14 @@ pub const LEVELS: [&str; 4] = ["UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP SE
 pub struct BasicPolicy;
 
 impl BasicPolicy {
+    /// Is `l` exactly one of this system's levels (tag, rank AND name agree)?
+    fn is_level(&self, l: &Level) -> bool {
+        l.policy == NAME
+            && LEVELS
+                .get(l.rank)
+                .is_some_and(|n| n.eq_ignore_ascii_case(&l.name))
+    }
+
     fn level(&self, rank: usize) -> Level {
         Level {
             policy: NAME.into(),
@@ -56,7 +64,10 @@ impl ClassificationPolicy for BasicPolicy {
     }
 
     fn dominates(&self, ceiling: &Level, content: &Level) -> Option<bool> {
-        if ceiling.policy != NAME || content.policy != NAME {
+        // BOTH must be levels of THIS system -- name AND rank, not just the
+        // policy tag: `Level`'s fields are public, and a forged
+        // `{policy: NAME, rank: 99}` would otherwise dominate everything.
+        if !self.is_level(ceiling) || !self.is_level(content) {
             return None;
         }
         Some(content.rank <= ceiling.rank)
@@ -132,6 +143,7 @@ mod tests {
             ("CUI//SP-PRVCY", "UNCLASSIFIED"),
             ("cui", "UNCLASSIFIED"),
             ("  confidential  ", "CONFIDENTIAL"),
+            (" SECRET//", "SECRET"), // an empty caveat list is still a caveat list
         ] {
             assert_eq!(p().level_of(raw).unwrap().name, want, "{raw}");
         }
@@ -142,10 +154,11 @@ mod tests {
             "OFFICIAL",
             "",
             "//NOFORN",
-            " SECRET//",
+            "FOUO",
+            "SBU",
         ] {
             let r = p().level_of(bad);
-            assert!(r.is_none() || bad == " SECRET//", "{bad:?} -> {r:?}");
+            assert!(r.is_none(), "{bad:?} -> {r:?}");
         }
         assert!(
             p().level_of("TOP_SECRET").is_none(),

@@ -252,6 +252,38 @@ mod tests {
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
     }
 
+    /// The one PSPF rung with a colon: quoted in YAML it ranks 2 (unquoted, the
+    /// loader refuses the file -- docs §4.1 says so).
+    #[cfg(unix)]
+    #[test]
+    fn the_official_sensitive_rung_boots_when_quoted() {
+        let d = new_dir("aus-os");
+        let y = SECRET_CORE
+            .replace(
+                "classification: SECRET",
+                "classification: \"Official: Sensitive\"",
+            )
+            .replace(
+                "    accreditation_ref: null\n",
+                "    accreditation_ref: null\n    policy: AUS\n",
+            );
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        let cfg = boot(&d.0).expect("boots");
+        let level = &cfg.ceiling().classification;
+        assert_eq!(
+            (level.name.as_str(), level.rank),
+            ("OFFICIAL: SENSITIVE", 2)
+        );
+        // Unquoted: refused by the loader, not the ceiling reader.
+        let y = y.replace("\"Official: Sensitive\"", "Official: Sensitive");
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        assert!(
+            matches!(boot(&d.0), Err(maknae_config::ConfigError::Parse { .. })),
+            "{:?}",
+            boot(&d.0)
+        );
+    }
+
     /// The same PROTECTED ceiling under the default (US) system refuses boot:
     /// the kernel maps nothing between systems.
     #[cfg(unix)]

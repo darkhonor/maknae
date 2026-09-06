@@ -36,9 +36,11 @@ rules** of the directory, independent of where a given deployment mounts it.
 ### 1.1 How Maknae reads it at boot
 
 The trust-plane daemon (`maknaed`) resolves the config directory — a positional
-argument, defaulting to **`/etc/maknae`** — loads it, reads `core.handling.ceiling`
-into the runtime **ingest posture**, and **refuses to start (exit 1)** on any config
-error. A successful boot exits 0; there is **no run loop yet**, so `maknaed` is
+argument, defaulting to **`/etc/maknae`** — loads it, selects the classification
+system `core.handling.policy` names from the ones compiled into the build (§4.1; an
+unknown name is `UnknownClassificationPolicy`), reads `core.handling.ceiling` through
+that system into the runtime **ingest posture**, and **refuses to start (exit 1)** on
+any config error. A successful boot exits 0; there is **no run loop yet**, so `maknaed` is
 boot-check-only for now (under a `Type=simple` supervisor this reads as "started then
 exited" — expected until the run loop lands).
 
@@ -248,7 +250,11 @@ Recognized **`classification`** values are the selected system's ladder, lowest 
 | `policy` | Ladder | Baseline (unmarked) |
 |---|---|---|
 | `US` (default; shipped in the kernel) | `UNCLASSIFIED` · `CONFIDENTIAL` · `SECRET` · `TOP SECRET` | `UNCLASSIFIED` |
-| `AUS` (`maknae-classification-aus`; PSPF Release 2025) | `UNOFFICIAL` · `OFFICIAL` · `OFFICIAL: SENSITIVE` · `PROTECTED` · `SECRET` · `TOP SECRET` | `UNOFFICIAL` |
+| `AUS` (`maknae-classification-aus`; PSPF Release 2025) | `UNOFFICIAL` · `OFFICIAL` · `"OFFICIAL: SENSITIVE"` · `PROTECTED` · `SECRET` · `TOP SECRET` | `UNOFFICIAL` |
+
+`OFFICIAL: Sensitive` contains a colon, so in YAML it **must be quoted**
+(`classification: "OFFICIAL: Sensitive"`); unquoted, the YAML parser refuses the file
+before any ceiling code runs (`mapping values are not allowed in this context`).
 
 The kernel maps **nothing** between systems: `PROTECTED` boots an `AUS` enclave and
 refuses a `US` one. An `AUS` enclave declares both keys:

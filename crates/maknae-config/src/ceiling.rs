@@ -43,6 +43,14 @@ pub enum IngestPosture {
 impl Ceiling {
     /// The compiled Public default a bare Maknae runs at, in `policy`'s system:
     /// its unmarked level, and the wide-open handling fields.
+    ///
+    /// `dissemination_permitted`'s wide-open value is the lake's spelling,
+    /// `Distribution Statement A` (a DoD construct), for EVERY system: the
+    /// six handling fields are the lake's vocabulary verbatim (module doc),
+    /// and only `classification` is policy-relative. An AUS enclave that
+    /// writes a `handling` block spells the same default (docs §4.1). Making
+    /// the dissemination vocabulary per-system is a seam extension for the
+    /// day a second lake vocabulary exists, not a kernel decision.
     pub fn baseline_for(policy: &dyn ClassificationPolicy) -> Ceiling {
         Ceiling {
             classification: policy.unmarked(),
@@ -56,7 +64,11 @@ impl Ceiling {
     }
 
     /// `Public` iff the ceiling equals `policy`'s baseline; any above-baseline
-    /// signal → `Gated`.
+    /// signal → `Gated`. Asked through a policy OTHER than the one that ranked
+    /// its level, a ceiling is `Gated` by construction: a `Level` carries its
+    /// system's tag, so it can never equal that policy's `unmarked()`. No
+    /// separate guard -- one would be an equivalent mutant (observed
+    /// 2026-09-06: removing such a guard left the pinning test green).
     pub fn ingest_posture(&self, policy: &dyn ClassificationPolicy) -> IngestPosture {
         if *self == Ceiling::baseline_for(policy) {
             IngestPosture::Public
@@ -486,6 +498,38 @@ mod tests {
                 false
             }
         }
+        // Its baseline is ITS unmarked level and the lake's six handling
+        // defaults, every field pinned (the dissemination default is the
+        // lake's spelling for every system -- see `baseline_for`).
+        let b = Ceiling::baseline_for(&Two);
+        assert_eq!(
+            (
+                b.classification.policy.as_str(),
+                b.classification.name.as_str(),
+                b.classification.rank
+            ),
+            ("TWO", "LOW", 0)
+        );
+        assert!(!b.sci && !b.cui_permitted);
+        assert!(b.releasable_to.is_empty() && b.cui_categories_permitted.is_empty());
+        assert_eq!(
+            b.dissemination_permitted,
+            vec!["Distribution Statement A".to_string()]
+        );
+        assert_eq!(b.accreditation_ref, None);
+        assert_eq!(b.ingest_posture(&Two), IngestPosture::Public);
+        // Asked through the WRONG system, even a baseline is Gated (fail
+        // closed): the level's system tag can never match the other's unmarked.
+        assert_eq!(
+            b.ingest_posture(&US),
+            IngestPosture::Gated,
+            "a TWO ceiling through US"
+        );
+        assert_eq!(
+            base().ingest_posture(&Two),
+            IngestPosture::Gated,
+            "a US ceiling through TWO"
+        );
         let v = core(&BASE.replace("classification: UNCLASSIFIED", "classification: high"));
         let c = ceiling_from_core(Some(&v), &Two).unwrap();
         assert_eq!(

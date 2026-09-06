@@ -59,10 +59,15 @@ pub trait ClassificationPolicy: Send + Sync {
     /// systems is `rust-dcs`'s, never this seam's.
     fn dominates(&self, ceiling: &Level, content: &Level) -> Option<bool>;
 
-    /// Does this marking carry a non-public marker in this system (US: `CUI`,
-    /// `FOUO`, a distribution statement other than A; AUS: `OFFICIAL:
+    /// Does this marking carry a non-public marker in this system (US: `CUI`
+    /// as the first token, `FOUO`/`SBU`/`CUI` as a caveat segment, or a
+    /// distribution statement other than A anywhere; AUS: `OFFICIAL:
     /// Sensitive`)? One switch, governed by `cui_permitted` on a ceiling
-    /// (ADR-0022 decision 6). A flag, not a level.
+    /// (ADR-0022 decision 6). A flag, not a level. *(Corrected 2026-09-06,
+    /// critical-review round 1: the earlier text listed bare `FOUO` as a US
+    /// marker; a bare legacy `FOUO`/`SBU` first token is NOT a level and is
+    /// refused as unrankable -- whether to alias it to UNCLASSIFIED the way
+    /// `CUI` is aliased is an open operator question.)*
     fn non_public(&self, marking: &str) -> bool;
 }
 
@@ -128,6 +133,9 @@ mod tests {
         assert_eq!(p.level_of("L//X"), Some(p.unmarked()));
         assert_eq!(p.level_of("Z"), None);
         assert_eq!(p.dominates(&p.unmarked(), &p.unmarked()), Some(true));
-        assert!(!p.non_public("L//X"), "every method answers through the object");
+        assert!(
+            !p.non_public("L//X"),
+            "every method answers through the object"
+        );
     }
 }

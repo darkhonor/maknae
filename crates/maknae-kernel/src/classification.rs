@@ -14,6 +14,9 @@ use maknae_security::{first_token, ClassificationPolicy};
 
 /// Every system this build carries, kernel-shipped US first. Order is not
 /// precedence: selection is by NAME, and names are unique (pinned below).
+/// A fixed-arity array on purpose: adding a system is a BUILD change (a
+/// dependency and an entry here), never a runtime registration -- that is
+/// ADR-0002's static TCB, and it is how `rust-dcs` joins too.
 static SYSTEMS: [&dyn ClassificationPolicy; 2] = [&BasicPolicy, &AusPspf];
 
 /// The system `name` selects, matched case-insensitively on the trimmed
