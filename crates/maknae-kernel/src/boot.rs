@@ -1,11 +1,13 @@
 //! Cycle: config-boot — the kernel's boot sequence over Maknae's own config.
-//! Loads the config directory, reads the `core` classification ceiling into the
-//! runtime ingest posture, and fails closed on any error. Maknae reads only its
-//! own config; nothing external is read at boot.
+//! Loads the config directory, selects the classification system
+//! `core.handling.policy` names (ADR-0022), reads the `core` ceiling THROUGH
+//! that system into the runtime ingest posture, and fails closed on any error.
+//! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config, Ceiling, ConfigError, Document, IngestPosture, SectionSpec,
-    Value, AUDIT_SECTION, PRINCIPAL_SECTION, TRANSPORT_SECTION,
+    ceiling_from_core, load_config, policy_name_from_core, Ceiling, ClassificationPolicy,
+    ConfigError, Document, IngestPosture, SectionSpec, Value, AUDIT_SECTION, PRINCIPAL_SECTION,
+    TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -15,11 +17,22 @@ use std::path::Path;
 /// carried, but nothing reads it yet.
 const LAKE_SECTION: &str = "lake";
 
-/// The assembled boot configuration: the loaded document + the resolved ceiling.
-#[derive(Debug)]
+/// The assembled boot configuration: the loaded document, the classification
+/// system the deployment declared, and the ceiling resolved through it.
 pub struct BootConfig {
     document: Document,
     ceiling: Ceiling,
+    policy: &'static dyn ClassificationPolicy,
+}
+
+impl std::fmt::Debug for BootConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootConfig")
+            .field("document", &self.document)
+            .field("ceiling", &self.ceiling)
+            .field("policy", &self.policy.name())
+            .finish()
+    }
 }
 
 impl BootConfig {
@@ -28,9 +41,21 @@ impl BootConfig {
         self.document.section(name)
     }
 
-    /// The resolved classification ceiling (`core.handling.ceiling`, or the baseline).
+    /// The resolved classification ceiling (`core.handling.ceiling`, or the
+    /// selected system's baseline).
     pub fn ceiling(&self) -> &Ceiling {
         &self.ceiling
+    }
+
+    /// The classification system this enclave operates under -- the one
+    /// `core.handling.policy` selected from the build's registry (ADR-0022).
+    pub fn policy(&self) -> &dyn ClassificationPolicy {
+        self.policy
+    }
+
+    /// The selected system's name, for `admin.status` and the boot evidence.
+    pub fn classification_policy_name(&self) -> &str {
+        self.policy.name()
     }
 
     /// The full loaded document — handed to `PlaneClient::from_document` so the daemon
@@ -41,15 +66,17 @@ impl BootConfig {
         &self.document
     }
 
-    /// The coarse ingest posture derived from the ceiling.
+    /// The coarse ingest posture derived from the ceiling, relative to the
+    /// selected system's baseline.
     pub fn ingest_posture(&self) -> IngestPosture {
-        self.ceiling.ingest_posture()
+        self.ceiling.ingest_posture(self.policy)
     }
 }
 
 /// Boot the kernel over Maknae's config directory: load the config ONCE with every
 /// section the daemon uses registered (`core` is auto-registered; `lake`+`vault`+
-/// `transport`+`audit`+`principal` as optional extensions), read the `core` ceiling,
+/// `transport`+`audit`+`principal` as optional extensions), select the classification
+/// system and read the `core` ceiling through it,
 /// and return the assembled `BootConfig`. The `vault` block is registered here —
 /// rather than re-loaded later under a `vault`-only registry — so the SAME document
 /// boots the kernel AND backs `PlaneClient::from_document`; a realistic combined
@@ -85,8 +112,19 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
         },
     ];
     let document = load_config(config_dir, &specs)?;
-    let ceiling = ceiling_from_core(document.section("core"))?;
-    Ok(BootConfig { document, ceiling })
+    // The SYSTEM first, then the ceiling THROUGH it (ADR-0022): a name this
+    // build does not carry refuses boot before any level is read, and a
+    // level the selected system does not rank refuses it in the reader.
+    let core = document.section("core");
+    let name = policy_name_from_core(core)?;
+    let policy = crate::classification::select(&name)
+        .ok_or(ConfigError::UnknownClassificationPolicy { name })?;
+    let ceiling = ceiling_from_core(core, policy)?;
+    Ok(BootConfig {
+        document,
+        ceiling,
+        policy,
+    })
 }
 
 #[cfg(test)]
@@ -143,9 +181,15 @@ mod tests {
             0o640,
         );
         let cfg = boot(&d.0).expect("boots");
-        assert_eq!(cfg.ceiling(), &maknae_config::Ceiling::baseline());
+        assert_eq!(
+            cfg.ceiling(),
+            &maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy)
+        );
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
+        assert_eq!(cfg.classification_policy_name(), "US", "the default system");
+        assert_eq!(cfg.policy().unmarked().name, "UNCLASSIFIED");
         assert!(cfg.section("core").is_some());
+        assert!(format!("{cfg:?}").contains("policy: \"US\""));
     }
 
     #[cfg(unix)]
@@ -164,10 +208,125 @@ mod tests {
         put(&d.0, "maknae.yaml", SECRET_CORE, 0o640);
         let cfg = boot(&d.0).expect("boots");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
+        let level = &cfg.ceiling().classification;
         assert_eq!(
-            cfg.ceiling().classification,
-            maknae_config::Classification::Secret
+            (level.policy.as_str(), level.name.as_str(), level.rank),
+            ("US", "SECRET", 2)
         );
+    }
+
+    /// The live bug #148's sibling closed: a case-variant spelling of a level
+    /// used to refuse boot outright.
+    #[cfg(unix)]
+    #[test]
+    fn a_case_variant_level_boots() {
+        let d = new_dir("caseok");
+        let y = SECRET_CORE.replace("classification: SECRET", "classification: Unclassified");
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        let cfg = boot(&d.0).expect("boots");
+        assert_eq!(cfg.ceiling().classification.name, "UNCLASSIFIED");
+        assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
+    }
+
+    /// ADR-0022: an AUS enclave declares its system and its ceiling is read
+    /// through the PSPF ladder -- PROTECTED is a level there and nowhere in US.
+    #[cfg(unix)]
+    #[test]
+    fn an_aus_enclave_boots_on_protected() {
+        let d = new_dir("aus");
+        let y = SECRET_CORE
+            .replace("classification: SECRET", "classification: PROTECTED")
+            .replace(
+                "    accreditation_ref: null\n",
+                "    accreditation_ref: null\n    policy: aus\n",
+            );
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        let cfg = boot(&d.0).expect("boots");
+        assert_eq!(cfg.classification_policy_name(), "AUS");
+        let level = &cfg.ceiling().classification;
+        assert_eq!(
+            (level.policy.as_str(), level.name.as_str(), level.rank),
+            ("AUS", "PROTECTED", 3)
+        );
+        assert_eq!(cfg.policy().unmarked().name, "UNOFFICIAL");
+        assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
+    }
+
+    /// The one PSPF rung with a colon: quoted in YAML it ranks 2 (unquoted, the
+    /// loader refuses the file -- docs §4.1 says so).
+    #[cfg(unix)]
+    #[test]
+    fn the_official_sensitive_rung_boots_when_quoted() {
+        let d = new_dir("aus-os");
+        let y = SECRET_CORE
+            .replace(
+                "classification: SECRET",
+                "classification: \"Official: Sensitive\"",
+            )
+            .replace(
+                "    accreditation_ref: null\n",
+                "    accreditation_ref: null\n    policy: AUS\n",
+            );
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        let cfg = boot(&d.0).expect("boots");
+        let level = &cfg.ceiling().classification;
+        assert_eq!(
+            (level.name.as_str(), level.rank),
+            ("OFFICIAL: SENSITIVE", 2)
+        );
+        // Unquoted: refused by the loader, not the ceiling reader.
+        let y = y.replace("\"Official: Sensitive\"", "Official: Sensitive");
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        assert!(
+            matches!(boot(&d.0), Err(maknae_config::ConfigError::Parse { .. })),
+            "{:?}",
+            boot(&d.0)
+        );
+    }
+
+    /// The same PROTECTED ceiling under the default (US) system refuses boot:
+    /// the kernel maps nothing between systems.
+    #[cfg(unix)]
+    #[test]
+    fn a_us_enclave_refuses_protected() {
+        let d = new_dir("usprot");
+        let y = SECRET_CORE.replace("classification: SECRET", "classification: PROTECTED");
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        match boot(&d.0) {
+            Err(maknae_config::ConfigError::InvalidCeiling { reason }) => {
+                assert!(reason.contains("not a level of the US system"), "{reason}")
+            }
+            other => panic!("expected InvalidCeiling, got {other:?}"),
+        }
+    }
+
+    /// A system this build does not carry refuses boot by NAME, before any
+    /// level is read -- config names a system, never adds one.
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_classification_system_refuses_boot() {
+        let d = new_dir("rok");
+        let y = SECRET_CORE.replace(
+            "    accreditation_ref: null\n",
+            "    accreditation_ref: null\n    policy: ROK\n",
+        );
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        match boot(&d.0) {
+            Err(maknae_config::ConfigError::UnknownClassificationPolicy { name }) => {
+                assert_eq!(name, "ROK")
+            }
+            other => panic!("expected UnknownClassificationPolicy, got {other:?}"),
+        }
+        // And a mistyped `policy` value is the ceiling reader's refusal.
+        let y = SECRET_CORE.replace(
+            "    accreditation_ref: null\n",
+            "    accreditation_ref: null\n    policy: 7\n",
+        );
+        put(&d.0, "maknae.yaml", &y, 0o640);
+        assert!(matches!(
+            boot(&d.0),
+            Err(maknae_config::ConfigError::InvalidCeiling { .. })
+        ));
     }
 
     #[cfg(unix)]

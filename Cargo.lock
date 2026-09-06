@@ -1015,10 +1015,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-classification-aus"
+version = "0.0.0"
+dependencies = [
+ "maknae-security",
+]
+
+[[package]]
 name = "maknae-config"
 version = "0.0.0"
 dependencies = [
  "maknae-io",
+ "maknae-security",
  "serde_json",
  "yaml-rust2",
 ]
@@ -1040,6 +1048,7 @@ dependencies = [
  "maknae-audit",
  "maknae-audit-append",
  "maknae-authz-basic",
+ "maknae-classification-aus",
  "maknae-config",
  "maknae-io",
  "maknae-msgs",

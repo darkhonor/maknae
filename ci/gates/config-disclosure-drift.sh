@@ -60,7 +60,7 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|4|wire"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|5|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no

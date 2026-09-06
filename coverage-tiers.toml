@@ -33,6 +33,15 @@ files = [
   "crates/maknae-authz-basic/src/role.rs",
   "crates/maknae-authz-basic/src/binding.rs",
   "crates/maknae-authz-basic/src/decide.rs",
+  # The classification seam (ADR-0022): the `ClassificationPolicy` contract
+  # and `first_token`, the two systems that implement it (US in the kernel's
+  # config crate, PSPF in its own crate), and the registry that selects one by
+  # name. Every line ranks a level or picks the ladder that will -- a wrong
+  # rank lets content flow above the ceiling once PR B consults it.
+  "crates/maknae-security/src/classification.rs",
+  "crates/maknae-config/src/policy.rs",
+  "crates/maknae-classification-aus/src/lib.rs",
+  "crates/maknae-kernel/src/classification.rs",
   # The fail-closed authz boot gate (#77): principal-required + PDP
   # construction refusal mapping — a wrong arm is a daemon serving without a
   # decider.
@@ -176,7 +185,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod authorizer;
+mod classification;
 mod compose;
 mod obligation;
 mod request;
@@ -18,6 +19,7 @@ mod value;
 mod verdict;
 
 pub use authorizer::{Authorizer, SubjectBinding};
+pub use classification::{first_token, ClassificationPolicy, Level};
 pub use compose::{
     combine, guarded_backend_name, guarded_decide, guarded_subjects, ConjunctionAuthorizer,
 };

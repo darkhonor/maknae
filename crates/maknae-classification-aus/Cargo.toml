@@ -1,0 +1,16 @@
+[package]
+name = "maknae-classification-aus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Australian PSPF classification system, as a maknae-security ClassificationPolicy (ADR-0022)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The seam, and nothing else: this crate is an implementation of ONE contract
+# (ADR-0022 decision 3) and must stay ignorant of the kernel, the config
+# loader and every other system's vocabulary.
+maknae-security = { path = "../maknae-security" }
