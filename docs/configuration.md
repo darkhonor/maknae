@@ -40,9 +40,15 @@ argument, defaulting to **`/etc/maknae`** — loads it, selects the classificati
 system `core.handling.policy` names from the ones compiled into the build (§4.1; an
 unknown name is `UnknownClassificationPolicy`), reads `core.handling.ceiling` through
 that system into the runtime **ingest posture**, and **refuses to start (exit 1)** on
-any config error. A successful boot exits 0; there is **no run loop yet**, so `maknaed` is
-boot-check-only for now (under a `Type=simple` supervisor this reads as "started then
-exited" — expected until the run loop lands).
+any config error. *(Corrected 2026-09-06, #233: this paragraph said "there is no run loop
+yet, so `maknaed` is boot-check-only" — stale since #77.)* After the config is read the
+daemon builds its authorization composition — the RBAC baseline and the classification
+ceiling, both non-removable (ADR-0008 decision 1; §4.1) — records the composition, the
+selected system and the ceiling level in the audit trail, mints its plane credential,
+binds the client socket and **serves**: every request is decided through that
+composition until a shutdown signal, and the process exits with the outcome the accept
+loop stopped on. A boot that fails any of those steps exits non-zero, and a step after
+the credential mint retires the credential on the way out.
 
 - An **empty or `core`-less `maknae.yaml`** boots at the **Public baseline** (§4.1).
 - An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1) —
