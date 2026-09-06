@@ -12,7 +12,11 @@ use crate::record::{canonical_json, AuditRecord};
 
 /// The `SYSLOG_IDENTIFIER` every record carries, so `journalctl -t maknaed`
 /// finds them whether or not the daemon is running under its systemd unit.
-const SYSLOG_IDENTIFIER: &str = "maknaed";
+///
+/// `pub(crate)` because the macOS formatter builds its identity token from this
+/// one definition rather than repeating the literal — two literals drift, and
+/// the token is what an operator greps for on either platform.
+pub(crate) const SYSLOG_IDENTIFIER: &str = "maknaed";
 
 /// Which primary-sink condition produced this mirrored copy.
 ///
@@ -89,6 +93,65 @@ pub(crate) fn push_field(buf: &mut Vec<u8>, name: &str, value: &[u8]) {
     }
 }
 
+/// What an audit record exposes to a log sink, decided ONCE.
+///
+/// **Why this type exists.** Two platform serializers each need "which parts of
+/// a record does a mirrored copy carry, and what stands in for an absent one".
+/// Deciding that twice is how the two mirrors drift: a sentinel changes on one
+/// platform and not the other, and the divergence is invisible until an auditor
+/// compares them. The *serializations* differ per platform and are mechanism;
+/// this is the decision, and it is shared.
+///
+/// No `Default` derive — see [`PrimaryOutcome`]'s note; the same reasoning binds
+/// every type returned by a function in this `[t1]` file.
+pub(crate) struct RecordFields<'a> {
+    pub(crate) action: &'a str,
+    pub(crate) outcome: &'a str,
+    /// `"unknown"` when the record carries no subject user.
+    pub(crate) subject: &'a str,
+    /// `"-"` when the record names no object.
+    pub(crate) object: &'a str,
+    pub(crate) primary: &'static str,
+    /// Linux-only consumer: [`encode`] derives the journald `PRIORITY` from it
+    /// (4 vs 6). **The macOS formatter MUST NOT** — its severity is pinned to
+    /// `LOG_WARNING` unconditionally (spec D4), because `LOG_INFO` lands in the
+    /// unified log's memory-backed info tier and a `permit` may never reach
+    /// disk. Severity is not where macOS carries deny/permit; `MAKNAE_OUTCOME`
+    /// is.
+    pub(crate) is_deny: bool,
+    pub(crate) session_id: u64,
+    pub(crate) seq: u64,
+}
+
+/// Project one audit record into the shared field set.
+pub(crate) fn fields_of(rec: &AuditRecord, primary: PrimaryOutcome) -> RecordFields<'_> {
+    RecordFields {
+        action: &rec.action,
+        outcome: &rec.outcome.result,
+        subject: rec.subject.user.as_deref().unwrap_or("unknown"),
+        object: rec.object.as_deref().unwrap_or("-"),
+        primary: primary.as_field(),
+        is_deny: rec.outcome.result == "deny",
+        session_id: rec.session_id,
+        seq: rec.seq,
+    }
+}
+
+/// The operator-facing one-line summary carried as journald's `MESSAGE`.
+///
+/// **This is the JOURNALD summary and it carries `object=` deliberately.** The
+/// macOS summary is a DIFFERENT function that omits it (spec D4b): on darwin the
+/// message text is the only queryable surface, so a subject-controlled path
+/// could forge `MAKNAE_OUTCOME=permit` into its own deny record. journald has
+/// structured fields alongside the message, so the same string is not a
+/// forgery surface there and the operator keeps the object.
+pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
+    format!(
+        "maknae audit: {} {} subject={} object={} session={} seq={}",
+        f.action, f.outcome, f.subject, f.object, f.session_id, f.seq
+    )
+}
+
 /// Encode one audit record as a systemd native-journal datagram.
 ///
 /// `MAKNAE_RECORD` carries the canonical JSON **verbatim**, so the journald
@@ -97,18 +160,10 @@ pub(crate) fn push_field(buf: &mut Vec<u8>, name: &str, value: &[u8]) {
 /// source of truth.
 pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u8>, AuditError> {
     let canonical = canonical_json(rec)?;
-    let subject = rec.subject.user.as_deref().unwrap_or("unknown");
-    let object = rec.object.as_deref().unwrap_or("-");
+    let f = fields_of(rec, primary);
     // syslog severity: a denial is operationally interesting, a permit is not.
-    let priority = if rec.outcome.result == "deny" {
-        "4"
-    } else {
-        "6"
-    };
-    let message = format!(
-        "maknae audit: {} {} subject={} object={} session={} seq={}",
-        rec.action, rec.outcome.result, subject, object, rec.session_id, rec.seq
-    );
+    let priority = if f.is_deny { "4" } else { "6" };
+    let message = summary_line(&f);
 
     // `Vec::new()`, NOT `with_capacity(a + b + n)`: a capacity hint has no
     // observable effect on the output, so every arithmetic mutant cargo-mutants
@@ -118,10 +173,10 @@ pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u
     push_field(&mut buf, "SYSLOG_IDENTIFIER", SYSLOG_IDENTIFIER.as_bytes());
     push_field(&mut buf, "MESSAGE", message.as_bytes());
     push_field(&mut buf, "PRIORITY", priority.as_bytes());
-    push_field(&mut buf, "MAKNAE_ACTION", rec.action.as_bytes());
-    push_field(&mut buf, "MAKNAE_OUTCOME", rec.outcome.result.as_bytes());
-    push_field(&mut buf, "MAKNAE_SUBJECT", subject.as_bytes());
-    push_field(&mut buf, "MAKNAE_PRIMARY", primary.as_field().as_bytes());
+    push_field(&mut buf, "MAKNAE_ACTION", f.action.as_bytes());
+    push_field(&mut buf, "MAKNAE_OUTCOME", f.outcome.as_bytes());
+    push_field(&mut buf, "MAKNAE_SUBJECT", f.subject.as_bytes());
+    push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
     push_field(&mut buf, "MAKNAE_RECORD", canonical.as_bytes());
     Ok(buf)
 }
@@ -356,5 +411,43 @@ mod tests {
         r.subject.user = None;
         let b = encode(&r, PrimaryOutcome::Ok).unwrap();
         assert_eq!(field(&b, "MAKNAE_SUBJECT").unwrap(), b"unknown");
+    }
+
+    #[test]
+    fn fields_of_supplies_the_absent_value_sentinels() {
+        let mut r = rec("no");
+        r.subject.user = None;
+        r.object = None;
+        let f = fields_of(&r, PrimaryOutcome::Ok);
+        assert_eq!(f.subject, "unknown");
+        assert_eq!(f.object, "-");
+        assert_eq!(f.primary, "ok");
+    }
+
+    #[test]
+    fn fields_of_flags_deny_and_not_permit() {
+        assert!(fields_of(&rec("no"), PrimaryOutcome::Ok).is_deny);
+        let mut p = rec("ok");
+        p.outcome.result = "permit".into();
+        assert!(!fields_of(&p, PrimaryOutcome::Ok).is_deny);
+    }
+
+    #[test]
+    fn the_summary_line_carries_the_operator_facing_facts() {
+        let s = summary_line(&fields_of(&rec("no"), PrimaryOutcome::RefusedAtCapacity));
+        // `object=` is LOAD-BEARING here: the natural instinct after reading D4b is
+        // to delete it from the shared summary_line, which silently changes
+        // journald's MESSAGE. Nothing else catches that -- not the three
+        // must-pass-unmodified tests, and not a mutant.
+        for needle in [
+            "fs.read",
+            "deny",
+            "byeori",
+            "object=/home/byeori/.ssh/id_rsa",
+            "session=7",
+            "seq=3",
+        ] {
+            assert!(s.contains(needle), "summary must carry {needle}: {s}");
+        }
     }
 }

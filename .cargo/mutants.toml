@@ -126,6 +126,27 @@ exclude_re = [
   # exclusion wider than its justification silently retires coverage the
   # justification never claimed.
   "maknae-authz-basic.*BasicAuthorizer>::subjects -> Option<Vec<maknae_security::SubjectBinding>> with None",
+  # `SyslogMirror::mirror` (#222) -- the macOS unified-log send. NARROW BY
+  # CONSTRUCTION, following the precedent immediately above: an `exclude_re`
+  # naming this ONE replacement, never a whole-file glob. A glob would also
+  # retire `SyslogMirror::open`'s mutants and every future decision added to
+  # that file, which is exactly the over-wide exclusion #219 calls a finding.
+  #
+  # MEASURED, not predicted after the fact: 3 mutants, 1 caught, 1 unviable,
+  # and this one MISSED. It is unkillable here for a structural reason.
+  # `mirror` returns `()`, so the mutant and the original are indistinguishable
+  # to any caller; the only observable difference is a line in the system log,
+  # and the mutation lane is `ubuntu-latest` (ci.yml:124), which has no unified
+  # log to read back. Inventing an assertion would only be testing `nix`.
+  #
+  # COMPENSATING CONTROLS, both real:
+  #   - Every decision `mirror` delegates to -- the oversize cap, the D4b scrub,
+  #     the field set, the extraction anchor -- lives in syslog_fmt.rs, which is
+  #     [t1] and measured 15 caught / 1 unviable / 0 missed.
+  #   - Delivery itself is proven on-host against the REAL unified log, by the
+  #     acceptance round-trip that reads the record back out of `log show` and
+  #     compares MAKNAE_RECORD byte-for-byte with the canonical JSON.
+  "maknae-audit-append.*SyslogMirror::mirror with \\(\\)",
 ]
 
 exclude_globs = [
@@ -157,6 +178,11 @@ exclude_globs = [
   # excluded — journal_io.rs measured 2 caught / 1 unviable / 0 missed, so the
   # T3 tier needs no mutation exemption here, and taking one would retire
   # coverage this note's argument never claimed.
+  # UPDATED 2026-09-06 (#222): maknae-audit-append gained syslog_fmt.rs (T1, the
+  # macOS line formatter — 15 caught / 1 unviable / 0 missed) and syslog_io.rs
+  # (T3, the syslog(3) call). NEITHER is excluded HERE either: syslog_io.rs has
+  # exactly one unkillable mutant, and it is excluded by the method-scoped
+  # `exclude_re` above rather than by a glob over the file.
   "crates/maknae-proto/src/error.rs",       # Display/Error declarations only
   "crates/maknae-audit-append/src/sink.rs", # file-open + blocking-write I/O
   "crates/maknae-audit-append/src/error.rs", # Display/Error declarations only
