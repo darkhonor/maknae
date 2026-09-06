@@ -66,8 +66,9 @@ pub trait ClassificationPolicy: Send + Sync {
     /// (ADR-0022 decision 6). A flag, not a level. *(Corrected 2026-09-06,
     /// critical-review round 1: the earlier text listed bare `FOUO` as a US
     /// marker; a bare legacy `FOUO`/`SBU` first token is NOT a level and is
-    /// refused as unrankable -- whether to alias it to UNCLASSIFIED the way
-    /// `CUI` is aliased is an open operator question.)*
+    /// refused as unrankable. Operator ruling 2026-09-06: REFUSE -- `FOUO`
+    /// as a first token was never legal; `CUI` is the authorized first-token
+    /// state, which is why only it is aliased.)*
     fn non_public(&self, marking: &str) -> bool;
 }
 
