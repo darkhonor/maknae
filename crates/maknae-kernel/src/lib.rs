@@ -7,6 +7,7 @@ mod authz;
 mod blocking_guard;
 mod boot;
 mod boot_gate;
+pub mod classification;
 mod groupres;
 mod handler;
 mod posture;

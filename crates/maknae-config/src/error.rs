@@ -53,6 +53,10 @@ pub enum ConfigError {
     DuplicateSpec { section: String },
     /// The `core.handling` classification ceiling is present but invalid (spec ②c §4).
     InvalidCeiling { reason: String },
+    /// `core.handling.policy` names a classification system that is not compiled
+    /// into this build (ADR-0022 decision 4). Fail closed: an enclave that declares a
+    /// system this daemon cannot rank must not boot as if it were the default.
+    UnknownClassificationPolicy { name: String },
     /// The `transport` section is present but a field is malformed or out of
     /// its fail-closed range (Stage-3a task-2).
     InvalidTransport(String),
@@ -132,6 +136,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidCeiling { reason } => {
                 write!(f, "invalid core classification ceiling: {reason}")
             }
+            ConfigError::UnknownClassificationPolicy { name } => {
+                write!(f, "core.handling.policy names a classification system this build does not carry: '{name}'")
+            }
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
             }
@@ -171,6 +178,18 @@ mod tests {
             col: 4,
         };
         assert!(format!("{p}").contains("bad") && format!("{p}").contains("2:4"));
+    }
+
+    #[test]
+    fn display_covers_unknown_classification_policy() {
+        let s = format!(
+            "{}",
+            ConfigError::UnknownClassificationPolicy { name: "ROK".into() }
+        );
+        assert!(
+            s.contains("core.handling.policy") && s.contains("'ROK'"),
+            "{s}"
+        );
     }
 
     #[test]

@@ -329,10 +329,11 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
-            println!("version           {}", s.version);
-            println!("protocol_version {}", s.protocol_version);
-            println!("listener         {}", s.listener);
-            println!("authz_backend    {}", s.authz_backend);
+            println!("{:<22}{}", "version", s.version);
+            println!("{:<22}{}", "protocol_version", s.protocol_version);
+            println!("{:<22}{}", "listener", s.listener);
+            println!("{:<22}{}", "authz_backend", s.authz_backend);
+            println!("{:<22}{}", "classification_policy", s.classification_policy);
             Ok(())
         }
         (Verb::AdminConfigShow, Payload::ConfigView(v)) => {

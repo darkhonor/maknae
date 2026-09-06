@@ -44,6 +44,7 @@ always	status.version	the daemon's own version; an operator debugging needs it a
 always	status.protocol_version	every peer that completed a handshake already has it
 always	status.listener	the socket the caller is already connected to
 always	status.authz_backend	which PDP produced a verdict; the point of the field
+always	status.classification_policy	which classification SYSTEM ranked a ceiling (ADR-0022); a name from the build's registry, never a level or a marking
 always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
 always	whoami.peer_plane_uri_san	the caller's own verified plane identity; it is who they already are

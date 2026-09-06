@@ -183,6 +183,7 @@ where
         fds,
         Arc::new(Default::default()),
         maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
     )
     .await
 }
@@ -210,6 +211,7 @@ where
         maknae_io::DelegatedFds::new(0),
         Arc::new(Default::default()),
         maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
     )
     .await
 }
@@ -227,6 +229,12 @@ async fn drive_with<P>(
     // (empty) for every verb that is not `admin.config.show`.
     config_view: Arc<maknae_kernel::ConfigView>,
     transport: maknae_config::TransportConfig,
+    // The classification SYSTEM name the daemon would hold (ADR-0022). Production
+    // captures it once in run_inner from `boot()`; a status test derives it from a
+    // real `boot()` of a fixture for the same reason `backend_name` below is
+    // derived from the authorizer -- a literal here would make the assertion
+    // tautological.
+    classification_policy: Arc<String>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -252,6 +260,7 @@ where
         Arc::new(fx_principal.clone()),
         Arc::clone(&config_view),
         backend_name,
+        classification_policy,
         timeout,
         maknae_security::Lane::Local,
         delegated,
@@ -1329,6 +1338,20 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
+    // The classification system is DERIVED from a real `boot()` of a config that
+    // declares the NON-default one (ADR-0022): `policy: aus` with a PSPF ceiling.
+    // A literal `"US"` here matched the production default and could not tell
+    // "read from boot" apart from "hardcoded" (critical-review round 1, C1) --
+    // the same distinguishing-input rule `nondefault_transport()` follows.
+    let cfg = fx.dir.join("maknae.yaml");
+    std::fs::write(
+        &cfg,
+        "core:\n  handling:\n    ceiling:\n      classification: protected\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: aus\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let booted = maknae_kernel::boot(&fx.dir).expect("the AUS fixture boots");
+    assert_eq!(booted.ceiling().classification.name, "PROTECTED");
     let emit = RecEmit::new();
     let frame = drive_with(
         &fx.principal,
@@ -1340,6 +1363,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         maknae_io::DelegatedFds::new(0),
         Arc::new(Default::default()),
         nondefault_transport(),
+        Arc::new(booted.classification_policy_name().to_string()),
     )
     .await
     .expect("a frame");
@@ -1347,6 +1371,11 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         RespResult::Ok(maknae_proto::Payload::Status(s)) => {
             assert_eq!(s.protocol_version, maknae_proto::PROTOCOL_VERSION);
             assert_eq!(s.authz_backend, "maknae-authz-basic");
+            assert_eq!(
+                s.classification_policy, "AUS",
+                "the system NAME boot selected from `core.handling.policy` -- the \
+                 registry's canonical spelling, not the operator's `aus`"
+            );
             // EXACT, like its siblings. This was the one field where any
             // non-empty string passed; the test crate is `maknae-kernel`, the
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
@@ -1594,6 +1623,7 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
     )
     .await
     .expect("a frame");
@@ -1672,6 +1702,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
     )
     .await
     .expect("a frame");
@@ -1720,6 +1751,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
         maknae_io::DelegatedFds::new(0),
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
     )
     .await
     .expect("a frame");
