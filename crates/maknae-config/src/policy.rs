@@ -214,4 +214,32 @@ mod tests {
         assert_eq!(b.name(), "US");
         assert_eq!(b.level_of("SECRET").unwrap().rank, 2);
     }
+    /// `Level`'s fields are public. A level that carries this system's TAG but
+    /// a rank/name this ladder does not have -- or a foreign tag with a rank
+    /// this ladder does have -- is NOT a level of this system: `dominates` is
+    /// `None`, never a verdict. (Kills the `&&`->`||` mutant in `is_level`.)
+    #[test]
+    fn a_forged_level_is_not_ordered() {
+        let real = p().level_of("SECRET").unwrap();
+        let forged_rank = Level {
+            policy: NAME.into(),
+            name: real.name.clone(),
+            rank: 99,
+        };
+        let forged_name = Level {
+            policy: NAME.into(),
+            name: "BOGUS".into(),
+            rank: real.rank,
+        };
+        let foreign_tag = Level {
+            policy: "AUS".into(),
+            name: real.name.clone(),
+            rank: real.rank,
+        };
+        for bad in [&forged_rank, &forged_name, &foreign_tag] {
+            assert_eq!(p().dominates(&real, bad), None, "{bad:?} as content");
+            assert_eq!(p().dominates(bad, &real), None, "{bad:?} as ceiling");
+        }
+        assert_eq!(p().dominates(&real, &real), Some(true));
+    }
 }
