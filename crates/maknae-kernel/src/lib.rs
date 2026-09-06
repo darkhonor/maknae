@@ -7,7 +7,9 @@ mod authz;
 mod blocking_guard;
 mod boot;
 mod boot_gate;
+mod ceiling_authz;
 pub mod classification;
+mod composition;
 mod groupres;
 mod handler;
 mod posture;
@@ -15,6 +17,8 @@ mod run;
 pub use authz::*;
 pub use boot::{boot, BootConfig};
 pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
+pub use ceiling_authz::CeilingAuthorizer;
+pub use composition::Composition;
 pub use groupres::*;
 pub use handler::{
     build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,

@@ -2058,6 +2058,11 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let socket = transport.socket_path.display().to_string();
     let euid = nix::unistd::geteuid().as_raw();
 
+    // ONE sequence for every boot-session record (#154 review): the boot
+    // session id is a constant per boot, so two records minted from separate
+    // `Seq::new()`s would both carry seq 1 and collide on (session_id, seq).
+    // Every boot-time emitter below draws from this counter.
+    let boot_seq = Seq::new();
     // #189: a configured `audit.siem` promises off-host offload that does not
     // exist until #223. Fail closed -- and audit the refusal, per the ordering
     // rule stated for the authz gate below.
@@ -2068,7 +2073,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             &socket,
             euid,
             boot_session_id(&session_ids),
-            Seq::new().next(),
+            boot_seq.next(),
             &audit_cfg.au3_1,
             e.to_string(),
         )
@@ -2091,7 +2096,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
                 &socket,
                 euid,
                 boot_session_id(&session_ids),
-                Seq::new().next(),
+                boot_seq.next(),
                 &audit_cfg.au3_1,
                 e.to_string(),
             )
@@ -2107,13 +2112,56 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
                 &socket,
                 euid,
                 boot_session_id(&session_ids),
-                Seq::new().next(),
+                boot_seq.next(),
                 &audit_cfg.au3_1,
                 e.to_string(),
             )
             .await);
         }
     };
+    // ADR-0008 decision 1 (#154) + #148: the PDP is the COMPOSITION, and both
+    // floors are named fields of it -- the sealed `Baseline` (-basic, from the
+    // gate above) and the booted classification ceiling, evaluated through the
+    // classification SYSTEM boot selected (ADR-0022). Neither can be absent:
+    // the type has no constructor without them. Built HERE, unconditionally,
+    // from the gate's own return value; `ci/gates/authz-composition-drift.sh`
+    // pins this call site so a future selection key fails CI.
+    let authorizer = crate::composition::build_pdp(&boot, authorizer);
+    // Boot-time EVIDENCE (ADR-0008 decision 1, fourth layer): the trail
+    // records which operands this process composes, so the property is
+    // auditable at runtime and not only at build time. Same record shape as
+    // the authz refusal above; the action is the `authz` pseudo-action.
+    let composition_name = maknae_security::guarded_backend_name(&authorizer);
+    let composition_rec = make_record(
+        "boot",
+        &host,
+        &socket,
+        euid,
+        None,
+        None,
+        None,
+        boot_session_id(&session_ids),
+        boot_seq.next(),
+        "authz",
+        None,
+        "permit",
+        // The reason ALSO records the classification SYSTEM and the booted
+        // ceiling LEVEL -- the two values the operand enforces -- so the
+        // trail says what this process will refuse (content marked above
+        // that level, in that system), not only which operands it composes.
+        &format!(
+            "authorization composition: {composition_name}; system: {}; ceiling: {}",
+            boot.classification_policy_name(),
+            boot.ceiling().classification.name
+        ),
+        "authorized",
+        &audit_cfg.au3_1,
+    );
+    if let Err(e) = sink.emit(&composition_rec).await {
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on boot composition record — boot proceeded without a durable record: {e}"
+        );
+    }
     let authorizer = Arc::new(authorizer);
     let principal = Arc::new(principal);
 
@@ -2187,7 +2235,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         None,
         None,
         boot_session_id(&session_ids),
-        Seq::new().next(),
+        boot_seq.next(),
         "posture",
         None,
         "permit",
@@ -2286,7 +2334,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
 /// unconditional `client.shutdown().await`. Returns the [`ServeOutcome`] the accept
 /// loop stopped on so [`run`] can map it to the process `ExitCode`.
 #[allow(clippy::too_many_arguments)]
-async fn serve_after_mint(
+async fn serve_after_mint<B>(
     client: &maknae_vault::PlaneClient,
     ca: &maknae_vault::CaBundle,
     sink: &Arc<maknae_audit_append::AuditSink>,
@@ -2294,14 +2342,22 @@ async fn serve_after_mint(
     audit_cfg: &maknae_config::AuditConfig,
     session_ids: Arc<SessionIds>,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
-    authorizer: Arc<maknae_authz_basic::BasicAuthorizer>,
+    // The COMPOSITION, by type -- not `Arc<P: Authorizer>`. A generic here would
+    // accept a bare baseline, and the drift gate inspects only the construction
+    // statement, so a run.rs that composes, audits the composition, then serves
+    // the baseline alone would pass every gate (critical-review round 3). This
+    // signature is the type-level pin: what is served is what was composed.
+    authorizer: Arc<crate::composition::Composition<B>>,
     principal: Arc<Principal>,
     // Already redacted at boot — the raw Document never reaches the run loop.
     config_view: Arc<ConfigView>,
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-) -> Result<ServeOutcome, String> {
+) -> Result<ServeOutcome, String>
+where
+    B: maknae_authz_basic::Baseline,
+{
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
     // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
@@ -2820,6 +2876,26 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(posture_rec.outcome.posture, "unverified");
             assert_eq!(posture_rec.subject.user, None);
             assert_eq!(posture_rec.source.uid, nix::unistd::geteuid().as_raw());
+            // ADR-0008 decision 1, fourth layer (#154): the trail records the
+            // composition. Asserted on the real success path (root only --
+            // run this on a test host, see the plan).
+            let comp_rec = recs
+                .iter()
+                .find(|r| r.action == "authz" && r.outcome.result == "permit")
+                .unwrap_or_else(|| panic!("no boot composition record in: {audit}"));
+            assert_eq!(comp_rec.event, "boot");
+            assert_eq!(
+                comp_rec.outcome.reason,
+                "authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: UNCLASSIFIED"
+            );
+            assert_eq!(comp_rec.outcome.posture, "authorized");
+            // Both boot records share the boot session; they must NOT share a
+            // sequence number (the collision the review found).
+            assert_eq!(comp_rec.session_id, posture_rec.session_id);
+            assert_ne!(
+                comp_rec.seq, posture_rec.seq,
+                "boot records collided on seq"
+            );
         } else {
             // Unprivileged (every CI lane, this dev host): the authz gate still
             // refuses — for `NotRootOwned` specifically (checked below via its

@@ -49,7 +49,7 @@ impl BootConfig {
 
     /// The classification system this enclave operates under -- the one
     /// `core.handling.policy` selected from the build's registry (ADR-0022).
-    pub fn policy(&self) -> &dyn ClassificationPolicy {
+    pub fn policy(&self) -> &'static dyn ClassificationPolicy {
         self.policy
     }
 
