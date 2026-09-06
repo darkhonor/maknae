@@ -24,6 +24,10 @@
 //! [`Ceiling`] and projects it to the coarse ingest gate ([`Ceiling::ingest_posture`]
 //! → [`IngestPosture`]). Absent → Public baseline; present → strictly validated
 //! (`lake.schema.json` port); present-but-invalid → [`ConfigError::InvalidCeiling`].
+//! The ceiling's level is a [`Level`] of a classification SYSTEM (ADR-0022): the
+//! reader validates it through a [`ClassificationPolicy`] the kernel selects by
+//! the name `core.handling.policy` gives ([`policy_name_from_core`]); this crate
+//! ships the US system ([`BasicPolicy`]) and orders nothing itself.
 #![forbid(unsafe_code)]
 
 mod audit_cfg;
@@ -33,6 +37,7 @@ mod ceiling;
 mod document;
 mod error;
 mod loader;
+mod policy;
 mod principal;
 mod scalar;
 mod transport;
@@ -50,13 +55,15 @@ pub use authz::{
     load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern,
     RawActionGrants, Request,
 };
-pub use ceiling::{ceiling_from_core, Ceiling, Classification, IngestPosture};
+pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
     effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
 };
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
+pub use maknae_security::{ClassificationPolicy, Level};
+pub use policy::BasicPolicy;
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
 pub use value::Value;

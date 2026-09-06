@@ -12,6 +12,11 @@ workspace = true
 [dependencies]
 yaml-rust2 = "=0.11.0"
 serde_json = "1"
+# The classification seam (ADR-0022): `Ceiling.classification` is a `Level` in a
+# declared system, validated through a `ClassificationPolicy`. The US system
+# itself (`BasicPolicy`) lives HERE because it is the config's default
+# vocabulary; the seam is policy-agnostic and depends on nothing of ours.
+maknae-security = { path = "../maknae-security" }
 
 [target.'cfg(unix)'.dependencies]
 maknae-io = { path = "../maknae-io" }

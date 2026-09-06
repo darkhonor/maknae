@@ -391,8 +391,9 @@ enum Disclosure {
 /// of a second redaction implementation; it applies inside this crate too.
 fn classify(section: &str, path: &str, disclosable: &[&str]) -> Disclosure {
     let full = format!("{section}.{path}");
-    // PREFIX match, not exact. `core.handling` has seven leaves; listing them
-    // one by one means the eighth, added later, is disclosed by default --
+    // PREFIX match, not exact. `core.handling` has eight leaves (the `policy`
+    // name joined the seven in ADR-0022 -- exactly the case this rule covers);
+    // listing them one by one means the ninth, added later, is disclosed by default --
     // which is the denylist failure this whole module rejects, reintroduced
     // inside the suppression list itself.
     if SUPPRESSED
