@@ -172,6 +172,7 @@ core:
       cui_categories_permitted: []
       dissemination_permitted: ["Distribution Statement A"]
     accreditation_ref: null
+    policy: US
 ```
 
 - **`schema_version`**, **`identity`** (`instance_id`, `name`, `domain`, `urn_root`) —
@@ -184,14 +185,16 @@ core:
 The ceiling governs the coarse **ingest gate**: whether this Maknae instance may reach
 past the *public* gate. The vocabulary is reused **verbatim** from the lake
 (`lake.yaml` / `lake.schema.json`), so the lake and the optional DCS classification
-backend read the same declaration.
+backend read the same declaration — plus one key of Maknae's own, `handling.policy`,
+which names the **classification system** the enclave operates under (ADR-0022).
 
 > **How it is read.** Loading the config *directory* carries the `core` section
 > verbatim (like any section) — the directory load does **not** itself validate the
-> ceiling. The ceiling is validated when Maknae **reads** it, through the typed reader
-> `ceiling_from_core`, which the kernel invokes at startup. The rule and errors below
-> describe that read. (Kernel wiring is forthcoming; until it lands, the reader exists
-> but nothing invokes it end-to-end.)
+> ceiling. At startup the kernel first reads `handling.policy` and selects that system
+> from the ones **compiled into the build** (`US`, the default; `AUS`); then it
+> validates the ceiling **through the selected system** (`ceiling_from_core`). A name
+> the build does not carry refuses boot (`UnknownClassificationPolicy`); config names a
+> system, it never adds one. The rule and errors below describe that read.
 
 **The rule** (applied when the ceiling is read):
 
@@ -230,21 +233,44 @@ is present, exact types (this matches the lake's `lake.schema.json`).
 
 | Key | Type | Baseline (Public) | Notes |
 |---|---|---|---|
-| `handling.ceiling.classification` | string | `"UNCLASSIFIED"` | One of the four recognized levels (below), **case-sensitive**. |
+| `handling.ceiling.classification` | string | the selected system's lowest level (`"UNCLASSIFIED"` for `US`) | A **bare level name** of the selected system (below), matched case-insensitively. Not a marking: no caveats after `//`, and `CUI` (a marking's spelling of UNCLASSIFIED) is not a level. |
 | `handling.ceiling.sci` | bool | `false` | |
 | `handling.ceiling.releasable_to` | list of strings | `[]` | Releasability caveats (e.g. `["REL FVEY"]`). Opaque here; interpreted by DCS. |
 | `handling.ceiling.cui_permitted` | bool | `false` | The primary "private-network" switch. |
 | `handling.ceiling.cui_categories_permitted` | list of strings | `[]` | Opaque CUI category strings. |
 | `handling.ceiling.dissemination_permitted` | list of strings | `["Distribution Statement A"]` | e.g. Distribution Statements. |
 | `handling.accreditation_ref` | string or `null` | `null` | Accreditation pointer (ATO reference, etc.). |
+| `handling.policy` | string | `"US"` (may be omitted) | The classification **system**: one of the names this build carries. Optional — the one `handling` key that is. |
 
-Recognized **`classification`** values (the standard ladder, case-sensitive exact —
-CUI is the separate `cui_permitted` dimension, not a classification level):
+Recognized **`classification`** values are the selected system's ladder, lowest first
+(CUI is the separate `cui_permitted` dimension, not a classification level):
 
-`UNCLASSIFIED` · `CONFIDENTIAL` · `SECRET` · `TOP SECRET`
+| `policy` | Ladder | Baseline (unmarked) |
+|---|---|---|
+| `US` (default; shipped in the kernel) | `UNCLASSIFIED` · `CONFIDENTIAL` · `SECRET` · `TOP SECRET` | `UNCLASSIFIED` |
+| `AUS` (`maknae-classification-aus`; PSPF Release 2025) | `UNOFFICIAL` · `OFFICIAL` · `OFFICIAL: SENSITIVE` · `PROTECTED` · `SECRET` · `TOP SECRET` | `UNOFFICIAL` |
 
-An unrecognized level — including a wrong-case one like `secret` — is **invalid** and
-refuses the load. It never silently becomes `Gated`.
+The kernel maps **nothing** between systems: `PROTECTED` boots an `AUS` enclave and
+refuses a `US` one. An `AUS` enclave declares both keys:
+
+```yaml
+core:
+  handling:
+    ceiling:
+      classification: PROTECTED
+      sci: false
+      releasable_to: []
+      cui_permitted: false
+      cui_categories_permitted: []
+      dissemination_permitted: ["Distribution Statement A"]
+    accreditation_ref: null
+    policy: AUS
+```
+
+A level the selected system does not rank — a typo, a caveat-bearing marking, another
+system's level — is **invalid** and refuses the load. It never silently becomes `Gated`.
+(Corrected 2026-09-06: case variants such as `secret` are accepted; earlier text made
+them a refusal, which was the live bug #148's sibling.)
 
 ---
 
