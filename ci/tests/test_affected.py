@@ -54,6 +54,68 @@ class AffectedTests(unittest.TestCase):
         for event in ('pull_request', 'push'):
             self.assertEqual(self.select(event=event)['build'], False)
 
+    def test_operational_docs_skip_rust_on_pr_and_push(self):
+        for path in ('packaging/README.md', 'packaging/rpm/README.md',
+                     'packaging/deb/README.md', 'packaging/macos/README.md',
+                     'packaging/isolation-contract.md', 'ci/hooks/README.md',
+                     'deploy/vault-pki/README.md'):
+            with self.subTest(path=path):
+                self.git('reset', '--hard', self.base)
+                self.write(path, 'documentation update\n')
+                self.commit()
+                for event in ('pull_request', 'push'):
+                    result = self.select(event=event)
+                    self.assertFalse(result['build'], result)
+                    self.assertEqual(result['mutants'], [])
+                    self.assertEqual(result['darwin'], [])
+
+    def test_operational_docs_do_not_hide_code_or_unknown_inputs(self):
+        for path in ('packaging/common/authz.yaml', 'packaging/fixture.md',
+                     'ci/hooks/pre-push', 'deploy/vault-pki/fixture.md'):
+            with self.subTest(path=path):
+                self.git('reset', '--hard', self.base)
+                self.write('packaging/README.md', 'docs\n')
+                self.write(path, 'changed\n')
+                self.commit()
+                self.assertEqual(self.select()['mutants'], ['a', 'b', 'c'])
+        self.git('reset', '--hard', self.base)
+        self.write('packaging/README.md', 'docs\n')
+        self.write('crates/a/src/lib.rs', '// changed\n')
+        self.commit()
+        self.assertEqual(self.select()['mutants'], ['a', 'b'])
+
+    def test_docs_only_merge_after_main_code_change_skips_rust(self):
+        self.git('checkout', '-qb', 'docs')
+        self.write('packaging/README.md', 'docs\n')
+        self.commit()
+        self.git('checkout', '-q', '-')
+        self.write('crates/c/src/lib.rs', '// main changed\n')
+        before_merge = self.commit()
+        self.git('merge', '--no-ff', '-qm', 'merge docs', 'docs')
+        self.assertFalse(self.select(base=before_merge, event='push')['build'])
+
+    def test_docs_only_workflow_still_rejects_invalid_isolation_contract(self):
+        contract = 'packaging/isolation-contract.md'
+        self.write(contract, '| descriptor | ✓ | ✓ | ✓ | ✓ |\n')
+        self.base = self.commit()
+        # Real gate accepts the starting contract, then rejects an empty cell.
+        gate = SELECTOR.parent / 'gates/isolation-contract-lint.sh'
+        good = subprocess.run(['bash', str(gate), str(self.root)],
+                              capture_output=True, text=True)
+        self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
+        self.write(contract, '| descriptor | ✓ | | ✓ | ✓ |\n')
+        self.commit()
+        bad = subprocess.run(['bash', str(gate), str(self.root)],
+                             capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn('EMPTY', bad.stdout)
+        self.assertFalse(self.select()['build'])
+        workflow = (SELECTOR.parent.parent / '.github/workflows/ci.yml').read_text()
+        affected = workflow.split('  affected:\n', 1)[1].split('\n  build-and-gate:', 1)[0]
+        self.assertIn('run: ci/gates/isolation-contract-lint.sh', affected)
+        self.assertNotIn('        if:', affected)
+        self.assertEqual(workflow.count('run: ci/gates/isolation-contract-lint.sh'), 1)
+
     def test_source_and_test_changes_include_reverse_dev_dependencies(self):
         for path in ('crates/a/src/lib.rs', 'crates/a/tests/a test\ncase.rs'):
             self.write(path, '// changed\n')
@@ -174,18 +236,30 @@ class AffectedTests(unittest.TestCase):
         self.assertIn('design/contract.md:1 cites an external', proc.stdout)
 
 
-    def hook(self, base, mutations=False):
+    def hook(self, base, mutations=False, invalid_contract=False):
         # A recording shell gate proves invocation/selection, not coverage itself.
         self.write('ci/affected.py', SELECTOR.read_text())
         hook = SELECTOR.parent / 'hooks/pre-push'
         self.write('ci/hooks/pre-push', hook.read_text())
         self.write('ci/gates/coverage-tiers.sh', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RECORD"\n')
+        for name in ('external-authority-lint.sh', 'isolation-contract-lint.sh'):
+            self.write('ci/gates/' + name, (SELECTOR.parent / 'gates' / name).read_text())
+        self.write('design/contract.md', 'Local authority.\n')
+        self.write('AGENTS.md', 'Local authority.\n')
+        self.write('packaging/isolation-contract.md',
+                   '| descriptor | ✓ | | ✓ | ✓ |\n' if invalid_contract else
+                   '| descriptor | ✓ | ✓ | ✓ | ✓ |\n')
         record = self.root / 'invocations'
         proc = subprocess.run(['bash', 'ci/hooks/pre-push'], cwd=self.root,
                               input=f'refs/heads/topic {self.git("rev-parse", "HEAD")} refs/heads/topic {base}\n',
                               env={**os.environ, 'RECORD': str(record),
                                    'MAKNAE_PRE_PUSH_MUTANTS': '1' if mutations else '0'},
                               capture_output=True, text=True)
+        if invalid_contract:
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn('EMPTY', proc.stdout)
+            self.assertFalse(record.exists(), 'Rust gate ran after invalid documentation')
+            return
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return record.read_text().splitlines() if record.exists() else []
 
@@ -193,6 +267,11 @@ class AffectedTests(unittest.TestCase):
         self.write('README.md', 'docs\n')
         self.commit()
         self.assertEqual(self.hook(self.base, mutations=True), [])
+
+    def test_hook_rejects_invalid_docs_without_running_rust(self):
+        self.write('packaging/isolation-contract.md', '| descriptor | ✓ | | ✓ | ✓ |\n')
+        self.commit()
+        self.hook(self.base, mutations=True, invalid_contract=True)
 
     def test_hook_runs_coverage_and_optional_selected_mutation(self):
         self.write('crates/a/src/lib.rs', '// changed\n')

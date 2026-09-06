@@ -57,6 +57,8 @@ jobs:
           fetch-depth: 0
       - name: External-authority lint (#34 — no Maknae rule rests on a foreign ADR)
         run: ci/gates/external-authority-lint.sh
+      - name: Isolation-contract lint (also required for documentation-only changes)
+        run: ci/gates/isolation-contract-lint.sh
       - name: Selector fixtures (including negative cases)
         run: python3 -m unittest discover -s ci/tests -v
       - name: Select affected packages
@@ -77,6 +79,14 @@ jobs:
     # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
     # this a regression burns the 360-minute default and emits no diagnostic.
     timeout-minutes: 30
+    env:
+      # Exact versions from the passing #235 merge run. Floating installs made
+      # cold and cached runs use different tools; every pin participates in its
+      # executable-only cache key. No coverage reports or test outcomes cached.
+      CARGO_DENY_VERSION: "0.19.9"
+      CARGO_AUDITABLE_VERSION: "0.7.5"
+      RUST_AUDIT_INFO_VERSION: "0.5.4"
+      CARGO_LLVM_COV_VERSION: "0.8.7"
     steps:
       - uses: actions/checkout@v4
       - name: Require successful lightweight gates and selection
@@ -85,11 +95,21 @@ jobs:
         run: test "$SELECTOR_RESULT" = success
       - name: Install toolchain (pinned)
         run: rustup show   # honors rust-toolchain.toml
+      - name: Cache gate-tool executables
+        id: gate-tools-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-auditable
+            ~/.cargo/bin/rust-audit-info
+          key: gate-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-deny-${{ env.CARGO_DENY_VERSION }}-auditable-${{ env.CARGO_AUDITABLE_VERSION }}-audit-info-${{ env.RUST_AUDIT_INFO_VERSION }}
       - name: Install gate tooling (BEFORE the auditable builds that need it)
+        if: steps.gate-tools-cache.outputs.cache-hit != 'true'
         run: |
-          cargo install cargo-deny --version "^0.19" --locked
-          cargo install cargo-auditable --locked
-          cargo install rust-audit-info --locked
+          cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+          cargo install cargo-auditable --version "$CARGO_AUDITABLE_VERSION" --locked
+          cargo install rust-audit-info --version "$RUST_AUDIT_INFO_VERSION" --locked
       - name: fmt
         run: cargo fmt --all --check
       - name: Panic strategy must be unwind (maknae-config catch_unwind boundary depends on it)
@@ -123,18 +143,23 @@ jobs:
         run: ci/gates/negative-control.sh
       - name: Direct std::fs production drift is forbidden
         run: ci/gates/std-fs-drift.sh .
-      - name: Isolation-contract lint
-        run: ci/gates/isolation-contract-lint.sh
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
       - name: Gate — config-disclosure drift (#162)
         run: ci/gates/config-disclosure-drift.sh
       - name: Gate — authz composition drift (ADR-0008 decision 1; #154/#148)
         run: ci/gates/authz-composition-drift.sh
-      - name: Coverage tooling (llvm-tools + cargo-llvm-cov pinned)
-        run: |
-          rustup component add llvm-tools
-          cargo install cargo-llvm-cov --locked --version "^0.8"
+      - name: Coverage toolchain component (also required on cache hits)
+        run: rustup component add llvm-tools
+      - name: Cache coverage-tool executable
+        id: coverage-tool-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          key: cargo-llvm-cov-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ env.CARGO_LLVM_COV_VERSION }}
+      - name: Install coverage tooling (pinned)
+        if: steps.coverage-tool-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
       - name: Coverage-tiers fixture suite (gate proven to fire, all modes)
         run: ci/gates/tests/coverage-tiers/run.sh
       - name: Coverage-tiers gate (live; CI is the lane of record)

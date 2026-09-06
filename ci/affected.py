@@ -65,7 +65,11 @@ def workspace(root):
 def docs_only(path):
     # Deliberate allowlist, not '*.md': fixtures/configs can be Markdown too.
     return path in {'README.md', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md',
-                    'SECURITY.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE'} or (
+                    'SECURITY.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE',
+                    'packaging/README.md', 'packaging/rpm/README.md',
+                    'packaging/deb/README.md', 'packaging/macos/README.md',
+                    'packaging/isolation-contract.md', 'ci/hooks/README.md',
+                    'deploy/vault-pki/README.md'} or (
         path.startswith(('design/', 'docs/')) and path.endswith(('.md', '.png', '.svg')))
 
 
