@@ -65,9 +65,9 @@ cargo build --workspace
 
 ## The pre-push gate
 
-CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. The lightweight job always runs external-authority lint, including on documentation-only updates. Unknown inputs or missing history select all; unreadable selection authority fails. **Run it locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
+CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; mutation and Darwin jobs select complete affected packages, including reverse dependencies. Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. The lightweight job always runs external-authority and isolation-contract lint, including on documentation-only updates. The allowlist covers the existing packaging READMEs and isolation contract, deployment README, and hook README as well as root/design/docs prose; unknown Markdown fixtures and packaging configuration are still build inputs. Unknown inputs or missing history select all; unreadable selection authority fails. **Run the applicable checks locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
 
-At minimum, before every commit:
+For Rust changes, before committing:
 
 ```bash
 cargo fmt --all --check
@@ -77,7 +77,14 @@ done
 cargo test --workspace
 ```
 
-For source changes, run the applicable heavier gates before pushing (derive the current, authoritative set from `ci.yml`; documentation-only changes still run `ci/gates/external-authority-lint.sh`):
+For documentation-only changes, run these checks without compiling Rust:
+
+```bash
+bash ci/gates/external-authority-lint.sh
+bash ci/gates/isolation-contract-lint.sh
+```
+
+For source changes, run the applicable heavier gates before pushing (derive the current, authoritative set from `ci.yml`):
 
 ```bash
 cargo deny check
@@ -91,6 +98,8 @@ bash ci/gates/coverage-tiers.sh --root .            # risk-tiered coverage (ADR-
 ```
 
 Enable the local hook with `git config core.hooksPath ci/hooks`. It reads the incoming pre-push ref updates (remote old SHA to local new SHA), so it works with any remote name and checks merge pushes correctly. It runs aggregate coverage for source changes. Mutations are opt-in with `MAKNAE_PRE_PUSH_MUTANTS=1 git push`; a push of a ref other than the current checkout is refused because local gates cannot attest to that ref's contents.
+
+CI also caches the cargo-deny, cargo-auditable, rust-audit-info, and cargo-llvm-cov executables using exact version pins from the passing #235 merge run, keyed by OS, architecture, and Rust toolchain. Update a tool's version in the workflow to invalidate its cache. An exact cache miss compiles the pinned tool with `--locked`; the LLVM component is installed independently of cache hits. Coverage and mutation results are always regenerated. The #235 merge run spent 191 seconds installing the three build-gate tools and 70 seconds on coverage tooling, so a warm cache can avoid most of that 261-second cost, less cache transfer overhead. Cold runs still pay the installation cost; hosted savings must be confirmed from subsequent warm runs.
 
 Inspect the same selection before running expensive work (Python 3.11 or newer):
 
