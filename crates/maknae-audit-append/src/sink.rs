@@ -144,7 +144,7 @@ fn open_audit_file(path: &Path) -> Result<File, AuditError> {
 
 /// The append-only JSONL audit sink: single-writer, off-runtime blocking I/O.
 pub struct AuditSink {
-    primary: Arc<Mutex<File>>,
+    primary: Arc<Mutex<Primary>>,
     breaker: Arc<Mutex<BlockingBreaker>>,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
@@ -156,6 +156,22 @@ pub struct AuditSink {
     /// has no endpoint that can be missing, so the macOS `open` is infallible in
     /// practice and the `Option` is shape parity, not a guard.
     mirror: Option<Mirror>,
+}
+
+struct Primary {
+    file: File,
+    // Protected by the writer mutex: no queued writer can acknowledge a later
+    // line after a failed/partial write or uncertain synchronization.
+    failed: bool,
+}
+
+impl Primary {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            failed: false,
+        }
+    }
 }
 
 impl AuditSink {
@@ -187,7 +203,7 @@ impl AuditSink {
         #[cfg(unix)]
         validate_secure_audit_file(&file, &cfg.jsonl_path)?;
         Ok(AuditSink {
-            primary: Arc::new(Mutex::new(file)),
+            primary: Arc::new(Mutex::new(Primary::new(file))),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
             path: cfg.jsonl_path.clone(),
             mirror: Mirror::open(journal),
@@ -301,19 +317,28 @@ impl AuditSink {
     }
 }
 
-fn write_line(file: &Mutex<File>, line: &str) -> Result<(), AuditError> {
-    // A poisoned mutex (a prior writer panicked mid-write) still holds a
-    // possibly-torn file handle; recovering it is strictly better than
-    // wedging every subsequent append forever, and any partial prior write
-    // is on the writer's own line (JSONL readers already must tolerate a
-    // truncated last line from an unclean shutdown).
-    let mut guard = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
+    // A writer panic may leave a partial JSONL line. Appending after it would
+    // acknowledge a record spliced into that line, not a durable valid record.
+    let mut guard = file.lock().map_err(|_| {
+        AuditError::WritePrimary("audit writer panicked; primary sink requires recovery".into())
+    })?;
+    if guard.failed {
+        return Err(AuditError::WritePrimary(
+            "prior audit append failed; primary sink requires recovery".into(),
+        ));
+    }
+    guard.failed = true;
     guard
+        .file
         .write_all(line.as_bytes())
         .map_err(|e| AuditError::WritePrimary(e.to_string()))?;
     guard
+        .file
         .sync_data()
-        .map_err(|e| AuditError::WritePrimary(e.to_string()))
+        .map_err(|e| AuditError::WritePrimary(e.to_string()))?;
+    guard.failed = false;
+    Ok(())
 }
 
 /// The interface the run-loop (Task 7) is generic over. **RPITIT + `Send`**
@@ -389,6 +414,81 @@ mod tests {
                 sig: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn append_after_writer_panic_preserves_the_torn_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let sink = AuditSink::open(&cfg).unwrap();
+        let primary = Arc::clone(&sink.primary);
+        let partial = b"{\"sentinel\":\"interrupted-audit-158";
+        let worker = std::thread::spawn(move || {
+            let mut file = primary.lock().unwrap();
+            file.file.write_all(partial).unwrap();
+            panic!("simulate a writer panic after actual partial bytes");
+        });
+        assert!(worker.join().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), partial);
+        let result = sink.append(&sample_record()).await;
+        assert!(
+            result.is_err(),
+            "a torn audit line must block later acknowledgments"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), partial);
+    }
+
+    #[tokio::test]
+    async fn append_after_primary_write_failure_stays_refused() {
+        assert_primary_failure_stays_refused(false).await;
+    }
+
+    #[tokio::test]
+    async fn append_after_primary_sync_failure_stays_refused() {
+        assert_primary_failure_stays_refused(true).await;
+    }
+
+    async fn assert_primary_failure_stays_refused(sync_failure: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let sink = AuditSink::open(&cfg).unwrap();
+        sink.append(&sample_record()).await.unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // Real kernel errors: read-only fd makes write fail; writable /dev/null
+        // accepts the bytes but cannot synchronize them. Restore only the fd to
+        // simulate a recovered device, preserving all production failure state.
+        let fault = std::fs::OpenOptions::new()
+            .read(true)
+            .write(sync_failure)
+            .open("/dev/null")
+            .unwrap();
+        let expected = if sync_failure {
+            fault.sync_data().unwrap_err().to_string()
+        } else {
+            (&fault).write_all(b"probe").unwrap_err().to_string()
+        };
+        let healthy = std::mem::replace(&mut sink.primary.lock().unwrap().file, fault);
+        let error = sink.append(&sample_record()).await.unwrap_err();
+        assert!(
+            error.to_string().contains(&expected),
+            "wrong injected failure: {error}"
+        );
+        sink.primary.lock().unwrap().file = healthy;
+        assert!(
+            sink.append(&sample_record()).await.is_err(),
+            "a primary failure must block later acknowledgments even after the device recovers"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[tokio::test]
@@ -687,7 +787,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (rx, jpath) = journal_receiver(dir.path());
         let mut sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
-        sink.primary = Arc::new(Mutex::new(File::open("/dev/null").unwrap()));
+        sink.primary = Arc::new(Mutex::new(Primary::new(File::open("/dev/null").unwrap())));
         assert!(
             sink.append(&sample_record()).await.is_err(),
             "the primary write must fail"
@@ -1089,7 +1189,7 @@ mod tests {
         let n_failed = macos_nonce();
         {
             let mut sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
-            sink.primary = Arc::new(Mutex::new(File::open("/dev/null").unwrap()));
+            sink.primary = Arc::new(Mutex::new(Primary::new(File::open("/dev/null").unwrap())));
             let mut r = sample_record();
             r.session_id = n_failed;
             assert!(

@@ -73,6 +73,10 @@ This ADR covers audit **content, sinks, and compliance posture** for Stage 3a. I
 | Identity preservation | Resolvable subject identity; specific group-member identity captured | AU-3f | Classified Information Overlay (insider-threat, public) |
 | OSS-vs-CUI boundary | Public-standard fields shipped; CNSSI-1015 specifics via deployer `au3_1` config | (governance) | CNSSI 1253 → CNSSI 1015 (CUI, not ingested) |
 
+## Amendment (2026-09-07, #158) — primary failure persists
+
+**Corrected:** the sink previously recovered a poisoned writer mutex and allowed later appends after a write or synchronization failure. A partial JSONL record could therefore absorb the next record while that append returned success. That acknowledgment is unsuitable for audit-before-mutate. A primary write, synchronization failure, or writer panic now refuses every subsequent append for the lifetime of that sink; the failure state is protected by the same mutex as the file. The system-log mirror remains best-effort and cannot restore primary availability. This is a prerequisite for #158's mutation intent/completion mechanism, not delivery of that mechanism. It does not claim repair of a torn file on restart or durability of a newly created parent-directory entry.
+
 ## References
 
 - NIST SP 800-53r5 (AU-2/AU-3/AU-3(1)/AU-8/AU-9/AU-10/AU-12) and SP 800-53B (HIGH baseline) — public. CNSSI 1253 (2022) and the Classified Information Overlay — public. **CNSSI No. 1015 — CUI, deliberately not ingested.**
