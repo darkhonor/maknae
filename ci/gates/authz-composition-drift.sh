@@ -11,7 +11,7 @@
 # its statement by its boundary (`;` / `{` / `}`), not by the previous newline,
 # so a rustfmt re-wrap cannot fire it either.
 #
-# Five checks, mapped to ADR-0008 decision 1's four layers:
+# Six checks, mapped to ADR-0008 decision 1's four layers:
 #   1. (type-level) The production PDP is built UNCONDITIONALLY, from the
 #      BOOTED config and the boot gate's own return value: one plain
 #      `let authorizer = ...build_pdp(&boot, authorizer)` statement in run.rs,
@@ -40,6 +40,17 @@
 #      the ceiling LEVEL (`; system: {..}; ceiling: {..}`) -- AND EMITS it
 #      (`sink.emit(&composition_rec)`), both in the production half. Its VALUE is
 #      asserted by the root-only boot test on a test host.
+#   6. (type-level, whole tree) `Composition::new(` and `CeilingAuthorizer::new(`
+#      are called NOWHERE in production code except the two files that define
+#      them (`composition.rs` -- where `build_pdp` is the one production
+#      caller -- and `ceiling_authz.rs`). The constructors stay `pub` for the
+#      integration harness; this check is what keeps a second, hand-built
+#      composition from being routed to the serve loop from any other module
+#      (operator ruling 2026-09-06 on PR #231: keep them public, gate the
+#      call sites). Struct-literal construction needs no check: both types'
+#      fields are private, so Rust's own privacy already confines it to the
+#      defining file. Content-keyed on the constructor names with comments
+#      blanked; exemption by PATH, never by line.
 #
 # WHAT THIS GATE DOES NOT HOLD, stated so it is not over-read: checks 1-3 pin
 # the composition's SHAPE. That the ceiling is actually CONSULTED -- that
@@ -182,8 +193,26 @@ if run:
     if "sink.emit(&composition_rec)" not in run:
         fail("run.rs: the boot composition evidence record is constructed but never EMITTED (no `sink.emit(&composition_rec)`)")
 
+# 6. The constructors are called only where they are defined.
+def strip_comments(src: str) -> str:
+    """Blank `//` line comments and `/* */` block comments, preserving length
+    so nothing in the blanked text can match, and nothing else moves."""
+    def blank(m):
+        return "".join("\n" if c == "\n" else " " for c in m.group(0))
+    out = re.sub(r"/\*.*?\*/", blank, src, flags=re.S)
+    return re.sub(r"//[^\n]*", blank, out)
+DEFINING = {"crates/maknae-kernel/src/composition.rs", "crates/maknae-kernel/src/ceiling_authz.rs"}
+ctor = re.compile(r"\b(Composition|CeilingAuthorizer)\s*::\s*new\s*\(")
+for p in all_rs:
+    rel = str(p.relative_to(root))
+    if rel in DEFINING:
+        continue
+    text = strip_comments(production_half(p.read_text(errors="replace")))
+    for mm in ctor.finditer(text):
+        fail(f"{rel}: calls `{mm.group(1)}::new(` outside its defining file -- production composes ONLY through `build_pdp` (check 6)")
+
 if fails:
     for f in fails: print(f"FAIL: {f}")
     sys.exit(1)
-print("authz-composition-drift: ok (5 checks over ADR-0008 decision 1's four layers)")
+print("authz-composition-drift: ok (6 checks over ADR-0008 decision 1's four layers)")
 PY

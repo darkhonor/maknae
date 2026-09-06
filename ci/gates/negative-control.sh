@@ -1673,8 +1673,8 @@ fi
 # purpose is "the baseline cannot be removed" must be SEEN rejecting each way of
 # removing it. One minimal fixture, at least one corruption per `fail(` CALL
 # SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
-# 4 found the hand count wrong twice): the gate has 20 `fail(` sites; the
-# 27 probes below map onto every one of them by their `why` substring
+# 4 found the hand count wrong twice): the gate has 21 `fail(` sites; the
+# 29 probes below map onto every one of them by their `why` substring
 # (a probe's `why` is a literal substring of exactly the message it targets),
 # and the two parameterized sites -- `missing <file>` and `missing <base>/` --
 # are probed once per parameter value (3 files, 2 bases). A probe whose `why`
@@ -1712,6 +1712,8 @@ pub struct Composition<B: Baseline> {
 mod tests {}
 RS
   printf 'const LAKE_SECTION: &str = "lake";\n' > "$f/crates/maknae-kernel/src/boot.rs"
+  # The defining file for the ceiling operand: its own `new` is exempt BY PATH (check 6).
+  printf 'pub struct CeilingAuthorizer;\nimpl CeilingAuthorizer { pub fn new() -> Self { CeilingAuthorizer } }\nfn own() { let _ = CeilingAuthorizer::new(); }\n#[cfg(test)]\nmod tests {}\n' > "$f/crates/maknae-kernel/src/ceiling_authz.rs"
   cat > "$f/crates/maknae-authz-basic/src/lib.rs" <<'RS'
 pub trait Baseline: Authorizer + sealed::Sealed + Send + Sync + 'static {}
 mod sealed { pub trait Sealed {} }
@@ -1793,9 +1795,21 @@ composition_reject "bins-dir-missing" "missing bins/" \
   'import shutil; shutil.rmtree(root/"bins")'
 composition_reject "evidence-reason-lacks-system-and-ceiling" "must carry '; system:" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("; system: {sys}; ceiling: {lvl}", ""))'
+# check 6 -- constructor call sites outside the defining files
+composition_reject "composition-new-in-another-kernel-module" "calls \`Composition::new(\` outside its defining file" \
+  'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = crate::composition::Composition::new(a, b); }\n")'
+composition_reject "ceiling-new-in-a-bin" "calls \`CeilingAuthorizer::new(\` outside its defining file" \
+  'p=root/"bins/maknaed/src/main.rs"; p.write_text(p.read_text()+"fn shadow() { let _ = maknae_kernel::CeilingAuthorizer::new(c, p); }\n")'
 composition_reject "evidence-record-removed" "boot composition evidence record" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(re.sub(r"    let composition_rec = make_record\(.*?\n    \);\n", "", p.read_text(), flags=re.S))'
 f="$(composition_fixture)"; expect_accept "authz-composition-drift/clean-fixture" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
+# A commented-out or test-module construction is NOT a site (comments blanked; production half only).
+f="$(composition_fixture)"; python3 - "$f" <<'PYFIX'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-kernel/src/boot.rs"
+p.write_text(p.read_text() + "// let _ = Composition::new(a, b);\n/* CeilingAuthorizer::new(c, p) */\n#[cfg(test)]\nmod tests { fn t() { let _ = crate::composition::Composition::new(a, b); } }\n")
+PYFIX
+expect_accept "authz-composition-drift/commented-or-test-construction-is-not-a-site" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
 expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" "$here/authz-composition-drift.sh" "$here/../.."
 
 
