@@ -151,9 +151,11 @@ jobs:
     needs: affected
     if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '') }}
     runs-on: ubuntu-latest
-    # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
-    # this a regression burns the 360-minute default and emits no diagnostic.
-    timeout-minutes: 30
+    # A cold all-package run previously took 29m13s; #126 adds ~67s to the
+    # I/O gate in serial local measurements. Keep a bounded job budget with
+    # room for the required full run on shared configuration changes. Normal
+    # source changes select affected crates; individual mutant timeouts remain.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -206,23 +208,17 @@ jobs:
         run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
         run: rustup show
-      - name: Add darwin targets
-        run: |
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
-      - name: Cross-compile check (both darwin arches)
+      - name: Add supported darwin target
+        run: rustup target add aarch64-apple-darwin
+      - name: Cross-compile check (Apple Silicon)
         run: |
           set -euo pipefail
           pkgs=()
           test -n "$PACKAGES"
           read -r -a packages <<< "$PACKAGES"
           for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
-          # Apple Silicon first: it is the fleet arch and the operator's own host.
-          for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            echo "::group::cargo check --target $t"
-            cargo check "${pkgs[@]}" --target "$t" --all-targets
-            echo "::endgroup::"
-          done
+          # Apple Silicon is the supported macOS architecture (AGENTS.md).
+          cargo check "${pkgs[@]}" --target aarch64-apple-darwin --all-targets
 
   darwin-native:
     needs: affected

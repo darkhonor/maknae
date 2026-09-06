@@ -64,13 +64,10 @@ files = [
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
-  # Promoted from [[t3]] once it reached 100%. MEASURED ON BOTH LANES, because the
-  # cfg(linux) openat2 block and the real probe are regions darwin never compiles and
-  # CI enforces the floor on Linux: darwin 87/87, Linux 107/107, both 100.00%. The
-  # delta is NET, and the earlier phrasing did not reconcile — 87 - 3 + 20 is 104, not
-  # 107. Correctly: the darwin `probe_openat2` stub is 3 regions and disappears on
-  # Linux, while `openat2_resolve` plus the real `probe_openat2` add 23, for a net +20.
-  # All of them are covered, and the file carries NO exceptions, so both figures are raw.
+  # Raw T1 syscall coverage, with no exceptions. Corrected 2026-09-06 (#126):
+  # current measurements are macOS 97/97 and Linux 116/116, both 100.00%.
+  # The earlier 87/87 and 107/107 figures described the promotion revision,
+  # before fd_path and the shared directory opener; they are not current counts.
   "crates/maknae-io/src/syscall.rs",
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",

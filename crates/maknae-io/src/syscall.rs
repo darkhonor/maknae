@@ -4,7 +4,8 @@
 //! (`OFlag`, `Mode`, `ResolveFlag`, `AtFlags` are four `libc_bitflags!` families) and
 //! by *which* syscall variant is called. `cargo-mutants`' `replace | with ^` on a
 //! disjoint union is behaviourally identical — an *equivalent* mutant: unkillable,
-//! reported MISSED, gate fails. So this file is `exclude_globs`.
+//! reported MISSED. Only that replacement family is excluded; the rest of this
+//! file is mutation-gated on its native platform (corrected 2026-09-06, #126).
 
 use crate::error::IoError;
 use nix::fcntl::{AtFlags, OFlag};
@@ -49,8 +50,8 @@ pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
 //
 // Mutation cannot isolate a single flag: `&` binds tighter than `|`, so every
 // `| with &` mutant drops the TWO ADJACENT operands and is killed by whichever half
-// happens to be covered. This file is also whole-file `exclude_globs`. So the only way
-// to know whether a flag is HELD is to delete it and run the suite. Three real defects
+// happens to be covered. To know whether an individual flag is HELD, delete it
+// and run its behavioral control, in addition to the automatic mutation suite. Three real defects
 // were found exactly this way -- row 0's O_DIRECTORY (FIFO hang at startup),
 // open_append's O_NOFOLLOW (audit records written outside the anchor), and
 // openat2_resolve's O_NONBLOCK (FIFO hang on the fast read lane) -- so the sweep is
@@ -73,8 +74,10 @@ pub(crate) fn nlink_count(n: nix::libc::nlink_t) -> u64 {
 //     O_NONBLOCK                    inode -- a planted name is EEXIST, nothing blocks.
 //   openat2_resolve O_DIRECTORY     Only the want_dir branch, reached solely by
 //     (want_dir arm)                probe_openat2 against `.`.
-//   RESOLVE_BENEATH                 `normalize` refuses an escaping `..` above this
-//                                   seam, so the kernel check is belt-and-braces.
+//   RESOLVE_BENEATH                 `normalize` also refuses an escaping `..`.
+//                                   Corrected 2026-09-06 (#126): the raw wrapper
+//                                   now has a direct escape control, independently
+//                                   holding the kernel's containment guarantee.
 //
 // Everything else is RED or HANGs, i.e. held. Two are held by HANGING rather than
 // failing -- open_read_target's and open_append's O_NONBLOCK -- which is why the FIFO
@@ -332,9 +335,9 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
 mod tests {
     //! Every open verb must set `FD_CLOEXEC`.
     //!
-    //! This file composes the flags that ARE the crate's security model, and it is
-    //! `exclude_globs` (no mutants, because bitflag unions yield equivalent mutants),
-    //! so until these tests existed the flag unions had NO automated control at all:
+    //! This file composes the flags that ARE the crate's security model. Before
+    //! these tests existed, its whole-file mutation exclusion left the flag unions
+    //! without an automated control:
     //! stripping `O_CLOEXEC` from all seven opens left 89/89 green. It was also
     //! `[[t3]]` then — report-only, no floor — and has since been promoted to `[t1]`,
     //! so a coverage floor now backs these assertions.
@@ -458,6 +461,19 @@ mod tests {
         assert_eq!(
             openat2_resolve(&parent, "file", true).unwrap_err(),
             nix::errno::Errno::ENOTDIR
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openat2_refuses_escape_without_a_symlink() {
+        let d = tmp();
+        std::fs::create_dir(d.path().join("anchor")).unwrap();
+        std::fs::write(d.path().join("outside"), b"outside sentinel").unwrap();
+        let parent = open_parent_by_path(&d.path().join("anchor")).unwrap();
+        assert_eq!(
+            openat2_resolve(&parent, "../outside", false).unwrap_err(),
+            nix::errno::Errno::EXDEV
         );
     }
 

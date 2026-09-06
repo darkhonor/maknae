@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -58,6 +59,21 @@ class PlatformSelection(unittest.TestCase):
         result = subprocess.run(["bash", str(SCRIPT), "Plan9"], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported native mutation host", result.stderr)
+
+    def test_config_excludes_only_the_equivalent_syscall_family(self):
+        configured = subprocess.check_output([
+            "cargo", "mutants", "-p", "maknae-io", "--file",
+            "crates/maknae-io/src/syscall.rs", "--list",
+        ], cwd=ROOT, text=True).splitlines()
+        equivalent = {m for m in INVENTORY if "replace | with ^ in " in m}
+        self.assertEqual(len(equivalent), 22, "review the disjoint-union inventory when it changes")
+        self.assertEqual(set(configured), set(INVENTORY) - equivalent)
+        patterns = tomllib.loads((ROOT / ".cargo/mutants.toml").read_text())["exclude_re"]
+        # A new function or another file has no equivalence review yet.
+        for mutant in equivalent:
+            for nearby in (mutant.replace("syscall.rs:", "other.rs:"),
+                           mutant.rsplit(" in ", 1)[0] + " in future_open"):
+                self.assertFalse(any(re.search(pattern, nearby) for pattern in patterns))
 
     def test_gate_passes_native_filter_as_one_argument(self):
         # The real gate, with its documented injection fixture interface. This
