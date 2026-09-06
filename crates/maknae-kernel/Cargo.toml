@@ -20,6 +20,9 @@ maknae-subject-ctx-mint = { path = "../maknae-subject-ctx-mint" }
 maknae-audit-append = { path = "../maknae-audit-append" }
 maknae-security = { path = "../maknae-security" }
 maknae-authz-basic = { path = "../maknae-authz-basic" }
+# The seam's first non-kernel classification system (ADR-0022): compiled in so
+# `core.handling.policy: AUS` boots; it brings no authorizer and no lattice.
+maknae-classification-aus = { path = "../maknae-classification-aus" }
 maknae-io = { path = "../maknae-io" }
 maknae-msgs = { path = "../maknae-msgs" }
 nix = { version = "0.31", default-features = false, features = ["user"] }
