@@ -90,7 +90,7 @@ fn endpoint_is_acceptable(url: &str) -> bool {
     // The AUTHORITY is everything up to the first '/'; it must not carry
     // userinfo, and it must name a host.
     let authority = rest.split('/').next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') {
+    if authority.contains('@') {
         return false;
     }
     // host[:port]; a bracketed IPv6 host, or a DNS-label/IPv4 host of
@@ -304,6 +304,9 @@ mod tests {
             "http://[::1]:9/v1",
             "https://api.openai.com:8443/v1",
             "https://10.0.0.5/v1",
+            // a bare bracketed loopback, no port; a five-digit port
+            "http://[::1]/v1",
+            "https://api.openai.com:65535/v1",
         ] {
             assert!(
                 parse(&OK.replace("https://api.openai.com/v1", ok)).is_ok(),
@@ -341,6 +344,8 @@ mod tests {
             "https://bad.example./v1",
             "https://exa mple/v1",
             "https://[::1]x/v1",
+            "http://[zz::1]/v1",
+            "http://[::1]:/v1",
         ] {
             match parse(&OK.replace("https://api.openai.com/v1", bad)) {
                 Err(ConfigError::InvalidProvider(r)) => {

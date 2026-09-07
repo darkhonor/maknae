@@ -175,6 +175,20 @@ fn is_yaml_ext(name: &str) -> bool {
 /// read — so a world-writable `config.d/` is caught before a bad base is opened).
 #[cfg(unix)]
 pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError> {
+    scan_dir_anchored(dir).map(|(_, buffers)| buffers)
+}
+
+/// [`scan_dir`], returning the anchor the scan was read through as well, so a
+/// caller that must re-judge the directory later ([`load_config_rooted`]) asks
+/// the SAME open fd -- the standing `maknae-io` rule that the checked inode is
+/// the used inode. A second `open_anchor_resolved` on the path would follow a
+/// top-level symlink again, and one repointed between the two opens would hand
+/// verification a different tree than the scan read (codex review round 3,
+/// 2026-09-07).
+#[cfg(unix)]
+pub(crate) fn scan_dir_anchored(
+    dir: &Path,
+) -> Result<(maknae_io::Anchor, Vec<(Source, String)>), ConfigError> {
     let root = std::path::absolute(dir).map_err(io_err)?;
     let anchor = maknae_io::open_anchor_resolved(
         &root,
@@ -273,7 +287,7 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
         )?;
         out.push((Source::ConfigD(p), body));
     }
-    Ok(out)
+    Ok((anchor, out))
 }
 
 /// Parse each buffer and merge into a `Document` (spec §4 precedence): base
@@ -408,9 +422,10 @@ pub fn load_config(dir: &Path, specs: &[SectionSpec]) -> Result<Document, Config
 /// and `config.d/` themselves. Without that, a subject who owns the directory
 /// chooses between root-authored candidates by renaming one out of the scan
 /// (codex review, 2026-09-07). The source is re-read under the stricter
-/// requirement through a fresh anchor pinned on the same root directory and its
-/// bytes must equal what was loaded, so the file that was checked is the file
-/// that was used. A root-required section that is absent is not an error:
+/// requirement through the SAME open directory the scan read it from -- never a
+/// second open of the path, which a repointed top-level symlink could send to
+/// another tree -- and its bytes must equal what was loaded, so the file that
+/// was checked is the file that was used. A root-required section that is absent is not an error:
 /// absence is the unregistered state, and the caller decides what that means.
 pub fn load_config_rooted(
     dir: &Path,
@@ -450,7 +465,8 @@ fn load_config_rooted_with(
     requirement: maknae_io::TargetRequired,
 ) -> Result<Document, ConfigError> {
     validate_specs(specs)?;
-    let buffers = scan_dir(dir)?;
+    // The anchor the scan read through is the one every later check asks.
+    let (anchor, buffers) = scan_dir_anchored(dir)?;
     // Keep the buffers: the re-read below must equal what was assembled.
     let doc = assemble(buffers.clone(), &Registry { specs })?;
     let root = std::path::absolute(dir).map_err(io_err)?;
@@ -460,7 +476,7 @@ fn load_config_rooted_with(
     // round 2 named: the subject hides the root-authored override by renaming
     // it, and the base file, itself root-owned, wins.
     if root_sections.iter().any(|s| doc.source_of(s).is_some()) {
-        verify_selection_dirs(&root, &requirement).map_err(|()| {
+        verify_selection_dirs(&anchor, &requirement).map_err(|()| {
             let section = root_sections
                 .iter()
                 .find(|s| doc.source_of(s).is_some())
@@ -484,7 +500,7 @@ fn load_config_rooted_with(
                 section: section.to_string(),
                 path: source_label(source),
             })?;
-        verify_root_source(&root, source, loaded, &requirement).map_err(|()| {
+        verify_root_source(&anchor, &root, source, loaded, &requirement).map_err(|()| {
             ConfigError::SectionNotRootOwned {
                 section: section.to_string(),
                 path: source_label(source),
@@ -499,21 +515,19 @@ fn load_config_rooted_with(
 /// group/other-writable. Checked ONCE per load when any root-required section is
 /// present, independent of which source won -- a subject-writable `config.d/`
 /// lets the subject hide a root-authored override and hand the win to the base
-/// file (codex review round 2, 2026-09-07).
+/// file (codex review round 2, 2026-09-07). `anchor` is the directory the scan read
+/// through, re-judged on its held fd (`Anchor::require`), not reopened by path.
 #[cfg(unix)]
 pub(crate) fn verify_selection_dirs(
-    root: &Path,
+    anchor: &maknae_io::Anchor,
     requirement: &maknae_io::TargetRequired,
 ) -> Result<(), ()> {
-    let anchor = maknae_io::open_anchor_resolved(
-        root,
-        maknae_io::AnchorRequired {
+    anchor
+        .require(&maknae_io::AnchorRequired {
             owner: requirement.owner,
             mode_mask: Some(0o022),
-        },
-        maknae_io::StrategyPref::Auto,
-    )
-    .map_err(|_| ())?;
+        })
+        .map_err(|_| ())?;
     let entries = anchor.enumerate(Path::new(""), None).map_err(|_| ())?.value;
     if entries
         .iter()
@@ -541,9 +555,12 @@ pub(crate) fn verify_selection_dirs(
 /// the file is re-read under `requirement`; and the bytes must equal `expected`.
 /// Any failure is `Err(())` — the caller names the section and the path. Kept
 /// as its own function so the byte-equality half can be tested with bytes that
-/// DIFFER, which no single load can produce deterministically.
+/// DIFFER, which no single load can produce deterministically. `anchor` is the
+/// directory the scan read through; the source is re-read through it, never
+/// through a second open of `root`.
 #[cfg(unix)]
 pub(crate) fn verify_root_source(
+    anchor: &maknae_io::Anchor,
     root: &Path,
     source: &Source,
     expected: &[u8],
@@ -553,17 +570,14 @@ pub(crate) fn verify_root_source(
         Source::Base => Path::new("maknae.yaml").to_path_buf(),
         Source::ConfigD(p) => p.strip_prefix(root).map_err(|_| ())?.to_path_buf(),
     };
-    let anchor = maknae_io::open_anchor_resolved(
-        root,
-        // The DIRECTORY decides which candidate is scanned: it is held to the
-        // same owner as the file, and must not be writable by group or other.
-        maknae_io::AnchorRequired {
+    // The DIRECTORY decides which candidate is scanned: it is held to the same
+    // owner as the file, and must not be writable by group or other.
+    anchor
+        .require(&maknae_io::AnchorRequired {
             owner: requirement.owner,
             mode_mask: Some(0o022),
-        },
-        maknae_io::StrategyPref::Auto,
-    )
-    .map_err(|_| ())?;
+        })
+        .map_err(|_| ())?;
     let desc = match source {
         Source::Base => None,
         Source::ConfigD(_) => Some(maknae_io::DescendantRequired {
@@ -1126,6 +1140,11 @@ mod tests {
         .unwrap()
         .uid()
     }
+    /// The anchor a scan of `p` reads through: what the verify functions take.
+    #[cfg(unix)]
+    fn anchor_of(p: &std::path::Path) -> maknae_io::Anchor {
+        scan_dir_anchored(p).unwrap().0
+    }
     #[cfg(unix)]
     fn me() -> maknae_io::TargetRequired {
         maknae_io::TargetRequired {
@@ -1332,10 +1351,7 @@ mod tests {
             0o660,
         );
         let specs = [spec("provider", false)];
-        assert_eq!(
-            verify_selection_dirs(&std::path::absolute(&d.0).unwrap(), &me()),
-            Ok(())
-        );
+        assert_eq!(verify_selection_dirs(&anchor_of(&d.0), &me()), Ok(()));
         match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
             Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
             other => panic!("expected the FILE refusal, got {other:?}"),
@@ -1380,10 +1396,7 @@ mod tests {
             other
         );
         let specs = [spec("provider", false)];
-        assert_eq!(
-            verify_selection_dirs(&std::path::absolute(&d.0).unwrap(), &me()),
-            Ok(())
-        );
+        assert_eq!(verify_selection_dirs(&anchor_of(&d.0), &me()), Ok(()));
         match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
             Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
             other => panic!("expected the FILE OWNER refusal, got {other:?}"),
@@ -1404,19 +1417,77 @@ mod tests {
             0o640,
         );
         let root = std::path::absolute(&d.0).unwrap();
+        let anchor = anchor_of(&root);
         let on_disk = std::fs::read(root.join("maknae.yaml")).unwrap();
         assert_eq!(
-            verify_root_source(&root, &Source::Base, &on_disk, &me()),
+            verify_root_source(&anchor, &root, &Source::Base, &on_disk, &me()),
             Ok(())
         );
         let mut other = on_disk.clone();
         other.push(b'#');
         assert_eq!(
-            verify_root_source(&root, &Source::Base, &other, &me()),
+            verify_root_source(&anchor, &root, &Source::Base, &other, &me()),
             Err(())
         );
         assert_eq!(
-            verify_root_source(&root, &Source::Base, b"", &me()),
+            verify_root_source(&anchor, &root, &Source::Base, b"", &me()),
+            Err(())
+        );
+    }
+
+    /// The verification asks the directory the SCAN read, not the path again.
+    /// A config path that is a symlink is followed once, at scan; repointing it
+    /// afterwards at a tree that would fail the directory requirement changes
+    /// nothing, and repointing a failing tree's link at a passing one does not
+    /// rescue it. Reopening by path inside either verify function turns this red.
+    #[cfg(unix)]
+    #[test]
+    fn verification_judges_the_scanned_directory_not_a_reopened_path() {
+        let good = new_dir("rooted-swap-good");
+        put(
+            &good.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let bad = new_dir("rooted-swap-bad");
+        put(
+            &bad.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        // Group-writable: passes the scan's other-class mask, fails the
+        // root-required 0o022 mask.
+        std::fs::set_permissions(&bad.0, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let holder = new_dir("rooted-swap-holder");
+        let link = holder.0.join("config");
+        let repoint = |to: &std::path::Path| {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(to, &link).unwrap();
+        };
+        repoint(&good.0);
+        let (scanned_good, bufs) = scan_dir_anchored(&link).unwrap();
+        repoint(&bad.0);
+        let (scanned_bad, _) = scan_dir_anchored(&link).unwrap();
+        repoint(&good.0);
+        let root = std::path::absolute(&link).unwrap();
+        let loaded = bufs[0].1.as_bytes();
+        assert_eq!(verify_selection_dirs(&scanned_good, &me()), Ok(()));
+        assert_eq!(
+            verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
+            Ok(())
+        );
+        repoint(&bad.0);
+        assert_eq!(verify_selection_dirs(&scanned_good, &me()), Ok(()));
+        assert_eq!(
+            verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
+            Ok(())
+        );
+        repoint(&good.0);
+        assert_eq!(verify_selection_dirs(&scanned_bad, &me()), Err(()));
+        assert_eq!(
+            verify_root_source(&scanned_bad, &root, &Source::Base, loaded, &me()),
             Err(())
         );
     }
