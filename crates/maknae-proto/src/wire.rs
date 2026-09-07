@@ -82,9 +82,10 @@ pub enum Verb {
     /// Enumerate the model providers available to the agent runtime. A disclosure
     /// of what destinations exist. Maps to ACP's top-level `providers/list` — an
     /// agent method, so Maknae is the caller. *(Corrected 2026-09-07, ADR-0023:
-    /// in Cooky the provider registry lives in the trust plane (#243), so this
-    /// term answers from `maknaed`'s own configuration; the ACP call toward an
-    /// external Agent is not built.)*
+    /// NOT built in Cooky — the provider registry lives in the trust plane
+    /// (#243) and `admin.config.show` is its view; building this needs the same
+    /// `GRANTABLE_ACTIONS` extension as `.set`/`.disable` and is #169's later
+    /// work; the ACP call toward an external Agent is not built either.)*
     AdminProviderList,
     /// Maknae selecting the agent runtime's model provider — a trust-plane
     /// destination choice, not the agent's preference. Egress on the same axis as
