@@ -52,6 +52,16 @@ updates:
           - "webpki*"
       dev-dependencies:
         dependency-type: "development"
+    ignore:
+      # aws-lc-rs 1.18.0 moves the `fips` backend from the AWS-LC-FIPS 3.x
+      # module (CMVP #5314, VALIDATED) to 4.x (Modules In Process). ASD STIG
+      # APSC-DV-001860 (CAT I) requires the validated list, so
+      # crates/maknae-vault/Cargo.toml pins aws-lc-rs to <1.18.0 as a
+      # compliance control. Dependabot does not honor an upper bound: it
+      # proposes widening it. Ignore 1.18.x and later until NIST issues the
+      # 4.x certificate; the watch is #259.
+      - dependency-name: "aws-lc-rs"
+        versions: [">=1.18.0"]
 
   # ---------------------------------------------------------------------------
   # GitHub Actions

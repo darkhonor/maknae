@@ -19,6 +19,30 @@ rustify = { version = "=0.6.1", default-features = false }        # direct dep o
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
+# UPPER BOUND IS A COMPLIANCE CONTROL, NOT DEPENDENCY HYGIENE. Do not relax it to
+# take a routine Dependabot bump (the dependabot.yml ignore rule mirrors it).
+# aws-lc-rs is otherwise only a transitive dependency (rustls, rcgen, webpki);
+# it is named here so the workspace resolves ONE version and this bound wins.
+#
+# aws-lc-rs 1.18.0 switches aws-lc-fips-sys from the AWS-LC-FIPS 3.x module to
+# 4.x. The 3.x module shipped by aws-lc-rs 1.17.x is FIPS 140-3 VALIDATED (CMVP
+# certificate #5314 static / #5298 dynamic); the 4.x module has completed lab
+# testing and is on the CMVP Modules In Process list, not the validated list.
+# Upstream's own guidance: "Consumers who need to remain on the FIPS 3.x module
+# should pin aws-lc-rs to <1.18.0." Upstream keeps the 1.17.x line patched
+# (1.17.4 and 1.18.1 released the same day), so the pin costs no fixes.
+#
+#   AWS-LC-FIPS module | aws-lc-rs        | aws-lc-fips-sys
+#   3.0.x              | >=1.17.3, <1.18  | 0.13.x   <-- maknae is here, deliberately
+#   4.x                | >=1.18           | 0.14.x
+#
+# ASD STIG APSC-DV-001860 (CAT I) requires the module on the NIST CMVP
+# VALIDATED list; in-process does not satisfy it. Raising this bound moves the
+# product off a validated module and is an AO-visible change. Revisit only when
+# 4.x has an issued certificate: the watch is #259. Same control as Microkosmos.
+# The failure this pin prevents: the lockfile had already drifted to 1.18.0 /
+# aws-lc-fips-sys 0.14.1 (the in-process module) before the pin existed.
+aws-lc-rs = { version = ">=1.17.3, <1.18.0", features = ["fips"] }
 x509-parser = "0.16"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"
