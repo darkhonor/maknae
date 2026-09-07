@@ -88,12 +88,15 @@ pub enum Verb {
     AdminProviderList,
     /// Maknae selecting the agent runtime's model provider — a trust-plane
     /// destination choice, not the agent's preference. Egress on the same axis as
-    /// `session.prompt` (#153). *(ADR-0023 decision 3: operator-only in Cooky and
-    /// denied to the loop's subject role — the one destination is never chosen
-    /// from the untrusted side.)*
+    /// `session.prompt` (#153). *(ADR-0023 decision 3: NOT built in Cooky — the
+    /// provider is registered in root-owned `/etc/maknae` YAML (#243) the
+    /// subject cannot write, and this term is not grantable (ADR-0010); a wire
+    /// term that could re-target egress from the subject's uid would undo that
+    /// custody control.)*
     AdminProviderSet,
     /// Remove a provider from the agent's available destinations. Destination
-    /// selection by elimination, same axis.
+    /// selection by elimination, same axis. *(ADR-0023 decision 3: not built in
+    /// Cooky, for the same reason as `admin.provider.set`.)*
     AdminProviderDisable,
     /// Use a trust-plane-held credential on a subject's behalf against an
     /// external service, without the subject ever seeing it — egress with an
@@ -111,9 +114,10 @@ pub enum Verb {
     /// Begin a conversation with an agent runtime. This is where the agent's tool
     /// authority is provisioned — in an ACP v2 deployment the MCP servers Maknae
     /// hands into the session are named here, making this a capability-granting
-    /// call, not bookkeeping. *(ADR-0023: not built in Cooky — the loop's
-    /// conversation is the connection's session; a session that outlives a
-    /// process is Velveteen's.)*
+    /// call, not bookkeeping. *(ADR-0023: not built in Cooky — each loop turn is
+    /// one connection and one audit session (`maknaed` serves one frame per
+    /// connection); the kernel holds no conversation object, and one that
+    /// outlives a process is Velveteen's.)*
     SessionNew,
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have

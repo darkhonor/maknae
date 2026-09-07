@@ -24,6 +24,9 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
 | 0019 | Audit record model — AU-3-complete content now, crypto integrity/non-repudiation deferred to ADR-0007 | Accepted (2026-08-11) |
 | 0020 | Access-control model & vocabulary — CNSSI 4009-aligned RBAC/ABAC over DAC/MAC, deny-overrides, no clearance bypass | Accepted (2026-08-21) |
+| 0021 | Fail-closed storage I/O tightenings | *(row added 2026-09-07; the ADR predates it — see the file's own status line)* |
+| 0022 | A `ClassificationPolicy` seam — kernel ships US, `maknae-classification-aus` ships PSPF, `rust-dcs` brings the lattice | Accepted (operator-ratified 2026-09-06) *(row added 2026-09-07)* |
+| 0023 | The runtime loop is the ACP Agent, the kernel the Client — Rust MVP loop as `maknae agent`, model egress brokered per turn | **Proposed (2026-09-07)** — Cooky's implementation issues cite it while Proposed, as with 0010; ratification at or after #242 |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 
