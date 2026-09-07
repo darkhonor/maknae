@@ -1,0 +1,12 @@
+Maknae
+Copyright 2026 Alex Ackerman
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party Rust crates, each under its own license
+(Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib,
+Unlicense, CC0-1.0, MIT-0, BSL-1.0, and the OpenSSL license for aws-lc-sys).
+The crate-by-crate inventory with license expressions is in
+THIRD-PARTY-NOTICES.md; the full license texts ship inside each crate's
+source at the pinned version recorded in Cargo.lock. Supply-chain policy
+(the allowed-license set and the pins that enforce it) is in deny.toml.

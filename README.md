@@ -9,7 +9,7 @@
 | **Core spec** | [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — read this first |
 | **Agent guidance** | [`AGENTS.md`](AGENTS.md) — core principles and conventions for AI agents and tools (`CLAUDE.md` is a symlink to it) |
 | **Team** | Alex (architect/owner) + two engineers |
-| **License** | TBD (MIT leaning, pending team decision) |
+| **License** | [Apache-2.0](LICENSE) |
 
 ---
 
@@ -112,7 +112,7 @@ It also builds on the operator's prior work: the [**Knowledge Lake**](https://gi
 
 ## License
 
-To be determined (MIT leaning), pending team decision.
+Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party crate attributions are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Contributions are accepted under the same license with a Developer Certificate of Origin sign-off; see [CONTRIBUTING.md](CONTRIBUTING.md#licensing-of-contributions).
 
 ---
 
