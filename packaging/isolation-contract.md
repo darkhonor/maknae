@@ -56,5 +56,5 @@ The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the 
 | maknae-audit | via kernel | — | — |
 | maknae-vault | linked | linked | — |
 | maknae-config | via kernel | linked | — |
-| maknae-llm | ~~linked~~ — *(corrected 2026-09-07, ADR-0023: linked into `maknae-egress`, a fourth binary column #240 adds — with the lint change that column needs)* | — | — |
+| maknae-llm | linked *(today, as a scaffold stub; ADR-0023 decision 3, 2026-09-07: #240 moves it to `maknae-egress`, a fourth binary column that also needs the lint taught a five-cell row — this cell becomes `—` in that change)* | — | — |
 | maknae-mcp | linked | linked | — |
