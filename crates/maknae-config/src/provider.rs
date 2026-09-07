@@ -123,7 +123,9 @@ fn endpoint_is_acceptable(url: &str) -> bool {
             && h.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             && !h.starts_with(['-', '.'])
-            && !h.ends_with(['-', '.']);
+            && !h.ends_with(['-', '.'])
+            // an empty interior label (`api..example`) is a typo, not a host
+            && !h.contains("..");
         if !ok {
             return false;
         }
@@ -356,6 +358,7 @@ mod tests {
             "http://localhost:123456/v1",
             "https://-bad.example/v1",
             "https://bad.example./v1",
+            "https://api..example/v1",
             "https://exa mple/v1",
             "https://[::1]x/v1",
             "http://[::1]:/v1",
