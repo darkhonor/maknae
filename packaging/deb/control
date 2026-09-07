@@ -3,7 +3,7 @@ Version: 0.1.0-1
 Section: admin
 Priority: optional
 Architecture: amd64
-Maintainer: Alex Ackerman <darkhonor@gmail.com>
+Maintainer: Alex Ackerman <developer@maknae.io>
 Homepage: https://github.com/darkhonor/maknae
 Depends: libc6, systemd, apparmor, apparmor-utils, acl
 Description: trust-plane daemon and operator CLI for a local AI-agent platform

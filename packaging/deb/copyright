@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: maknae
-Upstream-Contact: Alex Ackerman <darkhonor@gmail.com>
+Upstream-Contact: Alex Ackerman <developer@maknae.io>
 Source: https://github.com/darkhonor/maknae
 
 Files: *

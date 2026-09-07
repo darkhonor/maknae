@@ -143,7 +143,7 @@ fi
 %ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 
 %changelog
-* Mon Aug 17 2026 Alex Ackerman <darkhonor@gmail.com> - 0.1.0-1
+* Mon Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1
 - Initial Tokki PR-T1 packaging: maknaed/maknae binaries, hardened systemd unit
   with TPM2 LoadCredentialEncrypted, SELinux TE policy (NNP process2 transition,
   credential-read, mandatory Vault egress via operator-labeled port, append-only

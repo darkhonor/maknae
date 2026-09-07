@@ -104,7 +104,7 @@ maknae (${VERSION}-1) stable; urgency=medium
     (TPM2 LoadCredentialEncrypted), AppArmor profile, two-group sysusers,
     shipped authz.yaml DAC default + maknae.yaml skeleton.
 
- -- Alex Ackerman <darkhonor@gmail.com>  Mon, 17 Aug 2026 00:00:00 +0000
+ -- Alex Ackerman <developer@maknae.io>  Mon, 17 Aug 2026 00:00:00 +0000
 CHLOG
 gzip -9n "$PKG_ROOT/usr/share/doc/maknae/changelog.Debian"
 
