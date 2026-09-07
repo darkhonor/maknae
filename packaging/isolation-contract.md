@@ -23,7 +23,7 @@ Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the li
 | Trust-plane process isolation | `_maknae`; systemd `ProtectSystem=strict`/`NoNewPrivileges`/cap-drop/seccomp ✓`systemd-analyze security` threshold in smoke | `_maknae` daemon; launchd (no seccomp — delta) ✓plist lint + perms smoke | non-root, RO rootfs ✓compose lint (`user:`,`read_only:`) | `deferred` |
 | Channel auth (session) | mTLS over UDS + peer-creds ✓§7(3) negative suite | same ✓same | mTLS internal net ✓same | `deferred` |
 | Plane identity issuance | each plane → own AppRole+policy → own `pki/sign` cert; keypair local, memory-only (§4) ✓per-plane Vault-policy scope test (a plane's SecretID signs only its own role) + memory-only source-grep (Microkosmos) | same ✓same | same ✓same | `deferred` |
-| Egress: platform flows | enforcing = **credential custody** (model/API keys + MCP OAuth tokens exist only in `maknaed`) + kernel-side authority-map allowlist ✓demo 4 **+ custody assertion: no egress credential readable by operator uid (install + CI)**; nftables defense-in-depth ✓ruleset assertion (best-effort — see honest statement) | kernel-side allowlist + custody ✓custody assertion | internal nets; proxy-only ✓compose network lint | `deferred` |
+| Egress: platform flows | enforcing = **credential custody** (model/API keys + MCP OAuth tokens exist only in `maknaed` — *corrected 2026-09-07, ADR-0023 decision 3: in Cooky the model key exists only in the `maknae-egress` process under its own account and Vault policy, never in `maknaed`*) + kernel-side authority-map allowlist ✓demo 4 **+ custody assertion: no egress credential readable by operator uid (install + CI)**; nftables defense-in-depth ✓ruleset assertion (best-effort — see honest statement) | kernel-side allowlist + custody ✓custody assertion | internal nets; proxy-only ✓compose network lint | `deferred` |
 | Lake corpus (read-only curated mount) | consumer-only `ro` mount (§2.9); CLI reads directly; **boot classification-match gate** (lake.yaml ceiling ≤ Maknae authorization) else fail closed ✓demo 1 boot-gate paired assertion (dominated lake mounts; over-ceiling lake refuses) + `ro` mount-perms check | same ✓same | read-only volume ✓mount-flag lint | `deferred` |
 | Persona/workspace | operator-uid files loaded by CLI; presentation/config content, session-floor-classified (§5); untrusted-plane residual (container-arch §1.5 residual clause) ✓payload-floor vector §7(1) | same ✓same | `deferred` | `deferred` |
 | State-store access | localhost socket; service role (no DDL) vs DDL-owner (offline only, §2.10); RLS ✓demo 2 + role-privilege audit query | same ✓same | network-scoped ✓same | `deferred` |
@@ -56,5 +56,5 @@ The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the 
 | maknae-audit | via kernel | — | — |
 | maknae-vault | linked | linked | — |
 | maknae-config | via kernel | linked | — |
-| maknae-llm | linked | — | — |
+| maknae-llm | ~~linked~~ — *(corrected 2026-09-07, ADR-0023: linked into `maknae-egress`, a fourth binary column #240 adds — with the lint change that column needs)* | — | — |
 | maknae-mcp | linked | linked | — |
