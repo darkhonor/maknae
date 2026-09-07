@@ -175,6 +175,20 @@ fn is_yaml_ext(name: &str) -> bool {
 /// read — so a world-writable `config.d/` is caught before a bad base is opened).
 #[cfg(unix)]
 pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError> {
+    scan_dir_anchored(dir).map(|(_, buffers)| buffers)
+}
+
+/// [`scan_dir`], returning the anchor the scan was read through as well, so a
+/// caller that must re-judge the directory later ([`load_config_rooted`]) asks
+/// the SAME open fd -- the standing `maknae-io` rule that the checked inode is
+/// the used inode. A second `open_anchor_resolved` on the path would follow a
+/// top-level symlink again, and one repointed between the two opens would hand
+/// verification a different tree than the scan read (codex review round 3,
+/// 2026-09-07).
+#[cfg(unix)]
+pub(crate) fn scan_dir_anchored(
+    dir: &Path,
+) -> Result<(maknae_io::Anchor, Vec<(Source, String)>), ConfigError> {
     let root = std::path::absolute(dir).map_err(io_err)?;
     let anchor = maknae_io::open_anchor_resolved(
         &root,
@@ -273,7 +287,7 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
         )?;
         out.push((Source::ConfigD(p), body));
     }
-    Ok(out)
+    Ok((anchor, out))
 }
 
 /// Parse each buffer and merge into a `Document` (spec §4 precedence): base
@@ -316,6 +330,7 @@ pub(crate) fn assemble(
     // config.d file already supplied (the cross-config.d duplicate guard).
     let mut sections: Vec<(String, Value, Source)> = Vec::new();
     let mut overrides: Vec<Override> = Vec::new();
+    let mut shadowed: Vec<(String, Value, Source)> = Vec::new();
     let mut from_configd: Vec<String> = Vec::new();
 
     for (source, map) in parsed {
@@ -351,7 +366,11 @@ pub(crate) fn assemble(
                             winner: Source::ConfigD(p.clone()),
                             shadowed: slot.2.clone(),
                         });
-                        slot.1 = val;
+                        shadowed.push((
+                            key.clone(),
+                            std::mem::replace(&mut slot.1, val),
+                            slot.2.clone(),
+                        ));
                         slot.2 = Source::ConfigD(p.clone());
                     } else {
                         sections.push((key, val, Source::ConfigD(p.clone())));
@@ -370,7 +389,7 @@ pub(crate) fn assemble(
         }
     }
 
-    Ok(Document::new(sections, overrides))
+    Ok(Document::new(sections, overrides, shadowed))
 }
 
 /// Load a config directory into a `Document` (spec §2–§6). Spec validation is
@@ -393,6 +412,203 @@ pub fn load_config(dir: &Path, specs: &[SectionSpec]) -> Result<Document, Config
         let buffers = scan_dir(dir)?;
         assemble(buffers, &Registry { specs })
     }
+}
+
+/// [`load_config`], plus: every section named in `root_sections` that is present
+/// must have been contributed by a **root-controlled** source — root-owned and not
+/// group/other-writable ([`ROOT_ARTIFACT`]) — whether that source is `maknae.yaml`
+/// or a `config.d/` member (#243; ADR-0023 decision 3), AND the directories that
+/// decide which candidate wins must be held to the same owner: the config root
+/// and `config.d/` themselves. Without that, a subject who owns the directory
+/// chooses between root-authored candidates by renaming one out of the scan
+/// (codex review, 2026-09-07). The source is re-read under the stricter
+/// requirement through the SAME open directory the scan read it from -- never a
+/// second open of the path, which a repointed top-level symlink could send to
+/// another tree -- and its bytes must equal what was loaded, so the file that
+/// was checked is the file that was used. A root-required section that is absent is not an error:
+/// absence is the unregistered state, and the caller decides what that means.
+pub fn load_config_rooted(
+    dir: &Path,
+    specs: &[SectionSpec],
+    root_sections: &[&str],
+) -> Result<Document, ConfigError> {
+    #[cfg(not(unix))]
+    {
+        let _ = root_sections;
+        return load_config(dir, specs);
+    }
+    #[cfg(unix)]
+    {
+        load_config_rooted_with(dir, specs, root_sections, ROOT_ARTIFACT)
+    }
+}
+
+/// The hermetic door for [`load_config_rooted`]: the root requirement is the
+/// caller's, so an unprivileged test can prove the re-verification path with a
+/// requirement it can satisfy (its own euid) and one it cannot. Feature-gated,
+/// non-default; production goes through [`load_config_rooted`] only.
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub fn load_config_rooted_with_requirement(
+    dir: &Path,
+    specs: &[SectionSpec],
+    root_sections: &[&str],
+    requirement: maknae_io::TargetRequired,
+) -> Result<Document, ConfigError> {
+    load_config_rooted_with(dir, specs, root_sections, requirement)
+}
+
+#[cfg(unix)]
+fn load_config_rooted_with(
+    dir: &Path,
+    specs: &[SectionSpec],
+    root_sections: &[&str],
+    requirement: maknae_io::TargetRequired,
+) -> Result<Document, ConfigError> {
+    validate_specs(specs)?;
+    // The anchor the scan read through is the one every later check asks.
+    let (anchor, buffers) = scan_dir_anchored(dir)?;
+    // Keep the buffers: the re-read below must equal what was assembled.
+    let doc = assemble(buffers.clone(), &Registry { specs })?;
+    let root = std::path::absolute(dir).map_err(io_err)?;
+    // The directories that decide WHICH candidate wins are verified once, as
+    // soon as any root-required section is present -- whichever source won.
+    // A base winner with a subject-writable `config.d/` is the case codex
+    // round 2 named: the subject hides the root-authored override by renaming
+    // it, and the base file, itself root-owned, wins.
+    if root_sections.iter().any(|s| doc.source_of(s).is_some()) {
+        verify_selection_dirs(&anchor, &root, &requirement).map_err(|failed| {
+            let section = root_sections
+                .iter()
+                .find(|s| doc.source_of(s).is_some())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            ConfigError::SectionNotRootOwned {
+                section,
+                path: failed.display().to_string(),
+            }
+        })?;
+    }
+    for section in root_sections {
+        let Some(source) = doc.source_of(section) else {
+            continue;
+        };
+        let loaded = buffers
+            .iter()
+            .find(|(s, _)| s == source)
+            .map(|(_, body)| body.as_bytes())
+            .ok_or_else(|| ConfigError::SectionNotRootOwned {
+                section: section.to_string(),
+                path: source_label(source),
+            })?;
+        verify_root_source(&anchor, &root, source, loaded, &requirement).map_err(|()| {
+            ConfigError::SectionNotRootOwned {
+                section: section.to_string(),
+                path: source_label(source),
+            }
+        })?;
+    }
+    Ok(doc)
+}
+
+/// The directories that decide which candidate is scanned: the config root, and
+/// `config.d/` when it exists, must both satisfy `requirement`'s owner and not be
+/// group/other-writable. Checked ONCE per load when any root-required section is
+/// present, independent of which source won -- a subject-writable `config.d/`
+/// lets the subject hide a root-authored override and hand the win to the base
+/// file (codex review round 2, 2026-09-07). `anchor` is the directory the scan read
+/// through, re-judged on its held fd (`Anchor::require`), not reopened by path.
+/// `Err` carries the directory the check itself refused -- `root`, or
+/// `root/config.d` when ITS owner or mode was the finding -- so the refusal
+/// names the thing to fix (codex review round 3). A fault that is not an
+/// owner/mode finding on `config.d` (an `EACCES` opening it because the root's
+/// own search bit went away underneath the held fd) names the root, not a
+/// directory that was never judged (round 4).
+#[cfg(unix)]
+pub(crate) fn verify_selection_dirs(
+    anchor: &maknae_io::Anchor,
+    root: &Path,
+    requirement: &maknae_io::TargetRequired,
+) -> Result<(), std::path::PathBuf> {
+    anchor
+        .require(&maknae_io::AnchorRequired {
+            owner: requirement.owner,
+            mode_mask: Some(0o022),
+        })
+        .map_err(|_| root.to_path_buf())?;
+    let entries = anchor
+        .enumerate(Path::new(""), None)
+        .map_err(|_| root.to_path_buf())?
+        .value;
+    if entries
+        .iter()
+        .any(|e| e.name == std::ffi::OsStr::new("config.d"))
+    {
+        // Enumerating under the descendant requirement is the check: a
+        // `config.d/` the requirement owner does not hold, or that group/other
+        // can write, is refused before anything in it is looked at.
+        anchor
+            .enumerate(
+                Path::new("config.d"),
+                Some(maknae_io::DescendantRequired {
+                    owner: requirement.owner,
+                    mode_mask: Some(0o022),
+                }),
+            )
+            .map_err(|e| match e {
+                maknae_io::IoError::InsecurePermissions { path, .. }
+                | maknae_io::IoError::NotOwned { path, .. } => path,
+                _ => root.to_path_buf(),
+            })?;
+    }
+    Ok(())
+}
+
+/// The re-verification behind [`load_config_rooted`], on one source: the config
+/// root directory must satisfy `requirement`'s owner and not be group/other-
+/// writable; a `config.d/` source additionally requires `config.d/` itself to;
+/// the file is re-read under `requirement`; and the bytes must equal `expected`.
+/// Any failure is `Err(())` — the caller names the section and the path. Kept
+/// as its own function so the byte-equality half can be tested with bytes that
+/// DIFFER, which no single load can produce deterministically. `anchor` is the
+/// directory the scan read through; the source is re-read through it, never
+/// through a second open of `root`.
+#[cfg(unix)]
+pub(crate) fn verify_root_source(
+    anchor: &maknae_io::Anchor,
+    root: &Path,
+    source: &Source,
+    expected: &[u8],
+    requirement: &maknae_io::TargetRequired,
+) -> Result<(), ()> {
+    let rel: std::path::PathBuf = match source {
+        Source::Base => Path::new("maknae.yaml").to_path_buf(),
+        Source::ConfigD(p) => p.strip_prefix(root).map_err(|_| ())?.to_path_buf(),
+    };
+    // The DIRECTORY decides which candidate is scanned: it is held to the same
+    // owner as the file, and must not be writable by group or other.
+    anchor
+        .require(&maknae_io::AnchorRequired {
+            owner: requirement.owner,
+            mode_mask: Some(0o022),
+        })
+        .map_err(|_| ())?;
+    let desc = match source {
+        Source::Base => None,
+        Source::ConfigD(_) => Some(maknae_io::DescendantRequired {
+            owner: requirement.owner,
+            mode_mask: Some(0o022),
+        }),
+    };
+    let reread = anchor
+        .read(&rel, desc, requirement.clone())
+        .map_err(|_| ())?
+        .value;
+    if reread.as_slice() != expected {
+        // Changed between the two reads: the checked bytes are not the used
+        // bytes, and the fail-closed answer is the same as a failed check.
+        return Err(());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -921,5 +1137,431 @@ mod tests {
         let p = std::env::temp_dir().join(format!("maknae_2a_nope_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         assert!(matches!(scan_dir(&p), Err(ConfigError::NotFound { .. })));
+    }
+    // ---- #243: a root-required section's SOURCE is re-verified under the
+    // caller's requirement, whichever file contributed it.
+    #[cfg(unix)]
+    fn my_uid() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(
+            std::env::temp_dir().join(format!("maknae_cfg_uid_{}", std::process::id())),
+        )
+        .or_else(|_| {
+            let p = std::env::temp_dir().join(format!("maknae_cfg_uid_{}", std::process::id()));
+            std::fs::write(&p, b"").unwrap();
+            std::fs::metadata(&p)
+        })
+        .unwrap()
+        .uid()
+    }
+    /// The anchor a scan of `p` reads through: what the verify functions take.
+    #[cfg(unix)]
+    fn anchor_of(p: &std::path::Path) -> maknae_io::Anchor {
+        scan_dir_anchored(p).unwrap().0
+    }
+    #[cfg(unix)]
+    fn me() -> maknae_io::TargetRequired {
+        maknae_io::TargetRequired {
+            owner: Some(my_uid()),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        }
+    }
+    #[cfg(unix)]
+    fn not_me() -> maknae_io::TargetRequired {
+        maknae_io::TargetRequired {
+            owner: Some(my_uid().wrapping_add(1)),
+            ..me()
+        }
+    }
+    #[cfg(unix)]
+    const PROVIDER: &str =
+        "provider:\n  name: p\n  endpoint: https://x/v1\n  model: m\n  key_vault_path: k\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_required_section_in_the_base_file_is_verified_against_the_requirement() {
+        let d = new_dir("rooted-base");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let specs = [spec("provider", false)];
+        let doc = load_config_rooted_with(&d.0, &specs, &["provider"], me()).unwrap();
+        assert!(doc.section("provider").is_some());
+        // An owner the requirement does not name refuses at the ROOT DIRECTORY,
+        // before any file is looked at -- the selection directory is the first
+        // check (codex round 2); the file-level refusals are isolated below.
+        match load_config_rooted_with(&d.0, &specs, &["provider"], not_me()) {
+            Err(ConfigError::SectionNotRootOwned { section, path }) => {
+                assert_eq!(section, "provider");
+                assert!(
+                    path.ends_with("rooted-base"),
+                    "the root directory is named: {path}"
+                );
+            }
+            other => panic!("expected SectionNotRootOwned, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_required_section_from_config_d_is_verified_and_named_by_its_file() {
+        let d = new_dir("rooted-cd");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER, 0o640);
+        let specs = [spec("provider", false)];
+        assert!(load_config_rooted_with(&d.0, &specs, &["provider"], me()).is_ok());
+        // Owner mismatch: the root directory refuses first and is named. The
+        // config.d MEMBER is named by the mode-isolated test below.
+        match load_config_rooted_with(&d.0, &specs, &["provider"], not_me()) {
+            Err(ConfigError::SectionNotRootOwned { section, path }) => {
+                assert_eq!(section, "provider");
+                assert!(
+                    path.ends_with("rooted-cd"),
+                    "the root directory is named: {path}"
+                );
+            }
+            other => panic!("expected SectionNotRootOwned, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_writable_source_fails_the_root_requirement_even_when_the_owner_matches() {
+        let d = new_dir("rooted-mode");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o660,
+        );
+        let specs = [spec("provider", false)];
+        // The plain loader accepts 0o660 (mask 0o007); the root requirement's
+        // mask (0o022) does not.
+        assert!(load_config(&d.0, &specs).is_ok());
+        assert!(matches!(
+            load_config_rooted_with(&d.0, &specs, &["provider"], me()),
+            Err(ConfigError::SectionNotRootOwned { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_root_required_section_is_not_an_error_and_other_sections_are_not_checked() {
+        let d = new_dir("rooted-absent");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  a: 1\ntransport:\n  read_timeout_ms: 500\n",
+            0o660,
+        );
+        let specs = [spec("provider", false), spec("transport", false)];
+        // `transport` is present but not root-required; the unsatisfiable
+        // requirement must not touch it.
+        let doc = load_config_rooted_with(&d.0, &specs, &["provider"], not_me()).unwrap();
+        assert!(doc.section("provider").is_none());
+        assert!(doc.section("transport").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_the_requirement_owner_does_not_hold_refuses_the_root_required_section() {
+        // The file is fine; the DIRECTORY that decides which candidate is
+        // scanned is group-writable -- a subject in that group could hide a
+        // member. Refused, by the same error.
+        let d = new_dir("rooted-dir");
+        std::fs::set_permissions(&d.0, std::fs::Permissions::from_mode(0o770)).unwrap();
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let specs = [spec("provider", false)];
+        assert!(
+            load_config(&d.0, &specs).is_ok(),
+            "the plain loader accepts 0o770"
+        );
+        assert!(matches!(
+            load_config_rooted_with(&d.0, &specs, &["provider"], me()),
+            Err(ConfigError::SectionNotRootOwned { .. })
+        ));
+        // And a group-writable config.d, with the member itself fine.
+        let d = new_dir("rooted-cd-dir");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o770)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER, 0o640);
+        assert!(load_config(&d.0, &specs).is_ok());
+        assert!(matches!(
+            load_config_rooted_with(&d.0, &specs, &["provider"], me()),
+            Err(ConfigError::SectionNotRootOwned { .. })
+        ));
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(load_config_rooted_with(&d.0, &specs, &["provider"], me()).is_ok());
+    }
+
+    /// Codex round 2: the base file wins, `config.d/` is subject-writable, and
+    /// a root-authored override could be hidden by renaming it. The directory
+    /// is verified regardless of which source won.
+    #[cfg(unix)]
+    #[test]
+    fn a_base_winner_still_requires_config_d_to_be_held_by_the_requirement_owner() {
+        let d = new_dir("rooted-base-winner");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        // group-writable config.d, EMPTY: nothing overrides, the base wins.
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let specs = [spec("provider", false)];
+        let doc = load_config(&d.0, &specs).unwrap();
+        assert_eq!(
+            doc.source_of("provider"),
+            Some(&Source::Base),
+            "premise: the base wins"
+        );
+        match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
+            Err(ConfigError::SectionNotRootOwned { section, path }) => {
+                assert_eq!(section, "provider");
+                // The DIRECTORY that failed is the one named: config.d, not
+                // the root that passed (codex review round 3).
+                assert!(path.ends_with("rooted-base-winner/config.d"), "{path}");
+            }
+            other => panic!("expected the selection-directory refusal, got {other:?}"),
+        }
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(load_config_rooted_with(&d.0, &specs, &["provider"], me()).is_ok());
+        // With no root-required section present, the directory is not consulted.
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(load_config_rooted_with(&d.0, &specs, &["provider"], me()).is_ok());
+    }
+
+    /// The FILE check isolated from the directory checks: directories satisfy
+    /// the requirement, the file's mode does not (0o660 against mask 0o022).
+    #[cfg(unix)]
+    #[test]
+    fn the_file_requirement_is_checked_after_the_directories_pass() {
+        let d = new_dir("rooted-file-isolated");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o660,
+        );
+        let specs = [spec("provider", false)];
+        assert_eq!(
+            verify_selection_dirs(&anchor_of(&d.0), &std::path::absolute(&d.0).unwrap(), &me()),
+            Ok(())
+        );
+        match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
+            Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
+            other => panic!("expected the FILE refusal, got {other:?}"),
+        }
+        // Same, through config.d: the member's mode fails while both dirs pass.
+        let d = new_dir("rooted-cd-file-isolated");
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER, 0o660);
+        match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
+            Err(ConfigError::SectionNotRootOwned { path, .. }) => {
+                assert!(path.ends_with("config.d/10-provider.yaml"), "{path}")
+            }
+            other => panic!("expected the config.d FILE refusal, got {other:?}"),
+        }
+    }
+
+    /// The OWNER half of the file check, isolated -- needs root to chown, so it
+    /// runs on the Rocky root lane and returns early elsewhere (never a silent
+    /// pass: the unprivileged tests above hold the mode half).
+    #[cfg(unix)]
+    #[test]
+    fn the_file_owner_is_checked_after_the_directories_pass_root_only() {
+        use std::os::unix::fs::MetadataExt;
+        if my_uid() != 0 {
+            return;
+        }
+        let d = new_dir("rooted-file-owner");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        // Directories are root's; the FILE is handed to another uid.
+        let other = 65534u32; // nobody
+        std::os::unix::fs::chown(d.0.join("maknae.yaml"), Some(other), None).unwrap();
+        assert_eq!(
+            std::fs::metadata(d.0.join("maknae.yaml")).unwrap().uid(),
+            other
+        );
+        let specs = [spec("provider", false)];
+        assert_eq!(
+            verify_selection_dirs(&anchor_of(&d.0), &std::path::absolute(&d.0).unwrap(), &me()),
+            Ok(())
+        );
+        match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
+            Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
+            other => panic!("expected the FILE OWNER refusal, got {other:?}"),
+        }
+    }
+
+    /// The byte-equality half, with bytes that DIFFER: the file satisfies the
+    /// requirement, the content is not what was loaded, and that is a refusal.
+    /// Removing the comparison turns this red.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_whose_bytes_differ_from_what_was_loaded_is_refused() {
+        let d = new_dir("rooted-bytes");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let root = std::path::absolute(&d.0).unwrap();
+        let anchor = anchor_of(&root);
+        let on_disk = std::fs::read(root.join("maknae.yaml")).unwrap();
+        assert_eq!(
+            verify_root_source(&anchor, &root, &Source::Base, &on_disk, &me()),
+            Ok(())
+        );
+        let mut other = on_disk.clone();
+        other.push(b'#');
+        assert_eq!(
+            verify_root_source(&anchor, &root, &Source::Base, &other, &me()),
+            Err(())
+        );
+        assert_eq!(
+            verify_root_source(&anchor, &root, &Source::Base, b"", &me()),
+            Err(())
+        );
+    }
+
+    /// The verification asks the directory the SCAN read, not the path again.
+    /// A config path that is a symlink is followed once, at scan; repointing it
+    /// afterwards at a tree that would fail the directory requirement changes
+    /// nothing, and repointing a failing tree's link at a passing one does not
+    /// rescue it. Reopening by path inside either verify function turns this red.
+    #[cfg(unix)]
+    #[test]
+    fn verification_judges_the_scanned_directory_not_a_reopened_path() {
+        let good = new_dir("rooted-swap-good");
+        put(
+            &good.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let bad = new_dir("rooted-swap-bad");
+        put(
+            &bad.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        // Group-writable: passes the scan's other-class mask, fails the
+        // root-required 0o022 mask.
+        std::fs::set_permissions(&bad.0, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let holder = new_dir("rooted-swap-holder");
+        let link = holder.0.join("config");
+        let repoint = |to: &std::path::Path| {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(to, &link).unwrap();
+        };
+        repoint(&good.0);
+        let (scanned_good, bufs) = scan_dir_anchored(&link).unwrap();
+        repoint(&bad.0);
+        let (scanned_bad, _) = scan_dir_anchored(&link).unwrap();
+        repoint(&good.0);
+        let root = std::path::absolute(&link).unwrap();
+        let loaded = bufs[0].1.as_bytes();
+        assert_eq!(verify_selection_dirs(&scanned_good, &root, &me()), Ok(()));
+        assert_eq!(
+            verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
+            Ok(())
+        );
+        repoint(&bad.0);
+        assert_eq!(verify_selection_dirs(&scanned_good, &root, &me()), Ok(()));
+        assert_eq!(
+            verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
+            Ok(())
+        );
+        repoint(&good.0);
+        assert_eq!(
+            verify_selection_dirs(&scanned_bad, &root, &me()),
+            Err(root.clone())
+        );
+        assert_eq!(
+            verify_root_source(&scanned_bad, &root, &Source::Base, loaded, &me()),
+            Err(())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_section_a_config_d_member_shadows_is_retained_for_inspection() {
+        let d = new_dir("shadowed");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  a: 1\nprovider:\n  api_key: sk-live\n",
+            0o640,
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER, 0o640);
+        let doc = load_config(&d.0, &[spec("provider", false)]).unwrap();
+        assert!(matches!(
+            doc.source_of("provider"),
+            Some(Source::ConfigD(_))
+        ));
+        let shadowed: Vec<_> = doc.shadowed_sections("provider").collect();
+        assert_eq!(shadowed.len(), 1, "the base block is kept, not discarded");
+        assert!(format!("{:?}", shadowed[0]).contains("api_key"));
+        assert_eq!(doc.shadowed_sections("core").count(), 0);
+    }
+
+    /// The PRODUCTION door refuses an operator-owned provider source: this is
+    /// the property the whole check exists for, proven with the real
+    /// requirement on every unprivileged lane (root would legitimately pass).
+    #[cfg(unix)]
+    #[test]
+    fn the_production_door_refuses_a_provider_source_the_test_user_owns() {
+        if my_uid() == 0 {
+            return;
+        }
+        let d = new_dir("rooted-prod");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  a: 1\n{PROVIDER}"),
+            0o640,
+        );
+        let specs = [spec("provider", false)];
+        assert!(matches!(
+            load_config_rooted(&d.0, &specs, &["provider"]),
+            Err(ConfigError::SectionNotRootOwned { .. })
+        ));
+        // And without the block the same directory boots through the same door.
+        put(&d.0, "maknae.yaml", "core:\n  a: 1\n", 0o640);
+        assert!(load_config_rooted(&d.0, &specs, &["provider"]).is_ok());
     }
 }

@@ -1,6 +1,9 @@
 name: ci
 on:
   pull_request:
+    # `labeled` is what makes the mutation lane's `run-mutants` opt-in reachable
+    # without a push (codex review 2026-09-07); the other three are GitHub's defaults.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
@@ -20,8 +23,10 @@ on:
 # branch gets a distinct classified run, which is what the branch-protection evidence chain
 # is relying on. PR supersession is unaffected — those still share a per-ref group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A `labeled` event gets its OWN group: it must never cancel a push-triggered
+  # PR run (codex review round 2, 2026-09-07).
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.action != 'labeled' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'labeled' }}
 
 # MUTANTS_PATHS: retained as the drift-checked inventory, verified by
 # ci/gates/coverage-tiers.sh against coverage-tiers.toml's mutants_crates
@@ -45,6 +50,9 @@ env:
 
 jobs:
   affected:
+    # A `labeled` event runs this selector only for the `run-mutants` label; any
+    # other label is a no-op run (nothing below it fires).
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'run-mutants' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -74,7 +82,8 @@ jobs:
   build-and-gate:
     needs: affected
     # Propagate lightweight-job failure into the required check before any Rust build.
-    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
+    # Never on a `labeled` event: labels reach the mutation lane only.
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
     runs-on: ubuntu-latest
     # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
     # this a regression burns the 360-minute default and emits no diagnostic.
@@ -145,6 +154,8 @@ jobs:
         run: ci/gates/std-fs-drift.sh .
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
+      - name: Mutation lane status (paused by default — operator ruling 2026-09-07)
+        run: echo "mutation lane paused in hosted CI; opt in with the run-mutants label or vars.MUTATION_IN_CI=true; the zero-missed evidence is in the PR body"
       - name: Gate — config-disclosure drift (#162)
         run: ci/gates/config-disclosure-drift.sh
       - name: Gate — authz composition drift (ADR-0008 decision 1; #154/#148)
@@ -173,60 +184,62 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # MUTATION JOB PAUSED IN CI — operator ruling 2026-09-07: "stop mutation
-  # testing in CI. Leave the tasks, but comment them out. We're spending too much
-  # of my PERSONAL ACCOUNT CI MINUTES." The job below is kept verbatim, commented,
-  # so it can be restored by un-commenting. The OBLIGATION did not move: the
-  # zero-missed-mutant contract (ADR-0016, coverage-tiers.toml [t1].mutants_crates)
-  # is met LOCALLY before a PR opens -- `bash ci/gates/coverage-tiers.sh --mutants
-  # <crates>` on the dev host and the Rocky lane -- and the PR body carries the
-  # figures. MUTANTS_PATHS above stays: coverage-tiers.sh cross-checks it against
-  # mutants_crates, and it is the inventory of what must be run locally.
+  # MUTATION LANE: wired, paused by default. See the job's `if:` below.
   # ---------------------------------------------------------------------------
-  #mutation:
-  #  needs: affected
-  #  if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '') }}
-  #  runs-on: ubuntu-latest
-  #  # #238, run 34053713105: all nine completed crate sweeps passed, but the
-  #  # 35m job limit killed the final (Vault) sweep after its 143s cold build.
-  #  # Kernel alone took 15m on CI versus 6m on the warm local host. Budget the
-  #  # hosted cold run with headroom; normal changes still select affected crates
-  #  # and individual mutant timeouts/zero-missed requirements remain unchanged.
-  #  timeout-minutes: 45
-  #  steps:
-  #    - uses: actions/checkout@v4
-  #      with:
-  #        fetch-depth: 0
-  #    - name: Require a trustworthy selection
-  #      env:
-  #        SELECTOR_RESULT: ${{ needs.affected.result }}
-  #      run: test "$SELECTOR_RESULT" = success
-  #    - name: Install toolchain (pinned)
-  #      run: rustup show
-  #    - name: Cache cargo-mutants executable
-  #      id: mutants-cache
-  #      uses: actions/cache@v4
-  #      with:
-  #        path: ~/.cargo/bin/cargo-mutants
-  #        key: cargo-mutants-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-27.1.0
-  #    - name: Install cargo-mutants 27.1.0
-  #      if: steps.mutants-cache.outputs.cache-hit != 'true'
-  #      run: cargo install cargo-mutants --version 27.1.0 --locked
-  #    - name: Native syscall mutation filter fixtures
-  #      if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ')
-  #      run: python3 ci/gates/tests/mutation-platform/run.py
-  #    - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
-  #      env:
-  #        PACKAGES: ${{ needs.affected.outputs.mutants }}
-  #        # Mutation evidence needs test assertions, not debugger symbols. #238
-  #        # exceeded this job's 35m budget; two representative kernel mutant
-  #        # rebuilds on Rocky9 fell from 7.08s to 2.46s without symbols. Keep the
-  #        # normal test profile's assertions/overflow checks and all gate scope.
-  #        CARGO_PROFILE_TEST_DEBUG: "0"
-  #      run: |
-  #        test -n "$PACKAGES"
-  #        read -r -a packages <<< "$PACKAGES"
-  #        bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}"
+  mutation:
+    needs: affected
+    # PAUSED BY DEFAULT — operator ruling 2026-09-07 (hosted minutes are the
+    # operator's personal account). The lane stays WIRED (hobibot, PR #247): it
+    # runs only when a PR carries the `run-mutants` label or the repository
+    # variable MUTATION_IN_CI is 'true'; otherwise it shows as SKIPPED in every
+    # run, and build-and-gate prints the pause. The zero-missed obligation is
+    # met locally (dev host + Rocky lane) and reported in the PR body.
+    if: >-
+      ${{ always()
+          && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '')
+          && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+              || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))) }}
+    runs-on: ubuntu-latest
+    # #238, run 34053713105: all nine completed crate sweeps passed, but the
+    # 35m job limit killed the final (Vault) sweep after its 143s cold build.
+    # Kernel alone took 15m on CI versus 6m on the warm local host. Budget the
+    # hosted cold run with headroom; normal changes still select affected crates
+    # and individual mutant timeouts/zero-missed requirements remain unchanged.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a trustworthy selection
+        env:
+          SELECTOR_RESULT: ${{ needs.affected.result }}
+        run: test "$SELECTOR_RESULT" = success
+      - name: Install toolchain (pinned)
+        run: rustup show
+      - name: Cache cargo-mutants executable
+        id: mutants-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-27.1.0
+      - name: Install cargo-mutants 27.1.0
+        if: steps.mutants-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Native syscall mutation filter fixtures
+        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ')
+        run: python3 ci/gates/tests/mutation-platform/run.py
+      - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
+        env:
+          PACKAGES: ${{ needs.affected.outputs.mutants }}
+          # Mutation evidence needs test assertions, not debugger symbols. #238
+          # exceeded this job's 35m budget; two representative kernel mutant
+          # rebuilds on Rocky9 fell from 7.08s to 2.46s without symbols. Keep the
+          # normal test profile's assertions/overflow checks and all gate scope.
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          test -n "$PACKAGES"
+          read -r -a packages <<< "$PACKAGES"
+          bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}"
 
   # macOS is a DEPLOYMENT TARGET (packaging/isolation-contract.md). These two jobs
   # are the only automated macOS coverage that exists; neither substitutes for the
@@ -234,7 +247,7 @@ jobs:
 
   darwin-cross:
     needs: affected
-    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
     env:
       PACKAGES: ${{ needs.affected.outputs.darwin }}
     # Free, no Mac required, and it pays for itself: adding this locally caught
@@ -264,7 +277,7 @@ jobs:
 
   darwin-native:
     needs: affected
-    if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
     env:
       PACKAGES: ${{ needs.affected.outputs.darwin }}
     # Both PR and main pushes use dependency-aware selection. Docs-only changes

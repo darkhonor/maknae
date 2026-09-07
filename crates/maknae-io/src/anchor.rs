@@ -111,7 +111,10 @@ pub struct Entry {
 
 /// A pinned anchor directory. `Drop` closes the fd. `AnchorRequired` is checked ONCE,
 /// at construction — an attacker who `chmod`s the anchor afterwards faces no re-check,
-/// which is the deliberate consequence of pinning.
+/// which is the deliberate consequence of pinning. [`Anchor::require`] is the one
+/// exception, on the caller's initiative: a point-in-time re-judgement of the held
+/// fd against a stricter requirement, which neither replaces the construction-time
+/// requirement nor governs later verbs.
 #[derive(Debug)]
 pub struct Anchor {
     fd: OwnedFd,
@@ -228,6 +231,27 @@ impl Anchor {
     /// actually ran.
     pub fn probed_capability(&self) -> Strategy {
         self.probed
+    }
+
+    /// Re-judge the PINNED directory -- the fd this anchor holds -- against a
+    /// requirement stricter than the one it was opened under. `fstat` on the held
+    /// fd, never a path: a caller that learns mid-load it needs a stronger
+    /// guarantee (`maknae-config`'s root-required sections, #243) asks the same
+    /// inode rather than re-opening the path, which a replaceable top-level
+    /// symlink could point at a different tree between the two opens (codex
+    /// review round 3, 2026-09-07). The error names the anchor's path.
+    ///
+    /// This is a POINT-IN-TIME judgement of the directory's metadata. It is not
+    /// stored, it does not retroactively bless bytes already read under the
+    /// looser requirement, and later verbs on this anchor still run under
+    /// their own descendant/target requirements. A caller that needs "the
+    /// content I hold satisfies the stricter requirement" must re-read it
+    /// under that requirement and compare, as `maknae-config`'s
+    /// `verify_root_source` does.
+    pub fn require(&self, req: &AnchorRequired) -> Result<(), IoError> {
+        let st = syscall::fstat(&self.fd)
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path))?;
+        check_owner_mode(&st, &self.path, req.owner, req.mode_mask)
     }
 }
 
@@ -741,6 +765,51 @@ mod tests {
         };
         let out = read_absolute(&f, req, StrategyPref::Auto).expect("every requirement is met");
         assert_eq!(out.value.as_slice(), b"core:\n  a: 1\n");
+    }
+
+    /// `require` judges the fd the anchor HOLDS. The pinned directory keeps
+    /// passing after the path it was opened through is repointed at a directory
+    /// that would fail, and keeps failing after it is repointed at one that
+    /// would pass: the path is not consulted again.
+    #[test]
+    fn require_judges_the_pinned_directory_not_the_path() {
+        let good = dir(0o750);
+        let bad = dir(0o777);
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("config-link");
+        let strict = AnchorRequired {
+            owner: Some(nix::unistd::geteuid().as_raw()),
+            mode_mask: Some(0o022),
+        };
+        symlink(good.path(), &link).unwrap();
+        let pinned_good = open_anchor_resolved(&link, none_req(), StrategyPref::Auto).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(bad.path(), &link).unwrap();
+        let pinned_bad = open_anchor_resolved(&link, none_req(), StrategyPref::Auto).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(good.path(), &link).unwrap();
+        assert_eq!(pinned_good.require(&strict), Ok(()));
+        match pinned_bad.require(&strict) {
+            Err(IoError::InsecurePermissions { path, mode }) => {
+                assert_eq!(path, link);
+                assert_eq!(mode & 0o777, 0o777);
+            }
+            other => panic!("expected the pinned 0777 directory refused, got {other:?}"),
+        }
+        // The owner half: a requirement naming another uid refuses the held fd
+        // even though its mode passes.
+        let other = AnchorRequired {
+            owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
+            mode_mask: Some(0o022),
+        };
+        match pinned_good.require(&other) {
+            Err(IoError::NotOwned { path, uid, want }) => {
+                assert_eq!(path, link);
+                assert_eq!(uid, nix::unistd::geteuid().as_raw());
+                assert_eq!(want, uid.wrapping_add(1));
+            }
+            other => panic!("expected NotOwned from the held fd, got {other:?}"),
+        }
     }
 
     #[test]
