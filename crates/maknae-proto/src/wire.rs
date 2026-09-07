@@ -141,8 +141,9 @@ pub enum Verb {
     /// decision 3): the SUBJECT — Maknae's own runtime loop, the ACP Agent,
     /// untrusted, holding no egress credential — asks the trust plane to send
     /// content to the model. The kernel decides, appends the write-ahead
-    /// record, calls the registered provider, and returns the reply on the
-    /// response leg, which is decided as a release. This REVERSES ACP's
+    /// record, hands the turn to the `maknae-egress` process (which holds the
+    /// key and makes the call), and returns the reply on the response leg,
+    /// which is decided as a release. This REVERSES ACP's
     /// direction, where `session/prompt` is an agent method the Client calls;
     /// the ADR owns the reversal. The user → loop hop is not this term.* This
     /// is EGRESS — content leaving the trust plane toward a model endpoint. The
