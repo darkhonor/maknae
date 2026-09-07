@@ -637,14 +637,29 @@ mod tests {
             .unwrap()
             .provider()
             .is_some());
+        // A mode the requirement refuses on the MEMBER itself (0o660 against
+        // mask 0o022), with both directories passing: the member is named.
+        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o660);
+        match boot_with_requirement(&d.0, me()) {
+            Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
+                assert_eq!(section, "provider");
+                assert!(path.ends_with("config.d/10-provider.yaml"), "{path}");
+            }
+            other => panic!("expected SectionNotRootOwned naming the member, got {other:?}"),
+        }
+        // An owner mismatch refuses at the root directory first and names it.
         let wrong = maknae_io::TargetRequired {
             owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
             ..me()
         };
+        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
         match boot_with_requirement(&d.0, wrong) {
             Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
                 assert_eq!(section, "provider");
-                assert!(path.ends_with("config.d/10-provider.yaml"), "{path}");
+                assert!(
+                    path.ends_with("provider-cd"),
+                    "the root directory is named: {path}"
+                );
             }
             other => panic!("expected SectionNotRootOwned, got {other:?}"),
         }

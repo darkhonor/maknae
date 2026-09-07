@@ -93,16 +93,45 @@ fn endpoint_is_acceptable(url: &str) -> bool {
     if authority.is_empty() || authority.contains('@') {
         return false;
     }
-    let host = if let Some(v6) = authority.strip_prefix('[') {
+    // host[:port]; a bracketed IPv6 host, or a DNS-label/IPv4 host of
+    // [A-Za-z0-9.-] that neither starts nor ends with '-' or '.'; a port, when
+    // present, is 1..=5 digits. `https://?query`, `https://[]` and
+    // `localhost:garbage` are not destinations (codex review round 2).
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
         match v6.split_once(']') {
-            Some((h, _)) => format!("[{h}]"),
-            None => return false,
+            Some((h, rest))
+                if !h.is_empty()
+                    && h.chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') =>
+            {
+                let port = match rest.strip_prefix(':') {
+                    Some(p) => Some(p),
+                    None if rest.is_empty() => None,
+                    None => return false,
+                };
+                (format!("[{h}]"), port)
+            }
+            _ => return false,
         }
     } else {
-        authority.split(':').next().unwrap_or("").to_string()
+        let (h, port) = match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        };
+        let ok = !h.is_empty()
+            && h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && !h.starts_with(['-', '.'])
+            && !h.ends_with(['-', '.']);
+        if !ok {
+            return false;
+        }
+        (h.to_string(), port)
     };
-    if host.is_empty() {
-        return false;
+    if let Some(p) = port {
+        if p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit()) || p == "0" {
+            return false;
+        }
     }
     if secure {
         return true;
@@ -273,6 +302,8 @@ mod tests {
             "http://127.0.0.1:8080/v1",
             "http://localhost/v1",
             "http://[::1]:9/v1",
+            "https://api.openai.com:8443/v1",
+            "https://10.0.0.5/v1",
         ] {
             assert!(
                 parse(&OK.replace("https://api.openai.com/v1", ok)).is_ok(),
@@ -297,6 +328,19 @@ mod tests {
             // scheme is case-sensitive; an unclosed IPv6 bracket is not a host
             "HTTPS://api.openai.com/v1",
             "http://[::1/v1",
+            // authority syntax (codex round 2): hostless, empty brackets, bad
+            // port, bad host characters
+            "https://?query",
+            "https://[]",
+            "https://[]:443/v1",
+            "http://localhost:garbage/v1",
+            "http://localhost:/v1",
+            "http://localhost:0/v1",
+            "http://localhost:123456/v1",
+            "https://-bad.example/v1",
+            "https://bad.example./v1",
+            "https://exa mple/v1",
+            "https://[::1]x/v1",
         ] {
             match parse(&OK.replace("https://api.openai.com/v1", bad)) {
                 Err(ConfigError::InvalidProvider(r)) => {
