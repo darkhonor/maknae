@@ -93,25 +93,26 @@ fn endpoint_is_acceptable(url: &str) -> bool {
     if authority.contains('@') {
         return false;
     }
-    // host[:port]; a bracketed IPv6 host, or a DNS-label/IPv4 host of
-    // [A-Za-z0-9.-] that neither starts nor ends with '-' or '.'; a port, when
-    // present, is 1..=5 digits. `https://?query`, `https://[]` and
-    // `localhost:garbage` are not destinations (codex review round 2).
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+    // host[:port]; a bracketed host must PARSE as an IPv6 address (`[1]` is
+    // hex but is not an address -- codex review round 3), or a DNS-label/IPv4
+    // host of [A-Za-z0-9.-] that neither starts nor ends with '-' or '.'; a
+    // port, when present, is decimal digits with no leading zero that parse
+    // to 1..=65535 (`65536` and `00000` are not ports). `https://?query`,
+    // `https://[]` and `localhost:garbage` are not destinations (round 2).
+    let (loopback, port) = if let Some(v6) = authority.strip_prefix('[') {
         match v6.split_once(']') {
-            Some((h, rest))
-                if !h.is_empty()
-                    && h.chars()
-                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') =>
-            {
+            Some((h, rest)) => {
+                let Ok(addr) = h.parse::<std::net::Ipv6Addr>() else {
+                    return false;
+                };
                 let port = match rest.strip_prefix(':') {
                     Some(p) => Some(p),
                     None if rest.is_empty() => None,
                     None => return false,
                 };
-                (format!("[{h}]"), port)
+                (addr.is_loopback(), port)
             }
-            _ => return false,
+            None => return false,
         }
     } else {
         let (h, port) = match authority.split_once(':') {
@@ -126,17 +127,15 @@ fn endpoint_is_acceptable(url: &str) -> bool {
         if !ok {
             return false;
         }
-        (h.to_string(), port)
+        (h == "127.0.0.1" || h == "localhost", port)
     };
     if let Some(p) = port {
-        if p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit()) || p == "0" {
+        let digits = !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+        if !digits || p.starts_with('0') || p.parse::<u16>().is_err() {
             return false;
         }
     }
-    if secure {
-        return true;
-    }
-    host == "127.0.0.1" || host == "localhost" || host == "[::1]"
+    secure || loopback
 }
 
 /// Refuse a provider VALUE that carries a key under a plaintext-key spelling —
@@ -304,8 +303,10 @@ mod tests {
             "http://[::1]:9/v1",
             "https://api.openai.com:8443/v1",
             "https://10.0.0.5/v1",
-            // a bare bracketed loopback, no port; a five-digit port
+            // a bare bracketed loopback, no port; the loopback ADDRESS in its
+            // long spelling; the top of the port range
             "http://[::1]/v1",
+            "http://[0:0:0:0:0:0:0:1]:8080/v1",
             "https://api.openai.com:65535/v1",
         ] {
             assert!(
@@ -344,8 +345,16 @@ mod tests {
             "https://bad.example./v1",
             "https://exa mple/v1",
             "https://[::1]x/v1",
-            "http://[zz::1]/v1",
             "http://[::1]:/v1",
+            // bracket contents that are not an IPv6 address, whichever scheme
+            "https://[zz::1]/v1",
+            "https://[1]/v1",
+            "http://[::2]/v1",
+            // ports: above the range, leading zeros, a sign
+            "https://api.openai.com:65536/v1",
+            "http://localhost:00000/v1",
+            "http://localhost:08080/v1",
+            "http://localhost:+80/v1",
         ] {
             match parse(&OK.replace("https://api.openai.com/v1", bad)) {
                 Err(ConfigError::InvalidProvider(r)) => {

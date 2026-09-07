@@ -476,7 +476,7 @@ fn load_config_rooted_with(
     // round 2 named: the subject hides the root-authored override by renaming
     // it, and the base file, itself root-owned, wins.
     if root_sections.iter().any(|s| doc.source_of(s).is_some()) {
-        verify_selection_dirs(&anchor, &requirement).map_err(|()| {
+        verify_selection_dirs(&anchor, &root, &requirement).map_err(|failed| {
             let section = root_sections
                 .iter()
                 .find(|s| doc.source_of(s).is_some())
@@ -484,7 +484,7 @@ fn load_config_rooted_with(
                 .unwrap_or_default();
             ConfigError::SectionNotRootOwned {
                 section,
-                path: root.display().to_string(),
+                path: failed.display().to_string(),
             }
         })?;
     }
@@ -517,18 +517,24 @@ fn load_config_rooted_with(
 /// lets the subject hide a root-authored override and hand the win to the base
 /// file (codex review round 2, 2026-09-07). `anchor` is the directory the scan read
 /// through, re-judged on its held fd (`Anchor::require`), not reopened by path.
+/// `Err` carries the directory that failed -- `root`, or `root/config.d` -- so
+/// the refusal names the thing to fix (codex review round 3).
 #[cfg(unix)]
 pub(crate) fn verify_selection_dirs(
     anchor: &maknae_io::Anchor,
+    root: &Path,
     requirement: &maknae_io::TargetRequired,
-) -> Result<(), ()> {
+) -> Result<(), std::path::PathBuf> {
     anchor
         .require(&maknae_io::AnchorRequired {
             owner: requirement.owner,
             mode_mask: Some(0o022),
         })
-        .map_err(|_| ())?;
-    let entries = anchor.enumerate(Path::new(""), None).map_err(|_| ())?.value;
+        .map_err(|_| root.to_path_buf())?;
+    let entries = anchor
+        .enumerate(Path::new(""), None)
+        .map_err(|_| root.to_path_buf())?
+        .value;
     if entries
         .iter()
         .any(|e| e.name == std::ffi::OsStr::new("config.d"))
@@ -544,7 +550,7 @@ pub(crate) fn verify_selection_dirs(
                     mode_mask: Some(0o022),
                 }),
             )
-            .map_err(|_| ())?;
+            .map_err(|_| root.join("config.d"))?;
     }
     Ok(())
 }
@@ -1323,10 +1329,9 @@ mod tests {
         match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
             Err(ConfigError::SectionNotRootOwned { section, path }) => {
                 assert_eq!(section, "provider");
-                assert!(
-                    path.ends_with("rooted-base-winner") || path.contains("rooted-base-winner"),
-                    "{path}"
-                );
+                // The DIRECTORY that failed is the one named: config.d, not
+                // the root that passed (codex review round 3).
+                assert!(path.ends_with("rooted-base-winner/config.d"), "{path}");
             }
             other => panic!("expected the selection-directory refusal, got {other:?}"),
         }
@@ -1351,7 +1356,10 @@ mod tests {
             0o660,
         );
         let specs = [spec("provider", false)];
-        assert_eq!(verify_selection_dirs(&anchor_of(&d.0), &me()), Ok(()));
+        assert_eq!(
+            verify_selection_dirs(&anchor_of(&d.0), &std::path::absolute(&d.0).unwrap(), &me()),
+            Ok(())
+        );
         match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
             Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
             other => panic!("expected the FILE refusal, got {other:?}"),
@@ -1396,7 +1404,10 @@ mod tests {
             other
         );
         let specs = [spec("provider", false)];
-        assert_eq!(verify_selection_dirs(&anchor_of(&d.0), &me()), Ok(()));
+        assert_eq!(
+            verify_selection_dirs(&anchor_of(&d.0), &std::path::absolute(&d.0).unwrap(), &me()),
+            Ok(())
+        );
         match load_config_rooted_with(&d.0, &specs, &["provider"], me()) {
             Err(ConfigError::SectionNotRootOwned { path, .. }) => assert_eq!(path, "maknae.yaml"),
             other => panic!("expected the FILE OWNER refusal, got {other:?}"),
@@ -1473,19 +1484,22 @@ mod tests {
         repoint(&good.0);
         let root = std::path::absolute(&link).unwrap();
         let loaded = bufs[0].1.as_bytes();
-        assert_eq!(verify_selection_dirs(&scanned_good, &me()), Ok(()));
+        assert_eq!(verify_selection_dirs(&scanned_good, &root, &me()), Ok(()));
         assert_eq!(
             verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
             Ok(())
         );
         repoint(&bad.0);
-        assert_eq!(verify_selection_dirs(&scanned_good, &me()), Ok(()));
+        assert_eq!(verify_selection_dirs(&scanned_good, &root, &me()), Ok(()));
         assert_eq!(
             verify_root_source(&scanned_good, &root, &Source::Base, loaded, &me()),
             Ok(())
         );
         repoint(&good.0);
-        assert_eq!(verify_selection_dirs(&scanned_bad, &me()), Err(()));
+        assert_eq!(
+            verify_selection_dirs(&scanned_bad, &root, &me()),
+            Err(root.clone())
+        );
         assert_eq!(
             verify_root_source(&scanned_bad, &root, &Source::Base, loaded, &me()),
             Err(())

@@ -111,7 +111,10 @@ pub struct Entry {
 
 /// A pinned anchor directory. `Drop` closes the fd. `AnchorRequired` is checked ONCE,
 /// at construction — an attacker who `chmod`s the anchor afterwards faces no re-check,
-/// which is the deliberate consequence of pinning.
+/// which is the deliberate consequence of pinning. [`Anchor::require`] is the one
+/// exception, on the caller's initiative: a point-in-time re-judgement of the held
+/// fd against a stricter requirement, which neither replaces the construction-time
+/// requirement nor governs later verbs.
 #[derive(Debug)]
 pub struct Anchor {
     fd: OwnedFd,
@@ -237,6 +240,14 @@ impl Anchor {
     /// inode rather than re-opening the path, which a replaceable top-level
     /// symlink could point at a different tree between the two opens (codex
     /// review round 3, 2026-09-07). The error names the anchor's path.
+    ///
+    /// This is a POINT-IN-TIME judgement of the directory's metadata. It is not
+    /// stored, it does not retroactively bless bytes already read under the
+    /// looser requirement, and later verbs on this anchor still run under
+    /// their own descendant/target requirements. A caller that needs "the
+    /// content I hold satisfies the stricter requirement" must re-read it
+    /// under that requirement and compare, as `maknae-config`'s
+    /// `verify_root_source` does.
     pub fn require(&self, req: &AnchorRequired) -> Result<(), IoError> {
         let st = syscall::fstat(&self.fd)
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path))?;
