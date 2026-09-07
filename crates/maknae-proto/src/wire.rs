@@ -102,7 +102,8 @@ pub enum Verb {
     /// external service, without the subject ever seeing it — egress with an
     /// irreversible third-party effect. The confused-deputy term — the subject's
     /// reach becomes the daemon's reach unless the credential is scoped to the
-    /// subject rather than the daemon (#151).
+    /// subject rather than the daemon (#153 §4 and #168; *corrected 2026-09-07,
+    /// ADR-0023 — this said #151, the MCP epic*).
     AdminCredentialBroker,
     /// Enumerate daemon-side session records (connections to `maknaed`, per #115)
     /// — not agent conversations. A disclosure of who is connected.
@@ -115,9 +116,10 @@ pub enum Verb {
     /// authority is provisioned — in an ACP v2 deployment the MCP servers Maknae
     /// hands into the session are named here, making this a capability-granting
     /// call, not bookkeeping. *(ADR-0023: not built in Cooky — each loop turn is
-    /// one connection and one audit session (`maknaed` serves one frame per
-    /// connection); the kernel holds no conversation object, and one that
-    /// outlives a process is Velveteen's.)*
+    /// one connection and one audit session; the kernel holds no conversation
+    /// identity spanning connections (multi-frame exchanges within one
+    /// connection exist — the mutation lane — the identity does not), and a
+    /// conversation that outlives a process is Velveteen's.)*
     SessionNew,
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
