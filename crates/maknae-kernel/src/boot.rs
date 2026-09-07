@@ -5,9 +5,10 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config_rooted, policy_name_from_core, provider_from_section, Ceiling,
-    ClassificationPolicy, ConfigError, Document, IngestPosture, ProviderConfig, SectionSpec, Value,
-    AUDIT_SECTION, PRINCIPAL_SECTION, PROVIDER_SECTION, TRANSPORT_SECTION,
+    ceiling_from_core, load_config_rooted, policy_name_from_core, provider_from_section,
+    refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError, Document, IngestPosture,
+    ProviderConfig, SectionSpec, Value, AUDIT_SECTION, PRINCIPAL_SECTION, PROVIDER_SECTION,
+    TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -149,6 +150,12 @@ fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
     let policy = crate::classification::select(&name)
         .ok_or(ConfigError::UnknownClassificationPolicy { name })?;
     let ceiling = ceiling_from_core(core, policy)?;
+    // Every contribution to the provider section is checked for a pasted
+    // key, not only the winner: a base block a root-owned config.d member
+    // shadows would otherwise carry a credential that precedence hid.
+    for shadowed in document.shadowed_sections(PROVIDER_SECTION) {
+        refuse_plaintext_keys(shadowed)?;
+    }
     let provider = provider_from_section(document.section(PROVIDER_SECTION))?;
     Ok(BootConfig {
         document,
@@ -640,6 +647,30 @@ mod tests {
                 assert!(path.ends_with("config.d/10-provider.yaml"), "{path}");
             }
             other => panic!("expected SectionNotRootOwned, got {other:?}"),
+        }
+    }
+
+    /// A pasted key in a base provider block that a config.d member shadows is
+    /// still refused: precedence does not launder a credential out of the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_shadowed_provider_block_with_a_pasted_key_still_refuses_boot() {
+        let d = new_dir("provider-shadow");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core: {}\nprovider:\n  api_key: sk-live\n",
+            0o640,
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
+        match boot_with_requirement(&d.0, me()) {
+            Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
+                assert_eq!(field, "api_key")
+            }
+            other => panic!("expected ProviderPlaintextKey from the shadowed block, got {other:?}"),
         }
     }
 

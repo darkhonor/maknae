@@ -33,6 +33,10 @@ pub struct Override {
 pub struct Document {
     sections: Vec<(String, Value, Source)>,
     overrides: Vec<Override>,
+    /// Base sections a `config.d/` member replaced, kept so a check that must
+    /// see EVERY contribution to a section (#243: a pasted key in a shadowed
+    /// provider block) is not blinded by precedence.
+    shadowed: Vec<(String, Value, Source)>,
 }
 
 impl Document {
@@ -49,15 +53,30 @@ impl Document {
                 .map(|(n, v)| (n, v, Source::Base))
                 .collect(),
             overrides: Vec::new(),
+            shadowed: Vec::new(),
         }
     }
 
     /// Loader-only constructor.
-    pub(crate) fn new(sections: Vec<(String, Value, Source)>, overrides: Vec<Override>) -> Self {
+    pub(crate) fn new(
+        sections: Vec<(String, Value, Source)>,
+        overrides: Vec<Override>,
+        shadowed: Vec<(String, Value, Source)>,
+    ) -> Self {
         Document {
             sections,
             overrides,
+            shadowed,
         }
+    }
+
+    /// Every value a section was given that precedence discarded — the base
+    /// block a `config.d/` member replaced. Empty for a section written once.
+    pub fn shadowed_sections<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+        self.shadowed
+            .iter()
+            .filter(move |(n, _, _)| n == name)
+            .map(|(_, v, _)| v)
     }
 
     /// The section's `Value`, or `None` for a registered-optional-absent (or
@@ -606,6 +625,7 @@ mod tests {
                 winner: Source::ConfigD("cfg.yaml".into()),
                 shadowed: Source::Base,
             }],
+            Vec::new(),
         );
         assert_eq!(doc.section("core"), Some(&Value::Int(1)));
         assert_eq!(doc.section("authz"), Some(&Value::Int(2)));
@@ -622,6 +642,7 @@ mod tests {
                 .into_iter()
                 .map(|(n, v)| (n.to_string(), v, Source::Base))
                 .collect(),
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -899,6 +920,7 @@ mod tests {
                 Source::Base,
             )],
             Vec::new(),
+            Vec::new(),
         );
         let transport = crate::TransportConfig::default();
         let audit = crate::AuditConfig {
@@ -943,7 +965,7 @@ mod tests {
     /// fold exists. All three sections, not just the one a review named.
     #[test]
     fn every_section_with_resolved_defaults_is_folded() {
-        let doc = Document::new(Vec::new(), Vec::new()); // an empty file
+        let doc = Document::new(Vec::new(), Vec::new(), Vec::new()); // an empty file
         let transport = crate::TransportConfig::default();
         let audit = crate::AuditConfig {
             jsonl_path: "/var/log/maknae/audit.jsonl".into(),

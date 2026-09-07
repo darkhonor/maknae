@@ -362,13 +362,13 @@ The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-002
 ```yaml
 provider:
   name: openai                          # operator's label; appears in the audit trail
-  endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only (the hermetic stub)
+  endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only (the hermetic stub); no userinfo
   model: gpt-5
   key_vault_path: maknae/provider/openai  # KV v2 path the maknae-egress process reads; never disclosed
 ```
 
-- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect is reported. It lives in Vault at `<kv mount>/data/<key_vault_path>` (`deploy/vault-pki`: the `maknae-kv` mount), readable by the `maknae-egress` principal only.
-- **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**; otherwise boot refuses (`SectionNotRootOwned`, naming the file). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
+- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect is reported — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. It lives in Vault at `<kv mount>/data/<key_vault_path>` (`deploy/vault-pki`: the `maknae-kv` mount), readable by the `maknae-egress` principal only.
+- **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses (`SectionNotRootOwned`, naming the file). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
 - **Disclosure.** `admin.config.show` shows `name`, `endpoint` and `model` in the clear and omits `key_vault_path`.
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 

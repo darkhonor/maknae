@@ -71,27 +71,59 @@ fn required_str<'a>(m: &'a [(String, Value)], key: &str) -> Result<&'a str, Conf
 }
 
 /// `https://…`, or `http://` to a loopback host only. Anything else — a bare
-/// host, another scheme, whitespace, an `http://` to a routable address — is
+/// host, another scheme (case-sensitively: `HTTPS://` is not a scheme this
+/// accepts), whitespace, **userinfo** (`user:pw@host` — a credential in a
+/// disclosed field, and the trick that made `localhost:pw@remote` read as
+/// loopback; codex review 2026-09-07), an `http://` to a routable address — is
 /// refused: the loop's content leaves the trust plane over this URL.
 fn endpoint_is_acceptable(url: &str) -> bool {
     if url.chars().any(char::is_whitespace) {
         return false;
     }
-    if let Some(rest) = url.strip_prefix("https://") {
-        return !rest.is_empty() && !rest.starts_with('/');
+    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return false;
+    };
+    // The AUTHORITY is everything up to the first '/'; it must not carry
+    // userinfo, and it must name a host.
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
     }
-    if let Some(rest) = url.strip_prefix("http://") {
-        let host = if rest.starts_with('[') {
-            rest.split(']')
-                .next()
-                .map(|h| format!("{h}]"))
-                .unwrap_or_default()
-        } else {
-            rest.split(['/', ':']).next().unwrap_or("").to_string()
-        };
-        return host == "127.0.0.1" || host == "localhost" || host == "[::1]";
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((h, _)) => format!("[{h}]"),
+            None => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    if host.is_empty() {
+        return false;
     }
-    false
+    if secure {
+        return true;
+    }
+    host == "127.0.0.1" || host == "localhost" || host == "[::1]"
+}
+
+/// Refuse a provider VALUE that carries a key under a plaintext-key spelling —
+/// callable on every contribution to the section, not only the winner: a base
+/// block a `config.d/` member shadows still had the key in it (codex review
+/// 2026-09-07). A non-map value refuses nothing here; the parser handles it.
+pub fn refuse_plaintext_keys(v: &Value) -> Result<(), ConfigError> {
+    if let Value::Map(m) = v {
+        if let Some((k, _)) = m
+            .iter()
+            .find(|(k, _)| PLAINTEXT_KEY_KEYS.contains(&k.to_ascii_lowercase().as_str()))
+        {
+            return Err(ConfigError::ProviderPlaintextKey { field: k.clone() });
+        }
+    }
+    Ok(())
 }
 
 /// Read the `provider` section. Absent → `Ok(None)`; present → strictly
@@ -108,12 +140,7 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
     };
     // The plaintext-key refusal comes FIRST: an operator who pasted a key next
     // to a typo in another field should hear about the key, not the typo.
-    if let Some((k, _)) = m
-        .iter()
-        .find(|(k, _)| PLAINTEXT_KEY_KEYS.contains(&k.to_ascii_lowercase().as_str()))
-    {
-        return Err(ConfigError::ProviderPlaintextKey { field: k.clone() });
-    }
+    refuse_plaintext_keys(section)?;
     for (k, _) in m {
         if !KEYS.contains(&k.as_str()) {
             return Err(err(format!("provider: unknown key '{k}'")));
@@ -214,6 +241,17 @@ mod tests {
     }
 
     #[test]
+    fn refuse_plaintext_keys_sees_any_contribution_and_ignores_non_maps() {
+        let v = load_str("name: p\nTOKEN: x\n").unwrap();
+        assert!(matches!(
+            refuse_plaintext_keys(&v),
+            Err(ConfigError::ProviderPlaintextKey { field }) if field == "TOKEN"
+        ));
+        assert!(refuse_plaintext_keys(&load_str(OK).unwrap()).is_ok());
+        assert!(refuse_plaintext_keys(&Value::Str("sk-live".into())).is_ok());
+    }
+
+    #[test]
     fn the_key_set_is_exact() {
         match parse(&format!("{OK}region: us\n")) {
             Err(ConfigError::InvalidProvider(r)) => {
@@ -250,6 +288,15 @@ mod tests {
             "https://",
             "https:///v1",
             "https://api.openai.com/v 1",
+            // userinfo: a credential in a disclosed field, and the trick that
+            // reads `localhost:pw@remote` as loopback
+            "http://localhost:pw@remote.example/v1",
+            "http://127.0.0.1@remote.example/v1",
+            "https://user:pw@api.openai.com/v1",
+            "https://@api.openai.com/v1",
+            // scheme is case-sensitive; an unclosed IPv6 bracket is not a host
+            "HTTPS://api.openai.com/v1",
+            "http://[::1/v1",
         ] {
             match parse(&OK.replace("https://api.openai.com/v1", bad)) {
                 Err(ConfigError::InvalidProvider(r)) => {

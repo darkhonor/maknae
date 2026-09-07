@@ -1,6 +1,9 @@
 name: ci
 on:
   pull_request:
+    # `labeled` is what makes the mutation lane's `run-mutants` opt-in reachable
+    # without a push (codex review 2026-09-07); the other three are GitHub's defaults.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
