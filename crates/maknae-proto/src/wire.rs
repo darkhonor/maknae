@@ -81,11 +81,16 @@ pub enum Verb {
     AdminCredentialRotate,
     /// Enumerate the model providers available to the agent runtime. A disclosure
     /// of what destinations exist. Maps to ACP's top-level `providers/list` — an
-    /// agent method, so Maknae is the caller.
+    /// agent method, so Maknae is the caller. *(Corrected 2026-09-07, ADR-0023:
+    /// in Cooky the provider registry lives in the trust plane (#243), so this
+    /// term answers from `maknaed`'s own configuration; the ACP call toward an
+    /// external Agent is not built.)*
     AdminProviderList,
     /// Maknae selecting the agent runtime's model provider — a trust-plane
     /// destination choice, not the agent's preference. Egress on the same axis as
-    /// `session.prompt` (#153).
+    /// `session.prompt` (#153). *(ADR-0023 decision 3: operator-only in Cooky and
+    /// denied to the loop's subject role — the one destination is never chosen
+    /// from the untrusted side.)*
     AdminProviderSet,
     /// Remove a provider from the agent's available destinations. Destination
     /// selection by elimination, same axis.
@@ -106,7 +111,9 @@ pub enum Verb {
     /// Begin a conversation with an agent runtime. This is where the agent's tool
     /// authority is provisioned — in an ACP v2 deployment the MCP servers Maknae
     /// hands into the session are named here, making this a capability-granting
-    /// call, not bookkeeping.
+    /// call, not bookkeeping. *(ADR-0023: not built in Cooky — the loop's
+    /// conversation is the connection's session; a session that outlives a
+    /// process is Velveteen's.)*
     SessionNew,
     /// Reattach to an existing conversation. The caller obtains its content and
     /// history — a disclosure, and for a conversation the caller may not have
@@ -123,18 +130,23 @@ pub enum Verb {
     /// in a shared audience (#147). The fork inherits the parent's provenance and
     /// high-water mark; forking is never a way to shed them.
     SessionFork,
-    /// Send content to an agent runtime. This is EGRESS — content leaving the
-    /// trust plane toward a model endpoint. The term #147's destination
-    /// governance attaches to; its default is #153's. Un-recallable once sent —
-    /// which is why it is two-phase, not audited after the fact.
-    ///
-    /// *Corrected 2026-09-07 (ADR-0023): the hop this term governs is the
-    /// LOOP → MODEL hop. Maknae's own runtime loop (the ACP Agent, untrusted,
-    /// holding no key) issues it each turn; the kernel decides, appends the
-    /// write-ahead record, calls the registered provider, and returns the
-    /// reply. The user → loop hop is not this term.*
+    /// ~~Send content to an agent runtime.~~ *Corrected 2026-09-07 (ADR-0023
+    /// decision 3): the SUBJECT — Maknae's own runtime loop, the ACP Agent,
+    /// untrusted, holding no egress credential — asks the trust plane to send
+    /// content to the model. The kernel decides, appends the write-ahead
+    /// record, calls the registered provider, and returns the reply on the
+    /// response leg, which is decided as a release. This REVERSES ACP's
+    /// direction, where `session/prompt` is an agent method the Client calls;
+    /// the ADR owns the reversal. The user → loop hop is not this term.* This
+    /// is EGRESS — content leaving the trust plane toward a model endpoint. The
+    /// term #147's destination governance attaches to; its default is #153's.
+    /// Un-recallable once sent — which is why it is two-phase, not audited
+    /// after the fact.
     SessionPrompt,
-    /// Ask the agent to stop work in progress.
+    /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: granted
+    /// wherever `session.prompt` is (#172 — never the scarcer grant); in Cooky
+    /// it stops the loop, and a cancel of an in-flight egress is best-effort and
+    /// recorded as such — cancel never recalls a disclosure.)*
     SessionCancel,
     /// Change a conversation-scoped setting. Open: whether any option can
     /// redirect the model endpoint — if so this is a parallel destination surface
@@ -150,7 +162,10 @@ pub enum Verb {
     /// that came with it. ACP v1 only.
     SessionLoad,
     /// Agent output arriving and being relayed onward. A DISCLOSURE on the relay
-    /// leg — to whatever audience receives it.
+    /// leg — to whatever audience receives it. *(ADR-0023 decision 3: in Cooky
+    /// the model's reply returns to the requesting subject's own loop on the
+    /// `session.prompt` response leg, decided as a release by that verdict; a
+    /// relay to any OTHER audience is this term and stays #172's.)*
     SessionUpdate,
     /// The agent asking a human to approve something. A UX affordance and NEVER a
     /// PDP verdict — approval proves intent at one moment, never entitlement. The
