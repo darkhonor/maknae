@@ -30,6 +30,10 @@ disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
 disclose	principal.uid	readable by any local process via getpwuid
 disclose	principal.home	readable by any local process via getpwuid
+disclose	provider.name	the operator's label for the one registered model provider (#243)
+disclose	provider.endpoint	where the loop's content goes; the point of registering it
+disclose	provider.model	the model identifier sent on every request
+omit	provider.key_vault_path	the secret store's layout; not the key, and not the grant's business (ADR-0023 d3)
 disclose	transport.socket_path	the socket the daemon is listening on
 disclose	transport.max_connections	transport shape
 disclose	transport.frame_max_bytes	transport shape
