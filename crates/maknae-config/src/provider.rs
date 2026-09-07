@@ -262,6 +262,14 @@ mod tests {
 
     #[test]
     fn names_and_vault_paths_are_constrained() {
+        // Each permitted separator on its own, so no single `||` in the
+        // allowlist can be turned into `&&` unnoticed.
+        for ok in ["open-ai", "open_ai", "gpt.4", "A1"] {
+            let p = parse(&OK.replace("name: openai", &format!("name: '{ok}'")))
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.name, ok);
+        }
         for bad in ["open ai", "open/ai", "ope;nai", ""] {
             assert!(
                 matches!(

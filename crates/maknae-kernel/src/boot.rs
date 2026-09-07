@@ -106,24 +106,6 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     assemble_boot(document)
 }
 
-/// The hermetic door: the same assembly over a document loaded with the
-/// caller's root requirement, so unprivileged tests can prove the provider
-/// wiring end to end. Test-only; production is [`boot`].
-#[cfg(test)]
-fn boot_with_requirement(
-    config_dir: &Path,
-    requirement: maknae_io::TargetRequired,
-) -> Result<BootConfig, ConfigError> {
-    let specs = boot_specs();
-    let document = maknae_config::load_config_rooted_with_requirement(
-        config_dir,
-        &specs,
-        &ROOT_REQUIRED_SECTIONS,
-        requirement,
-    )?;
-    assemble_boot(document)
-}
-
 /// The sections the daemon registers, as literal blocks: the disclosure drift
 /// gate reads each registration's `name:` operand from this file, so the list
 /// is never built by a loop (and this comment never spells the block's opener).
@@ -179,6 +161,23 @@ fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hermetic door: the same assembly over a document loaded with the
+    /// caller's root requirement, so unprivileged tests can prove the provider
+    /// wiring end to end. Test-only; production is [`boot`].
+    fn boot_with_requirement(
+        config_dir: &Path,
+        requirement: maknae_io::TargetRequired,
+    ) -> Result<BootConfig, ConfigError> {
+        let specs = boot_specs();
+        let document = maknae_config::load_config_rooted_with_requirement(
+            config_dir,
+            &specs,
+            &ROOT_REQUIRED_SECTIONS,
+            requirement,
+        )?;
+        assemble_boot(document)
+    }
 
     // Platform-agnostic: a nonexistent dir fails on every platform (unix → Io from
     // canonicalize; non-unix → PermissionsUnsupported). Keeps `use super::*` live off-unix.
