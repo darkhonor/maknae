@@ -1,9 +1,11 @@
 ###############################################################################
 # Dependabot configuration
 #
-# Two ecosystems: Rust crates (Cargo.toml / Cargo.lock) and GitHub Actions
-# (.github/workflows/). No container ecosystem: Maknae ships as deb, rpm and
-# a macOS package (packaging/), not as an image.
+# Three ecosystems: Rust crates (Cargo.toml / Cargo.lock), GitHub Actions
+# (.github/workflows/), and the two OCI build images under packaging/oci/
+# (corrected 2026-09-07: an earlier revision of this header said there was no
+# container ecosystem; the Dockerfiles are scaffold stubs but they exist and
+# they pull a base image, so they are in scope).
 #
 # Supply-chain delay (mirrors Microkosmos): every update waits in a cooldown
 # after its upstream release before Dependabot will propose it. The window is
@@ -91,3 +93,27 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # ---------------------------------------------------------------------------
+  # OCI build images (packaging/oci/)
+  # ---------------------------------------------------------------------------
+  # The base image is pinned by DIGEST with the tag kept as a human label
+  # (`FROM rust:X.Y.Z@sha256:...`). Dependabot moves the digest and the tag
+  # together. No cooldown, mirroring Microkosmos: a base image is a single
+  # curated vendor artifact, digest-pinned, and the rustup inside it honors
+  # rust-toolchain.toml, so the toolchain that builds is the pinned one
+  # whatever the base carries. The images are scaffold stubs and are not
+  # built in CI today.
+  - package-ecosystem: docker
+    directory: /packaging/oci
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "build"
+      include: scope
+    labels:
+      - dependencies
+      - docker
