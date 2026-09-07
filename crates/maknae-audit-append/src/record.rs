@@ -51,6 +51,79 @@ pub struct Integrity {
     pub sig: Option<String>,
 }
 
+/// Provenance of mutation facts; a validated report is still a client claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationOrigin {
+    KernelObserved,
+    ClientReported,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationPhase {
+    Intent,
+    Progress,
+    Completion,
+}
+/// Authorization and effects are independent. IntentOnly proves no execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationStatus {
+    IntentOnly,
+    Applied,
+    NoEffect,
+    Partial,
+    DurabilityUnknown,
+    Incomplete,
+    ReportedProgress,
+    ReportedSuccess,
+    ReportedOsRefused,
+    ReportedPartial,
+    ReportedLimitReached,
+    ReportedPathChanged,
+    ReportedUnsupportedName,
+    ReportedDurabilityUnknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationEffectKind {
+    CreatedFile,
+    ReplacedFile,
+    CreatedDirectory,
+    DeletedEntry,
+}
+/// Immutable prepared operation; distinguishes subtree authorization from one entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationOperation {
+    WriteExisting,
+    WriteCreate,
+    DeleteEntry,
+    DeleteTree,
+    Mkdir,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationEffectRecord {
+    pub path: String,
+    pub effect: MutationEffectKind,
+}
+/// Trusted schema outside the deployer's free-form AU-3(1) extension. Session ID
+/// lives on AuditRecord; intent_seq correlates every phase within that session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationAudit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<MutationOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorized_paths: Vec<String>,
+    pub intent_seq: u64,
+    pub phase: MutationPhase,
+    pub origin: MutationOrigin,
+    pub status: MutationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<MutationEffectRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+}
+
 /// The full AU-3/AU-3(1)-complete audit record (ADR-0019 Decision 1).
 ///
 /// `where_` carries `#[serde(rename = "where")]`: `where` is a Rust keyword
@@ -86,6 +159,8 @@ pub struct AuditRecord {
     /// it by emitting it always would destroy exactly that property.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_requested: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<MutationAudit>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -178,6 +253,7 @@ mod tests {
             action: "connect".into(),
             object: None,
             object_requested: None,
+            mutation: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -191,6 +267,37 @@ mod tests {
                 sig: None,
             },
         }
+    }
+
+    #[test]
+    fn mutation_origin_is_typed_and_independent_of_untrusted_extension() {
+        let mut rec = sample();
+        assert!(!canonical_json(&rec).unwrap().contains("\"mutation\""));
+        rec.au3_1 = serde_json::json!({"mutation": {"origin": "KernelObserved"}});
+        rec.mutation = Some(MutationAudit {
+            operation: Some(MutationOperation::WriteCreate),
+            authorized_paths: vec!["/sentinel".into()],
+            intent_seq: 17,
+            phase: MutationPhase::Completion,
+            origin: MutationOrigin::ClientReported,
+            status: MutationStatus::ReportedSuccess,
+            content_length: None,
+            first_index: Some(1),
+            effects: vec![MutationEffectRecord {
+                path: "/sentinel".into(),
+                effect: MutationEffectKind::CreatedFile,
+            }],
+            stopped_at: None,
+        });
+        let encoded = canonical_json(&rec).unwrap();
+        let decoded: AuditRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.mutation, rec.mutation);
+        assert_eq!(
+            decoded.mutation.unwrap().origin,
+            MutationOrigin::ClientReported
+        );
+        let invalid = encoded.replace("ClientReported", "VerifiedClient");
+        assert!(serde_json::from_str::<AuditRecord>(&invalid).is_err());
     }
 
     #[test]
@@ -345,6 +452,7 @@ mod tests {
                 action: "fs.read".into(),
                 object,
                 object_requested: None,
+                mutation: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

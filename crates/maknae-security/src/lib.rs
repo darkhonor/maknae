@@ -26,8 +26,8 @@ pub use compose::{
 };
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{
-    Action, Context, Lane, Request, Resource, Subject, CONTEXT_DAC_LANE, RESOURCE_CLASSIFICATION,
-    RESOURCE_OS_ACCESSIBLE,
+    Action, Context, FsOperation, Lane, Request, Resource, Subject, CONTEXT_DAC_LANE,
+    CONTEXT_FS_OPERATION, RESOURCE_CLASSIFICATION, RESOURCE_OS_ACCESSIBLE,
 };
 pub use value::{AttrValue, Attributes};
 // NOTE: `Verdict` and `Decision` implement `Default` as a deliberate *fail-closed

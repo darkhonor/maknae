@@ -34,6 +34,8 @@ pub enum Dispatch {
     /// The peer asked to read a file; the path is the VERB's own datum
     /// (client-supplied, canonical-pre-gated by the PEP), not a peer fact.
     ReadRequested(String),
+    /// Requires the dedicated descriptor/preparation and durable intent path.
+    MutationRequested,
     /// The peer asked for the effective configuration (#162 Phase 2). Carries
     /// no datum: the config is the daemon's own, never client-supplied.
     ConfigShowRequested,
@@ -50,6 +52,9 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::Ping => Dispatch::Pong,
         Verb::Whoami => Dispatch::WhoamiRequested,
         Verb::Read { path } => Dispatch::ReadRequested(path.clone()),
+        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
+            Dispatch::MutationRequested
+        }
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
         // compile error until someone decides what it dispatches to.
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
@@ -84,12 +89,9 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::SessionElicitCreate
         | Verb::SessionElicitComplete
         | Verb::SessionCompact
-        | Verb::FsWrite
-        | Verb::FsDelete
         | Verb::FsMove
         | Verb::FsList
         | Verb::FsStat
-        | Verb::FsMkdir
         | Verb::FsLink
         | Verb::FsChmod
         | Verb::FsChown
@@ -203,12 +205,12 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::SessionElicitComplete => "session.elicit.complete",
         Verb::SessionCompact => "session.compact",
         Verb::Read { .. } => "fs.read",
-        Verb::FsWrite => "fs.write",
-        Verb::FsDelete => "fs.delete",
+        Verb::FsWrite { .. } => "fs.write",
+        Verb::FsDelete { .. } => "fs.delete",
         Verb::FsMove => "fs.move",
         Verb::FsList => "fs.list",
         Verb::FsStat => "fs.stat",
-        Verb::FsMkdir => "fs.mkdir",
+        Verb::FsMkdir { .. } => "fs.mkdir",
         Verb::FsLink => "fs.link",
         Verb::FsChmod => "fs.chmod",
         Verb::FsChown => "fs.chown",
@@ -713,6 +715,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn filesystem_mutations_require_the_dedicated_intent_path() {
+        for verb in all_verbs()
+            .into_iter()
+            .filter(|v| matches!(verb_to_action(v), "fs.write" | "fs.delete" | "fs.mkdir"))
+        {
+            assert_eq!(dispatch_verb(&verb), Dispatch::MutationRequested);
+        }
+        assert_ne!(dispatch_verb(&Verb::FsMove), Dispatch::MutationRequested);
+    }
+
     // ---- AUTHZ_DECIDE_TIMEOUT value pin (the binding site is T3) ----
 
     #[test]
@@ -1085,12 +1098,23 @@ mod tests {
             Verb::Read {
                 path: String::new(),
             },
-            Verb::FsWrite,
-            Verb::FsDelete,
+            Verb::FsWrite {
+                path: "/x".into(),
+                content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
+                mode: maknae_proto::WriteMode::Existing,
+            },
+            Verb::FsDelete {
+                path: "/x".into(),
+                recursive: false,
+            },
             Verb::FsMove,
             Verb::FsList,
             Verb::FsStat,
-            Verb::FsMkdir,
+            Verb::FsMkdir {
+                path: "/x".into(),
+                parents: false,
+                components: vec!["x".into()],
+            },
             Verb::FsLink,
             Verb::FsChmod,
             Verb::FsChown,

@@ -2,6 +2,7 @@ schema_version: 1
 permissions:
   allow:
     - "Read(~/**)"
+    - "Write(~/projects/**)"
   deny:
     - "Read(~/.ssh/**)"
     - "Read(~/.gnupg/**)"
@@ -12,3 +13,12 @@ permissions:
     - "Read(~/.kube/**)"
     - "Read(~/.docker/config.json)"
     - "Read(~/.maknae/**)"
+    - "Write(~/.ssh/**)"
+    - "Write(~/.gnupg/**)"
+    - "Write(~/.aws/**)"
+    - "Write(~/.vault-token)"
+    - "Write(~/.netrc)"
+    - "Write(~/.git-credentials)"
+    - "Write(~/.kube/**)"
+    - "Write(~/.docker/config.json)"
+    - "Write(~/.maknae/**)"

@@ -147,6 +147,8 @@ PAYLOAD_DISPOSITIONS=(
   "ConfigView|preredacted"
   "Status|struct:StatusView"
   "SubjectList|struct:RoleBindingView"
+  "MutationComplete|unit"
+  "MutationAttempt|authorized-attempt"
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }
@@ -181,6 +183,14 @@ for row in "${PAYLOAD_DISPOSITIONS[@]}"; do
     unit)
       [ -z "$operand" ] || { echo "FAIL: Payload::$vname is listed 'unit' but carries '$operand'"; exit 1; } ;;
     bytes|preredacted) ;;
+    authorized-attempt)
+      # Per-request scope is neither configuration output nor opaque file bytes.
+      # Inventory every reachable grant field/type/variant in its own decision record.
+      [ "$vname" = "MutationAttempt" ] && [ "$operand" = "crate::MutationGrant" ] || {
+        echo "FAIL: authorized-attempt must carry crate::MutationGrant"; exit 1;
+      }
+      python3 ci/gates/mutation-disclosure.py . ;;
+
     struct:*)
       st="${disp#struct:}"
       case "$operand" in

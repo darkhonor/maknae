@@ -27,18 +27,18 @@ class PlatformSelection(unittest.TestCase):
 
     def test_linux(self):
         selected = self.selected("Linux")
-        for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve"):
+        for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve", "linux_mutation_directory_flags"):
             self.assertIn(active, selected)
-        for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path"):
+        for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path", "macos_mutation_directory_flags"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
     def test_macos(self):
         selected = self.selected("Darwin")
-        for active in ("macos_fd_path", "portable_probe_openat2"):
+        for active in ("macos_fd_path", "portable_probe_openat2", "macos_mutation_directory_flags"):
             self.assertIn(active, selected)
         for absent in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve",
-                       "unsupported_fd_path"):
+                       "unsupported_fd_path", "linux_mutation_directory_flags"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
@@ -50,7 +50,7 @@ class PlatformSelection(unittest.TestCase):
             for mutant in excluded:
                 self.assertIsNone(re.search(regex, mutant.replace("syscall.rs:", "other.rs:")))
                 # A similarly named future function is not covered by this rule.
-                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve)( ->|$)",
+                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags)( ->|$)",
                                  r"\1_extra\2", mutant)
                 self.assertNotEqual(altered, mutant)
                 self.assertIsNone(re.search(regex, altered))
@@ -65,14 +65,35 @@ class PlatformSelection(unittest.TestCase):
             "cargo", "mutants", "-p", "maknae-io", "--file",
             "crates/maknae-io/src/syscall.rs", "--list",
         ], cwd=ROOT, text=True).splitlines()
-        equivalent = {m for m in INVENTORY if "replace | with ^ in " in m}
-        self.assertEqual(len(equivalent), 22, "review the disjoint-union inventory when it changes")
+        xor_mutants = {m for m in INVENTORY if "replace | with ^ in " in m}
+        reviewed = {"open_parent_by_path", "open_dir_at", "open_read_target",
+                    "openat2_resolve", "open_temp_excl", "open_append",
+                    "macos_mutation_directory_flags", "linux_mutation_directory_flags", "open_mutation_directory_at",
+                    "open_writable_delegation"}
+        equivalent = {m for m in xor_mutants if m.rsplit(" in ", 1)[1] in reviewed}
+        self.assertEqual(len(equivalent), 28, "review the disjoint-union inventory when it changes")
+        # Both production platforms have native evidence plus executable bit proofs.
+        self.assertEqual(xor_mutants - equivalent, set())
         self.assertEqual(set(configured), set(INVENTORY) - equivalent)
         patterns = tomllib.loads((ROOT / ".cargo/mutants.toml").read_text())["exclude_re"]
         # A new function or another file has no equivalence review yet.
         for mutant in equivalent:
             for nearby in (mutant.replace("syscall.rs:", "other.rs:"),
                            mutant.rsplit(" in ", 1)[0] + " in future_open"):
+                self.assertFalse(any(re.search(pattern, nearby) for pattern in patterns))
+
+    def test_audit_equivalence_excludes_only_the_six_reviewed_xors(self):
+        args = ["cargo", "mutants", "-p", "maknae-io", "--file",
+                "crates/maknae-io/src/audit_append.rs", "--list"]
+        inventory = subprocess.check_output(args + ["--no-config"], cwd=ROOT, text=True).splitlines()
+        configured = subprocess.check_output(args, cwd=ROOT, text=True).splitlines()
+        equivalent = {m for m in inventory if "replace | with ^ in flags" in m}
+        self.assertEqual(len(equivalent), 6)
+        self.assertEqual(set(configured), set(inventory) - equivalent)
+        patterns = tomllib.loads((ROOT / ".cargo/mutants.toml").read_text())["exclude_re"]
+        for mutant in equivalent:
+            for nearby in (mutant.replace("audit_append.rs:", "other.rs:"),
+                           mutant.rsplit(" in ", 1)[0] + " in future_flags"):
                 self.assertFalse(any(re.search(pattern, nearby) for pattern in patterns))
 
     def test_gate_passes_native_filter_as_one_argument(self):
@@ -101,7 +122,8 @@ class PlatformSelection(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
             self.assertEqual(arguments.read_text().splitlines(),
-                             ["mutants", "--package", "maknae-io", "--exclude-re", expected])
+                             ["mutants", "--package", "maknae-io", "--exclude-re", expected,
+                              "--minimum-test-timeout", "60"])
 
 
 if __name__ == "__main__":

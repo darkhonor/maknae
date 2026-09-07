@@ -823,6 +823,40 @@ open(p, "w").write(s)
 PYEOF2
 expect "mutants_features non-list value refused" "must be a list of strings" nonzero --   env COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list"       "$gate" --root "$r" --injection
 
+# The I/O suite contains independent five-second child watchdogs. Its enclosing
+# mutant timeout must allow those witnesses to fail and reap their children,
+# including when libtest schedules only one or two tests at a time.
+r="$(newroot)"; mk_base "$r"
+shim="$(newroot)"
+cat >"$shim/cargo-mutants" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$shim/cargo" <<'EOF'
+#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args[:1] != ['mutants']:
+    raise SystemExit('unexpected cargo invocation')
+package = args[args.index('--package') + 1]
+if package == 'maknae-io':
+    if '--minimum-test-timeout' not in args or args[args.index('--minimum-test-timeout') + 1] != '60':
+        raise SystemExit('missing enclosing I/O watchdog budget')
+elif '--minimum-test-timeout' in args:
+    raise SystemExit('I/O watchdog budget leaked to another crate')
+print('verified mutant budget for ' + package)
+sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
+EOF
+chmod +x "$shim/cargo" "$shim/cargo-mutants"
+for package in maknae-io xcore; do
+  expect "mutation watchdog budget: $package" "verified mutant budget for $package" 0 -- \
+    env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+      COVERAGE_TIERS_CRATE_DIRS="$package=crates/x" "$gate" --root "$r" --injection --mutants "$package"
+done
+expect "mutation watchdog budget still propagates failure" "cargo mutants --package maknae-io reported missed/timeout mutants" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_EXIT=3 COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/x" "$gate" --root "$r" --injection --mutants maknae-io
+
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"
 expect "ambient GIT_DIR immunity (pass path unaffected)" "PASS: coverage-tiers gate" 0 -- \

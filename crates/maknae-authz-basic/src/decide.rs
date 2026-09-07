@@ -210,6 +210,9 @@ fn permit_with_audit() -> Verdict {
 /// `/`; bare `/` passes vacuously). Returns the offending component on
 /// violation.
 fn canonical_violation(path: &str) -> Option<&'static str> {
+    if path.contains('\0') {
+        return Some("NUL byte");
+    }
     if !path.starts_with('/') {
         return Some("not absolute");
     }
@@ -315,6 +318,27 @@ pub(crate) fn decide_loaded(
     // Step 3 — role gates over the closed class vocabulary.
     let class = class_of(&req.action.0);
     match role {
+        // #158, operator ruling 2026-09-07: admin governs Maknae management,
+        // not filesystem privilege. Users and admins use the SAME subject OS
+        // proof and universal path policy. Key the implemented term exactly;
+        // adding a path to an unbuilt fs verb must never grant it Read access.
+        Role::Admin | Role::User if req.action.0 == "fs.read" => match os_dac_gate(req) {
+            OsDacGate::Satisfied | OsDacGate::NotApplicable => {
+                decide_fs(lp, req, role.key(), FsScope::Read)
+            }
+            OsDacGate::Deny(why) => Verdict::Deny {
+                reason: format!("os dac: {why}"),
+            },
+            OsDacGate::Indeterminate => Verdict::Indeterminate,
+        },
+        Role::Admin | Role::User
+            if matches!(req.action.0.as_str(), "fs.write" | "fs.delete" | "fs.mkdir") =>
+        {
+            match mutation_scope(req) {
+                Ok(scope) => decide_fs(lp, req, role.key(), scope),
+                Err(verdict) => verdict,
+            }
+        }
         Role::Adversary => Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
         },
@@ -375,28 +399,6 @@ pub(crate) fn decide_loaded(
                     req.action.0
                 )),
             },
-            // Keyed like the admin arm above, and for the same reason. Without
-            // it, safety rests on a remote `if let Verb::Read` in another crate:
-            // `decide_fs` builds `Request::Read(path)` for ANY `fs.*` action, so
-            // an unbuilt fs term reaching it with a path would match `Read(~/**)`.
-            // Keying here makes the property provable in the file that decides,
-            // and makes unbuilt fs terms abstain (NotApplicable) rather than
-            // report Indeterminate — which is a PDP-malfunction signal, not a
-            // "this term has no behaviour yet" signal.
-            // OS DAC first, and ONLY for terms that name an object: `liveness.ping`
-            // and `admin.whoami` name none, so discretionary access to an object is
-            // not a question they raise. `-basic` IS the DAC layer (ADR-0020 §5), and
-            // a DAC decision that ignores the OS's own discretionary controls is not
-            // a complete DAC decision (ADR-0009).
-            Some(Class::Fs) if req.action.0 == "fs.read" => match os_dac_gate(req) {
-                // Satisfied: the OS permits it, so the policy decides.
-                // NotApplicable: OS DAC is not this lane's control, so likewise.
-                OsDacGate::Satisfied | OsDacGate::NotApplicable => decide_fs(lp, req, "admin"),
-                OsDacGate::Deny(why) => Verdict::Deny {
-                    reason: format!("os dac: {why}"),
-                },
-                OsDacGate::Indeterminate => Verdict::Indeterminate,
-            },
             Some(Class::Fs) => Verdict::NotApplicable {
                 note: Some(format!(
                     "term enumerated, not implemented: {}",
@@ -425,11 +427,57 @@ pub(crate) fn decide_loaded(
     }
 }
 
-/// Step 4 — the capability grammar, admin-only, `fs.*`-only (spec §4.4).
-/// `role_key` names the caller's role in case-5 testimony only — the one call
-/// site sits inside `Role::Admin`, so the role is statically known there (the
-/// same pattern `evaluate3_action`'s key uses, #162).
-fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
+/// Universal filesystem capability grammar (#158). `role_key` supplies audit
+/// testimony only; it does not select a different path permission set.
+enum FsScope {
+    Read,
+    Write,
+    WriteSubtree,
+}
+
+fn mutation_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
+    use maknae_security::{
+        FsOperation, CONTEXT_DAC_LANE, CONTEXT_FS_OPERATION, RESOURCE_OS_ACCESSIBLE,
+    };
+    let refuse = |reason: &str| Verdict::Deny {
+        reason: reason.into(),
+    };
+    if req.context.0.str(CONTEXT_DAC_LANE) != Some("local") {
+        return Err(refuse("filesystem mutation requires a local subject"));
+    }
+    let operation = req
+        .context
+        .0
+        .str(CONTEXT_FS_OPERATION)
+        .and_then(FsOperation::parse)
+        .ok_or_else(|| refuse("filesystem mutation preparation absent or invalid"))?;
+    let scope = match (req.action.0.as_str(), operation) {
+        ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
+        | ("fs.delete", FsOperation::DeleteEntry)
+        | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
+        ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
+        _ => {
+            return Err(refuse(
+                "filesystem mutation preparation does not match action",
+            ))
+        }
+    };
+    if operation == FsOperation::WriteExisting {
+        match os_dac_gate(req) {
+            OsDacGate::Satisfied => {}
+            OsDacGate::Deny(why) => return Err(refuse(&format!("os dac: {why}"))),
+            OsDacGate::Indeterminate => return Err(Verdict::Indeterminate),
+            OsDacGate::NotApplicable => {
+                return Err(refuse("filesystem mutation requires OS access"))
+            }
+        }
+    } else if req.resource.0.get(RESOURCE_OS_ACCESSIBLE).is_some() {
+        return Err(refuse("namespace attempt cannot carry an OS preapproval"));
+    }
+    Ok(scope)
+}
+
+fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope) -> Verdict {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
         // Required at THIS point of use: absent or wrong-typed → Indeterminate.
@@ -442,10 +490,13 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
             reason: format!("non-canonical resource path ({offense})"),
         };
     }
-    match lp
-        .policy
-        .evaluate3(&maknae_config::Request::Read(std::path::Path::new(path)))
-    {
+    let path = std::path::Path::new(path);
+    let matched = match scope {
+        FsScope::Read => lp.policy.evaluate3(&maknae_config::Request::Read(path)),
+        FsScope::Write => lp.policy.evaluate3(&maknae_config::Request::Write(path)),
+        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path),
+    };
+    match matched {
         maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
             // Audit-only provenance (spec §4.4): this reason reaches the
             // audit record; #77's wiring must never copy it onto the wire.
@@ -546,6 +597,164 @@ mod tests {
             resource: Resource(r),
             action: Action(action.into()),
             context: Context(c),
+        }
+    }
+
+    /// The production role and capability decision, with kernel preparation facts.
+    #[test]
+    fn filesystem_mutation_attempts_share_user_and_admin_policy() {
+        for role in ["admin", "user"] {
+            let mut lp = lp_with(
+                Some(&[(role, &["operator"])]),
+                &[("operator", OPERATOR_UID)],
+            );
+            lp.policy = maknae_config::parse_authz(
+                "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\"]\n",
+                Some(std::path::Path::new("/home/operator")),
+            ).unwrap();
+            for (action, operation, existing) in [
+                ("fs.write", "write-existing", true),
+                ("fs.write", "write-create", false),
+                ("fs.delete", "delete-entry", false),
+                ("fs.delete", "delete-tree", false),
+                ("fs.mkdir", "mkdir", false),
+            ] {
+                let mut req = read_req(Some("local"), existing.then_some(AttrValue::Bool(true)));
+                req.action.0 = action.into();
+                req.context
+                    .0
+                    .insert("fs_operation", AttrValue::Str(operation.into()));
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/projects/sentinel-158".into()),
+                );
+                assert!(
+                    matches!(
+                        decide_loaded(&lp, &principal(), &req),
+                        Verdict::Permit { .. }
+                    ),
+                    "{role} {operation} must reach its universal Write grant"
+                );
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/projects/private/sentinel-158".into()),
+                );
+                let refused = decide_loaded(&lp, &principal(), &req);
+                assert!(
+                    matches!(refused, Verdict::Deny { ref reason } if reason.contains("Write(~/projects/private/**)")),
+                    "wrong refusal: {refused:?}"
+                );
+                req.resource.0.insert(
+                    RESOURCE_PATH,
+                    AttrValue::Str("/home/operator/read-only-sentinel-158".into()),
+                );
+                assert!(
+                    matches!(
+                        decide_loaded(&lp, &principal(), &req),
+                        Verdict::NotApplicable { .. }
+                    ),
+                    "Read authority must not imply Write"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_preparation_cannot_substitute_for_other_os_evidence() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+            Some(std::path::Path::new("/home/operator")),
+        )
+        .unwrap();
+        for (action, operation, lane, accessible) in [
+            ("fs.write", "write-existing", "local", None),
+            (
+                "fs.write",
+                "write-existing",
+                "local",
+                Some(AttrValue::Bool(false)),
+            ),
+            (
+                "fs.write",
+                "write-create",
+                "local",
+                Some(AttrValue::Bool(true)),
+            ),
+            ("fs.mkdir", "mkdir", "local", Some(AttrValue::Bool(false))),
+            (
+                "fs.delete",
+                "delete-entry",
+                "local",
+                Some(AttrValue::Int(1)),
+            ),
+            (
+                "fs.write",
+                "write-existing",
+                "remote",
+                Some(AttrValue::Bool(true)),
+            ),
+            ("fs.write", "write-create", "remote", None),
+            ("fs.delete", "write-create", "local", None),
+            ("fs.write", "mkdir", "local", None),
+            ("fs.mkdir", "unknown", "local", None),
+            ("fs.read", "write-create", "local", None),
+        ] {
+            let mut req = read_req(Some(lane), accessible);
+            req.action.0 = action.into();
+            req.context
+                .0
+                .insert("fs_operation", AttrValue::Str(operation.into()));
+            assert!(
+                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+                "{action} {operation} {lane}"
+            );
+        }
+        let mut req = read_req(Some("local"), Some(AttrValue::Bool(true)));
+        req.action.0 = "fs.write".into();
+        assert!(
+            matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+            "bare positive OS access is not a prepared write"
+        );
+        req.context
+            .0
+            .insert("fs_operation", AttrValue::Str("write-existing".into()));
+        req.resource
+            .0
+            .insert(maknae_security::RESOURCE_OS_ACCESSIBLE, AttrValue::Int(1));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn mutation_capability_checks_reject_noncanonical_paths_before_matching() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
+            None,
+        )
+        .unwrap();
+        for path in [
+            "relative",
+            "/home//operator/x",
+            "/home/operator/../x",
+            "/home/operator/x/",
+            "/home/operator/\0x",
+        ] {
+            let mut req = read_req(Some("local"), Some(AttrValue::Bool(true)));
+            req.action.0 = "fs.write".into();
+            req.context
+                .0
+                .insert("fs_operation", AttrValue::Str("write-existing".into()));
+            req.resource
+                .0
+                .insert(RESOURCE_PATH, AttrValue::Str(path.into()));
+            assert!(
+                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+                "{path:?}"
+            );
         }
     }
 
@@ -683,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_and_user_permit_only_liveness() {
+    fn guest_stays_liveness_only_and_user_can_read() {
         for (role_key, ident, uid) in [("guest", "guestic", 700_u32), ("user", "usery", 701)] {
             let lp = lp_with(Some(&[(role_key, &[ident])]), &[(ident, uid)]);
             for action in ALL_ACTIONS {
@@ -692,7 +901,7 @@ mod tests {
                     &principal(),
                     &request(None, Some(uid as i64), action, Some("/home/operator/x")),
                 );
-                if *action == "liveness.ping" {
+                if *action == "liveness.ping" || (role_key == "user" && *action == "fs.read") {
                     assert!(
                         matches!(v, Verdict::Permit { .. }),
                         "{role_key} {action}: {v:?}"
@@ -713,28 +922,44 @@ mod tests {
     }
 
     #[test]
-    fn user_not_applicable_where_admin_is_permitted_on_fs() {
-        // The C2 discriminator (spec §7): the untrusted runtime's default role
-        // never inherits the capability grammar.
+    fn user_and_admin_share_filesystem_permissions_and_os_refusals() {
         let lp = lp_with(
             Some(&[("admin", &["alex"]), ("user", &["usery"])]),
             &[("alex", OPERATOR_UID), ("usery", 701)],
         );
-        let action = "fs.read";
-        let path = Some("/home/operator/notes.txt");
-        let admin_v = decide_loaded(
-            &lp,
-            &principal(),
-            &request(None, Some(OPERATOR_UID as i64), action, path),
-        );
-        let user_v = decide_loaded(&lp, &principal(), &request(None, Some(701), action, path));
-        assert!(matches!(admin_v, Verdict::Permit { .. }), "{admin_v:?}");
-        assert_eq!(
-            user_v,
-            Verdict::NotApplicable {
-                note: Some("role user: no rule for fs.read".into())
-            }
-        );
+        for uid in [OPERATOR_UID, 701] {
+            let mut req = request(
+                None,
+                Some(uid as i64),
+                "fs.read",
+                Some("/home/operator/notes.txt"),
+            );
+            assert_eq!(decide_loaded(&lp, &principal(), &req), permit_with_audit());
+            req.resource.0.insert(
+                RESOURCE_PATH,
+                AttrValue::Str("/home/operator/.ssh/key".into()),
+            );
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "denied by policy entry Read(~/.ssh/**)".into(),
+                }
+            );
+            req.resource.0.insert(
+                RESOURCE_PATH,
+                AttrValue::Str("/home/operator/notes.txt".into()),
+            );
+            req.resource.0.insert(
+                maknae_security::RESOURCE_OS_ACCESSIBLE,
+                AttrValue::Bool(false),
+            );
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &req),
+                Verdict::Deny {
+                    reason: "os dac: os dac refuses this subject this object".into(),
+                }
+            );
+        }
     }
 
     #[test]
@@ -1252,27 +1477,13 @@ mod tests {
         }
     }
 
-    /// GOLDEN MATRIX (#162 step 0) — 4 roles x 8 (action, path) columns, written
-    /// BEFORE the action-grant surface exists and never edited after.
-    ///
-    /// Its whole value is that it predates the change: every cell here must be
-    /// byte-identical once `roles:` lands, because this fixture is `lp_with`,
-    /// which hard-wires `shipped_policy()` — and that has no `roles:` key, so
-    /// the grant map stays empty and the three grant-sensitive terms keep
-    /// answering `NotApplicable`. The grant path is asserted separately, against
-    /// its own fixture. **If you find yourself editing a cell below, stop.**
-    ///
-    /// *(Corrected 2026-09-02, #181 — the never-edit claim is NARROWED, not
-    /// voided: every `Verdict` CELL below is byte-identical to the pre-#181
-    /// matrix — same variant, same permits, same denies — and the only change
-    /// is `na()` gaining the absence's note argument, because absences now
-    /// carry audit-only testimony. No verdict changed; the notes are the new
-    /// behaviour, and pinning them exactly is what the zero-missed rule
-    /// demands. A change to any VERDICT cell still means stop.)*
-    ///
-    /// Full `Verdict` equality, never `matches!`: the variant alone collapses
-    /// adversary-deny, policy-deny and OS-DAC deny into one cell, and a pin that
-    /// cannot tell them apart cannot detect the regression it exists for.
+    /// GOLDEN MATRIX: roles against management and filesystem requests.
+    /// Corrected 2026-09-07, #158: the prior "never edit any verdict" rule
+    /// preserved #85's initial user-liveness-only scope beyond its purpose.
+    /// Operator-approved ordinary development changes exactly the two user
+    /// fs.read cells: a matching allow permits and an explicit path deny denies.
+    /// Management, guest, containment, and unknown-action cells are unchanged.
+    /// Full verdict equality distinguishes each refusal's actual reason.
     #[test]
     fn golden_matrix_pins_every_role_against_every_class() {
         let lp = lp_with(
@@ -1359,7 +1570,7 @@ mod tests {
                 "fs.read",
                 Some("/home/operator/x"),
                 permit(),
-                na("role user: no rule for fs.read"),
+                permit(),
                 na("role guest: no rule for fs.read"),
                 contained(),
             ),
@@ -1367,7 +1578,7 @@ mod tests {
                 "fs.read",
                 Some("/home/operator/.ssh/k"),
                 policy_deny(),
-                na("role user: no rule for fs.read"),
+                policy_deny(),
                 na("role guest: no rule for fs.read"),
                 contained(),
             ),
@@ -1408,8 +1619,8 @@ mod tests {
             ("session.prompt", Class::Session),
             ("terminal.create", Class::Terminal),
             ("mcp.tool.call", Class::Mcp),
-            ("fs.write", Class::Fs),
-            ("fs.delete", Class::Fs),
+            ("fs.move", Class::Fs),
+            ("fs.link", Class::Fs),
             ("kernel.contain", Class::Kernel),
         ] {
             assert_eq!(class_of(action), Some(expect), "{action} must resolve");
@@ -1486,16 +1697,16 @@ mod tests {
             &request(
                 Some(AGENT_SUBJECT),
                 Some(OPERATOR_UID as i64),
-                "fs.read",
-                Some("/home/operator/x"),
+                "admin.whoami",
+                None,
             ),
         );
         assert_eq!(
             v,
             Verdict::NotApplicable {
-                note: Some("role user: no rule for fs.read".into())
+                note: Some("role user: no rule for admin.whoami".into())
             },
-            "agent must not inherit admin's grammar"
+            "agent must not inherit admin management authority"
         );
     }
 

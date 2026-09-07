@@ -11,14 +11,14 @@ workspace = true
 
 [dependencies]
 maknae-config = { path = "../maknae-config" }
+maknae-io = { path = "../maknae-io" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 tokio = { workspace = true, features = ["rt", "sync", "time", "io-util"] }
 
 [target.'cfg(unix)'.dependencies]
-# O_NOFOLLOW (via `nix::libc`) + `geteuid` (feature `user`) for the fail-closed
-# integrity check on the OPENED audit fd (regular file, owner=euid, not
-# group/world-writable). `custom_flags` + `MetadataExt` keep this `unsafe`-free.
+# `geteuid` (feature `user`) names the audit-file ownership requirement passed
+# to maknae-io. File opens and validation are implemented there.
 # "syslog" (#222) — the macOS unified-log mirror. NOT a new dependency: `nix`
 # is already here for the checks above, and `syslog = []` is a bare feature gate
 # that pulls no further crates (prove it with `git diff --exit-code Cargo.lock`;

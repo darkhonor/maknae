@@ -2286,10 +2286,10 @@ mod tests {
         // unrelated EACCES, which would let the test pass for the wrong reason.
         match &err {
             IoError::Io {
-                kind: crate::error::IoKind::Other { raw },
+                kind: crate::error::IoKind::AlreadyExists,
                 ..
-            } => assert_eq!(*raw, nix::errno::Errno::EEXIST as i32, "expected EEXIST"),
-            other => panic!("expected Io{{Other{{EEXIST}}}}, got {other:?}"),
+            } => {}
+            other => panic!("expected Io{{AlreadyExists}}, got {other:?}"),
         }
         assert!(
             !a.path.join("out.yaml").exists(),

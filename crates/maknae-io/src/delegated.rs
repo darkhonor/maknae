@@ -159,6 +159,17 @@ pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     Ok(OwnedFd::from(std::fs::File::open(path)?))
 }
 
+/// Subject-side, nontruncating writable open for existing-file delegation.
+/// Failure must still lead to an audited request without evidence.
+pub fn open_writable_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_writable_delegation(path).map_err(Into::into)
+}
+
+/// Subject-side directory open. Proves no permission to mutate its children.
+pub fn open_directory_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_mutation_directory(path).map_err(Into::into)
+}
+
 /// Write to a socket, delegating one descriptor alongside the bytes.
 ///
 /// The mirror of [`recv_delegated`], and the SUBJECT's half of ADR-0009: the client
