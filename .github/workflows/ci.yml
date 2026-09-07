@@ -176,11 +176,12 @@ jobs:
     needs: affected
     if: ${{ always() && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '') }}
     runs-on: ubuntu-latest
-    # A cold all-package run previously took 29m13s; #126 adds ~67s to the
-    # I/O gate in serial local measurements. Keep a bounded job budget with
-    # room for the required full run on shared configuration changes. Normal
-    # source changes select affected crates; individual mutant timeouts remain.
-    timeout-minutes: 35
+    # #238, run 34053713105: all nine completed crate sweeps passed, but the
+    # 35m job limit killed the final (Vault) sweep after its 143s cold build.
+    # Kernel alone took 15m on CI versus 6m on the warm local host. Budget the
+    # hosted cold run with headroom; normal changes still select affected crates
+    # and individual mutant timeouts/zero-missed requirements remain unchanged.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
