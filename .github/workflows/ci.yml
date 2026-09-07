@@ -64,7 +64,7 @@ jobs:
       mutants: ${{ steps.select.outputs.mutants }}
       darwin: ${{ steps.select.outputs.darwin }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: External-authority lint (#34 — no Maknae rule rests on a foreign ADR)
@@ -101,7 +101,7 @@ jobs:
       RUST_AUDIT_INFO_VERSION: "0.5.4"
       CARGO_LLVM_COV_VERSION: "0.8.7"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require successful lightweight gates and selection
         env:
           SELECTOR_RESULT: ${{ needs.affected.result }}
@@ -211,7 +211,7 @@ jobs:
     # and individual mutant timeouts/zero-missed requirements remain unchanged.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Require a trustworthy selection
@@ -262,7 +262,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require a trustworthy selection
         run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
@@ -298,7 +298,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Require a trustworthy selection
