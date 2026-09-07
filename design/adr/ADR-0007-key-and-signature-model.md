@@ -5,7 +5,7 @@
 - **Deciders:** Alex Ackerman (operator), Claude (pair)
 - **Addresses:** review issue #5 (Key & signature model — the undefined foundation)
 - **Relates to:** ADR-0005 (the mTLS plane transport that carries the communication-signing load); the merged Vault PKI (`deploy/vault-pki/`); the DCS library (rust-dcs) — which owns authoritative classification/label signing.
-- **Source spec:** `~/claude-memory/maknae/specs/2026-08-10-adr-0005-0007-crypto-foundation.md`.
+- **Source spec:** `2026-08-10-adr-0005-0007-crypto-foundation.md` (out-of-repo design spec; specs never live in this repository).
 
 > **Slot note.** Registry slot 0007 was allocated as "Key & signature model (STANAG 4778 binding)". On finalizing, the STANAG 4778 **label-binding** half — authoritative, tamper-evident binding of a classification label to a data object — is DCS classification-semantics and is **Relocated to the DCS library** (rust-dcs #21). Slot 0007 is renamed + reused for the **non-DCS core** key/signature model below.
 

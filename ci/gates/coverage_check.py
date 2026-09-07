@@ -9,7 +9,7 @@ reported before the nonzero exit; typed-field rules mean malformed input is a
 FAIL:, never a traceback. The ADR baseline table is emitted even when the run
 fails (a red CI run must still yield the CI-lane numbers).
 
-Spec authority: ~/claude-memory/maknae/specs/2026-08-04-coverage-tiers-design.md
+Spec authority: 2026-08-04-coverage-tiers-design.md (out-of-repo design spec)
 (v18, converged). Where this file and the spec disagree, the spec wins.
 """
 

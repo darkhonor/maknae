@@ -1,0 +1,25 @@
+name: Bug report
+description: A defect, with the reproduction first.
+labels: [bug]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest sequence that shows the defect. A failing test is ideal (AGENTS.md, principle 5).
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected versus observed
+    validations: { required: true }
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Linux amd64 / arm64, or macOS Apple Silicon; distribution and version
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Commit or package version

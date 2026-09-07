@@ -2,7 +2,7 @@
 //! seam (#85). Four code-defined roles (`admin`/`user`/`guest`/`adversary`)
 //! decide four-valued verdicts from `authz.yaml` (+ the additive `bindings:`
 //! key), per request, deny-by-default, fail-closed. Spec:
-//! `~/claude-memory/maknae/specs/2026-08-26-maknae-authz-basic-design.md`.
+//! `2026-08-26-maknae-authz-basic-design.md` (out-of-repo design spec; specs never live in this repository).
 //!
 //! Composition: `maknaed` constructs [`BasicAuthorizer`] at boot (#77,
 //! `maknae-kernel::boot_gate`) and decides every request through the seam —

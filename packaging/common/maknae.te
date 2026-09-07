@@ -162,7 +162,7 @@ allow maknaed_t self:unix_stream_socket { create bind listen accept read write g
 #
 # The last line is why the interface is correct here and a hand-rolled devlog_t
 # rule would NOT have been: on el9 `/run/systemd/journal/socket` is labeled
-# **syslogd_var_run_t**, not devlog_t (`ls -Z` on test-host). Hand-rolling
+# **syslogd_var_run_t**, not devlog_t (`ls -Z` on an el9 test host). Hand-rolling
 # would have shipped a rule that misses the real label -- which is the failure
 # this file's interface idiom (logging_log_file above) exists to avoid.
 #

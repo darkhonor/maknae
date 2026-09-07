@@ -84,7 +84,7 @@ impl std::fmt::Display for SiemOffloadUnsupported {
         // The catalog string this is joined to already says "audit.siem is
         // configured but off-host audit offload is not implemented", so this
         // carries only what the operator must DO about it. Measured on
-        // test-host: the two together previously said it twice.
+        // the Rocky 9 test host: the two together previously said it twice.
         f.write_str(
             "remove `audit.siem` (offload arrives with issue #223) and ship the \
              audit JSONL with a host log agent instead — see packaging/README.md",

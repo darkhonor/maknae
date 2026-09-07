@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Risk-tiered coverage gate (ADR-0016, issue #24). Spec authority:
-# ~/claude-memory/maknae/specs/2026-08-04-coverage-tiers-design.md (v18).
+# 2026-08-04-coverage-tiers-design.md (out-of-repo design spec) (v18).
 #
 # Usage: coverage-tiers.sh [--root <path>] [--injection]
 #                          [--mutants <crate>... | --mutants-all | --readiness-check]

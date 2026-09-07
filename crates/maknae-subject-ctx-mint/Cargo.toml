@@ -1,5 +1,7 @@
 [package]
 name = "maknae-subject-ctx-mint"
+publish.workspace = true
+description = "Privileged trust-plane capability: subject-context minting"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

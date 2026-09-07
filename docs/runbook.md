@@ -59,7 +59,7 @@ chmod 600 ~/.maknae/maknae.yaml
 ### 2. Point the vars
 
 ```bash
-export VAULT_ADDR="https://vault.example.internal:8200"   # your CLI is already authed with root
+export VAULT_ADDR="https://vault.example.internal:8200"   # a CLI token holding the policies below
 export MAKNAE_CONFIG_DIR="$HOME/.maknae"
 ```
 
@@ -134,7 +134,7 @@ milestone (the transport; the daemon run-loop + CLI arrive in Stage 3).
 ### 1. Seed both response-wrapped SecretIDs (just-in-time)
 
 ```bash
-export VAULT_ADDR="https://vault.example.internal:8200"   # already authed with root
+export VAULT_ADDR="https://vault.example.internal:8200"   # a CLI token holding the policies below
 # kernel plane:
 vault write -wrap-ttl=90s -f auth/maknae-approle/role/maknaed/secret-id   # → 0o400 ~/.maknae/maknaed-secret-id
 # cli plane:
@@ -239,7 +239,7 @@ Same response-wrap flow as Chapter 1 §3, targeted at the **daemon's** config di
 AppRole role:
 
 ```bash
-export VAULT_ADDR="https://vault.example.internal:8200"   # already authed with root
+export VAULT_ADDR="https://vault.example.internal:8200"   # a CLI token holding the policies below
 vault write -wrap-ttl=90s -f auth/maknae-approle/role/maknaed/secret-id
 
 umask 077

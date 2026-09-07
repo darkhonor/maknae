@@ -58,7 +58,7 @@ If it prints nothing and `CLAUDE.md` is a tiny text file, the clone came out wro
 ### Clone and build
 
 ```bash
-git clone git@github.com:darkhonor/maknae.git
+git clone https://github.com/darkhonor/maknae.git   # or your fork
 cd maknae
 cargo build --workspace
 ```
@@ -158,6 +158,18 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 4. **Wait for review.** `hobibot` reviews PRs; address every finding — fix it, or say why not. A green CI check is not the review; read the review comments before expecting a merge.
 5. **The project owner merges.** Merging (like tag pushes and any direct write to `main`) is an operator-driven action, not delegated — do not merge your own PR.
 
+## Licensing of contributions
+
+Maknae is licensed under the [Apache License, Version 2.0](LICENSE). By submitting a contribution you agree that it is licensed under the same terms, inbound equals outbound, including the patent license in section 3 of the Apache License. There is no contributor license agreement to sign.
+
+Every commit must carry a [Developer Certificate of Origin](https://developercertificate.org/) sign-off, which is your statement that you have the right to submit the work under this license:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+`git commit -s` adds it. A commit without a sign-off is not merged. The DCO is the same mechanism the Linux kernel uses; it records provenance without transferring copyright.
+
 ## Decisions become ADRs
 
 A choice that constrains future work — an interface, a security property, a vocabulary — is recorded as an ADR under [`design/adr/`](design/adr/), allocated in the registry, and written in the measured, self-correcting style described in `AGENTS.md` (state the decision, the failure that motivated it, and date any later correction). External ADRs (from other projects) are provenance, never authority — if a decision matters here, we make it here.
@@ -177,6 +189,6 @@ A choice that constrains future work — an interface, a security property, a vo
 
 ### Filesystem mutation checks across credentials
 
-Issue #158 includes an opt-in test using two existing non-root development accounts. Build `cargo test -p maknae-io --test subject_mutations --no-run`, then run the emitted test binary as root with `MAKNAE_TEST_SUBJECT` and `MAKNAE_TEST_SERVICE` set, selecting `--ignored --exact distinct_credentials_preserve_os_authority --nocapture`. On the Rocky development hosts these are `alice` and `_maknae`. The test creates and removes only its unique temporary fixture; child processes run via `sudo -u` with each account's actual groups.
+Issue #158 includes an opt-in test using two existing non-root development accounts. Build `cargo test -p maknae-io --test subject_mutations --no-run`, then run the emitted test binary as root with `MAKNAE_TEST_SUBJECT` and `MAKNAE_TEST_SERVICE` set, selecting `--ignored --exact distinct_credentials_preserve_os_authority --nocapture`. On a packaged host these are an ordinary login account and the `_maknae` service account. The test creates and removes only its unique temporary fixture; child processes run via `sudo -u` with each account's actual groups.
 
 It transfers real descriptors between the subject and service, checks replacement through the subject's writable descriptor, and verifies that the directory descriptor confers no namespace permission on the service. The subject then creates, deletes, and makes a directory in a write/search-only project directory. This developmental test is excluded from ordinary CI account provisioning; run it on both approved Rocky hosts before pushing changes to this boundary. The ordinary composed-policy, audit, report, and filesystem suites remain in CI.

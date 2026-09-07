@@ -4,7 +4,7 @@
 - **Date:** 2026-08-04
 - **Deciders:** Alex Ackerman (operator), Byeori (Claude Fable 5, pair)
 - **Addresses:** issue #24 (risk-tiered coverage policy), operator-directed
-- **Source spec:** `~/claude-memory/maknae/specs/2026-08-04-coverage-tiers-design.md` (v18; converged through 17 critical-review rounds, 48 criticals remediated)
+- **Source spec:** `2026-08-04-coverage-tiers-design.md` (out-of-repo design spec; specs never live in this repository) (v18; converged through 17 critical-review rounds, 48 criticals remediated)
 - **Provenance (never authority, per the ADR README doctrine):** the operator's prior standards in MPE-ES (tiered-testing model) and Microkosmos (runner-readiness "verify before run") informed this design; every rule below is decided here.
 
 ## Context

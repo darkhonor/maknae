@@ -8,8 +8,8 @@
 | **Domain** | https://maknae.io (registered, Cloudflare; holding page pending) |
 | **Core spec** | [`design/knowledge-lifecycle-contract.md`](design/knowledge-lifecycle-contract.md) — read this first |
 | **Agent guidance** | [`AGENTS.md`](AGENTS.md) — core principles and conventions for AI agents and tools (`CLAUDE.md` is a symlink to it) |
-| **Team** | Alex (architect/owner) + two engineers |
-| **License** | TBD (MIT leaning, pending team decision) |
+| **Maintainer** | Alex Ackerman ([@darkhonor](https://github.com/darkhonor)); AI agents (Claude, Codex) contribute under blind review, never merge |
+| **License** | [Apache-2.0](LICENSE) |
 
 ---
 
@@ -19,7 +19,7 @@ Maknae is a personal AI agent platform built around a **security kernel**. Where
 
 The platform's defining feature is a **governed learning loop**: the agent is permitted to learn — generating skills from experience and ingesting documents into its own local Knowledge Lake when tasked work reveals a gap — but every piece of acquired knowledge flows through a single authority-tiered, provenance-stamped promotion pipeline before it can be trusted. The operator does not fill the agent's knowledge base; **the agent fills it himself, from operator-authorized sources only**, learning the "official way" to do things as defined by a signed authority map.
 
-Deployment targets are x64 Linux and macOS, container-based via a **Docker Compose stack** (or Podman equivalent) or a **full Kubernetes deployment**, both on STIG default baselines. The bare-metal (Compose) path seals its bootstrap credential to a hardware root of trust — TPM 2.0 (or a vTPM) on Linux, the Secure Enclave on macOS — so a Raspberry Pi with no TPM isn't a bare-metal target; the Kubernetes path uses platform identity (Vault Kubernetes auth) with no secret at rest and needs no HRoT ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)). Single-binary is *not* a goal; small-and-auditable is.
+Supported platforms are Linux (amd64 and arm64) and macOS on Apple Silicon (arm64); there are no x86 macOS builds. Deployment is container-based via a **Docker Compose stack** (or Podman equivalent) or a **full Kubernetes deployment**, both on STIG default baselines. The bare-metal (Compose) path seals its bootstrap credential to a hardware root of trust — TPM 2.0 (or a vTPM) on Linux, the Secure Enclave on macOS — so a Raspberry Pi with no TPM isn't a bare-metal target; the Kubernetes path uses platform identity (Vault Kubernetes auth) with no secret at rest and needs no HRoT ([ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)). Single-binary is *not* a goal; small-and-auditable is.
 
 The north-star deployment is a classified, multinational, air-gapped enclave — partner operators as attribute-bearing subjects, a full Bell-LaPadula classification lattice with releasability categories, and every model endpoint local and accredited. That is not a special mode: it is the same kernel with a richer lattice and a stricter authority map, which a homelab runs with a trivial lattice at zero ceremony.
 
@@ -34,7 +34,7 @@ The fork premise died on inspection: **both projects make architectural decision
 
 Three ideas set it apart from both upstreams:
 
-1. **Policy-bound authorization.** Every consequential action transits a single deny-by-default reference monitor. The default in-repo model is **Role-Based Access Control (RBAC)**, composed with a **mandatory (MAC) classification-ceiling operand** — degenerate ABAC over the declared system's level order (ADR-0022; US = the four-level EO 13526 order, AUS = the six-rung PSPF ladder): content at or below the declared `core.handling.ceiling` flows, content marked above it is refused, unmarked content is the system's lowest level (US `UNCLASSIFIED`, AUS `UNOFFICIAL`), on every content request (#148; nothing stamps a marking yet — #229 makes higher markings expressible); where the optional external classification (DCS) library is present, it enriches decisions to full **Attribute-Based Access Control (ABAC)** — role *plus* clearance, classification, and releasability. Mandatory controls (classification, SELinux) always take precedence over discretionary grants: an administrative role never buys read-up, and even the kernel is constrained ([ADR-0020](design/adr/ADR-0020-access-control-model-and-vocabulary.md)).
+1. **Policy-bound authorization.** Every consequential action transits a single deny-by-default reference monitor. The default in-repo model is **Role-Based Access Control (RBAC)**, composed with a **mandatory (MAC) classification-ceiling operand** — degenerate ABAC over the declared system's level order (ADR-0022; US = the four-level EO 13526 order, AUS = the six-rung PSPF ladder): content at or below the declared `core.handling.ceiling` flows, content marked above it is refused, unmarked content is the system's lowest level (US `UNCLASSIFIED`, AUS `UNOFFICIAL`), on every content request (#148; nothing stamps a marking yet — #229 makes higher markings expressible); where the optional external classification (DCS, Data Classification Service: a private library the default build does not need) library is present, it enriches decisions to full **Attribute-Based Access Control (ABAC)** — role *plus* clearance, classification, and releasability. Mandatory controls (classification, SELinux) always take precedence over discretionary grants: an administrative role never buys read-up, and even the kernel is constrained ([ADR-0020](design/adr/ADR-0020-access-control-model-and-vocabulary.md)).
 2. **Zero Trust.** Every decision evaluates the tuple (subject, action, resource, context). Freshly retrieved content is an untrusted principal until it is promoted — it can *inform* a decision but never *authorize* one.
 3. **Unified knowledge lifecycle.** Skills (procedural), lake documents (declarative), and memories (episodic/semantic) all flow through one authority-tiered promotion pipeline. See the contract.
 
@@ -97,6 +97,23 @@ Two capabilities are first-class *by design* from the start (design intent, not 
     └── diagrams/
 ```
 
+## Build
+
+Rust 1.94.1 or newer on Linux (amd64/arm64) or macOS on Apple Silicon.
+
+```bash
+cargo build --workspace
+cargo test --workspace
+```
+
+The pre-push gate (formatting, clippy as errors, the coverage-tier and drift gates) is described in [`CONTRIBUTING.md`](CONTRIBUTING.md#the-pre-push-gate). Packaging for deb, rpm and macOS lives under [`packaging/`](packaging/).
+
+## Contributing, security, conduct
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow, the pre-push gate, commit conventions, and the DCO sign-off.
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability. Please do not open a public issue for one.
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ## Working in this repo
 
 Start with [`AGENTS.md`](AGENTS.md) — the direction Maknae's AI agents and tools follow, and a useful reference for human contributors. It carries the core principles and conventions and points at the load-bearing detail. In short: deny-by-default applies to designs too (absence of a permission is a denial); nothing self-promotes (no content, skill, or config gains authority without transiting the promotion pipeline); verify through the fail-closed gates in [`ci/gates/`](ci/gates/); and record decisions as ADRs. The [Knowledge Lifecycle Contract](design/knowledge-lifecycle-contract.md) invariants are acceptance criteria — violating one is a wrong answer even if the code works.
@@ -108,11 +125,11 @@ Maknae's two reference implementations are the operator's production agents — 
 - **OpenClaw** — https://github.com/openclaw/openclaw (layered-control reference)
 - **Hermes Agent** — https://github.com/NousResearch/hermes-agent (learning-first reference)
 
-It also builds on the operator's prior work: the [**Knowledge Lake**](https://github.com/mpe-es/knowledgebase) (authority-tiered, deterministic markdown retrieval — the architecture Maknae's lake is a portable instance of), [**Claude Memory**](https://github.com/darkhonor/claude-memory) (the shared memory system with out-of-band "dreaming" consolidation), the **Security MCP Server** (a live OAuth 2.1 + ABAC gateway — prior art for the kernel's decision point), and [**Microkosmos**](https://github.com/mpe-es/microkosmos) (the FIPS 140-3 Rust precedent). Assessments of comparable third-party platforms live in [`design/references/`](design/references/): the [**DeepSeek Harness**](design/references/2026-08-14-deepseek-harness-assessment.md) (a TypeScript agent harness) and [**Agent Deck**](design/references/2026-08-21-agent-deck-assessment.md) (a Rust multi-agent TUI orchestrator).
+It also builds on the maintainer's prior work (private repositories): the **Knowledge Lake** (authority-tiered, deterministic markdown retrieval — the architecture Maknae's lake is a portable instance of), **Claude Memory** (the shared memory system with out-of-band "dreaming" consolidation), the **Security MCP Server** (a live OAuth 2.1 + ABAC gateway — prior art for the kernel's decision point), and **Microkosmos** (the FIPS 140-3 Rust precedent). Assessments of comparable third-party platforms live in [`design/references/`](design/references/): the [**DeepSeek Harness**](design/references/2026-08-14-deepseek-harness-assessment.md) (a TypeScript agent harness) and [**Agent Deck**](design/references/2026-08-21-agent-deck-assessment.md) (a Rust multi-agent TUI orchestrator).
 
 ## License
 
-To be determined (MIT leaning), pending team decision.
+Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party crate attributions are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Contributions are accepted under the same license with a Developer Certificate of Origin sign-off; see [CONTRIBUTING.md](CONTRIBUTING.md#licensing-of-contributions).
 
 ---
 

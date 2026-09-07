@@ -1,5 +1,7 @@
 [package]
 name = "maknae-llm"
+publish.workspace = true
+description = "OpenAI-compatible chat-completions client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
