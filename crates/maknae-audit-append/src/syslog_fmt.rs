@@ -236,6 +236,7 @@ mod tests {
             action: "fs.read".into(),
             object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
+            mutation: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: reason.into(),

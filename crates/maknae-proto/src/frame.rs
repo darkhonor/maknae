@@ -26,6 +26,17 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     r: &mut R,
     max: usize,
 ) -> Result<Vec<u8>, ProtoFrameError> {
+    read_frame_zeroizing(r, max)
+        .await
+        .map(|mut body| std::mem::take(&mut *body))
+}
+
+/// Keep incoming content zeroizing even when the read errors or its future is
+/// dropped mid-frame. The length is checked before allocating the body.
+pub async fn read_frame_zeroizing<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoFrameError> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)
         .await
@@ -34,7 +45,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     if declared > max {
         return Err(ProtoFrameError::Oversize { declared, max });
     } // BEFORE allocation
-    let mut body = vec![0u8; declared];
+    let mut body = zeroize::Zeroizing::new(vec![0u8; declared]);
     r.read_exact(&mut body)
         .await
         .map_err(|_| ProtoFrameError::Truncated)?;
@@ -44,6 +55,23 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn secret_frames_are_bounded_and_zeroizing_from_allocation() {
+        let mut bytes = &b"\0\0\0\x03\x00\xff\x17"[..];
+        let body: zeroize::Zeroizing<Vec<u8>> = read_frame_zeroizing(&mut bytes, 3).await.unwrap();
+        assert_eq!(&*body, &[0, 255, 23]);
+        assert!(matches!(
+            read_frame_zeroizing(&mut &b"\0\0\0\x03"[..], 2).await,
+            Err(ProtoFrameError::Oversize {
+                declared: 3,
+                max: 2
+            })
+        ));
+        assert!(matches!(
+            read_frame_zeroizing(&mut &b"\0\0\0\x03x"[..], 3).await,
+            Err(ProtoFrameError::Truncated)
+        ));
+    }
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Duration;

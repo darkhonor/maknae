@@ -117,3 +117,20 @@ To be determined (MIT leaning), pending team decision.
 ---
 
 *The youngest one, raised by the best of both. 막내 화이팅.*
+
+
+## Filesystem development commands
+
+The CLI runs with your user ID and OS permissions. Users and admins share the filesystem policy in `authz.yaml`; the admin role grants no additional filesystem access. The shipped policy allows reads within your enrolled home and writes within `~/projects/**`, with sensitive-path denies. Operators can change those path grants independently of management roles.
+
+```sh
+printf 'hello\n' | maknae write ~/projects/demo.txt
+maknae mkdir --parents ~/projects/demo/src
+maknae read ~/projects/demo.txt
+maknae delete ~/projects/demo.txt
+maknae delete --recursive ~/projects/demo
+```
+
+`write` consumes raw stdin bytes within the configured frame limit, including its request envelope. Existing content is replaced through your writable descriptor after a durable intent; absent files are created exclusively, so a collision never silently overwrites another file. Delete without `--recursive` removes a file, symlink, or empty directory. Recursive delete requires authority over the entire subtree and never follows symlinks.
+
+Creation, deletion, and mkdir are authorized attempts performed by the CLI, where the OS checks your credentials at each syscall. Their audit results are explicitly client-reported. A timeout or lost connection may leave partial or unreported effects; inspect the filesystem before issuing another command. The supported CLI stops when an acknowledgment is missing and does not retry uncertain work.

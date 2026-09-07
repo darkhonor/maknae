@@ -174,3 +174,9 @@ A choice that constrains future work — an interface, a security property, a vo
 - **No specs or plans in the repo** — development-process artifacts live outside it (see the rule in `AGENTS.md`); ask the operator for the location if you don't have one.
 - **Nothing self-promotes** — no content, skill, or config gains authority without transiting the promotion pipeline.
 - **No permissive or bypass modes** — deny-by-default applies to designs too; absence of an explicit permission is a denial.
+
+### Filesystem mutation checks across credentials
+
+Issue #158 includes an opt-in test using two existing non-root development accounts. Build `cargo test -p maknae-io --test subject_mutations --no-run`, then run the emitted test binary as root with `MAKNAE_TEST_SUBJECT` and `MAKNAE_TEST_SERVICE` set, selecting `--ignored --exact distinct_credentials_preserve_os_authority --nocapture`. On the Rocky development hosts these are `alice` and `_maknae`. The test creates and removes only its unique temporary fixture; child processes run via `sudo -u` with each account's actual groups.
+
+It transfers real descriptors between the subject and service, checks replacement through the subject's writable descriptor, and verifies that the directory descriptor confers no namespace permission on the service. The subject then creates, deletes, and makes a directory in a write/search-only project directory. This developmental test is excluded from ordinary CI account provisioning; run it on both approved Rocky hosts before pushing changes to this boundary. The ordinary composed-policy, audit, report, and filesystem suites remain in CI.

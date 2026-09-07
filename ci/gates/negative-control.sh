@@ -848,8 +848,13 @@ pub enum Payload {
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     Status(StatusView),
     SubjectList(Vec<RoleBindingView>),
+    MutationComplete,
+    MutationAttempt(crate::MutationGrant),
 }
 FIX
+  cp "$here/mutation-disclosure.py" "$fixture/ci/gates/"
+  cp "$here/mutation-disclosure-manifest.txt" "$fixture/ci/gates/"
+  cp "$here/../../crates/maknae-proto/src/mutation.rs" "$fixture/crates/maknae-proto/src/"
   # The gate cross-checks its SURFACE list against the section registry, so a
   # fixture needs one.
   cat > "$fixture/crates/maknae-kernel/src/boot.rs" <<'FIX'
@@ -1579,6 +1584,34 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
   ": 33 paths decided, 32 struct fields covered" "$here/config-disclosure-drift.sh"
 
+
+# #158: a grant's own disclosure inventory must reject new data and type changes.
+for change in field variant type; do
+  fx="$(cfg_fixture "$CFG_OK")"
+  python3 - "$fx" "$change" <<'PYFIX'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/mutation.rs"
+s = p.read_text()
+old, new = {
+    "field": ("pub struct MutationGrant {", "pub struct MutationGrant {\n    pub credential: String,"),
+    "variant": ("pub enum MutationScope {", "pub enum MutationScope {\n    Secret { token: String },"),
+    "type": ("pub max_effects: u32,", "pub max_effects: String,"),
+}[sys.argv[2]]
+assert s.count(old) == 1
+p.write_text(s.replace(old, new))
+PYFIX
+  expect_reject_because "mutation-disclosure/new-$change" \
+    "mutation grant disclosure inventory differs" "$fx/ci/gates/config-disclosure-drift.sh"
+done
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = p.read_text()
+p.write_text(s.replace("MutationAttempt(crate::MutationGrant)", "MutationAttempt(String)"))
+PYFIX
+expect_reject_because "mutation-disclosure/wrong-payload-type" \
+  "authorized-attempt must carry crate::MutationGrant" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
 # The wording IS the control here, so the fixture is a wording fixture.

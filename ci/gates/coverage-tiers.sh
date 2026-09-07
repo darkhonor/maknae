@@ -402,6 +402,12 @@ if [ "$mutants_mode" != "" ]; then
         fail "cannot select native syscall mutants"; continue
       fi
       extra_mutants_flags+=(--exclude-re "$native_exclusion")
+      # #238: eight independent five-second subprocess watchdogs reject a
+      # nonadvancing write loop. With two libtest threads the suite takes ~23s
+      # to fail, so the default 20s mutant timeout killed it before libtest could
+      # return failure. Allow serial scheduling plus headroom; each child still
+      # dies after five seconds, and missed/timeout outcomes still fail the gate.
+      extra_mutants_flags+=(--minimum-test-timeout 60)
     fi
     if ! (cd "$root" && cargo mutants --package "$cname" "${extra_mutants_flags[@]}"); then
       fail "cargo mutants --package $cname reported missed/timeout mutants"

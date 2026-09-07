@@ -39,6 +39,43 @@ pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 /// structurally inapplicable — which is why the lane must be read first.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 
+/// Kernel-stamped mutation preparation kind (#158). Never copied from client
+/// metadata: a namespace kind means policy authorization to attempt an operation
+/// under subject credentials, not OS preapproval from a directory descriptor.
+pub const CONTEXT_FS_OPERATION: &str = "fs_operation";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsOperation {
+    WriteExisting,
+    WriteCreate,
+    DeleteEntry,
+    DeleteTree,
+    Mkdir,
+}
+
+impl FsOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WriteExisting => "write-existing",
+            Self::WriteCreate => "write-create",
+            Self::DeleteEntry => "delete-entry",
+            Self::DeleteTree => "delete-tree",
+            Self::Mkdir => "mkdir",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "write-existing" => Some(Self::WriteExisting),
+            "write-create" => Some(Self::WriteCreate),
+            "delete-entry" => Some(Self::DeleteEntry),
+            "delete-tree" => Some(Self::DeleteTree),
+            "mkdir" => Some(Self::Mkdir),
+            _ => None,
+        }
+    }
+}
+
 /// The resource attribute carrying the CONTENT'S CLASSIFICATION MARKING, as a
 /// string. Its FIRST token (everything before the first `//`) is ranked by the
 /// classification system the enclave selected (`ClassificationPolicy::level_of`
@@ -143,5 +180,26 @@ mod tests {
         };
         assert_eq!(req.action.0, "egress");
         assert_eq!(req.subject.0.str("id"), Some("alex"));
+    }
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::FsOperation;
+    #[test]
+    fn preparation_terms_have_distinct_exact_spellings() {
+        for (operation, spelling) in [
+            (FsOperation::WriteExisting, "write-existing"),
+            (FsOperation::WriteCreate, "write-create"),
+            (FsOperation::DeleteEntry, "delete-entry"),
+            (FsOperation::DeleteTree, "delete-tree"),
+            (FsOperation::Mkdir, "mkdir"),
+        ] {
+            assert_eq!(operation.as_str(), spelling);
+            assert_eq!(FsOperation::parse(spelling), Some(operation));
+        }
+        for unknown in ["", "write", "WriteExisting", "read", "mkdir "] {
+            assert_eq!(FsOperation::parse(unknown), None);
+        }
     }
 }

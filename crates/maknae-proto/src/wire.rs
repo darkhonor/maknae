@@ -169,10 +169,14 @@ pub enum Verb {
     Read { path: String },
     /// Create or replace file content. Maknae writes bytes; ACP v1's counterpart
     /// is text-only — the same divergence `fs.read` carries.
-    FsWrite,
+    FsWrite {
+        path: String,
+        content: crate::Bytes,
+        mode: crate::WriteMode,
+    },
     /// Destroy file content. Irreversible, and the strongest argument for
     /// two-phase audit.
-    FsDelete,
+    FsDelete { path: String, recursive: bool },
     /// Relocate content to a new path. A mutation, and a laundering route if
     /// decided against the source alone: deny matching is lexical over paths, so
     /// moving a denied object to a permitted path makes it readable under a rule
@@ -188,7 +192,14 @@ pub enum Verb {
     FsStat,
     /// Create a directory. It also creates a destination later terms are decided
     /// against.
-    FsMkdir,
+    FsMkdir {
+        path: String,
+        parents: bool,
+        /// Intended suffix beneath the delegated existing directory. The daemon
+        /// validates every component and decides paths from the descriptor's
+        /// kernel-reported location; this sequence supplies no OS authority.
+        components: Vec<String>,
+    },
     /// Create a symbolic or hard link. A mutation and an aliasing primitive — the
     /// exact class `maknae-io` exists to defend against, and a second laundering
     /// route alongside `fs.move`. Decided against both link and target. Note the
@@ -282,6 +293,11 @@ pub enum Payload {
     /// re-read per request, so a snapshot would report authorization state the
     /// PDP is no longer using, and disclosing stale authz is worse than none.
     SubjectList(Vec<RoleBindingView>),
+    /// Durable policy authorization for a subject-side attempt, never OS approval.
+    MutationAttempt(crate::MutationGrant),
+    /// An existing-file replacement completed under daemon observation and its
+    /// completion record was durably appended. Namespace reports use MutationAck.
+    MutationComplete,
 }
 
 /// What `admin.status` discloses. Every field is deployment SHAPE the operator
@@ -385,8 +401,44 @@ fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>, ProtoCodecError> {
 pub fn encode_request(r: &Request) -> Result<Vec<u8>, ProtoCodecError> {
     enc(r)
 }
+/// Encode content-bearing requests without reallocating secret bytes or
+/// exceeding the configured frame budget, including the CBOR envelope.
+pub fn encode_request_zeroizing(
+    r: &Request,
+    max_bytes: usize,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    ciborium::into_writer(r, &mut writer).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
+    Ok(buf)
+}
 pub fn encode_response(r: &Response) -> Result<Vec<u8>, ProtoCodecError> {
     enc(r)
+}
+pub fn encode_mutation_report(r: &crate::MutationReport) -> Result<Vec<u8>, ProtoCodecError> {
+    enc(r)
+}
+pub fn encode_mutation_ack(r: &crate::MutationAck) -> Result<Vec<u8>, ProtoCodecError> {
+    enc(r)
+}
+
+fn decode_followup<T: serde::de::DeserializeOwned>(mut bytes: &[u8]) -> Result<T, ProtoCodecError> {
+    let value =
+        ciborium::from_reader(&mut bytes).map_err(|e| ProtoCodecError::Decode(e.to_string()))?;
+    if !bytes.is_empty() {
+        return Err(ProtoCodecError::Decode(
+            "trailing mutation frame data".into(),
+        ));
+    }
+    Ok(value)
+}
+pub fn decode_mutation_report(bytes: &[u8]) -> Result<crate::MutationReport, ProtoCodecError> {
+    decode_followup(bytes)
+}
+pub fn decode_mutation_ack(bytes: &[u8]) -> Result<crate::MutationAck, ProtoCodecError> {
+    decode_followup(bytes)
 }
 /// Encode into a pre-sized zeroizing buffer — the read path's encode (spec
 /// D5: zeroization preserved to the wire). Pre-sizing prevents realloc from
@@ -420,7 +472,102 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_secret_encoding_enforces_actual_frame_limit() {
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsWrite {
+                path: "/projects/frame-limit".into(),
+                content: crate::Bytes::new(zeroize::Zeroizing::new(vec![0, 255, 17])),
+                mode: crate::WriteMode::Existing,
+            },
+        };
+        let expected = encode_request(&request).unwrap();
+        let encoded = encode_request_zeroizing(&request, expected.len()).unwrap();
+        assert_eq!(&*encoded, &expected);
+        assert_eq!(decode_request(&encoded).unwrap(), request);
+        assert!(encode_request_zeroizing(&request, expected.len() - 1).is_err());
+        assert!(encode_request_zeroizing(&request, 0).is_err());
+    }
     use super::*;
+    #[test]
+    fn mutation_operands_round_trip_without_exposing_content_in_debug() {
+        let verbs = [
+            Verb::FsWrite {
+                path: "/home/u/projects/x".into(),
+                content: crate::Bytes::new(zeroize::Zeroizing::new(
+                    b"private-mutation-158".to_vec(),
+                )),
+                mode: crate::WriteMode::CreateExclusive,
+            },
+            Verb::FsDelete {
+                path: "/home/u/projects/x".into(),
+                recursive: true,
+            },
+            Verb::FsMkdir {
+                path: "/home/u/projects/a/b".into(),
+                parents: true,
+                components: vec!["a".into(), "b".into()],
+            },
+        ];
+        for verb in verbs {
+            assert!(!format!("{verb:?}").contains("private-mutation-158"));
+            let req = Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb,
+            };
+            assert_eq!(decode_request(&encode_request(&req).unwrap()).unwrap(), req);
+        }
+    }
+
+    #[test]
+    fn mutation_followups_round_trip_and_refuse_trailing_messages() {
+        let id = crate::MutationId {
+            session_id: 7,
+            intent_seq: 2,
+        };
+        let report = crate::MutationReport::Finished {
+            id,
+            next_index: 1,
+            outcome: crate::ReportedFinish::Success,
+            stopped_at: None,
+        };
+        let bytes = encode_mutation_report(&report).unwrap();
+        assert_eq!(decode_mutation_report(&bytes).unwrap(), report);
+        let mut doubled = bytes.clone();
+        doubled.extend_from_slice(&bytes);
+        assert!(decode_mutation_report(&doubled).is_err());
+        assert!(decode_mutation_report(&[0xff]).is_err());
+        let ack = crate::MutationAck { id, next_index: 1 };
+        let mut bytes = encode_mutation_ack(&ack).unwrap();
+        assert_eq!(decode_mutation_ack(&bytes).unwrap(), ack);
+        bytes.push(0);
+        assert!(decode_mutation_ack(&bytes).is_err());
+        assert!(decode_mutation_ack(&[0xff]).is_err());
+        let grant = Payload::MutationAttempt(crate::MutationGrant {
+            id,
+            scope: crate::MutationScope::Exact {
+                path: "/home/u/projects/x".into(),
+                effect: crate::ReportedEffect::CreatedFile,
+            },
+            limits: crate::MutationLimits {
+                max_effects: 1,
+                max_depth: 1,
+                deadline_ms: 5000,
+            },
+        });
+        for payload in [grant, Payload::MutationComplete] {
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(payload),
+            };
+            assert_eq!(
+                decode_response(&encode_response(&response).unwrap()).unwrap(),
+                response
+            );
+        }
+    }
+
     #[test]
     fn request_round_trips() {
         let r = Request {

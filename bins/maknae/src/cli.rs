@@ -1,6 +1,6 @@
 //! `maknae` CLI — the untrusted interaction plane (spec §3). Resolves its own
 //! config dir, mints a short-lived plane leaf, connects to `maknaed` over the
-//! Stage-2 mTLS/UDS transport, and issues one read-only verb per invocation
+//! Stage-2 mTLS/UDS transport, and issues one verb per invocation
 //! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
 //! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).
 //!
@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
 use maknae_proto::{
-    decode_response, encode_request, Payload, Request, RespResult, PROTOCOL_VERSION,
+    decode_response, encode_request_zeroizing, Payload, Request, RespResult, PROTOCOL_VERSION,
 };
 use maknae_proto::{read_frame, write_frame};
 use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector, VAULT_SECTION};
@@ -57,12 +57,12 @@ fn cli_config_specs() -> [SectionSpec; 2] {
     ]
 }
 
-/// `maknae` — read-only verbs over the mTLS plane, plus one-time elevated
+/// `maknae` — filesystem and management verbs over the mTLS plane, plus elevated
 /// enrollment.
 #[derive(Parser, Debug)]
 #[command(
     name = "maknae",
-    about = "Untrusted CLI plane for maknaed (read-only) + one-time elevated enroll"
+    about = "CLI for maknaed: filesystem operations, daemon queries, and enrollment"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -86,6 +86,21 @@ enum Command {
     Read {
         /// File to read (absolute, or relative to the current directory).
         path: std::path::PathBuf,
+    },
+    /// Write raw stdin bytes to a file. Replaces existing content, or creates
+    /// an absent file exclusively. Requires Write authority and OS permission.
+    Write { path: PathBuf },
+    /// Remove a file, symlink or empty directory. --recursive removes a tree.
+    Delete {
+        path: PathBuf,
+        #[arg(short = 'r', long)]
+        recursive: bool,
+    },
+    /// Create a directory. --parents creates missing parent directories.
+    Mkdir {
+        path: PathBuf,
+        #[arg(short = 'p', long)]
+        parents: bool,
     },
     /// Report daemon runtime posture: version, protocol version, listener,
     /// active authorization backend. Ungranted by default — the operator must
@@ -117,6 +132,9 @@ enum Verb {
     Ping,
     Whoami,
     Read { path: String },
+    Write { path: String },
+    Delete { path: String, recursive: bool },
+    Mkdir { path: String, parents: bool },
     AdminStatus,
     AdminConfigShow,
     AdminSubjectList,
@@ -128,11 +146,68 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
             Verb::Read { path } => maknae_proto::Verb::Read { path },
+            Verb::Write { path } => maknae_proto::Verb::FsWrite {
+                path,
+                content: maknae_proto::Bytes::new(zeroize::Zeroizing::new(Vec::new())),
+                mode: maknae_proto::WriteMode::Existing,
+            },
+            Verb::Delete { path, recursive } => maknae_proto::Verb::FsDelete { path, recursive },
+            Verb::Mkdir { path, parents } => maknae_proto::Verb::FsMkdir {
+                path,
+                parents,
+                components: Vec::new(),
+            },
             Verb::AdminStatus => maknae_proto::Verb::AdminStatus,
             Verb::AdminConfigShow => maknae_proto::Verb::AdminConfigShow,
             Verb::AdminSubjectList => maknae_proto::Verb::AdminSubjectList,
         }
     }
+}
+
+fn request_from_input(
+    verb: Verb,
+    frame_max: usize,
+    input: &mut impl std::io::Read,
+) -> Result<maknae_proto::Verb, String> {
+    let mut request: maknae_proto::Verb = verb.into();
+    if let maknae_proto::Verb::FsWrite { content, .. } = &mut request {
+        let cap = frame_max.checked_add(1).ok_or("invalid frame budget")?;
+        let mut bytes = zeroize::Zeroizing::new(vec![0; cap]);
+        let mut used = 0;
+        loop {
+            match input.read(&mut bytes[used..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    used += n;
+                    if used > frame_max {
+                        return Err("stdin content exceeds the configured frame budget".into());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("reading stdin: {e}")),
+            }
+        }
+        bytes.truncate(used);
+        *content = maknae_proto::Bytes::new(bytes);
+        // Includes the actual CBOR envelope, not just the content length.
+        encode_request_zeroizing(
+            &Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb: request.clone(),
+            },
+            frame_max,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(request)
+}
+
+fn absolute_path(path: PathBuf) -> Result<String, String> {
+    std::path::absolute(path)
+        .map_err(|e| format!("cannot absolutize path: {e}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "path is not valid UTF-8".into())
 }
 
 /// The full round trip: resolve config → mint a plane leaf → connect →
@@ -161,6 +236,12 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
 
+    let request = request_from_input(
+        verb.clone(),
+        transport.frame_max_bytes,
+        &mut std::io::stdin().lock(),
+    )?;
+
     let client =
         PlaneClient::from_document(&document, &dir, Plane::Cli).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
@@ -171,7 +252,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     // must revoke it, or the token leaks. Capture the whole round-trip outcome, revoke the
     // token UNCONDITIONALLY, THEN propagate. (A pre-mint failure above skips revoke — there
     // is nothing minted to revoke.)
-    let outcome = round_trip(verb, &transport, &client, &ca).await;
+    let outcome = round_trip(verb, request, &transport, &client, &ca).await;
     client.shutdown().await;
     outcome
 }
@@ -192,6 +273,9 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
         // the daemon's own, never a client-supplied path, so there is nothing
         // for a subject to delegate a descriptor for.
         Verb::Ping
+        | Verb::Write { .. }
+        | Verb::Delete { .. }
+        | Verb::Mkdir { .. }
         | Verb::Whoami
         | Verb::AdminStatus
         | Verb::AdminConfigShow
@@ -201,6 +285,7 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 
 async fn round_trip(
     verb: Verb,
+    request_verb: maknae_proto::Verb,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
@@ -235,7 +320,18 @@ async fn round_trip(
     // If the open FAILS the request is still sent, unarmed. That is not a fallback —
     // the daemon denies for want of a descriptor (ADR-0009 decision 2) and the refusal
     // lands in the audit trail, which is the whole reason not to fail silently here.
-    if let (Some(object), Some(armer)) = (delegated_object(&verb), stream.armer()) {
+    let prepared = crate::mutation::prepare(request_verb.clone());
+    if let Some(prepared) = &prepared {
+        if let Some(error) = prepared.preparation_error() {
+            eprintln!("maknae: cannot prepare filesystem operation: {error}");
+        }
+        if let (Some(fd), Some(armer)) = (
+            prepared.descriptor().map_err(|e| e.to_string())?,
+            stream.armer(),
+        ) {
+            armer.arm(fd);
+        }
+    } else if let (Some(object), Some(armer)) = (delegated_object(&verb), stream.armer()) {
         match maknae_io::open_for_delegation(std::path::Path::new(object)) {
             Ok(fd) => {
                 armer.arm(fd);
@@ -248,12 +344,17 @@ async fn round_trip(
 
     let request = Request {
         protocol_version: PROTOCOL_VERSION,
-        verb: verb.clone().into(),
+        verb: prepared
+            .as_ref()
+            .map(|p| p.request().clone())
+            .unwrap_or(request_verb),
     };
-    let body = encode_request(&request).map_err(|e| e.to_string())?;
+    let body =
+        encode_request_zeroizing(&request, transport.frame_max_bytes).map_err(|e| e.to_string())?;
     // Bound the request write like the handshake and read: a daemon that accepted but
     // stopped consuming must not hang the CLI on a full socket buffer (the frame can
     // exceed the UDS buffer). `read_timeout_ms` doubles as the write bound.
+    let request_started = std::time::Instant::now();
     match tokio::time::timeout(
         std::time::Duration::from_millis(transport.read_timeout_ms),
         write_frame(&mut stream, &body),
@@ -289,6 +390,26 @@ async fn round_trip(
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     let ok = match response.result {
+        RespResult::Ok(Payload::MutationAttempt(grant)) => {
+            let prepared =
+                prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
+            return crate::mutation::execute(
+                prepared,
+                grant,
+                &mut stream,
+                transport,
+                request_started,
+            )
+            .await;
+        }
+        RespResult::Ok(Payload::MutationComplete) => {
+            if !matches!(prepared.as_ref(), Some(p) if !p.is_namespace()) {
+                return Err(
+                    "protocol error: daemon completion for a namespace or ordinary request".into(),
+                );
+            }
+            true
+        }
         RespResult::Ok(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
             // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
@@ -367,6 +488,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::ReadContent(_))
         | (v, p @ Payload::ConfigView(_))
         | (v, p @ Payload::Status(_))
+        | (v, p @ Payload::MutationAttempt(_))
+        | (v, p @ Payload::MutationComplete)
         | (v, p @ Payload::SubjectList(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
@@ -384,6 +507,18 @@ pub async fn run_cli() -> ExitCode {
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await),
         Command::ConfigShow => wire_exit_code(execute(Verb::AdminConfigShow).await),
         Command::SubjectList => wire_exit_code(execute(Verb::AdminSubjectList).await),
+        Command::Write { path } => wire_exit_code(match absolute_path(path) {
+            Ok(path) => execute(Verb::Write { path }).await,
+            Err(e) => Err(e),
+        }),
+        Command::Delete { path, recursive } => wire_exit_code(match absolute_path(path) {
+            Ok(path) => execute(Verb::Delete { path, recursive }).await,
+            Err(e) => Err(e),
+        }),
+        Command::Mkdir { path, parents } => wire_exit_code(match absolute_path(path) {
+            Ok(path) => execute(Verb::Mkdir { path, parents }).await,
+            Err(e) => Err(e),
+        }),
         Command::Read { path } => {
             // Lexically absolutize client-side (std::path::absolute keeps `..`
             // on Unix — the daemon's canonical pre-gate refuses those as
@@ -423,6 +558,48 @@ fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mutation_commands_preserve_options() {
+        assert!(matches!(
+            super::Cli::try_parse_from(["maknae", "write", "a"])
+                .unwrap()
+                .command,
+            super::Command::Write { .. }
+        ));
+        assert!(matches!(
+            super::Cli::try_parse_from(["maknae", "delete", "-r", "a"])
+                .unwrap()
+                .command,
+            super::Command::Delete {
+                recursive: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            super::Cli::try_parse_from(["maknae", "mkdir", "-p", "a/b"])
+                .unwrap()
+                .command,
+            super::Command::Mkdir { parents: true, .. }
+        ));
+    }
+
+    #[test]
+    fn write_input_keeps_binary_bytes_and_refuses_over_budget() {
+        use super::*;
+        let verb = Verb::Write {
+            path: "/projects/binary".into(),
+        };
+        let request = request_from_input(verb.clone(), 512, &mut &[0, 255, 7][..]).unwrap();
+        let maknae_proto::Verb::FsWrite { content, .. } = request else {
+            panic!("write expected")
+        };
+        assert_eq!(content.0.as_slice(), &[0, 255, 7]);
+        assert!(request_from_input(verb.clone(), 2, &mut &[1, 2, 3][..]).is_err());
+        assert!(
+            request_from_input(verb, 8, &mut &[][..]).is_err(),
+            "envelope alone exceeds budget"
+        );
+    }
 
     /// Only terms that NAME an object delegate one. `ping` and `whoami` name none, so
     /// the client must not manufacture a descriptor for them — an unarmed connection

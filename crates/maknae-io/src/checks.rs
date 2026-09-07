@@ -233,6 +233,8 @@ fn kind_of(e: Errno) -> IoKind {
         Errno::ENOENT => IoKind::NotFound,
         Errno::ENOTDIR => IoKind::NotADirectory,
         Errno::EACCES => IoKind::PermissionDenied,
+        Errno::EEXIST => IoKind::AlreadyExists,
+        Errno::ENOTEMPTY => IoKind::DirectoryNotEmpty,
         other => IoKind::Other { raw: other as i32 },
     }
 }
