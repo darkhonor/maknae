@@ -127,7 +127,18 @@ fn endpoint_is_acceptable(url: &str) -> bool {
         if !ok {
             return false;
         }
-        (h == "127.0.0.1" || h == "localhost", port)
+        // A host spelled only in digits and dots is an IPv4 literal and must
+        // PARSE as one: `256.256.256.256` is not a destination (codex review
+        // round 4). Loopback is then the address's own property.
+        let loopback = if h.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            match h.parse::<std::net::Ipv4Addr>() {
+                Ok(addr) => addr.is_loopback(),
+                Err(_) => return false,
+            }
+        } else {
+            h == "localhost"
+        };
+        (loopback, port)
     };
     if let Some(p) = port {
         let digits = !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
@@ -308,6 +319,8 @@ mod tests {
             "http://[::1]/v1",
             "http://[0:0:0:0:0:0:0:1]:8080/v1",
             "https://api.openai.com:65535/v1",
+            // loopback is the ADDRESS's property, not one spelling of it
+            "http://127.0.0.2/v1",
         ] {
             assert!(
                 parse(&OK.replace("https://api.openai.com/v1", ok)).is_ok(),
@@ -350,6 +363,12 @@ mod tests {
             "https://[zz::1]/v1",
             "https://[1]/v1",
             "http://[::2]/v1",
+            // digits-and-dots hosts must parse as IPv4
+            "https://256.256.256.256/v1",
+            "https://1.2.3/v1",
+            "https://1.2.3.4.5/v1",
+            "http://127.1/v1",
+            "http://127.0.0.01/v1",
             // ports: above the range, leading zeros, a sign
             "https://api.openai.com:65536/v1",
             "http://localhost:00000/v1",

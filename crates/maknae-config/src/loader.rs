@@ -517,8 +517,12 @@ fn load_config_rooted_with(
 /// lets the subject hide a root-authored override and hand the win to the base
 /// file (codex review round 2, 2026-09-07). `anchor` is the directory the scan read
 /// through, re-judged on its held fd (`Anchor::require`), not reopened by path.
-/// `Err` carries the directory that failed -- `root`, or `root/config.d` -- so
-/// the refusal names the thing to fix (codex review round 3).
+/// `Err` carries the directory the check itself refused -- `root`, or
+/// `root/config.d` when ITS owner or mode was the finding -- so the refusal
+/// names the thing to fix (codex review round 3). A fault that is not an
+/// owner/mode finding on `config.d` (an `EACCES` opening it because the root's
+/// own search bit went away underneath the held fd) names the root, not a
+/// directory that was never judged (round 4).
 #[cfg(unix)]
 pub(crate) fn verify_selection_dirs(
     anchor: &maknae_io::Anchor,
@@ -550,7 +554,11 @@ pub(crate) fn verify_selection_dirs(
                     mode_mask: Some(0o022),
                 }),
             )
-            .map_err(|_| root.join("config.d"))?;
+            .map_err(|e| match e {
+                maknae_io::IoError::InsecurePermissions { path, .. }
+                | maknae_io::IoError::NotOwned { path, .. } => path,
+                _ => root.to_path_buf(),
+            })?;
     }
     Ok(())
 }
