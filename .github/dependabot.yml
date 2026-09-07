@@ -5,7 +5,19 @@ updates:
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     # Every pin in Cargo.toml records the failure it prevents (AGENTS.md); a
-    # Dependabot bump must keep that comment true or be closed.
+    # Dependabot bump must keep that comment true or be closed. Cargo.lock
+    # already carries a checksum per crate, so "pin by hash" is the lockfile's
+    # job here, and deny.toml is the gate on what the lockfile may contain.
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    # Actions are pinned by full-length commit SHA with the version in a
+    # trailing comment (`uses: owner/action@<sha> # vX.Y.Z`). Dependabot keeps
+    # that form on its own: it rewrites the SHA and the comment together and
+    # never substitutes a tag. The repository setting "require actions to be
+    # pinned to a full-length commit SHA" refuses any workflow that drifts from
+    # it. One grouped PR per week rather than one per action.
+    groups:
+      actions:
+        patterns: ["*"]
