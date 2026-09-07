@@ -1,5 +1,7 @@
 [package]
 name = "maknae"
+publish.workspace = true
+description = "The Maknae CLI: the untrusted interaction plane"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

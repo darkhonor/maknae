@@ -107,9 +107,9 @@ mod tests {
 
     fn valid_map() -> Value {
         Value::Map(vec![
-            ("name".into(), Value::Str("aackerman".into())),
+            ("name".into(), Value::Str("alice".into())),
             ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("/Users/aackerman".into())),
+            ("home".into(), Value::Str("/Users/alice".into())),
         ])
     }
 
@@ -122,9 +122,9 @@ mod tests {
     fn fully_valid_parses() {
         let v = valid_map();
         let p = principal_from_section(Some(&v)).unwrap().unwrap();
-        assert_eq!(p.name, "aackerman");
+        assert_eq!(p.name, "alice");
         assert_eq!(p.uid, 1000);
-        assert_eq!(p.home, PathBuf::from("/Users/aackerman"));
+        assert_eq!(p.home, PathBuf::from("/Users/alice"));
     }
 
     #[test]

@@ -58,7 +58,7 @@ If it prints nothing and `CLAUDE.md` is a tiny text file, the clone came out wro
 ### Clone and build
 
 ```bash
-git clone git@github.com:darkhonor/maknae.git
+git clone https://github.com/darkhonor/maknae.git   # or your fork
 cd maknae
 cargo build --workspace
 ```
@@ -189,6 +189,6 @@ A choice that constrains future work — an interface, a security property, a vo
 
 ### Filesystem mutation checks across credentials
 
-Issue #158 includes an opt-in test using two existing non-root development accounts. Build `cargo test -p maknae-io --test subject_mutations --no-run`, then run the emitted test binary as root with `MAKNAE_TEST_SUBJECT` and `MAKNAE_TEST_SERVICE` set, selecting `--ignored --exact distinct_credentials_preserve_os_authority --nocapture`. On the Rocky development hosts these are `byeori` and `_maknae`. The test creates and removes only its unique temporary fixture; child processes run via `sudo -u` with each account's actual groups.
+Issue #158 includes an opt-in test using two existing non-root development accounts. Build `cargo test -p maknae-io --test subject_mutations --no-run`, then run the emitted test binary as root with `MAKNAE_TEST_SUBJECT` and `MAKNAE_TEST_SERVICE` set, selecting `--ignored --exact distinct_credentials_preserve_os_authority --nocapture`. On a packaged host these are an ordinary login account and the `_maknae` service account. The test creates and removes only its unique temporary fixture; child processes run via `sudo -u` with each account's actual groups.
 
 It transfers real descriptors between the subject and service, checks replacement through the subject's writable descriptor, and verifies that the directory descriptor confers no namespace permission on the service. The subject then creates, deletes, and makes a directory in a write/search-only project directory. This developmental test is excluded from ordinary CI account provisioning; run it on both approved Rocky hosts before pushing changes to this boundary. The ordinary composed-policy, audit, report, and filesystem suites remain in CI.

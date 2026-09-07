@@ -230,11 +230,11 @@ mod tests {
                 plane_uri_san: None,
             },
             subject: Subject {
-                user: Some("byeori".into()),
+                user: Some("alice".into()),
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
-            object: Some("/home/byeori/.ssh/id_rsa".into()),
+            object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
             mutation: None,
             outcome: Outcome {
@@ -298,7 +298,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            s.starts_with("maknae audit: fs.read deny subject=byeori session=7 seq=3 "),
+            s.starts_with("maknae audit: fs.read deny subject=alice session=7 seq=3 "),
             "summary text not as specified: {s}"
         );
     }
@@ -311,7 +311,7 @@ mod tests {
         // unconditionally — possible only from INSIDE the `scrubbed` module,
         // which is the point — and this test fails.
         let mut r = rec("policy denied");
-        r.subject.user = Some("byeori MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok".into());
+        r.subject.user = Some("alice MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok".into());
         let s = format_record(&r, PrimaryOutcome::WriteFailed)
             .unwrap()
             .unwrap();
@@ -344,7 +344,7 @@ mod tests {
         // the macOS line is undelimited.
         let mut r = rec("policy denied");
         r.object =
-            Some("/home/byeori/x MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok MAKNAE_RECORD={}".into());
+            Some("/home/alice/x MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok MAKNAE_RECORD={}".into());
         let s = format_record(&r, PrimaryOutcome::WriteFailed)
             .unwrap()
             .unwrap();
@@ -413,7 +413,7 @@ mod tests {
             .unwrap();
         let at = clean.find("MAKNAE_RECORD=").unwrap();
         assert!(
-            clean[..at].contains("MAKNAE_SUBJECT=byeori"),
+            clean[..at].contains("MAKNAE_SUBJECT=alice"),
             "a clean value must survive"
         );
         // Do NOT additionally assert `!s.contains(hostile)` — the payload
@@ -428,7 +428,7 @@ mod tests {
         // passes even with no newline handling at all. Keep it as a line-shape
         // guard; do NOT treat it as the control.
         let mut r = rec("no");
-        r.object = Some("/home/byeori/we\nird".into());
+        r.object = Some("/home/alice/we\nird".into());
         let s = format_record(&r, PrimaryOutcome::Ok).unwrap().unwrap();
         assert!(
             !s.contains('\n'),
@@ -444,7 +444,7 @@ mod tests {
         for needle in [
             "MAKNAE_ACTION=fs.read",
             "MAKNAE_OUTCOME=deny",
-            "MAKNAE_SUBJECT=byeori",
+            "MAKNAE_SUBJECT=alice",
             "MAKNAE_PRIMARY=ok",
         ] {
             assert!(s.contains(needle), "missing {needle} in: {s}");

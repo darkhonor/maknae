@@ -1,0 +1,14 @@
+name: Enhancement
+description: A change to behavior or scope. Decisions that constrain future work become ADRs.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem, not the solution
+    validations: { required: true }
+  - type: textarea
+    id: trust
+    attributes:
+      label: Trust-plane, protocol, or ADR impact
+      description: Does this touch the kernel, the PDP, the wire, or an accepted ADR? Say which.

@@ -1,5 +1,7 @@
 [package]
 name = "maknae-vault"
+publish.workspace = true
+description = "Non-privileged Vault client for plane certificates and secrets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

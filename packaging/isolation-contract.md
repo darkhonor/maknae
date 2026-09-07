@@ -1,7 +1,7 @@
 # Maknae Isolation Contract
 
 This file is the **normative** isolation contract. Its source is §4 of the topology design
-spec (`~/claude-memory/maknae/specs/2026-08-03-maknae-rust-workspace-topology-design.md`).
+spec (`2026-08-03-maknae-rust-workspace-topology-design.md` (out-of-repo design spec; specs never live in this repository)).
 Two tables follow: the **property × profile** table (which `ci/gates/isolation-contract-lint.sh`
 checks — every non-`deferred` cell must carry a `✓<check>` token) and the **crate × binary
 matrix** (the human-readable statement of the P1/P2 capability-separation property).

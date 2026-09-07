@@ -133,11 +133,11 @@ mod tests {
                 plane_uri_san: None,
             },
             subject: Subject {
-                user: Some("byeori".into()),
+                user: Some("alice".into()),
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
-            object: Some("/home/byeori/.ssh/id_rsa".into()),
+            object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
             mutation: None,
             outcome: Outcome {

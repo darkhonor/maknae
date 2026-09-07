@@ -207,11 +207,11 @@ mod tests {
                 plane_uri_san: None,
             },
             subject: Subject {
-                user: Some("byeori".into()),
+                user: Some("alice".into()),
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
-            object: Some("/home/byeori/.ssh/id_rsa".into()),
+            object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
             mutation: None,
             outcome: Outcome {
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(field(&b, "SYSLOG_IDENTIFIER").unwrap(), b"maknaed");
         assert_eq!(field(&b, "MAKNAE_ACTION").unwrap(), b"fs.read");
         assert_eq!(field(&b, "MAKNAE_OUTCOME").unwrap(), b"deny");
-        assert_eq!(field(&b, "MAKNAE_SUBJECT").unwrap(), b"byeori");
+        assert_eq!(field(&b, "MAKNAE_SUBJECT").unwrap(), b"alice");
         assert_eq!(field(&b, "MAKNAE_PRIMARY").unwrap(), b"ok");
     }
 
@@ -443,8 +443,8 @@ mod tests {
         for needle in [
             "fs.read",
             "deny",
-            "byeori",
-            "object=/home/byeori/.ssh/id_rsa",
+            "alice",
+            "object=/home/alice/.ssh/id_rsa",
             "session=7",
             "seq=3",
         ] {

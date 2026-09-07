@@ -5,7 +5,7 @@
 - **Deciders:** Alex Ackerman (operator), Claude (pair)
 - **Addresses:** the audit trail the `maknaed` trust plane emits — its record content, sinks, compliance posture, and the boundary between what an open-source project can ship and what a National Security System deployer supplies.
 - **Relates to:** ADR-0005 (the mTLS negative suite requires fail-closed rejections to emit audit events); ADR-0007 (key & signature model — owns the audit hash-chain / signing this ADR defers to); ADR-0018 (the authorization decisions these records capture); ADR-0016 (tiering).
-- **Source spec:** `~/claude-memory/maknae/specs/2026-08-11-maknae-stage3a-it-responds.md`.
+- **Source spec:** `2026-08-11-maknae-stage3a-it-responds.md` (out-of-repo design spec; specs never live in this repository).
 
 ## Context
 

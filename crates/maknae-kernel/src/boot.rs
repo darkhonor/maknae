@@ -408,7 +408,7 @@ mod tests {
             &d.0,
             "maknae.yaml",
             "core:\n  identity:\n    name: t\n\
-             principal:\n  name: aackerman\n  uid: 1000\n  home: /Users/aackerman\n",
+             principal:\n  name: alice\n  uid: 1000\n  home: /Users/alice\n",
             0o640,
         );
         let cfg = boot(&d.0).expect("boots with a principal block");
@@ -416,9 +416,9 @@ mod tests {
         let p = maknae_config::principal_from_section(cfg.section("principal"))
             .expect("principal parses from the booted document")
             .expect("principal section present");
-        assert_eq!(p.name, "aackerman");
+        assert_eq!(p.name, "alice");
         assert_eq!(p.uid, 1000);
-        assert_eq!(p.home, std::path::PathBuf::from("/Users/aackerman"));
+        assert_eq!(p.home, std::path::PathBuf::from("/Users/alice"));
     }
 
     // A pre-Jackrabbit config WITHOUT a `principal` block still LOADS — the

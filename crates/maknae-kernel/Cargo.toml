@@ -1,5 +1,7 @@
 [package]
 name = "maknae-kernel"
+publish.workspace = true
+description = "Privileged trust-plane logic: boot, the PDP call site, and the kernel's enforcement points"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

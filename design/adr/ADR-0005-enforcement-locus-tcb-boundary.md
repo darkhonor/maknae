@@ -5,7 +5,7 @@
 - **Deciders:** Alex Ackerman (operator), Claude (pair)
 - **Addresses:** review issue #3 (Enforcement-locus & TCB boundary)
 - **Relates to:** ADR-0002 (kernel is Rust); ADR-0007 (key & signature model — the object/audit/release signing this ADR defers); ADR-0006 (client AuthN model — supersedes-in-part, see the 2026-08-22 amendment banner); the merged Vault PKI (`deploy/vault-pki/`) that provisions the plane certs; the topology source spec.
-- **Source specs:** `~/claude-memory/maknae/specs/2026-08-03-maknae-rust-workspace-topology-design.md` (topology, v6.1) and `~/claude-memory/maknae/specs/2026-08-10-adr-0005-0007-crypto-foundation.md` (this finalization).
+- **Source specs:** `2026-08-03-maknae-rust-workspace-topology-design.md` (out-of-repo design spec; specs never live in this repository) (topology, v6.1) and `2026-08-10-adr-0005-0007-crypto-foundation.md` (out-of-repo design spec; specs never live in this repository) (this finalization).
 
 > **Finalization note (2026-08-10).** This ADR was ratified in scaffold form on 2026-08-03 (topology + trust boundary only, with the concrete transport "owed"). It is now finalized: decisions **2** (mTLS plane transport) and **4** (plane-cert identity) are upgraded from topology-level to **locked, concrete criteria** now that the Vault PKI (`deploy/vault-pki/`, merged) provisions the fields; the `maknae-vault` crate contract and the mTLS acceptance tests are added; and the 2026-08-10 embedded-config amendment is folded inline (decision 5). The enforcement-locus substance is unchanged.
 

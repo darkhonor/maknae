@@ -1,5 +1,7 @@
 [package]
 name = "maknae-proto"
+publish.workspace = true
+description = "Kernel decision request and response types: the versioned wire contract"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
