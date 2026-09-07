@@ -1,6 +1,10 @@
 # Maknae maknae image (spec §6). SCAFFOLD STUB.
 # Static musl target so the FROM scratch stage (no libc/loader) can actually run the binary.
-FROM rust:1.94.1 AS build
+# Base pinned by DIGEST, not tag (supply-chain: a tag can be re-pointed, a digest
+# cannot). The tag is a label for humans; Dependabot's docker ecosystem moves both.
+# The image's rustup honors rust-toolchain.toml from the COPY, so the toolchain that
+# builds is the pinned 1.98.1, whatever the base carries.
+FROM rust:1.98.0@sha256:620dbcd124499c59e2406d3741574b5c5838cf9eb9656f0c3a03948f79b02959 AS build
 WORKDIR /src
 COPY . .
 RUN rustup target add x86_64-unknown-linux-musl && cargo install cargo-auditable --locked

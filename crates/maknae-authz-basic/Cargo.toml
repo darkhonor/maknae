@@ -2,7 +2,7 @@
 name = "maknae-authz-basic"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.94.1"
+rust-version.workspace = true
 publish.workspace = true
 description = "The bundled RBAC decision backend behind the maknae-security seam"
 repository.workspace = true

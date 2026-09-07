@@ -33,7 +33,8 @@ license = "Apache-2.0"
 # Pre-MVP: nothing is published to crates.io; every member inherits this.
 publish = false
 repository = "https://github.com/darkhonor/maknae"
-rust-version = "1.94.1"
+# MSRV = the pinned toolchain; the reasons are in rust-toolchain.toml (#201).
+rust-version = "1.98.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
