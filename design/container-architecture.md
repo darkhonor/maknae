@@ -50,6 +50,8 @@ Channel adapter (Discord/Matrix/etc. per the team vote), operator authentication
 
 ### 3.4 `runtime` — Python (proposed)
 
+> **Dated note 2026-09-07 ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md), milestone Cooky):** the MVP loop is **Rust**, a subcommand of the existing untrusted `maknae` binary (`maknae agent`) — it reuses the plane client that already exists and adds no packaging surface. The Python proposal below is for the *eventual* runtime container and is re-decided on evidence after Cooky; the evidence that would move it is named in the ADR. The loop is the ACP **Agent**; the kernel is the ACP **Client**; the model call is brokered egress the trust plane makes on the Agent's request, decided per turn.
+
 The agent loop: LLM conversation orchestration, tool invocation (via kernel-mediated grants), MCP client integrations, gap detection, and learning-loop requests. Python rationale: best fit for the most experimental, fastest-iterating layer — the LLM/MCP SDK ecosystem is Python-first, Hermes' learning-loop concepts port naturally, and the layer is untrusted by design so its language guarantees are not load-bearing. Every privileged act transits the kernel; the runtime requests, never performs, lifecycle transitions.
 
 ### 3.5 `lake` — Python (proposed)

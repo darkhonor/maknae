@@ -127,6 +127,12 @@ pub enum Verb {
     /// trust plane toward a model endpoint. The term #147's destination
     /// governance attaches to; its default is #153's. Un-recallable once sent —
     /// which is why it is two-phase, not audited after the fact.
+    ///
+    /// *Corrected 2026-09-07 (ADR-0023): the hop this term governs is the
+    /// LOOP → MODEL hop. Maknae's own runtime loop (the ACP Agent, untrusted,
+    /// holding no key) issues it each turn; the kernel decides, appends the
+    /// write-ahead record, calls the registered provider, and returns the
+    /// reply. The user → loop hop is not this term.*
     SessionPrompt,
     /// Ask the agent to stop work in progress.
     SessionCancel,
