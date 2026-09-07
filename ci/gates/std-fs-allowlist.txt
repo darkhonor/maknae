@@ -63,6 +63,12 @@ crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
+# #243 `load_config_rooted_with`: the root-required section's SOURCE is re-read through
+# the same anchor shape (anchor + descendant requirement owner-free, as in scan_dir); the
+# ownership requirement is on the TARGET file, passed by the caller (ROOT_ARTIFACT), which
+# is exactly what this second read exists to enforce.
+crates/maknae-config/src/loader.rs|owner: None,
+crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-vault/src/client.rs|owner: None,
 
 # Unix-domain socket lifecycle belongs to transport (#66), not storage I/O.

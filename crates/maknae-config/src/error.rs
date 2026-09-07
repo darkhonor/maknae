@@ -57,6 +57,21 @@ pub enum ConfigError {
     /// into this build (ADR-0022 decision 4). Fail closed: an enclave that declares a
     /// system this daemon cannot rank must not boot as if it were the default.
     UnknownClassificationPolicy { name: String },
+    /// The `provider` section (#243) is present but malformed: not a map, a key
+    /// outside the exact set, a missing or empty field, an endpoint that is not
+    /// `https://` (or loopback `http://`), or a Vault path with whitespace.
+    InvalidProvider(String),
+    /// The `provider` section carries a key under a spelling that means the API
+    /// key itself was pasted into the config. Credentials are delivered via Vault,
+    /// never plaintext (ADR-0005 decision 8); refused by the field's name so the
+    /// operator hears about THIS before any other defect in the block.
+    ProviderPlaintextKey { field: String },
+    /// A section the caller required to come from a root-controlled source
+    /// (ADR-0023 decision 3: the `provider` registration) was contributed by a file
+    /// that is not root-owned or is group/other-writable — `maknae.yaml` or a
+    /// `config.d/` member alike. The subject the loop runs as must not be able to
+    /// register a destination; a source it could have written is refused at boot.
+    SectionNotRootOwned { section: String, path: String },
     /// The `transport` section is present but a field is malformed or out of
     /// its fail-closed range (Stage-3a task-2).
     InvalidTransport(String),
@@ -139,6 +154,15 @@ impl std::fmt::Display for ConfigError {
             ConfigError::UnknownClassificationPolicy { name } => {
                 write!(f, "core.handling.policy names a classification system this build does not carry: '{name}'")
             }
+            ConfigError::InvalidProvider(reason) => {
+                write!(f, "invalid provider config: {reason}")
+            }
+            ConfigError::ProviderPlaintextKey { field } => {
+                write!(f, "provider config carries a plaintext credential under '{field}': keys are delivered via Vault (key_vault_path), never in the config")
+            }
+            ConfigError::SectionNotRootOwned { section, path } => {
+                write!(f, "section '{section}' must come from a root-owned, non-group/other-writable source; {path} is not")
+            }
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
             }
@@ -178,6 +202,41 @@ mod tests {
             col: 4,
         };
         assert!(format!("{p}").contains("bad") && format!("{p}").contains("2:4"));
+    }
+
+    #[test]
+    fn display_covers_the_provider_variants() {
+        let a = format!(
+            "{}",
+            ConfigError::InvalidProvider("provider: missing 'model'".into())
+        );
+        assert!(
+            a.contains("invalid provider config") && a.contains("missing 'model'"),
+            "{a}"
+        );
+        let b = format!(
+            "{}",
+            ConfigError::ProviderPlaintextKey {
+                field: "api_key".into()
+            }
+        );
+        assert!(
+            b.contains("'api_key'") && b.contains("Vault") && b.contains("never"),
+            "{b}"
+        );
+        let c = format!(
+            "{}",
+            ConfigError::SectionNotRootOwned {
+                section: "provider".into(),
+                path: "/x/config.d/10.yaml".into()
+            }
+        );
+        assert!(
+            c.contains("'provider'")
+                && c.contains("/x/config.d/10.yaml")
+                && c.contains("root-owned"),
+            "{c}"
+        );
     }
 
     #[test]

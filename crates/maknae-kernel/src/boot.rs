@@ -5,9 +5,9 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config, policy_name_from_core, Ceiling, ClassificationPolicy,
-    ConfigError, Document, IngestPosture, SectionSpec, Value, AUDIT_SECTION, PRINCIPAL_SECTION,
-    TRANSPORT_SECTION,
+    ceiling_from_core, load_config_rooted, policy_name_from_core, provider_from_section, Ceiling,
+    ClassificationPolicy, ConfigError, Document, IngestPosture, ProviderConfig, SectionSpec, Value,
+    AUDIT_SECTION, PRINCIPAL_SECTION, PROVIDER_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -23,7 +23,12 @@ pub struct BootConfig {
     document: Document,
     ceiling: Ceiling,
     policy: &'static dyn ClassificationPolicy,
+    provider: Option<ProviderConfig>,
 }
+
+/// The sections whose contributing source must be root-controlled (#243;
+/// ADR-0023 decision 3). One today; a name, not a mechanism.
+const ROOT_REQUIRED_SECTIONS: [&str; 1] = [PROVIDER_SECTION];
 
 impl std::fmt::Debug for BootConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,6 +36,7 @@ impl std::fmt::Debug for BootConfig {
             .field("document", &self.document)
             .field("ceiling", &self.ceiling)
             .field("policy", &self.policy.name())
+            .field("provider", &self.provider)
             .finish()
     }
 }
@@ -56,6 +62,12 @@ impl BootConfig {
     /// The selected system's name, for `admin.status` and the boot evidence.
     pub fn classification_policy_name(&self) -> &str {
         self.policy.name()
+    }
+
+    /// The one registered model provider (#243), or `None` — a deployment with
+    /// no provider boots, and its loop has nothing to prompt.
+    pub fn provider(&self) -> Option<&ProviderConfig> {
+        self.provider.as_ref()
     }
 
     /// The full loaded document — handed to `PlaneClient::from_document` so the daemon
@@ -89,7 +101,34 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     // actual dependence on a vault block fails closed later at `from_document`/`mint`
     // (MissingKey); the authorization layer's dependence on a principal (`~` resolution,
     // Task 6) fails closed there, not here.
-    let specs = [
+    let specs = boot_specs();
+    let document = load_config_rooted(config_dir, &specs, &ROOT_REQUIRED_SECTIONS)?;
+    assemble_boot(document)
+}
+
+/// The hermetic door: the same assembly over a document loaded with the
+/// caller's root requirement, so unprivileged tests can prove the provider
+/// wiring end to end. Test-only; production is [`boot`].
+#[cfg(test)]
+fn boot_with_requirement(
+    config_dir: &Path,
+    requirement: maknae_io::TargetRequired,
+) -> Result<BootConfig, ConfigError> {
+    let specs = boot_specs();
+    let document = maknae_config::load_config_rooted_with_requirement(
+        config_dir,
+        &specs,
+        &ROOT_REQUIRED_SECTIONS,
+        requirement,
+    )?;
+    assemble_boot(document)
+}
+
+/// The sections the daemon registers, as literal blocks: the disclosure drift
+/// gate reads each registration's `name:` operand from this file, so the list
+/// is never built by a loop (and this comment never spells the block's opener).
+fn boot_specs() -> [SectionSpec; 6] {
+    [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
             required: false,
@@ -110,8 +149,16 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
             name: PRINCIPAL_SECTION.to_string(),
             required: false,
         },
-    ];
-    let document = load_config(config_dir, &specs)?;
+        SectionSpec {
+            name: PROVIDER_SECTION.to_string(),
+            required: false,
+        },
+    ]
+}
+
+/// Everything after the load: the classification system, the ceiling through
+/// it, the provider.
+fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
     // The SYSTEM first, then the ceiling THROUGH it (ADR-0022): a name this
     // build does not carry refuses boot before any level is read, and a
     // level the selected system does not rank refuses it in the reader.
@@ -120,10 +167,12 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     let policy = crate::classification::select(&name)
         .ok_or(ConfigError::UnknownClassificationPolicy { name })?;
     let ceiling = ceiling_from_core(core, policy)?;
+    let provider = provider_from_section(document.section(PROVIDER_SECTION))?;
     Ok(BootConfig {
         document,
         ceiling,
         policy,
+        provider,
     })
 }
 
@@ -499,6 +548,120 @@ mod tests {
         assert!(matches!(
             boot(&d.0),
             Err(maknae_config::ConfigError::Symlink { .. })
+        ));
+    }
+    // ---- #243: the provider registration, through the hermetic root door.
+    #[cfg(unix)]
+    fn me() -> maknae_io::TargetRequired {
+        maknae_io::TargetRequired {
+            owner: Some(nix::unistd::geteuid().as_raw()),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        }
+    }
+    #[cfg(unix)]
+    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5\n  key_vault_path: maknae/provider/openai\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registered_provider_is_carried_and_an_absent_one_is_none() {
+        let d = new_dir("provider");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  identity:\n    name: t\n",
+            0o640,
+        );
+        assert_eq!(boot_with_requirement(&d.0, me()).unwrap().provider(), None);
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core:\n  identity:\n    name: t\n{PROVIDER_BLOCK}"),
+            0o640,
+        );
+        let cfg = boot_with_requirement(&d.0, me()).unwrap();
+        let p = cfg.provider().expect("registered");
+        assert_eq!(
+            (
+                p.name.as_str(),
+                p.endpoint.as_str(),
+                p.model.as_str(),
+                p.key_vault_path.as_str()
+            ),
+            (
+                "openai",
+                "https://api.openai.com/v1",
+                "gpt-5",
+                "maknae/provider/openai"
+            )
+        );
+        assert!(format!("{cfg:?}").contains("openai"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pasted_key_refuses_boot_by_its_field_name() {
+        let d = new_dir("provider-key");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core: {{}}\n{PROVIDER_BLOCK}  api_key: sk-live\n"),
+            0o640,
+        );
+        match boot_with_requirement(&d.0, me()) {
+            Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
+                assert_eq!(field, "api_key")
+            }
+            other => panic!("expected ProviderPlaintextKey, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_provider_registered_through_config_d_is_verified_at_its_own_file() {
+        let d = new_dir("provider-cd");
+        put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
+        assert!(boot_with_requirement(&d.0, me())
+            .unwrap()
+            .provider()
+            .is_some());
+        let wrong = maknae_io::TargetRequired {
+            owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
+            ..me()
+        };
+        match boot_with_requirement(&d.0, wrong) {
+            Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
+                assert_eq!(section, "provider");
+                assert!(path.ends_with("config.d/10-provider.yaml"), "{path}");
+            }
+            other => panic!("expected SectionNotRootOwned, got {other:?}"),
+        }
+    }
+
+    /// The PRODUCTION `boot()` refuses a provider block the test user owns —
+    /// the custody property, proven on every unprivileged lane.
+    #[cfg(unix)]
+    #[test]
+    fn production_boot_refuses_a_provider_block_the_subject_owns() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let d = new_dir("provider-prod");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core: {{}}\n{PROVIDER_BLOCK}"),
+            0o640,
+        );
+        assert!(matches!(
+            boot(&d.0),
+            Err(maknae_config::ConfigError::SectionNotRootOwned { .. })
         ));
     }
 }

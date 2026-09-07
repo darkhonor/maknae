@@ -81,3 +81,9 @@ variable "approle_path" {
   description = "Dedicated AppRole auth mount path. NOT the shared default 'approle', which commonly already exists and would hard-fail apply with 'path is already in use'."
   default     = "maknae-approle"
 }
+
+variable "kv_mount_path" {
+  description = "Mount path of the KV v2 engine holding platform secrets (the provider API key, #243)."
+  type        = string
+  default     = "maknae-kv"
+}

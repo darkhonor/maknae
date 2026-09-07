@@ -21,6 +21,18 @@ resource "vault_pki_secret_backend_root_cert" "maknae_root" {
 }
 
 # ---- Intermediate CA (the one and only intermediate; issues plane leaves) -------
+# The KV v2 mount for platform secrets the daemons read and the CLI never can
+# (#243, ADR-0023 decision 3): the model provider's API key lives at
+# `<kv>/data/<provider.key_vault_path>`. NO policy here grants a read on it —
+# the `maknae-egress` principal that does is #240's, and the CLI policy below
+# names no KV path at all. Mounting it is the whole of #243's Vault obligation.
+resource "vault_mount" "maknae_kv" {
+  path        = var.kv_mount_path
+  type        = "kv"
+  options     = { version = "2" }
+  description = "Maknae platform secrets (provider API keys) — read by maknae-egress only"
+}
+
 resource "vault_mount" "maknae_int" {
   path                  = var.int_mount_path
   type                  = "pki"

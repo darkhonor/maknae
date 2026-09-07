@@ -69,6 +69,17 @@ impl Document {
             .map(|(_, v, _)| v)
     }
 
+    /// Which source supplied a present section — `maknae.yaml` or a `config.d/`
+    /// member. The loader uses it to re-verify a root-required section's source
+    /// under the stricter requirement (#243), so the check covers every input
+    /// path, not only the base file.
+    pub fn source_of(&self, name: &str) -> Option<&Source> {
+        self.sections
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, _, s)| s)
+    }
+
     /// The audit trail of which source won each overridden section.
     pub fn overrides(&self) -> &[Override] {
         &self.overrides
@@ -279,6 +290,12 @@ const DISCLOSABLE: &[&str] = &[
     "principal.uid",
     "principal.home",
     // Transport shape, as resolved -- see `merge_resolved_defaults`.
+    // The `provider` section (#243, ADR-0023): which destination the loop's
+    // content goes to is exactly what an operator reading the view needs, and
+    // none of it is a credential. The key's Vault PATH is suppressed below.
+    "provider.name",
+    "provider.endpoint",
+    "provider.model",
     "transport.socket_path",
     "transport.max_connections",
     "transport.frame_max_bytes",
@@ -334,6 +351,10 @@ const SUPPRESSED: &[&str] = &[
     // Its PRESENCE is the finding. Absent on a correctly-enrolled host, so its
     // absence from the view is not itself a signal.
     "vault.insecure_plaintext_secret_path",
+    // Where in Vault the provider's API key lives (#243). Not the key — but the
+    // layout of the secret store is nobody's business on a grant that exists to
+    // show WHAT is configured, and ADR-0023 decision 3 records it as `omit`.
+    "provider.key_vault_path",
     // The deployer's AU-3(1) extension object, and everything under it.
     //
     // Masking was the recorded decision and it applied the VALUE rule to a KEY
@@ -1145,5 +1166,38 @@ mod tests {
             out["deployment_id"], MASK,
             "leaf-name collision must not disclose"
         );
+    }
+    /// #243: the provider's endpoint, model and name are the view's business;
+    /// the key's Vault path is omitted outright.
+    #[test]
+    fn the_provider_section_discloses_its_destination_and_omits_the_key_path() {
+        let d = doc(vec![(
+            "provider",
+            map(vec![
+                ("name", Value::Str("openai".into())),
+                ("endpoint", Value::Str("https://api.openai.com/v1".into())),
+                ("model", Value::Str("gpt-5".into())),
+                (
+                    "key_vault_path",
+                    Value::Str("maknae/provider/openai".into()),
+                ),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        assert_eq!(v["provider"]["name"], "openai");
+        assert_eq!(v["provider"]["endpoint"], "https://api.openai.com/v1");
+        assert_eq!(v["provider"]["model"], "gpt-5");
+        assert!(!v["provider"].contains_key("key_vault_path"), "{v:?}");
+        assert!(!format!("{v:?}").contains("maknae/provider"), "{v:?}");
+    }
+
+    #[test]
+    fn source_of_names_the_contributing_source() {
+        let d = doc(vec![(
+            "provider",
+            map(vec![("name", Value::Str("p".into()))]),
+        )]);
+        assert_eq!(d.source_of("provider"), Some(&Source::Base));
+        assert_eq!(d.source_of("absent"), None);
     }
 }
