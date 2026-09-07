@@ -115,8 +115,8 @@ pub enum Verb {
     /// Begin a conversation with an agent runtime. This is where the agent's tool
     /// authority is provisioned — in an ACP v2 deployment the MCP servers Maknae
     /// hands into the session are named here, making this a capability-granting
-    /// call, not bookkeeping. *(ADR-0023: not built in Cooky — each loop turn is
-    /// one connection and one audit session; the kernel holds no conversation
+    /// call, not bookkeeping. *(ADR-0023: not built in Cooky, where each loop turn
+    /// is one connection and one audit session; the kernel holds no conversation
     /// identity spanning connections (multi-frame exchanges within one
     /// connection exist — the mutation lane — the identity does not), and a
     /// conversation that outlives a process is Velveteen's.)*
@@ -149,10 +149,11 @@ pub enum Verb {
     /// Un-recallable once sent — which is why it is two-phase, not audited
     /// after the fact.
     SessionPrompt,
-    /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: granted
-    /// wherever `session.prompt` is (#172 — never the scarcer grant); in Cooky
-    /// it stops the loop, and a cancel of an in-flight egress is best-effort and
-    /// recorded as such — cancel never recalls a disclosure.)*
+    /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: NOT built
+    /// in Cooky — the operand names a session and no session identity exists
+    /// there; stopping the loop is the subject stopping its own process. #172's
+    /// rule — granted wherever `session.prompt` is, never the scarcer grant,
+    /// best-effort, never a recall — applies once a session identity exists.)*
     SessionCancel,
     /// Change a conversation-scoped setting. Open: whether any option can
     /// redirect the model endpoint — if so this is a parallel destination surface
