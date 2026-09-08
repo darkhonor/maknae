@@ -47,6 +47,29 @@ use std::path::Path;
 // Public policy schema
 // ============================================================================
 
+/// Per-role egress destination allowlist (`destinations:`, #172). Raw strings:
+/// role-name semantics belong to `maknae-authz-basic`, never this crate. Allow only:
+/// an allowlist over one registered provider has nothing to deny, and a
+/// `deny:` key refuses at load so it cannot be silently ignored.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RawDestinations {
+    pub allow: Vec<String>,
+}
+
+/// `provider:<name>`, `<name>` in #243's provider-name charset
+/// (`[A-Za-z0-9._-]+`). URL patterns are #147's later grammar: refused now.
+pub fn destination_entry_is_acceptable(entry: &str) -> bool {
+    match entry.strip_prefix("provider:") {
+        Some(name) => {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        }
+        None => false,
+    }
+}
+
 /// One role's action grants as they appear on disk (#162): the `allow` and
 /// `deny` lists under `roles.<name>`. **Raw strings, deliberately** —
 /// whether `"admin"` names a real role and whether `"admin.status"` names a
@@ -78,6 +101,11 @@ pub struct AuthzPolicy {
     /// construction: reported MISSED with no killable test available, and the
     /// T1 zero-missed gate goes red with nothing to write.
     pub action_grants: std::collections::BTreeMap<String, RawActionGrants>,
+    /// Role → egress destination allowlist from the additive `destinations:`
+    /// key (#172). A plain map like `action_grants`, for the same mutant
+    /// reason: absent and empty behave identically (both refuse every prompt).
+    /// Raw strings: role-name semantics belong to `maknae-authz-basic`.
+    pub destinations: std::collections::BTreeMap<String, RawDestinations>,
     /// Original entry text for each `allow`/`deny` pattern, index-aligned
     /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
     /// the audit record. Private — provenance is not a matching input, and
@@ -543,6 +571,25 @@ fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
 /// reasoning as [`bindings_member_list`], and the same reason it is a third
 /// function rather than a shared one with a passed-in noun: the message is the
 /// diagnostic, so it is written out where a reader can see it.
+/// `destinations:` allow lists: the same YAML-shape checks as `roles_term_list`;
+/// the entry grammar is `destination_entry_is_acceptable`'s, applied by the caller.
+fn destination_list(v: &Value) -> Result<Vec<String>, AuthzError> {
+    match v {
+        Value::Seq(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(s) => Ok(s.clone()),
+                _ => Err(AuthzError::Yaml(
+                    "destinations allow entries must be strings (quote every entry; #172)".into(),
+                )),
+            })
+            .collect(),
+        _ => Err(AuthzError::Yaml(
+            "destinations allow list must be a sequence (write `allow: []` for empty)".into(),
+        )),
+    }
+}
+
 fn roles_term_list(v: &Value) -> Result<Vec<String>, AuthzError> {
     match v {
         Value::Seq(items) => items
@@ -580,7 +627,13 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
     };
     check_known_keys(
         &map,
-        &["schema_version", "permissions", "bindings", "roles"],
+        &[
+            "schema_version",
+            "permissions",
+            "bindings",
+            "roles",
+            "destinations",
+        ],
     )?;
 
     // Missing or non-integer schema_version is represented by the sentinel 0
@@ -679,11 +732,45 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         }
     };
 
+    let destinations = match get(&map, "destinations") {
+        None => std::collections::BTreeMap::new(),
+        Some(Value::Map(dm)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (role, body) in dm {
+                // Any key parses here; which roles may hold an allowlist is
+                // maknae-authz-basic's decision (validate_destinations), like `roles:`.
+                let Value::Map(rb) = body else {
+                    return Err(AuthzError::Yaml(format!(
+                        "destinations: role `{role}` must be a map with `allow`"
+                    )));
+                };
+                check_known_keys(rb, &["allow"])?;
+                let allow = get(rb, "allow")
+                    .map(destination_list)
+                    .transpose()?
+                    .unwrap_or_default();
+                if let Some(e) = allow.iter().find(|e| !destination_entry_is_acceptable(e)) {
+                    return Err(AuthzError::Yaml(format!(
+                        "destinations: entry `{e}` for role `{role}` is not `provider:<name>`"
+                    )));
+                }
+                out.insert(role.clone(), RawDestinations { allow });
+            }
+            out
+        }
+        Some(_) => {
+            return Err(AuthzError::Yaml(
+                "destinations section must be a map of role to allowlist".into(),
+            ))
+        }
+    };
+
     Ok(AuthzPolicy {
         allow,
         deny,
         bindings,
         action_grants,
+        destinations,
         allow_sources: allow_raw,
         deny_sources: deny_raw,
     })
@@ -834,6 +921,78 @@ pub fn load_authz(path: &Path, principal_home: Option<&Path>) -> Result<AuthzPol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n";
+    fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
+        parse_authz(body, Some(std::path::Path::new("/home/operator")))
+    }
+
+    #[test]
+    fn destinations_absent_means_empty_for_every_role() {
+        assert!(parse_dest(DEST_BASE).unwrap().destinations.is_empty());
+    }
+
+    #[test]
+    fn destinations_parse_per_role_allow_lists() {
+        let p = parse_dest(&format!(
+            "{DEST_BASE}destinations:\n  user:\n    allow: [\"provider:openai\"]\n  admin:\n    allow: []\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            p.destinations["user"].allow,
+            vec!["provider:openai".to_string()]
+        );
+        assert!(p.destinations["admin"].allow.is_empty());
+    }
+
+    #[test]
+    fn destinations_refuse_a_deny_key_an_unknown_key_a_non_map_and_a_non_map_section() {
+        // The last two reach destination_list's two error arms (T1: both regions, both mutants).
+        for tail in [
+            "destinations:\n  user:\n    deny: [\"provider:x\"]\n",
+            "destinations:\n  user:\n    allow: []\n    extra: 1\n",
+            "destinations:\n  user: [\"provider:x\"]\n",
+            "destinations: 3\n",
+            "destinations:\n  user:\n    allow: 3\n",
+            "destinations:\n  user:\n    allow: [3]\n",
+        ] {
+            assert!(parse_dest(&format!("{DEST_BASE}{tail}")).is_err(), "{tail}");
+        }
+    }
+
+    #[test]
+    fn destination_entries_must_be_provider_colon_name_and_the_error_names_the_entry() {
+        for bad in [
+            "openai",
+            "provider:",
+            "provider:open ai",
+            "https://api.openai.com/v1",
+            "provider:a/b",
+            "PROVIDER:x",
+        ] {
+            let err = parse_dest(&format!(
+                "{DEST_BASE}destinations:\n  user:\n    allow: [\"{bad}\"]\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains(bad), "{bad}: {err}");
+        }
+        assert!(destination_entry_is_acceptable("provider:open-ai_2.0"));
+        assert!(!destination_entry_is_acceptable("provider:"));
+    }
+
+    #[test]
+    fn destinations_parse_any_role_key_because_role_semantics_are_not_this_crates() {
+        // Role-name semantics belong to maknae-authz-basic (grammar, not decision):
+        // `guest`/`adversary`/unknown keys refuse at boot in `validate_destinations`, not here.
+        let p = parse_dest(&format!(
+            "{DEST_BASE}destinations:\n  guest:\n    allow: [\"provider:x\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            p.destinations["guest"].allow,
+            vec!["provider:x".to_string()]
+        );
+    }
 
     // ---- the exact spec §7 shipped default ----
 
