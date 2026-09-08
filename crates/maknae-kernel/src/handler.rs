@@ -44,6 +44,10 @@ pub enum Dispatch {
     /// The peer asked to enumerate role bindings. No datum; the answer is read
     /// LIVE from the PDP, never from a boot snapshot.
     SubjectListRequested,
+    /// The peer asked to send content to the registered provider (#172). The
+    /// destination is the KERNEL's (the provider registered at boot), never the
+    /// client's; the operands travel in the verb and are pre-gated in `run.rs`.
+    PromptRequested,
 }
 
 /// Resolve a verb to its dispatch. `Ping → Pong`, `Whoami → WhoamiRequested`.
@@ -60,6 +64,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
         Verb::AdminStatus => Dispatch::StatusRequested,
         Verb::AdminSubjectList => Dispatch::SubjectListRequested,
+        Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
         Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectBind
@@ -79,7 +84,6 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::SessionDelete
         | Verb::SessionList
         | Verb::SessionFork
-        | Verb::SessionPrompt { .. }
         | Verb::SessionCancel
         | Verb::SessionSetconfigoption
         | Verb::SessionSetmode
@@ -258,6 +262,9 @@ pub fn build_authz_request(
     peer_uid: u32,
     lane: maknae_security::Lane,
     object: VerifiedObject<'_>,
+    // The provider registered at boot (#243), by name, or none. Supplied by
+    // the accept loop's captured boot state, never read off the wire.
+    provider_name: Option<&str>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
@@ -282,6 +289,14 @@ pub fn build_authz_request(
                 resource.insert("path", AttrValue::Str(path.clone()));
             }
         }
+    }
+    // #172: the egress destination is the kernel's registered provider, stamped
+    // here so the PDP decides on `provider:<name>` and the client never names
+    // it. Deliberately a literal, like "path" above: the PDP is swappable behind
+    // the seam and the PEP must not depend on one backend's constant. Absent
+    // when no provider is registered — the arm refuses that.
+    if let (Verb::SessionPrompt { .. }, Some(name)) = (verb, provider_name) {
+        resource.insert("destination", AttrValue::Str(format!("provider:{name}")));
     }
     // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
     // caller is the accept loop, which knows which listener accepted, and there is
@@ -498,12 +513,58 @@ mod tests {
     }
 
     #[test]
+    fn session_prompt_dispatches_to_prompt_requested_and_its_siblings_do_not() {
+        assert_eq!(
+            dispatch_verb(&Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: vec![]
+            }),
+            Dispatch::PromptRequested
+        );
+        assert_eq!(dispatch_verb(&Verb::SessionCancel), Dispatch::NoBehaviour);
+        assert_eq!(dispatch_verb(&Verb::SessionUpdate), Dispatch::NoBehaviour);
+    }
+
+    #[test]
+    fn the_request_carries_the_registered_provider_as_the_destination_and_nothing_when_none() {
+        let v = Verb::SessionPrompt {
+            conversation: "c".into(),
+            content: vec![],
+        };
+        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, None, Some("openai"));
+        assert_eq!(
+            r.resource.0.get("destination"),
+            Some(&maknae_security::AttrValue::Str("provider:openai".into()))
+        );
+        assert!(
+            build_authz_request(&v, 1002, maknae_security::Lane::Local, None, None)
+                .resource
+                .0
+                .get("destination")
+                .is_none()
+        );
+        assert!(build_authz_request(
+            &Verb::Ping,
+            1002,
+            maknae_security::Lane::Local,
+            None,
+            Some("openai")
+        )
+        .resource
+        .0
+        .get("destination")
+        .is_none());
+    }
+
+    #[test]
     fn whoami_dispatches_requested() {
         assert_eq!(dispatch_verb(&Verb::Whoami), Dispatch::WhoamiRequested);
     }
 
-    /// All three grantable disclosure terms now dispatch. The `NoBehaviour`
-    /// pin that guarded them is RETIRED here, having done its job twice.
+    /// The three grantable disclosure terms dispatch here; the fourth grantable
+    /// term, `session.prompt` (#172), is asserted by
+    /// `every_grantable_term_dispatches_and_the_hand_copy_matches`. The
+    /// `NoBehaviour` pin that guarded them is RETIRED here, having done its job twice.
     ///
     /// It was written in Phase 1 over all three, so that none could gain a
     /// dispatch without someone answering the disclosure question deliberately.
@@ -579,9 +640,10 @@ mod tests {
     }
 
     /// The grantable-side tripwire (#181 S4), replacing what the retired
-    /// `NoBehaviour` pin provided: a FOURTH term joining `GRANTABLE_ACTIONS`
+    /// `NoBehaviour` pin provided: a FIFTH term joining `GRANTABLE_ACTIONS`
     /// without a dispatch arm — the "granted-but-unbuilt" state ADR-0010 makes
     /// a contradiction — turns this red, cross-crate, through the re-export.
+    /// *(Corrected 2026-09-09: said FOURTH; #172 was the fourth, `session.prompt`.)*
     /// The hand-copied list above is asserted equal to the constant, so it can
     /// no longer drift silently either.
     #[test]
@@ -589,7 +651,12 @@ mod tests {
         let real = maknae_authz_basic::grantable_actions();
         assert_eq!(
             real,
-            ["admin.status", "admin.config.show", "admin.subject.list"],
+            [
+                "admin.status",
+                "admin.config.show",
+                "admin.subject.list",
+                "session.prompt"
+            ],
             "the hand-copied list in the class test above must match the constant"
         );
         assert!(
@@ -738,12 +805,18 @@ mod tests {
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None);
+        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
         );
-        let r = build_authz_request(&Verb::Whoami, u32::MAX, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Whoami,
+            u32::MAX,
+            maknae_security::Lane::Local,
+            None,
+            None,
+        );
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(i64::from(u32::MAX)))
@@ -752,7 +825,7 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None);
+        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None, None);
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
         // Context is no longer empty: every request carries its lane (ADR-0009 D8).
@@ -770,6 +843,7 @@ mod tests {
             },
             501,
             maknae_security::Lane::Local,
+            None,
             None,
         );
         assert_eq!(r.action.0, "fs.read");
@@ -793,8 +867,8 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None);
+        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None, None);
+        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None, None);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -811,6 +885,7 @@ mod tests {
             },
             501,
             Lane::Local,
+            None,
             None,
         );
         assert_eq!(
@@ -1234,7 +1309,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None);
+            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None, None);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),

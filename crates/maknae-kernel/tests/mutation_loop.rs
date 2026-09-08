@@ -1,159 +1,13 @@
 //! Real composed PDP and real writable descriptors across the mutation audit gate.
+mod common;
+use common::{Fixture, Records};
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
 use maknae_proto::{Bytes, Payload, RespResult, Verb, WriteMode};
 use std::{
-    os::{fd::OwnedFd, unix::fs::PermissionsExt},
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-struct Records {
-    records: Mutex<Vec<AuditRecord>>,
-    fail: usize,
-}
-impl Records {
-    fn new(fail: usize) -> Arc<Self> {
-        Arc::new(Self {
-            records: Mutex::new(Vec::new()),
-            fail,
-        })
-    }
-    fn snapshot(&self) -> Vec<AuditRecord> {
-        self.records.lock().unwrap().clone()
-    }
-}
-impl AuditEmit for Records {
-    fn emit(
-        &self,
-        record: &AuditRecord,
-    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
-        let mut records = self.records.lock().unwrap();
-        records.push(record.clone());
-        let fail = records.len() == self.fail;
-        async move {
-            if fail {
-                Err(AuditError::WritePrimary(
-                    "injected append/sync failure".into(),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-    }
-}
-struct Fixture {
-    root: PathBuf,
-    principal: maknae_config::Principal,
-}
-impl Fixture {
-    fn new(tag: &str, allow: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("mutation_{tag}_{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let root = root.canonicalize().unwrap();
-        let principal = maknae_config::Principal {
-            name: "operator".into(),
-            uid: nix::unistd::geteuid().as_raw(),
-            home: root.clone(),
-        };
-        let policy = format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}(~/**)\"\n  deny: []\nbindings:\n  user: [\"root\"]\n");
-        std::fs::write(root.join("authz.yaml"), policy).unwrap();
-        std::fs::set_permissions(
-            root.join("authz.yaml"),
-            std::fs::Permissions::from_mode(0o640),
-        )
-        .unwrap();
-        Self { root, principal }
-    }
-    fn authorizer(
-        &self,
-    ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
-        let basic = maknae_authz_basic::HermeticAuthorizer::new(
-            self.root.join("authz.yaml"),
-            self.principal.clone(),
-            maknae_config::TargetRequired {
-                owner: None,
-                mode_mask: Some(0o022),
-                nlink_exactly_one: false,
-                regular_file: true,
-                max_bytes: None,
-            },
-        )
-        .unwrap();
-        let us = &maknae_config::BasicPolicy;
-        Arc::new(maknae_kernel::Composition::new(
-            basic,
-            maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        ))
-    }
-    fn start(
-        &self,
-        verb: Verb,
-        fd: Option<OwnedFd>,
-        records: Arc<impl AuditEmit + Send + Sync + 'static>,
-    ) -> (
-        tokio::io::DuplexStream,
-        tokio::task::JoinHandle<()>,
-        Vec<u8>,
-    ) {
-        self.start_with_config(
-            verb,
-            fd,
-            records,
-            maknae_config::transport_from_section(None).unwrap(),
-        )
-    }
-    fn start_with_config(
-        &self,
-        verb: Verb,
-        fd: Option<OwnedFd>,
-        records: Arc<impl AuditEmit + Send + Sync + 'static>,
-        config: maknae_config::TransportConfig,
-    ) -> (
-        tokio::io::DuplexStream,
-        tokio::task::JoinHandle<()>,
-        Vec<u8>,
-    ) {
-        let (client, server) = tokio::io::duplex(65536);
-        let fds = maknae_io::DelegatedFds::new(4);
-        if let Some(fd) = fd {
-            fds.push(fd);
-        }
-        let principal = Arc::new(self.principal.clone());
-        let authz = self.authorizer();
-        let task = tokio::spawn(maknae_kernel::handle(
-            server,
-            "maknae://d/plane/cli".into(),
-            0,
-            true,
-            records,
-            718,
-            config,
-            serde_json::json!({"mutation": "untrusted extension"}),
-            authz,
-            principal,
-            Arc::new(Default::default()),
-            Arc::new("basic+ceiling".into()),
-            Arc::new("US".into()),
-            Duration::from_secs(2),
-            maknae_security::Lane::Local,
-            fds,
-        ));
-        let body = maknae_proto::encode_request(&maknae_proto::Request {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb,
-        })
-        .unwrap();
-        // The client write happens in drive, leaving this helper reusable for reports.
-        (client, task, body)
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
 async fn drive(
     fx: &Fixture,
     bytes: &[u8],
@@ -1208,6 +1062,8 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
+            std::sync::Arc::new(None),
+            maknae_kernel::production_egress(),
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,

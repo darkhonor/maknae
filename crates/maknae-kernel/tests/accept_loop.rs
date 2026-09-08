@@ -205,6 +205,8 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::production_egress(),
         )
         .await;
     });
@@ -344,6 +346,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::production_egress(),
         )
         .await;
     });
@@ -439,6 +443,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::production_egress(),
         )
         .await;
     });
@@ -497,6 +503,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::production_egress(),
         ),
     )
     .await
@@ -547,6 +555,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         std::sync::Arc::new(Default::default()),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+        maknae_kernel::production_egress(),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)

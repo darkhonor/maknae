@@ -4,8 +4,13 @@
 #![allow(dead_code)]
 
 use std::future::Future;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use maknae_proto::{Response, Verb};
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
 use maknae_security::{Authorizer, Obligation, Request, Verdict};
@@ -132,5 +137,233 @@ impl Authorizer for PanickingName {
     }
     fn backend_name(&self) -> String {
         panic!("hostile backend name")
+    }
+}
+
+// ---- the composed-PDP harness (moved from mutation_loop.rs for #172; one
+// harness, so the mutation and prompt suites cannot drift apart) ----
+
+/// An `AuditEmit` that records every append and fails exactly the Nth one
+/// (`fail == 0` never fails). The failure is injected AFTER the push, so the
+/// failed record is still visible in `snapshot()`.
+pub struct Records {
+    records: Mutex<Vec<maknae_audit_append::AuditRecord>>,
+    fail: usize,
+}
+impl Records {
+    pub fn new(fail: usize) -> Arc<Self> {
+        Arc::new(Self {
+            records: Mutex::new(Vec::new()),
+            fail,
+        })
+    }
+    pub fn snapshot(&self) -> Vec<maknae_audit_append::AuditRecord> {
+        self.records.lock().unwrap().clone()
+    }
+}
+impl AuditEmit for Records {
+    fn emit(
+        &self,
+        record: &maknae_audit_append::AuditRecord,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+        let mut records = self.records.lock().unwrap();
+        records.push(record.clone());
+        let fail = records.len() == self.fail;
+        async move {
+            if fail {
+                Err(AuditError::WritePrimary(
+                    "injected append/sync failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A temp root with a real `authz.yaml` (binding `user: ["root"]`, so the
+/// fixture's peer uid 0 is the `user` role) and a real composed PDP over it.
+pub struct Fixture {
+    pub root: PathBuf,
+    pub principal: maknae_config::Principal,
+}
+impl Fixture {
+    pub fn new(tag: &str, allow: &str) -> Self {
+        Self::with_policy(tag, allow, "")
+    }
+    /// `new`, then `policy_tail` appended to the policy body (a `roles:` /
+    /// `destinations:` block for #172).
+    pub fn with_policy(tag: &str, allow: &str, policy_tail: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("mutation_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = root.canonicalize().unwrap();
+        let principal = maknae_config::Principal {
+            name: "operator".into(),
+            uid: nix::unistd::geteuid().as_raw(),
+            home: root.clone(),
+        };
+        let policy = format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}(~/**)\"\n  deny: []\nbindings:\n  user: [\"root\"]\n{policy_tail}");
+        std::fs::write(root.join("authz.yaml"), policy).unwrap();
+        std::fs::set_permissions(
+            root.join("authz.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        Self { root, principal }
+    }
+    pub fn authorizer(
+        &self,
+    ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
+        let basic = maknae_authz_basic::HermeticAuthorizer::new(
+            self.root.join("authz.yaml"),
+            self.principal.clone(),
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            },
+        )
+        .unwrap();
+        let us = &maknae_config::BasicPolicy;
+        Arc::new(maknae_kernel::Composition::new(
+            basic,
+            maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ))
+    }
+    pub fn start(
+        &self,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        self.start_with_config(
+            verb,
+            fd,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+        )
+    }
+    pub fn start_with_config(
+        &self,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        self.start_egress(
+            verb,
+            fd,
+            records,
+            config,
+            None,
+            maknae_kernel::production_egress(),
+        )
+    }
+    /// The full starter (#172): a registered provider name and an egress
+    /// backend. `fd` is INCLUDED: the mutation suite delegates a real writable
+    /// descriptor through here.
+    pub fn start_egress(
+        &self,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        let (client, server) = tokio::io::duplex(65536);
+        let fds = maknae_io::DelegatedFds::new(4);
+        if let Some(fd) = fd {
+            fds.push(fd);
+        }
+        let principal = Arc::new(self.principal.clone());
+        let authz = self.authorizer();
+        let task = tokio::spawn(maknae_kernel::handle(
+            server,
+            "maknae://d/plane/cli".into(),
+            0,
+            true,
+            records,
+            718,
+            config,
+            serde_json::json!({"mutation": "untrusted extension"}),
+            authz,
+            principal,
+            Arc::new(Default::default()),
+            Arc::new("basic+ceiling".into()),
+            Arc::new("US".into()),
+            Arc::new(provider.map(str::to_string)),
+            egress,
+            Duration::from_secs(2),
+            maknae_security::Lane::Local,
+            fds,
+        ));
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb,
+        })
+        .unwrap();
+        // The client write happens in the driver, leaving this reusable for reports.
+        (client, task, body)
+    }
+    /// One request, one frame back (`None` when the daemon closed frameless:
+    /// the audit-failure discipline), under the default transport.
+    pub async fn roundtrip(
+        &self,
+        verb: Verb,
+        records: Arc<Records>,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> Option<Response> {
+        self.roundtrip_with_config(
+            verb,
+            records,
+            provider,
+            egress,
+            maknae_config::transport_from_section(None).unwrap(),
+        )
+        .await
+    }
+    pub async fn roundtrip_with_config(
+        &self,
+        verb: Verb,
+        records: Arc<Records>,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        config: maknae_config::TransportConfig,
+    ) -> Option<Response> {
+        let (mut client, task, body) =
+            self.start_egress(verb, None, records, config, provider, egress);
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            maknae_proto::read_frame(&mut client, 65536),
+        )
+        .await
+        .ok()?
+        .ok()
+        .and_then(|body| maknae_proto::decode_response(&body).ok());
+        task.await.unwrap();
+        response
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }

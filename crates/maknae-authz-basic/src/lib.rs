@@ -55,14 +55,20 @@ pub enum AuthzBasicError {
     /// A `roles:` key names something that is not a role in the closed
     /// vocabulary (#162). Carries the offending key.
     UnknownRole(String),
-    /// A `roles:` key names a real role that Phase 1 does not grant for
-    /// (`user`, `guest`, `adversary`). Distinct from `UnknownRole` on purpose:
-    /// "not yet" and "never" are different operator problems, and collapsing
-    /// them would tell an operator their correct spelling was a typo.
+    /// A `roles:`/`destinations:` key names a STRUCTURAL role (`guest`,
+    /// `adversary`) that takes no grants. Distinct from `UnknownRole` on
+    /// purpose: "takes none" and "does not exist" are different operator
+    /// problems, and collapsing them would tell an operator their correct
+    /// spelling was a typo. *(Corrected 2026-09-09, #172: `user` left this
+    /// set; it holds the content-plane term.)*
     RoleNotSupportedYet(String),
     /// A `roles:` allow/deny list names a term outside `GRANTABLE_ACTIONS`
     /// (#162). Carries the offending term.
     UnknownActionTerm(String),
+    /// A `roles:` list names a grantable term that THIS role may not hold
+    /// (#172: `user` may hold `session.prompt` only; the admin disclosure
+    /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
+    TermNotGrantableForRole { role: String, term: String },
 }
 
 impl std::fmt::Display for AuthzBasicError {
@@ -75,11 +81,16 @@ impl std::fmt::Display for AuthzBasicError {
             }
             AuthzBasicError::RoleNotSupportedYet(k) => write!(
                 f,
-                "authz roles: role `{k}` is not grantable yet (Phase 1 grants `admin` only)"
+                "authz roles: role `{k}` takes no grants (guest and adversary are structural)"
             ),
             AuthzBasicError::UnknownActionTerm(t) => write!(
                 f,
-                "authz roles: `{t}` is not a grantable action term (#162 Phase 1: {})",
+                "authz roles: `{t}` is not a grantable action term (grantable: {})",
+                decide::GRANTABLE_ACTIONS.join(", ")
+            ),
+            AuthzBasicError::TermNotGrantableForRole { role, term } => write!(
+                f,
+                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
                 decide::GRANTABLE_ACTIONS.join(", ")
             ),
         }
@@ -134,6 +145,7 @@ impl BasicAuthorizer {
         // who mistypes a term learns it at boot, in the journal, with the token
         // named -- not by wondering why a grant they wrote does nothing.
         validate_grants(&policy.action_grants)?;
+        validate_destinations(&policy.destinations)?;
         Ok(Self {
             policy_path,
             principal,
@@ -172,41 +184,68 @@ fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<Load
     // for the operator at boot; a per-request refusal tells a caller only
     // `Indeterminate`. Both refuse -- only the diagnostic differs.
     let action_grants = validate_grants(&policy.action_grants).map_err(|_| ())?;
+    let destinations = validate_destinations(&policy.destinations).map_err(|_| ())?;
     Ok(LoadedPolicy {
         policy,
         roles,
         action_grants,
+        destinations,
     })
+}
+
+/// `destinations:` keys must be roles that can hold a prompt grant (#172):
+/// `admin` and `user`. Structural roles refuse like `roles:` does; an unknown
+/// key refuses by name. Runs at boot (finish_new) and on every per-request load.
+fn validate_destinations(
+    raw: &std::collections::BTreeMap<String, maknae_config::RawDestinations>,
+) -> Result<decide::DestinationGrants, AuthzBasicError> {
+    let mut out = std::collections::BTreeMap::new();
+    for (key, d) in raw {
+        match role::Role::from_key(key) {
+            None => return Err(AuthzBasicError::UnknownRole(key.clone())),
+            Some(role::Role::Admin | role::Role::User) => {}
+            Some(_) => return Err(AuthzBasicError::RoleNotSupportedYet(key.clone())),
+        }
+        out.insert(key.clone(), d.allow.clone());
+    }
+    Ok(decide::DestinationGrants(out))
 }
 
 /// Validate the raw `roles:` grants against the closed vocabularies (#162).
 ///
-/// Two separate checks, because `Role::from_key` answers only the first:
-/// `"user"` IS a role, so it passes `from_key` and must still be refused --
-/// Phase 1 grants `admin` alone. Gates **both** `allow` and `deny`, so a
-/// typo'd deny cannot be silently accepted as an unenforced denial.
-///
-/// Keyed by the literal `"admin"`; `role.rs` is untouched, since this is a
-/// grant surface over the existing vocabulary, not an addition to it.
+/// Three checks, because `Role::from_key` answers only the first: the key is
+/// a role; the role may hold grants at all (`admin` and, since #172, `user`;
+/// `guest`/`adversary` are structural); and the term is one that role may
+/// hold (`user`: `session.prompt` only — the admin disclosure terms stay
+/// admin-only, ADR-0010 decision 4 as superseded 2026-09-08). Gates **both**
+/// `allow` and `deny`, so a typo'd deny cannot be silently accepted as an
+/// unenforced denial. *(Corrected 2026-09-09: this said Phase 1 grants
+/// `admin` alone.)* `role.rs` is untouched: a grant surface over the existing
+/// vocabulary, not an addition to it.
 fn validate_grants(
     raw: &std::collections::BTreeMap<String, maknae_config::RawActionGrants>,
 ) -> Result<decide::ActionGrants, AuthzBasicError> {
     let mut out = std::collections::BTreeMap::new();
     for (key, grants) in raw {
-        match role::Role::from_key(key) {
+        let role = match role::Role::from_key(key) {
             None => return Err(AuthzBasicError::UnknownRole(key.clone())),
-            Some(role::Role::Admin) => {}
+            Some(r @ (role::Role::Admin | role::Role::User)) => r,
             Some(_) => return Err(AuthzBasicError::RoleNotSupportedYet(key.clone())),
-        }
+        };
         let check = |terms: &Vec<String>| -> Result<Vec<decide::ActionTerm>, AuthzBasicError> {
             terms
                 .iter()
                 .map(|t| {
-                    if decide::GRANTABLE_ACTIONS.contains(&t.as_str()) {
-                        Ok(decide::ActionTerm::validated(t.clone()))
-                    } else {
-                        Err(AuthzBasicError::UnknownActionTerm(t.clone()))
+                    if !decide::GRANTABLE_ACTIONS.contains(&t.as_str()) {
+                        return Err(AuthzBasicError::UnknownActionTerm(t.clone()));
                     }
+                    if role == role::Role::User && t != "session.prompt" {
+                        return Err(AuthzBasicError::TermNotGrantableForRole {
+                            role: key.clone(),
+                            term: t.clone(),
+                        });
+                    }
+                    Ok(decide::ActionTerm::validated(t.clone()))
                 })
                 .collect()
         };
@@ -433,7 +472,12 @@ mod tests {
     fn the_reexport_returns_the_real_constant_exactly() {
         assert_eq!(
             super::grantable_actions(),
-            ["admin.status", "admin.config.show", "admin.subject.list"]
+            [
+                "admin.status",
+                "admin.config.show",
+                "admin.subject.list",
+                "session.prompt"
+            ]
         );
     }
     use super::*;
@@ -482,6 +526,7 @@ mod tests {
             policy,
             roles: binding::resolve(&None, &UidMap::new()).unwrap(),
             action_grants: decide::ActionGrants::default(),
+            destinations: decide::DestinationGrants::default(),
         };
         // Enrolled uid → admin: admin verb permitted; deny-list still denies.
         let admin_whoami = decide::decide_loaded(&lp, &principal(), &{
@@ -648,13 +693,13 @@ mod tests {
         );
     }
 
-    /// A REAL role that Phase 1 does not grant for gets its own variant.
-    /// `Role::from_key("user")` returns `Some`, so this is a second check --
-    /// and it must not collapse into `UnknownRole`, which would tell an
-    /// operator their correct spelling was a typo.
+    /// A REAL but STRUCTURAL role gets its own variant. `Role::from_key`
+    /// returns `Some` for these, so this is a second check -- and it must not
+    /// collapse into `UnknownRole`, which would tell an operator their correct
+    /// spelling was a typo. (`user` left this loop with #172.)
     #[test]
     fn roles_real_but_ungrantable_role_refuses_with_its_own_variant() {
-        for key in ["user", "guest", "adversary"] {
+        for key in ["guest", "adversary"] {
             let p = parse_with_roles(&format!(
                 "roles:\n  {key}:\n    allow: [\"admin.status\"]\n"
             ));
@@ -664,6 +709,39 @@ mod tests {
                 "role `{key}`: expected RoleNotSupportedYet, got {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn user_may_hold_only_the_content_plane_term_and_the_error_names_role_and_term() {
+        let p = parse_with_roles("roles:\n  user:\n    allow: [\"admin.status\"]\n");
+        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        assert!(
+            matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, ref term }) if role == "user" && term == "admin.status"),
+            "{got:?}"
+        );
+        let p = parse_with_roles("roles:\n  user:\n    allow: [\"session.prompt\"]\n");
+        assert!(BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p).is_ok());
+    }
+
+    #[test]
+    fn destinations_for_a_structural_or_unknown_role_refuse_at_boot_naming_the_role() {
+        for (role, want_unknown) in [("guest", false), ("adversary", false), ("ghost", true)] {
+            let p = parse_with_roles(&format!(
+                "destinations:\n  {role}:\n    allow: [\"provider:x\"]\n"
+            ));
+            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            match got {
+                Err(AuthzBasicError::UnknownRole(ref k)) if want_unknown => assert_eq!(k, role),
+                Err(AuthzBasicError::RoleNotSupportedYet(ref k)) if !want_unknown => {
+                    assert_eq!(k, role)
+                }
+                other => panic!("{role}: {other:?}"),
+            }
+        }
+        let p = parse_with_roles(
+            "destinations:\n  user:\n    allow: [\"provider:x\"]\n  admin:\n    allow: []\n",
+        );
+        assert!(BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p).is_ok());
     }
 
     /// A term outside `GRANTABLE_ACTIONS` refuses, whether it is a real verb
@@ -887,9 +965,17 @@ mod tests {
         assert!(AuthzBasicError::UnknownRole("admn".into())
             .to_string()
             .contains("admn"));
-        assert!(AuthzBasicError::RoleNotSupportedYet("user".into())
+        // `starts_with`, not `contains`: the static tail names guest and
+        // adversary, so a `contains` would pass without the interpolation.
+        assert!(AuthzBasicError::RoleNotSupportedYet("adversary".into())
             .to_string()
-            .contains("user"));
+            .starts_with("authz roles: role `adversary` takes no grants"));
+        assert!(AuthzBasicError::TermNotGrantableForRole {
+            role: "user".into(),
+            term: "admin.status".into()
+        }
+        .to_string()
+        .starts_with("authz roles: `admin.status` is not grantable to role `user`"));
         let d = AuthzBasicError::UnknownActionTerm("admin.contain".into()).to_string();
         assert!(d.contains("admin.contain"), "{d}");
         // ...and lists what IS grantable, so the fix is in the message.
