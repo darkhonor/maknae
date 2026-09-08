@@ -79,7 +79,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::SessionDelete
         | Verb::SessionList
         | Verb::SessionFork
-        | Verb::SessionPrompt
+        | Verb::SessionPrompt { .. }
         | Verb::SessionCancel
         | Verb::SessionSetconfigoption
         | Verb::SessionSetmode
@@ -194,7 +194,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::SessionDelete => "session.delete",
         Verb::SessionList => "session.list",
         Verb::SessionFork => "session.fork",
-        Verb::SessionPrompt => "session.prompt",
+        Verb::SessionPrompt { .. } => "session.prompt",
         Verb::SessionCancel => "session.cancel",
         Verb::SessionSetconfigoption => "session.set_config_option",
         Verb::SessionSetmode => "session.set_mode",
@@ -1085,7 +1085,10 @@ mod tests {
             Verb::SessionDelete,
             Verb::SessionList,
             Verb::SessionFork,
-            Verb::SessionPrompt,
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: vec![],
+            },
             Verb::SessionCancel,
             Verb::SessionSetconfigoption,
             Verb::SessionSetmode,

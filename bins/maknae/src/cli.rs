@@ -490,7 +490,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
         | (v, p @ Payload::MutationComplete)
-        | (v, p @ Payload::SubjectList(_)) => Err(format!(
+        | (v, p @ Payload::SubjectList(_))
+        | (v, p @ Payload::PromptReply(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
     }

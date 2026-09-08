@@ -152,6 +152,7 @@ PAYLOAD_DISPOSITIONS=(
   "SubjectList|struct:RoleBindingView"
   "MutationComplete|unit"
   "MutationAttempt|authorized-attempt"
+  "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP), like ReadContent
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }
