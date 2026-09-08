@@ -36,7 +36,7 @@ nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
 zeroize = "1"
 # The enroll-written YAML artifacts (spec §4.6) are emitted via yaml_rust2::YamlEmitter
 # — NOT serde_yaml (trips deny.toml) — matching maknae-config's own parser pin. PR-J1 Task 8.
-yaml-rust2 = "=0.11.0"
+yaml-rust2 = "=0.12.0"
 # No-echo interactive Vault-token prompt (spec §4.1 step 2, `--token-file`-absent path).
 # Decided over a hand-rolled termios-via-nix no-echo read: small, no `unsafe`, actively
 # maintained, clears `cargo deny`. PR-J1 Task 8.
