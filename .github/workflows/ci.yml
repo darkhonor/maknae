@@ -132,16 +132,16 @@ jobs:
           fi
       - name: clippy (per-package, bins + lib crates, all targets incl. tests)
         run: |
-          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic maknae-classification-aus; do cargo clippy -p "$p" --all-targets -- -D warnings; done
+          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic maknae-classification-aus; do cargo clippy --locked -p "$p" --all-targets -- -D warnings; done
           # The feature-gated seam code is invisible to the default pass; lint it too (-D warnings).
-          cargo clippy -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
+          cargo clippy --locked -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
-          for p in maknaed maknae maknae-spifc; do cargo auditable build -p "$p" --release; done
+          for p in maknaed maknae maknae-spifc; do cargo auditable build --locked -p "$p" --release; done
       - name: Tests (workspace test IS permitted; does NOT establish isolation)
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: cargo-deny
-        run: cargo deny check
+        run: cargo deny --locked check
       - name: P1 manifest lint
         run: ci/gates/p1-manifest-lint.sh
       - name: P2 invert-tree witness
@@ -277,7 +277,7 @@ jobs:
           read -r -a packages <<< "$PACKAGES"
           for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
           # Apple Silicon is the supported macOS architecture (AGENTS.md).
-          cargo check "${pkgs[@]}" --target aarch64-apple-darwin --all-targets
+          cargo check --locked "${pkgs[@]}" --target aarch64-apple-darwin --all-targets
 
   darwin-native:
     needs: affected
@@ -317,7 +317,7 @@ jobs:
           # /var/db/diagnostics, so the skip branch is dead on CI -- which means
           # a soft default would let this lane go green with zero round-trip
           # evidence (the #219 ok-on-nothing class one level up).
-          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test "${pkgs[@]}"
+          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test --locked "${pkgs[@]}"
       - name: Confirm the F_GETPATH lane actually ran
         if: contains(format(' {0} ', needs.affected.outputs.darwin), ' maknae-io ')
         # The delegated suite is the macOS control for ADR-0009: on Linux it
@@ -326,7 +326,7 @@ jobs:
         # tests were collected rather than trusting the exit code.
         run: |
           set -euo pipefail
-          out="$(cargo test -p maknae-io --lib delegated -- --list)"
+          out="$(cargo test --locked -p maknae-io --lib delegated -- --list)"
           printf '%s\n' "$out"
           n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
           [ "$n" -ge 15 ] || { echo "FAIL: expected the delegated suite, saw $n tests"; exit 1; }

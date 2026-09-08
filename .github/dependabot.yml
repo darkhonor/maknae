@@ -1,11 +1,119 @@
+###############################################################################
+# Dependabot configuration
+#
+# Three ecosystems: Rust crates (Cargo.toml / Cargo.lock), GitHub Actions
+# (.github/workflows/), and the two OCI build images under packaging/oci/
+# (corrected 2026-09-07: an earlier revision of this header said there was no
+# container ecosystem; the Dockerfiles are scaffold stubs but they exist and
+# they pull a base image, so they are in scope).
+#
+# Supply-chain delay (mirrors Microkosmos): every update waits in a cooldown
+# after its upstream release before Dependabot will propose it. The window is
+# the time in which a compromised or yanked release is usually detected and
+# pulled; taking a release on day zero forfeits it. Security updates driven
+# by Dependabot alerts are not subject to the cooldown.
+###############################################################################
 version: 2
+
 updates:
+  # ---------------------------------------------------------------------------
+  # Rust crates
+  # ---------------------------------------------------------------------------
+  # Every pin in Cargo.toml records the failure it prevents (AGENTS.md); a
+  # Dependabot bump must keep that comment true or be closed. Cargo.lock
+  # already carries a checksum per crate, so "pin by hash" is the lockfile's
+  # job here, and deny.toml is the gate on what the lockfile may contain.
   - package-ecosystem: cargo
     directory: /
-    schedule: { interval: weekly }
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: "Etc/UTC"
+    cooldown:
+      default-days: 5
+      semver-patch-days: 5
+      semver-minor-days: 5
+      semver-major-days: 10
     open-pull-requests-limit: 5
-    # Every pin in Cargo.toml records the failure it prevents (AGENTS.md); a
-    # Dependabot bump must keep that comment true or be closed.
+    commit-message:
+      prefix: "build"
+      include: scope
+    labels:
+      - dependencies
+      - rust
+    groups:
+      tokio-ecosystem:
+        patterns:
+          - "tokio*"
+          - "tower*"
+          - "hyper*"
+      rustls-ecosystem:
+        patterns:
+          - "rustls*"
+          - "aws-lc*"
+          - "webpki*"
+      dev-dependencies:
+        dependency-type: "development"
+    ignore:
+      # aws-lc-rs 1.18.0 moves the `fips` backend from the AWS-LC-FIPS 3.x
+      # module (CMVP #5314, VALIDATED) to 4.x (Modules In Process). ASD STIG
+      # APSC-DV-001860 (CAT I) requires the validated list, so
+      # crates/maknae-vault/Cargo.toml pins aws-lc-rs to <1.18.0 as a
+      # compliance control. Dependabot does not honor an upper bound: it
+      # proposes widening it. Ignore 1.18.x and later until NIST issues the
+      # 4.x certificate; the watch is #259.
+      - dependency-name: "aws-lc-rs"
+        versions: [">=1.18.0"]
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions
+  # ---------------------------------------------------------------------------
+  # Actions are pinned to full-length commit SHAs with the version in a
+  # trailing comment (`uses: owner/action@<sha> # vX.Y.Z`), per the OpenSSF
+  # Scorecard Pinned-Dependencies check. Dependabot keeps that form on its
+  # own: it rewrites the SHA and the comment together and never substitutes a
+  # tag. The repository setting "require actions to be pinned to a
+  # full-length commit SHA" refuses any workflow that drifts from it.
+  # The Rust toolchain is governed by rust-toolchain.toml, not by an action.
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: "Etc/UTC"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - dependencies
+      - github_actions
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # ---------------------------------------------------------------------------
+  # OCI build images (packaging/oci/)
+  # ---------------------------------------------------------------------------
+  # The base image is pinned by DIGEST with the tag kept as a human label
+  # (`FROM rust:X.Y.Z@sha256:...`). Dependabot moves the digest and the tag
+  # together. No cooldown, mirroring Microkosmos: a base image is a single
+  # curated vendor artifact, digest-pinned, and the rustup inside it honors
+  # rust-toolchain.toml, so the toolchain that builds is the pinned one
+  # whatever the base carries. The images are scaffold stubs and are not
+  # built in CI today.
+  - package-ecosystem: docker
+    directory: /packaging/oci
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "build"
+      include: scope
+    labels:
+      - dependencies
+      - docker

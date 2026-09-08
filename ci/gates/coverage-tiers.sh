@@ -299,7 +299,7 @@ if [ "$need_default" -eq 1 ]; then
     run_helper=1
   else
     rm -f "$root/target/coverage.json"
-    if (cd "$root" && cargo llvm-cov --workspace --all-features --json --output-path target/coverage.json); then
+    if (cd "$root" && cargo llvm-cov --locked --workspace --all-features --json --output-path target/coverage.json); then
       cov_json="$root/target/coverage.json"
       run_helper=1
     else
