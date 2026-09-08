@@ -12,7 +12,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-yaml-rust2 = "=0.11.0"
+yaml-rust2 = "=0.12.0"
 serde_json = "1"
 # The classification seam (ADR-0022): `Ceiling.classification` is a `Level` in a
 # declared system, validated through a `ClassificationPolicy`. The US system
