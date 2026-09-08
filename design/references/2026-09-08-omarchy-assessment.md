@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Assessment record — informs the runtime-loop (Cooky) and OS-direction work. **No dispositions ratified; no issues opened; no team decisions taken.** The assessment is the only activity. |
+| **Status** | Assessment record — informs the runtime-loop (Cooky) and OS-direction work. **No dispositions ratified; no team decisions taken.** *(Corrected 2026-09-08, same day: this row said "no issues opened"; after reading the record the maintainer asked for follow-ups, and six were filed as candidates, #263 to #268, plus an acceptance amendment on #242. Filing an issue is not ratifying a disposition; each is triaged on its own.)* |
 | **Date** | 2026-09-08 |
 | **Subject** | [`omacom/omarchy`](https://github.com/omacom/omarchy) (formerly `basecamp/omarchy`) — DHH's opinionated Arch Linux + Hyprland desktop, since v4 "Quattro" (2026-08-14) self-described as *"a beautiful, fun & agentic Linux distribution"* and *"the malleable OS for the age of agents."* MIT. Shell (469 `.sh` plus ~450 extensionless bash in `bin/`), Quickshell QML for the desktop shell. Default branch `quattro`, surveyed at HEAD `d5040617` (2026-09-07). |
 | **Method** | **Read-only survey of two shallow clones plus the public record.** No Omarchy script was executed. Three independent fresh-context surveys: the repository (structure, install path, package trust, updates, process), the external record (timeline, philosophy, incidents, governance), and a dedicated pass on **how the OS integrates agentic tools and LLM assistance**, the focus the maintainer asked for. Repository citations are `path:line` at the surveyed HEAD; external claims carry URLs in §6. |
@@ -117,7 +117,7 @@ The maintainer's added focus was **how Omarchy handles agentic tool integration 
 - **The self-hosted search instance returned zero results for every query** (its upstream engines were suspended or rate-limited on the day), so the external record fell back to direct fetches and the public GitHub API. Every external claim in §6 carries the URL it was read from.
 - **Unverified, stated as such:** the exact date the repository moved from `basecamp/` to `omacom/`; star count over time (the stargazer listing was refused); the foundation's jurisdiction, legal form, and board; any DHH statement using the words "secure enough."
 - **Not assessed:** the Quickshell desktop shell's own code (42k lines of QML/JS), the ISO builder in `omarchy-pkgs`, and the `omarchy-chromium` fork (archived 2026-05-07).
-- **No dispositions ratified.** Nothing above opens an issue or changes a plan. The one concrete suggestion, a crash-dump acceptance case for #240/#242, is a candidate for the Cooky acceptance issue, not a commitment.
+- **No dispositions ratified.** Nothing above changes a plan. The crash-dump acceptance case is now on #242 as an added criterion (dated banner), and six candidate issues were filed after the record was read: #263 (outbound-destination drift gate), #264 (compiled-in, hashed loop prompt), #265 (attribution on loop outputs), #266 (host posture facts in boot evidence), #267 (diagnostics bundle), #268 (migrations discipline). Candidates, not commitments.
 
 ## 6. References
 
