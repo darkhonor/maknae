@@ -15,7 +15,7 @@ Maknae is not "Vault for everything" today. Two layers are distinct:
 - **The bootstrap credential**, the per-plane SecretID that lets a plane reach Vault, already has a substitution axis in [`crates/maknae-vault/src/secret_source.rs`](../crates/maknae-vault/src/secret_source.rs): systemd `LoadCredentialEncrypted` delivered through `$CREDENTIALS_DIRECTORY` on Linux (the hardware-root-of-trust path), a Secure-Enclave-sealed blob on macOS, the Keychain for the CLI, and an operator-opted-in plaintext path recorded in code as *"the weakest posture, last resort, never a silent default."* Resolution is pure and mutation-hardened; the ordering is fail-closed and testable.
 - **The store** is Vault only: plane certificates from the PKI mounts in [`deploy/vault-pki/`](../deploy/vault-pki/) and, since #243, the provider key from the `maknae-kv` KV v2 mount, referenced by `provider.key_vault_path` and never present in configuration.
 
-ADR-0022 already names three deployment tiers, HomeLab, small business, enclave, for the classification system. The same three are the natural tiers here, and reusing the names avoids a second vocabulary.
+ADR-0022 already names three deployment tiers for the classification system: **HomeLab**, **small business**, **enterprise** (ADR-0022 line 74; it uses "enclave" generically for a deployment, such as an AUS enclave, not as a tier name). The same three are the natural tiers here, and reusing the exact names avoids a second vocabulary. *(Corrected 2026-09-08 on hobibot's review of #262: an earlier revision of this note wrote "enclave" for the third tier and attributed that word to ADR-0022; the ADR's word is "enterprise".)*
 
 ## 2. The properties, separated from the product
 
@@ -39,7 +39,7 @@ Vault provides all five. **Properties 1 and 2 are the model; 3 to 5 are the ente
 | **Vault** (HashiCorp; Business Source License since 2023; the validated pattern's tier is Enterprise or HCP) | yes | yes | yes | yes | yes | Functionally the same as OpenBao at the open tier. The license is not OSI open source, which matters for what the project recommends and for what a government adopter may deploy. |
 | **Bitwarden / Vaultwarden, 1Password Connect** | no | **no**: they authenticate a user, not a service, and have no principal-reads-path policy | partial | yes | no | The HomeLab and SMB favourites, and what Hermes and ZeroClaw integrate. Fine as where the operator keeps master material; wrong as the store the egress process reads. |
 | **sops / age files** with the key in TPM or Keychain | partial | **no**: reduces to file permissions | no | manual | no | systemd-creds without the per-service delivery. Not better than what exists. |
-| **Cloud KMS / secrets managers** | yes | yes | yes | yes | yes | Not local; the enclave tier's other option. Out of scope for the two tiers asked about. |
+| **Cloud KMS / secrets managers** | yes | yes | yes | yes | yes | Not local; the enterprise tier's other option. Out of scope for the two tiers asked about. |
 | **Plaintext with a permission bit** | no | no | no | no | no | Where every surveyed project ended up. Already labeled in Maknae's code as never a silent default; it should not be a tier. |
 
 ## 4. A candidate shape, for discussion only
@@ -50,11 +50,11 @@ One contract, three tiers, the store declared by the operator in root-owned conf
 |---|---|---|---|
 | **HomeLab**, single host | systemd credentials on Linux; Keychain with Secure Enclave on macOS | the same mechanism; no SecretID exists because there is no server to reach | external audit, dynamic secrets, rotation without touching the host |
 | **Small business**, a few hosts | OpenBao, single node, file storage, PKI and KV exactly as today | systemd credentials or Keychain holding the OpenBao credential | nothing an SMB needs; Enterprise features |
-| **Enclave** | Vault Enterprise or HCP; the validated pattern: JWT auth against kernel-issued tokens, dynamic secrets, correlation into Vault's audit | as today, plus the JWT path | nothing |
+| **Enterprise** | Vault Enterprise or HCP; the validated pattern: JWT auth against kernel-issued tokens, dynamic secrets, correlation into Vault's audit | as today, plus the JWT path | nothing |
 
 The contract itself is small: *read a named secret for a named principal, fail closed, memory only, and report a source kind into the boot evidence record* so the acceptance run (#242) can quote which tier a host is actually on. `provider.key_vault_path` becomes a reference resolved by the tier's store, which is the `SecretRef` shape OpenClaw uses (a typed reference with a named source, never a value); the disclosure gate already suppresses it.
 
-## 5. What the HashiCorp pattern adds at the enclave tier
+## 5. What the HashiCorp pattern adds at the enterprise tier
 
 The pattern's contribution is identity chaining, not custody mechanics. Mapped onto Maknae:
 
@@ -74,7 +74,7 @@ The pattern's contribution is identity chaining, not custody mechanics. Mapped o
 - Whether the store contract lives in `maknae-vault` (renamed, since one implementation would not be Vault) or in a new crate behind the existing `maknae-io`-style rule that I/O has one home.
 - Whether OpenBao is a tested target in CI (a container in the Linux lane) or a documented one. The license finding argues for tested.
 - What the macOS tier's principal boundary really is when the store is a keychain and not a service account, and whether the `_maknae-egress` keychain ACL is enough for property 2 or whether it needs the Secure Enclave key to be non-exportable per binary.
-- Whether the enclave tier's JWT path replaces AppRole entirely or sits beside it for the CLI, given ADR-0006's direction that clients never reach Vault at all.
+- Whether the enterprise tier's JWT path replaces AppRole entirely or sits beside it for the CLI, given ADR-0006's direction that clients never reach Vault at all.
 - How the boot evidence names the tier and the source kind, and whether `admin.status` (#214) reports it.
 
 ## 8. References
