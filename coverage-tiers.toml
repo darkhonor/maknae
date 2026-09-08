@@ -115,6 +115,8 @@ files = [
   # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
+  # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
+  "crates/maknae-vault/src/digest.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a

@@ -91,6 +91,7 @@ mod tests {
             object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
             mutation: None,
+            egress: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: "policy denied".into(),

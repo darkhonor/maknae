@@ -286,6 +286,7 @@ fn make_record(
         object: object.map(str::to_string),
         object_requested: None,
         mutation: None,
+        egress: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),

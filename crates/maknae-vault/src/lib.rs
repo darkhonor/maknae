@@ -12,6 +12,7 @@ mod client;
 mod config;
 mod csr;
 mod csr_gen;
+mod digest;
 mod error;
 mod fips;
 mod fips_glue;
@@ -41,6 +42,7 @@ pub use config::{
     DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
+pub use digest::{sha256_hex, Sha256};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 pub use operator::OperatorClient;
