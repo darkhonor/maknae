@@ -9,7 +9,7 @@
   of them.
 - **Date:** 2026-08-31
 - **Author:** implementing agent (#162) · **Ratifier:** deferred by operator ruling
-- **Operator rulings recorded 2026-08-31:** decisions **4** (admin-only, and the
+- **Operator rulings recorded 2026-08-31:** decisions **4** (admin-only *(superseded in part 2026-09-08 for the `user` key on `session.prompt`, see decision 4)*, and the
   correction to why), **13** (no `actions:` level), **14** (`permissions:` stays
   separate) and **15** (`admin.config.show` discloses the full effective
   configuration with secret values masked). Held Proposed regardless — these
@@ -64,11 +64,13 @@ roles:
 
 A site that wants a person to hold `admin.*` **moves that person into the admin role**; it does not grant admin terms to `user`. That is the intended path, and it is simpler than a per-role disclosure matrix.
 
+> **Superseded in part, 2026-09-08 (#172, per the operator-concurred design of 2026-09-08).** The `user` KEY is now admitted in `roles:`, for exactly one term: `session.prompt`, the content-plane egress verb. The `admin.*` disclosure terms remain admin-only grants; writing one under `user` refuses at load with `TermNotGrantableForRole` naming both. `guest` and `adversary` remain structural (`RoleNotSupportedYet`, re-worded to say so). The sentence at the end of this ADR, "granting `user` or `guest` requires superseding decision 4," was followed: this is that supersession, scoped to the content plane, and it is a disclosure decision the maintainer took, not an implementation one.
+
 > **The framing this ADR originally gave decision 4 was wrong, and the correction matters more than the decision.** It said the restriction is lifted by "a decision about what a non-admin role may disclose." That assumes the four roles are the model. They are not: **`admin` / `user` / `guest` / `adversary` are the DEFAULT SHIPPED roles, not the universe of roles.** The end state is site-defined roles, and this issue's code makes the role vocabulary arbitrary — `Role::from_key` is a closed four-arm match, and `RoleNotSupportedYet` exists only because of it.
 >
 > **So what this constrains is not who may disclose what; it is sites defining their own roles.** That constraint is a Phase-1 artifact and is expected to go. When it does, `Role::from_key`, `UnknownRole` and `RoleNotSupportedYet` all change shape together, and decision 3's role-keying is what makes that survivable — grants are already keyed by role name rather than by a hard-wired enum position.
 
-**5. The grantable set is code-defined and unconfigurable.** `GRANTABLE_ACTIONS` is a constant in `decide.rs`. A term outside it refuses at load with the term named. `roles:` can therefore never reach a verb the decide arm does not consult, and an operator cannot grant a term the system has no arm for and then reasonably believe it took effect.
+**5. The grantable set is code-defined and unconfigurable.** `GRANTABLE_ACTIONS` is a constant in `decide.rs` *(four terms since 2026-09-08, #172: the three disclosure terms and `session.prompt`)*. A term outside it refuses at load with the term named. `roles:` can therefore never reach a verb the decide arm does not consult, and an operator cannot grant a term the system has no arm for and then reasonably believe it took effect.
 
 **6. `admin.whoami` is pinned OUT of that set at compile time.** It has its own unconditional arm for admins. Routing it through grants would mean an empty `roles:` block silently revokes it — a downgrade of working behaviour from a file that says nothing about `whoami`. The pin is a `const` assertion, so the mistake cannot reach a test run.
 
@@ -154,10 +156,10 @@ It reports what the **policy file binds**. The default-role fallback — an enro
 - Building a remaining term means adding behaviour behind the arm that already decides. The `NoBehaviour` pin is what made that a decision rather than a side effect. *(Corrected 2026-09-01: this said it "still covers `admin.status` and `admin.subject.list`". It does not — the pin fired a second time when those two gained dispatches, and is **retired**: there are no grantable terms left for it to cover, so keeping it would keep a test that asserts nothing. What replaces it is a per-term dispatch assertion plus a check that the ungrantable rest of `admin.*` still has no behaviour. The first half of this bullet was rewritten in the same commit that retired the pin; the second half was edited around.)*
 
   > *Corrected 2026-09-01: this bullet called that a "migration contract" and reasoned about grants "written today keeping their meaning". **Nobody has written any.** Maknae is pre-release in a private repo with no users, no deployments, and no `roles:` key in anything shipped — so there is nothing to migrate and no compatibility to preserve. That framing is the breaking-change topic the operator ruled out (see AGENTS.md), reappearing in different words. The grammar and this design can be changed outright, by whoever needs to, without a migration story.*
-- Adding a fourth grantable term is a code change (`GRANTABLE_ACTIONS`), a `grantable` row in `verb-manifest.txt`, **and** an `action` row for the same term — the gate enforces `grantable ⊆ action`, so a grant cannot name something no request will ever carry. All three are gated; none can be forgotten quietly.
-- The shipped `packaging/common/authz.yaml` gains no `roles:` key: nothing ships granted. The three terms' `action` rows read `not-granted-but-grantable`, distinguishing them from `admin.contain` and its siblings, which are `not-granted` and can never be granted at all — an auditor reading the primary row must not get the wrong answer.
+- Adding a fourth grantable term *(done 2026-09-08, #172: `session.prompt`; this sentence now describes a fifth)* is a code change (`GRANTABLE_ACTIONS`), a `grantable` row in `verb-manifest.txt`, **and** an `action` row for the same term — the gate enforces `grantable ⊆ action`, so a grant cannot name something no request will ever carry. All three are gated; none can be forgotten quietly.
+- The shipped `packaging/common/authz.yaml` gains no `roles:` key and no `destinations:` key: nothing ships granted, nothing ships allowlisted, and an absent or empty allowlist refuses every prompt (#172). The four terms' *(corrected 2026-09-08: three)* `action` rows read `not-granted-but-grantable`, distinguishing them from `admin.contain` and its siblings, which are `not-granted` and can never be granted at all — an auditor reading the primary row must not get the wrong answer.
 - `roles:` is a fourth closed vocabulary in `verb-vocabulary-drift`, inventoried exactly in both directions like the other three.
-- Granting `user` or `guest` requires superseding decision 4 — deliberately, since it is a disclosure decision and not an implementation one.
+- Granting `user` or `guest` requires superseding decision 4 — deliberately, since it is a disclosure decision and not an implementation one. *(Superseded for `user` on 2026-09-08, #172, for the content-plane term `session.prompt` only; see decision 4's banner.)*
 
 ## References
 

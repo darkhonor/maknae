@@ -637,12 +637,15 @@ vocab_fixture() { # <manifest-body> — builds a minimal repo the gate can read
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-kernel/src" \
            "$fixture/crates/maknae-config/src" "$fixture/crates/maknae-authz-basic/src"
   cp "$here/verb-vocabulary-drift.sh" "$fixture/ci/gates/"
-  cat > "$fixture/crates/maknae-kernel/src/handler.rs" <<'FIX'
+  # Unquoted heredoc (#172): the body is `$`-free Rust, and `$3` is an optional
+  # extra `verb_to_action` arm (default empty) for probes that carry a term.
+  cat > "$fixture/crates/maknae-kernel/src/handler.rs" <<FIX
 pub const KERNEL_ACTIONS: [&str; 1] = ["kernel.contain"];
 pub fn verb_to_action(verb: &Verb) -> &'static str {
     match verb {
         Verb::Ping => "liveness.ping",
         Verb::AdminStatus => "admin.status",
+${3:-}
     }
 }
 FIX
@@ -657,7 +660,7 @@ FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
-  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\"];}" \
+  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 4] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"session.prompt\"];}" \
     > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
   echo "$fixture"
@@ -733,6 +736,24 @@ grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `ro
 '
 fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# REJECT (#172): the code says session.prompt is grantable (a real action, decided, dispatched);
+# the manifest carries its action row but no grantable row. Every row carries its clause, so
+# the ONLY inconsistency is the missing row and the gate fires for that reason and no other.
+PROMPT_ACTION_ROW='action	session.prompt	not-granted-but-grantable	Ungranted by default; operator MAY grant per-role; the fixture egress term'
+PROMPT_GRANTABLE_ROW='grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:`'
+PROMPT_CONST='pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "session.prompt"];'
+PROMPT_ARM='        Verb::SessionPrompt { .. } => "session.prompt",'
+fx="$(vocab_fixture "${CLEAN_VOCAB}${PROMPT_ACTION_ROW}
+" "$PROMPT_CONST" "$PROMPT_ARM")"
+expect_reject_because "verb-vocabulary-drift/grantable-term-with-no-grantable-row" \
+  "+grantable	session.prompt" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# ACCEPT (#172, the reversing control): the same fixture WITH the grantable row passes.
+fx="$(vocab_fixture "${CLEAN_VOCAB}${PROMPT_ACTION_ROW}
+${PROMPT_GRANTABLE_ROW}
+" "$PROMPT_CONST" "$PROMPT_ARM")"
+expect_accept "verb-vocabulary-drift/prompt-rows-consistent" ": 7 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT (#181, durable): a row whose disposition and rationale DISAGREE — the
 # rationale lacks its (kind, disposition) clause. The one-time capture of the
@@ -850,6 +871,7 @@ pub enum Payload {
     SubjectList(Vec<RoleBindingView>),
     MutationComplete,
     MutationAttempt(crate::MutationGrant),
+    PromptReply(PromptReply),
 }
 FIX
   cp "$here/mutation-disclosure.py" "$fixture/ci/gates/"

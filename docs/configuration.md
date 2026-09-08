@@ -357,7 +357,7 @@ lands; until then, registering one and providing its content is not yet supporte
 
 ### 6.1 The `provider` section (#243)
 
-The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). Exactly four keys, all required when the block is present; the block is optional, and a deployment without it boots with a loop that has nothing to prompt.
+The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). Exactly four keys, all required when the block is present; the block is optional, and a deployment without it boots with a loop that has nothing to prompt. Which roles may send content to this provider is decided in `authz.yaml` (`roles:` and `destinations:`), see the runbook, Chapter 3 §7.
 
 ```yaml
 provider:
