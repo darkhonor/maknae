@@ -51,6 +51,50 @@ pub struct Integrity {
     pub sig: Option<String>,
 }
 
+/// `IntentOnly` proves nothing was sent yet; `BackendUnavailable` is the Cooky
+/// refusal recorded WITHOUT an intent (nothing was sent); `Failed` is a send
+/// the backend reported as failed; `DeadlineExpired` is a send that ran past
+/// the transport deadline, so whether it reached the provider is UNKNOWN (the
+/// mutation trail's `DurabilityUnknown` shape); `LandedUndelivered` keeps
+/// ADR-0023 decision 3's meaning: the egress went out, the reply arrived, and
+/// it never reached the loop. In #172 the kernel itself refuses delivery for
+/// three reasons, each named in `reason`: over the frame cap (`TooLarge` on
+/// the wire), carrying a block kind this deployment does not admit, or empty
+/// (both `Unauthorized`). A response-write timeout or a closed connection is
+/// not detected on any verb yet and is #240's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EgressStatus {
+    IntentOnly,
+    Sent,
+    Failed,
+    DeadlineExpired,
+    LandedUndelivered,
+    BackendUnavailable,
+}
+
+/// What the trail holds about one egress (#172). Deliberately minimal: the
+/// macOS unified-log mirror drops lines over `MACOS_SYSLOG_MAX`, and every
+/// field here was measured against that cap. The destination is the record's
+/// `object`; the ceiling is the boot record's; the phase is `status`.
+/// `content_digest` is the first 32 hex characters (128 bits) of the SHA-256
+/// of the concatenated text blocks: an identifier for matching, not an
+/// integrity control (the cap is why it is not the full 64).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAudit {
+    pub status: EgressStatus,
+    pub content_length: u64,
+    pub content_digest: String,
+    pub conversation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_length: Option<u64>,
+}
+
+impl EgressAudit {
+    pub fn is_intent(&self) -> bool {
+        self.status == EgressStatus::IntentOnly
+    }
+}
+
 /// Provenance of mutation facts; a validated report is still a client claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MutationOrigin {
@@ -161,6 +205,10 @@ pub struct AuditRecord {
     pub object_requested: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation: Option<MutationAudit>,
+    /// The egress block of a `session.prompt` record (#172); absent on every
+    /// other record and on a prompt refused before any send was considered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressAudit>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -254,6 +302,7 @@ mod tests {
             object: None,
             object_requested: None,
             mutation: None,
+            egress: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -315,6 +364,28 @@ mod tests {
         let a = canonical_json(&sample()).unwrap();
         let b = canonical_json(&sample()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn egress_audit_round_trips_and_is_absent_by_default() {
+        let mut rec = sample();
+        assert!(!serde_json::to_string(&rec).unwrap().contains("\"egress\""));
+        rec.egress = Some(EgressAudit {
+            status: EgressStatus::IntentOnly,
+            content_length: 12,
+            content_digest: "ab".repeat(16),
+            conversation: "conv-1".into(),
+            reply_length: None,
+        });
+        let s = serde_json::to_string(&rec).unwrap();
+        assert!(!s.contains("reply_length"), "None is absent, not null: {s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        let e = back.egress.unwrap();
+        assert!(e.is_intent());
+        assert_eq!(e.status, EgressStatus::IntentOnly);
+        let mut sent = e.clone();
+        sent.status = EgressStatus::Sent;
+        assert!(!sent.is_intent());
     }
 
     #[test]
@@ -453,6 +524,7 @@ mod tests {
                 object,
                 object_requested: None,
                 mutation: None,
+                egress: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

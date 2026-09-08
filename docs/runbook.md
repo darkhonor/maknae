@@ -364,6 +364,42 @@ on the wire (the client sees the generic `not authorized`):
 accept; seq 2+ are the per-request records above. Exact key order is
 canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration order.)
 
+### 7. Grants and destinations (`authz.yaml`)
+
+Two additive keys govern what a role may DO beyond the shipped baseline, and both ship
+absent: **nothing is granted and nothing is allowlisted** until you write it.
+
+```yaml
+roles:                       # #162: per-role action grants; deny beats allow inside a role
+  user:
+    allow: ["session.prompt"]
+destinations:                # #172: per-role egress allowlist for session.prompt
+  user:
+    allow: ["provider:openai"]   # provider:<name>, the name registered in maknae.yaml §6.1
+```
+
+- **Which terms a role may hold.** `admin`: the three disclosure terms (`admin.status`,
+  `admin.config.show`, `admin.subject.list`) and `session.prompt`. `user`: `session.prompt`
+  only — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
+  `destinations:` key naming them refuses at boot too.
+- **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
+  silently ignored); each entry is `provider:<name>` with `<name>` at most 32 bytes and
+  matching the registered provider's `name`. URL patterns are a later grammar and are
+  refused now. An absent or empty allowlist refuses every prompt: the second condition of
+  `session.prompt` is the destination, and it never defaults open.
+- **Separation of duties (recommended).** Bind the loop's account to `user`. An
+  admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
+  quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
+  single-account HomeLab shape collapses both roles into one person, and the trail still
+  names every destination, every intent and every outcome.
+- **What a prompt carries.** Text-only content blocks (any other kind is refused before
+  the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
+  `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
+- **Cooky refusal.** No egress process exists yet (#240): a permitted prompt is refused
+  with posture `unavailable` and reason `egress backend not ready` in the trail, and
+  `Unauthorized` on the wire, like every refusal — build state is never disclosed there.
+
 ### What it proves
 
 - **mTLS** — the CLI's Vault-minted `maknae://<deployment_id>/plane/cli` leaf and the

@@ -9,11 +9,14 @@
 //!      keys on the enrolled uid, so a daemon with no principal can authorize
 //!      no one: "boot anyway, deny everything, look healthy" would hide a
 //!      dead deployment behind a green service (operator ruling 2026-08-28);
-//!   2. `BasicAuthorizer::new` refuses — policy load, bindings semantics, or
+//!   2. `BasicAuthorizer::new` refuses — policy load, bindings semantics,
 //!      (added 2026-08-31, #162) `roles:` grant semantics: an unknown role, a
-//!      role Phase 1 does not grant for, or a term outside `GRANTABLE_ACTIONS`.
-//!      Still ONE trigger, not three: `finish_new` validates all of them
-//!      eagerly and refuses construction, which is what this gate observes.
+//!      structural role (`guest`/`adversary`), a term outside
+//!      `GRANTABLE_ACTIONS`, or a term the role may not hold (`user` holds
+//!      `session.prompt` only; corrected 2026-09-09, #172: the term set is
+//!      two-role now), or (added 2026-09-09, #172) `destinations:` role-key
+//!      semantics. Still ONE trigger, not four: `finish_new` validates all of
+//!      them eagerly and refuses construction, which is what this gate observes.
 
 use maknae_authz_basic::{AuthzBasicError, BasicAuthorizer};
 use maknae_config::Principal;

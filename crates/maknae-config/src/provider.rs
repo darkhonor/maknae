@@ -27,6 +27,10 @@ pub const PROVIDER_SECTION: &str = "provider";
 
 /// The four keys the section accepts, and no others.
 const KEYS: [&str; 4] = ["name", "endpoint", "model", "key_vault_path"];
+/// Upper bound on `provider.name` (#172): it is written into every egress
+/// audit record's `object`, and the macOS unified-log line cap was measured
+/// with this bound (maknae-audit-append `syslog_fmt.rs` tests).
+pub const MAX_PROVIDER_NAME_BYTES: usize = 32;
 
 /// Spellings under which an operator might paste the key itself. Any of these
 /// present — with any value — refuses the section by name.
@@ -196,6 +200,11 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
             "provider.name may contain only ASCII letters, digits, '-', '_' and '.'",
         ));
     }
+    if name.len() > MAX_PROVIDER_NAME_BYTES {
+        return Err(err(format!(
+            "provider.name may be at most {MAX_PROVIDER_NAME_BYTES} bytes (it is written into every egress audit record)"
+        )));
+    }
     let endpoint = required_str(m, "endpoint")?;
     if !endpoint_is_acceptable(endpoint) {
         return Err(err(
@@ -227,6 +236,23 @@ mod tests {
     fn parse(yaml: &str) -> Result<Option<ProviderConfig>, ConfigError> {
         let v = load_str(yaml).expect("test yaml parses");
         provider_from_section(Some(&v))
+    }
+
+    #[test]
+    fn provider_name_is_bounded_to_32_bytes_and_the_error_says_so() {
+        let at = parse(&OK.replace(
+            "name: openai",
+            &format!("name: '{}'", "n".repeat(MAX_PROVIDER_NAME_BYTES)),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(at.name.len(), MAX_PROVIDER_NAME_BYTES);
+        let err = parse(&OK.replace(
+            "name: openai",
+            &format!("name: '{}'", "n".repeat(MAX_PROVIDER_NAME_BYTES + 1)),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("32"), "{err}");
     }
 
     #[test]

@@ -207,6 +207,146 @@ pub(crate) fn format_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::{EgressAudit, EgressStatus};
+
+    fn egress_record(
+        status: EgressStatus,
+        reply_length: Option<u64>,
+        result: &str,
+        reason: &str,
+        posture: &str,
+    ) -> crate::record::AuditRecord {
+        let mut r = rec(reason);
+        r.where_.host = "maknaed-01".into();
+        r.where_.socket = "/var/run/maknae/plane.sock".into();
+        r.source.plane_uri_san = Some("maknae://d/plane/cli".into());
+        r.subject.plane_uri_san = Some("maknae://d/plane/cli".into());
+        r.source.uid = u32::MAX;
+        // production make_record never sets these; measure the production shape
+        r.subject.user = None;
+        r.source.gid = None;
+        r.source.pid = None;
+        r.action = "session.prompt".into();
+        r.object = Some(format!("provider:{}", "p".repeat(32)));
+        r.outcome.result = result.into();
+        r.outcome.posture = posture.into();
+        r.session_id = 999_999;
+        r.seq = 999_999;
+        r.au3_1 = serde_json::json!({"mutation": "untrusted extension"});
+        r.egress = Some(EgressAudit {
+            status,
+            content_length: 999_999_999,
+            content_digest: "f".repeat(32),
+            conversation: "c".repeat(32),
+            reply_length,
+        });
+        r
+    }
+
+    #[test]
+    fn every_egress_record_kind_fits_the_macos_unified_log_line_at_the_pinned_bounds() {
+        // The eight shapes the kernel writes (#172), with the exact reason/posture strings
+        // `outcome_for` and the run.rs arm use; `reply_length` is Some when a reply arrived.
+        // Bounds: provider.name 32, conversation 32 (kernel-enforced); host/socket/au3_1 at
+        // realistic values (operator-controlled, NOT bounded — see the mirror-cap issue).
+        for (label, r) in [
+            (
+                "intent",
+                egress_record(
+                    EgressStatus::IntentOnly,
+                    None,
+                    "permit",
+                    "intent recorded",
+                    "authorized",
+                ),
+            ),
+            (
+                "sent",
+                egress_record(
+                    EgressStatus::Sent,
+                    Some(999_999_999),
+                    "permit",
+                    "sent",
+                    "authorized",
+                ),
+            ),
+            (
+                "failed",
+                egress_record(
+                    EgressStatus::Failed,
+                    None,
+                    "deny",
+                    "send failed",
+                    "unavailable",
+                ),
+            ),
+            (
+                "deadline",
+                egress_record(
+                    EgressStatus::DeadlineExpired,
+                    None,
+                    "deny",
+                    "send deadline expired",
+                    "unavailable",
+                ),
+            ),
+            (
+                "undelivered",
+                egress_record(
+                    EgressStatus::LandedUndelivered,
+                    Some(999_999_999),
+                    "permit",
+                    "reply refused: oversize",
+                    "refused-oversize",
+                ),
+            ),
+            (
+                "undelivered-nontext",
+                egress_record(
+                    EgressStatus::LandedUndelivered,
+                    Some(999_999_999),
+                    "permit",
+                    "reply refused: non-text",
+                    "unauthorized",
+                ),
+            ),
+            (
+                "undelivered-empty",
+                egress_record(
+                    EgressStatus::LandedUndelivered,
+                    Some(0),
+                    "permit",
+                    "reply refused: empty",
+                    "unauthorized",
+                ),
+            ),
+            (
+                "unavailable",
+                egress_record(
+                    EgressStatus::BackendUnavailable,
+                    None,
+                    "deny",
+                    "egress backend not ready",
+                    "unavailable",
+                ),
+            ),
+        ] {
+            // A named margin, so the NEXT field added to the record fails here with a number
+            // rather than landing one byte under the cap and failing in production at a longer
+            // hostname. Measure first, assert second, so a failure still prints the number.
+            const EGRESS_RECORD_MARGIN: usize = 16;
+            let len = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap().len();
+            eprintln!("macOS line, {label}: {len} of {MACOS_SYSLOG_MAX} bytes");
+            assert!(
+                len + EGRESS_RECORD_MARGIN <= MACOS_SYSLOG_MAX,
+                "{label}: {len} + margin {EGRESS_RECORD_MARGIN} > {MACOS_SYSLOG_MAX}: the egress record grew past the mirror cap"
+            );
+            assert!(
+                format_record(&r, PrimaryOutcome::Ok).unwrap().is_some(),
+                "{label} would be DROPPED from the macOS mirror"
+            );
+        }
+    }
 
     /// Built LITERALLY. It CANNOT be shared: `journal.rs`'s and
     /// `journal_io.rs`'s test modules are private to their own files, and their
@@ -237,6 +377,7 @@ mod tests {
             object: Some("/home/alice/.ssh/id_rsa".into()),
             object_requested: None,
             mutation: None,
+            egress: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: reason.into(),

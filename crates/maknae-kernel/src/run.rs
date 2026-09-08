@@ -35,7 +35,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use maknae_audit_append::{
-    AuditEmit, AuditRecord, Integrity, Outcome, Seq, SessionIds, Source, Subject, Where,
+    AuditEmit, AuditRecord, EgressAudit, EgressStatus, Integrity, Outcome, Seq, SessionIds, Source,
+    Subject, Where,
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
@@ -286,6 +287,7 @@ fn make_record(
         object: object.map(str::to_string),
         object_requested: None,
         mutation: None,
+        egress: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -359,6 +361,12 @@ pub async fn handle<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
+    // #172: the provider registered at boot (#243), by name, or none. The
+    // PEP stamps `provider:<name>` as the egress destination; the client
+    // never names it.
+    provider_name: Arc<Option<String>>,
+    // #172: the egress backend behind the seam. `Unavailable` in Cooky.
+    egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
     // Which boundary accepted this connection. Supplied by the accept loop that owns
     // the listener — never inferred here, and never readable from the request
@@ -507,7 +515,10 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 "decode",
-                &format!("malformed request: {e}"),
+                // The CLASS only (#172): serde's diagnostic quotes the offending
+                // value, so a malformed prompt would carry prompt text into the
+                // trail through `{e}`.
+                &format!("malformed request: {}", e.category()),
                 &au3_1,
             )
             .await;
@@ -546,6 +557,52 @@ pub async fn handle<S, E, P>(
                     &cfg,
                     ProtoErrCode::BadRequest,
                     "malformed path",
+                )
+                .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
+    }
+
+    // #172: the prompt's operand pre-gate, the same shape as the Read one — a
+    // malformed conversation id or an inadmissible content kind is the
+    // BadRequest class and never reaches the PDP. Result-returning emit, frame
+    // gated on the append: `emit_request_deny` is for legs that serve nothing.
+    if let Verb::SessionPrompt {
+        conversation,
+        content,
+    } = &request.verb
+    {
+        let shape = if !maknae_proto::conversation_id_is_acceptable(conversation) {
+            Err("conversation identifier not acceptable".to_string())
+        } else {
+            crate::egress::admitted_blocks(content)
+        };
+        if let Err(reason) = shape {
+            let appended = emit_request_outcome(
+                &emit,
+                &host,
+                &socket,
+                peer_uid,
+                &peer_uri,
+                session_id,
+                seq.next(),
+                verb_to_action(&request.verb),
+                None,
+                None,
+                "deny",
+                &format!("prompt fails operand pre-gate: {reason}"),
+                "unauthorized",
+                &au3_1,
+            )
+            .await;
+            if may_respond(appended) {
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    ProtoErrCode::BadRequest,
+                    "invalid request",
                 )
                 .await;
             }
@@ -623,6 +680,7 @@ pub async fn handle<S, E, P>(
         peer_uid,
         lane,
         verified_read.as_ref().map(|(_, p)| p.as_str()),
+        provider_name.as_deref(),
     );
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
@@ -1040,7 +1098,7 @@ pub async fn handle<S, E, P>(
                     }
                 }
                 Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
-                Dispatch::NoBehaviour | Dispatch::MutationRequested => {
+                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -1050,104 +1108,42 @@ pub async fn handle<S, E, P>(
             };
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
-            if let Ok(bytes) = encode_response(&response) {
-                // SIZE-BOUNDED, like the read path. TWO payloads here scale
-                // with input: `ConfigView` (one entry per config leaf) and
-                // `SubjectList` (one per `bindings:` entry). `Pong` and
-                // `Whoami` never approach the cap, so the check is free for
-                // them and load-bearing for the other two.
-                //
-                // Without it the daemon writes an oversized frame that the
-                // client's own `read_frame(frame_max_bytes)` refuses as a
-                // framing `Oversize` — an authorized request failing with an
-                // undiagnosable transport error, after its audit record already
-                // said "permit / authorized". The read PEP's stance applies
-                // unchanged: a PERMIT whose delivery is refused is refused
-                // EXPLICITLY, never truncated and never silently oversized.
-                if bytes.len() > cfg.frame_max_bytes {
-                    // A CORRECTIVE record, the same shape the enumeration-
-                    // unavailable branch uses 60 lines above -- and for the
-                    // identical reason, which this arm missed because it emits
-                    // the record BEFORE discovering the oversize. (The read PEP
-                    // never has this problem: `read_budget` bounds the read, so
-                    // it computes the refusal first and emits once.)
-                    //
-                    // Without it the trail asserts an authorized-and-SERVED
-                    // disclosure for a caller that received TooLarge. ADR-0019
-                    // pins `refused-oversize` for exactly this, and the read
-                    // PEP already uses it; `permit` is retained because the
-                    // decision WAS a permit -- only the delivery was refused.
-                    let corrected = emit_request_outcome(
+            // UNCHANGED encoder for these payloads (#172 extracted the write
+            // and its two corrective records into helpers; only the prompt arm
+            // uses the zeroizing, pre-sized encoder).
+            match encode_response(&response) {
+                Ok(bytes) => {
+                    write_frame_bounded(
+                        &mut stream,
+                        &cfg,
+                        &bytes,
                         &emit,
                         &host,
                         &socket,
                         peer_uid,
                         &peer_uri,
                         session_id,
-                        seq.next(),
+                        &seq,
                         verb_to_action(&request.verb),
-                        None,
-                        None,
-                        "permit",
-                        "delivery refused: response exceeds the frame limit",
-                        "refused-oversize",
                         &au3_1,
                     )
-                    .await;
-                    // Same gate as every other outcome record on this loop:
-                    // if the correction cannot be recorded, the trail still
-                    // reads `permit / authorized / authorized`, so nothing may
-                    // go back to the caller.
-                    if may_respond(corrected) {
-                        write_error_bounded(
-                            &mut stream,
-                            &cfg,
-                            ProtoErrCode::TooLarge,
-                            "response exceeds the configured frame limit",
-                        )
-                        .await;
-                    }
-                    close_bounded(&mut stream).await;
-                    return;
+                    .await
                 }
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(cfg.read_timeout_ms),
-                    write_frame(&mut stream, &bytes),
-                )
-                .await;
-            } else {
-                // NO PATH out of this arm may have recorded `authorized`
-                // without delivering. Practically unreachable -- ciborium into
-                // a Vec, for owned types -- but it is the third instance of
-                // the shape the last two rounds closed, on the same arm, and
-                // this branch widened it by adding a second variable-size
-                // payload. Recording it costs nothing; discovering it from a
-                // trail that says "served" would cost an incident.
-                let corrected = emit_request_outcome(
-                    &emit,
-                    &host,
-                    &socket,
-                    peer_uid,
-                    &peer_uri,
-                    session_id,
-                    seq.next(),
-                    verb_to_action(&request.verb),
-                    None,
-                    None,
-                    "permit",
-                    "delivery failed: response could not be encoded",
-                    "unavailable",
-                    &au3_1,
-                )
-                .await;
-                if may_respond(corrected) {
-                    write_error_bounded(
+                Err(_) => {
+                    refuse_unencodable_bounded(
                         &mut stream,
                         &cfg,
-                        ProtoErrCode::Internal,
-                        "response encoding failed",
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        session_id,
+                        &seq,
+                        verb_to_action(&request.verb),
+                        &au3_1,
                     )
-                    .await;
+                    .await
                 }
             }
         }
@@ -1157,6 +1153,285 @@ pub async fn handle<S, E, P>(
         // answer for that descriptor (`object_path`, computed before the decision).
         // If this binding is ever needed again, something has started trusting the
         // client's name (ADR-0009 decision 6).
+        Dispatch::PromptRequested => {
+            let Verb::SessionPrompt {
+                conversation,
+                content,
+            } = &request.verb
+            else {
+                unreachable!("dispatch keyed on the verb")
+            };
+            let Some(name) = provider_name.as_deref() else {
+                // Production-unreachable: the PDP denies this case first (no
+                // destination attribute → Deny), so a Permit never arrives here.
+                // Kept as a fail-closed second refusal that costs nothing and
+                // keeps a "?" out of the trail. Gated like every served frame.
+                let appended = emit_request_outcome(
+                    &emit,
+                    &host,
+                    &socket,
+                    peer_uid,
+                    &peer_uri,
+                    session_id,
+                    seq.next(),
+                    "session.prompt",
+                    None,
+                    None,
+                    "deny",
+                    "no provider registered for session.prompt",
+                    "unauthorized",
+                    &au3_1,
+                )
+                .await;
+                if may_respond(appended) {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::Unauthorized,
+                        "not authorized",
+                    )
+                    .await;
+                }
+                close_bounded(&mut stream).await;
+                return;
+            };
+            let destination = format!("provider:{name}");
+            let m = crate::egress::content_measure(content);
+            let egress_meta = |status| EgressAudit {
+                status,
+                content_length: m.length,
+                content_digest: m.digest32.clone(),
+                conversation: conversation.clone(),
+                reply_length: None,
+            };
+            // 1. readiness BEFORE any intent: a refusal is not a send.
+            if let Err(_f) = egress.ready() {
+                let mut rec = make_record(
+                    "request",
+                    &host,
+                    &socket,
+                    peer_uid,
+                    None,
+                    None,
+                    Some(&peer_uri),
+                    session_id,
+                    seq.next(),
+                    "session.prompt",
+                    Some(&destination),
+                    "deny",
+                    "egress backend not ready",
+                    "unavailable",
+                    &au3_1,
+                );
+                rec.egress = Some(egress_meta(EgressStatus::BackendUnavailable));
+                let appended =
+                    emit_or_report(&emit, &rec, "egress refusal", peer_uid, session_id).await;
+                // Build state is not a wire disclosure (ruling 2026-09-02).
+                if may_respond(appended) {
+                    write_error_bounded(
+                        &mut stream,
+                        &cfg,
+                        ProtoErrCode::Unauthorized,
+                        "not authorized",
+                    )
+                    .await;
+                }
+                close_bounded(&mut stream).await;
+                return;
+            }
+            // 2. the write-ahead intent; the TYPE of `send` makes step 3
+            //    impossible without it (egress.rs).
+            let mut intent = make_record(
+                "request",
+                &host,
+                &socket,
+                peer_uid,
+                None,
+                None,
+                Some(&peer_uri),
+                session_id,
+                seq.next(),
+                "session.prompt",
+                Some(&destination),
+                "permit",
+                "intent recorded",
+                "authorized",
+                &au3_1,
+            );
+            intent.egress = Some(egress_meta(EgressStatus::IntentOnly));
+            let intent = match crate::egress::commit_intent(&*emit, intent).await {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!(
+                        "maknaed: AUDIT WRITE FAILED on egress intent (peer_uid={peer_uid} session_id={session_id}) — withholding the send: {e}"
+                    );
+                    close_bounded(&mut stream).await;
+                    return;
+                }
+            };
+            // 3. the send, on a blocking worker, under the transport's per-peer
+            //    permit bound (the same bound the response write uses). The
+            //    intent is shared by Arc so the outcome record can be derived
+            //    from it even if the worker is abandoned on expiry.
+            //    NO BlockingBreaker here, unlike the four sibling offloads
+            //    (decide, subject list, read PEP, group lookup): in Cooky
+            //    `ready()` fails before any send, so no blocking thread can be
+            //    held; the breaker belongs with #240's egress-specific deadline
+            //    (#240 is handed this by name).
+            let intent = Arc::new(intent);
+            let sent = {
+                let egress = Arc::clone(&egress);
+                let intent = Arc::clone(&intent);
+                let req = crate::egress::EgressRequest {
+                    destination: destination.clone(),
+                    conversation: conversation.clone(),
+                    content: content.clone(),
+                };
+                tokio::time::timeout(
+                    Duration::from_millis(cfg.read_timeout_ms),
+                    tokio::task::spawn_blocking(move || egress.send(&intent, req)),
+                )
+                .await
+            };
+            let (send_outcome, reply) = match sent {
+                Ok(Ok(Ok(r))) => {
+                    // Admission and the cap check happen HERE, before the
+                    // outcome record, so the trail names the refusal with the
+                    // reply's length (ADR-0023 decision 3: landed, undelivered)
+                    // and no un-zeroized copy is ever made (reply_capacity is
+                    // checked before encoding, and only on a text-only reply).
+                    let n = crate::egress::reply_text_length(&r.reply);
+                    match crate::egress::admitted_reply(&r.reply) {
+                        Err(refusal) => (
+                            crate::egress::SendOutcome::LandedUndelivered {
+                                reply_length: n,
+                                refusal,
+                            },
+                            None,
+                        ),
+                        Ok(()) if crate::egress::reply_capacity(&r.reply) > cfg.frame_max_bytes => {
+                            (
+                                crate::egress::SendOutcome::LandedUndelivered {
+                                    reply_length: n,
+                                    refusal: crate::egress::ReplyRefusal::Oversize,
+                                },
+                                None,
+                            )
+                        }
+                        Ok(()) => (
+                            crate::egress::SendOutcome::Sent { reply_length: n },
+                            Some(r.reply),
+                        ),
+                    }
+                }
+                // The backend reported failure: nothing left.
+                Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),
+                Ok(Err(join)) => {
+                    // The blocking worker was LOST (it panicked). Whether bytes
+                    // left before the panic is unknowable to the kernel.
+                    // Recorded `Failed` by an explicit collapse: #240's backend
+                    // contract is that `send` does not panic, so a lost worker
+                    // is a DEFECT surfaced here, not an outcome class the trail
+                    // models (ADR-0019 amendment, #172).
+                    // NOT `{join}`: JoinError's Display interpolates the panic
+                    // payload verbatim, and a backend panic message could carry
+                    // prompt text; the trail and the journal are
+                    // length-and-digest only. Id and kind are enough.
+                    eprintln!(
+                        "maknaed: egress worker lost during send (peer_uid={peer_uid} session_id={session_id} task={} panic={})",
+                        join.id(),
+                        join.is_panic()
+                    );
+                    (crate::egress::SendOutcome::Failed, None)
+                }
+                // The worker keeps running detached; its late reply is dropped.
+                Err(_elapsed) => (crate::egress::SendOutcome::DeadlineExpired, None),
+            };
+            // 4. the outcome record, then the reply: audit-then-respond on the
+            //    release leg (#146).
+            let outcome =
+                crate::egress::outcome_for(&intent, seq.next(), rfc3339_now(), send_outcome);
+            let appended =
+                emit_or_report(&emit, &outcome, "egress outcome", peer_uid, session_id).await;
+            if may_respond(appended) {
+                match (send_outcome, reply) {
+                    (_, Some(reply)) => {
+                        // 5. within-cap: encode into a buffer that never grows
+                        //    (no un-zeroized partial copies in freed heap; the
+                        //    Read path's rule).
+                        let cap = crate::egress::reply_capacity(&reply);
+                        let response = Response {
+                            protocol_version: PROTOCOL_VERSION,
+                            result: RespResult::Ok(Payload::PromptReply(reply)),
+                        };
+                        match encode_response_zeroizing(&response, cap) {
+                            Ok(bytes) => {
+                                write_frame_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    &bytes,
+                                    &emit,
+                                    &host,
+                                    &socket,
+                                    peer_uid,
+                                    &peer_uri,
+                                    session_id,
+                                    &seq,
+                                    "session.prompt",
+                                    &au3_1,
+                                )
+                                .await
+                            }
+                            Err(_) => {
+                                refuse_unencodable_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    &emit,
+                                    &host,
+                                    &socket,
+                                    peer_uid,
+                                    &peer_uri,
+                                    session_id,
+                                    &seq,
+                                    "session.prompt",
+                                    &au3_1,
+                                )
+                                .await
+                            }
+                        }
+                    }
+                    // The outcome record above already names the refusal; no
+                    // second corrective record.
+                    (
+                        crate::egress::SendOutcome::LandedUndelivered {
+                            refusal: crate::egress::ReplyRefusal::Oversize,
+                            ..
+                        },
+                        None,
+                    ) => {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            ProtoErrCode::TooLarge,
+                            "response exceeds the configured frame limit",
+                        )
+                        .await
+                    }
+                    // Failed, DeadlineExpired, and the non-text / empty refusals.
+                    (_, None) => {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            ProtoErrCode::Unauthorized,
+                            "not authorized",
+                        )
+                        .await
+                    }
+                }
+            }
+            close_bounded(&mut stream).await;
+            return;
+        }
         Dispatch::ReadRequested(_client_path) => {
             // The read PEP (spec D5): per-request anchor at the enrolled home,
             // named requirements, bounded on the blocking pool like the decide.
@@ -1304,6 +1579,165 @@ fn read_pep(
     )
     .map(|(_path, bytes)| bytes)
     .map_err(crate::handler::map_read_error)
+}
+
+/// Append a pre-built record and say so in the journal if it fails, like every
+/// result-returning emitter on this loop; returns append success for `may_respond`.
+async fn emit_or_report<E: AuditEmit + Send + Sync>(
+    emit: &Arc<E>,
+    rec: &AuditRecord,
+    what: &str,
+    peer_uid: u32,
+    session_id: u64,
+) -> bool {
+    match emit.emit(rec).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "maknaed: AUDIT WRITE FAILED on {what} (peer_uid={peer_uid} session_id={session_id}) — withholding the frame: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// The over-cap refusal of a PERMITTED payload: a CORRECTIVE record (`permit`
+/// stays because the decision WAS a permit; only the delivery was refused,
+/// ADR-0019's `refused-oversize`), then `TooLarge`, gated on the append like
+/// every other outcome record on this loop. Never closes the stream and never
+/// returns on `handle`'s behalf: the caller closes.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &Arc<E>,
+    host: &str,
+    socket: &str,
+    peer_uid: u32,
+    peer_uri: &str,
+    session_id: u64,
+    seq: &Seq,
+    action: &str,
+    au3_1: &serde_json::Value,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // Without it the trail asserts an authorized-and-SERVED disclosure for a
+    // caller that received TooLarge.
+    let corrected = emit_request_outcome(
+        emit,
+        host,
+        socket,
+        peer_uid,
+        peer_uri,
+        session_id,
+        seq.next(),
+        action,
+        None,
+        None,
+        "permit",
+        "delivery refused: response exceeds the frame limit",
+        "refused-oversize",
+        au3_1,
+    )
+    .await;
+    // Same gate as every other outcome record on this loop: if the correction
+    // cannot be recorded, the trail still reads `permit / authorized /
+    // authorized`, so nothing may go back to the caller.
+    if may_respond(corrected) {
+        write_error_bounded(
+            stream,
+            cfg,
+            ProtoErrCode::TooLarge,
+            "response exceeds the configured frame limit",
+        )
+        .await;
+    }
+}
+
+/// The encode-failure corrective: practically unreachable (ciborium into a
+/// Vec, for owned types), but NO PATH may have recorded `authorized` without
+/// delivering. Never closes the stream.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    emit: &Arc<E>,
+    host: &str,
+    socket: &str,
+    peer_uid: u32,
+    peer_uri: &str,
+    session_id: u64,
+    seq: &Seq,
+    action: &str,
+    au3_1: &serde_json::Value,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let corrected = emit_request_outcome(
+        emit,
+        host,
+        socket,
+        peer_uid,
+        peer_uri,
+        session_id,
+        seq.next(),
+        action,
+        None,
+        None,
+        "permit",
+        "delivery failed: response could not be encoded",
+        "unavailable",
+        au3_1,
+    )
+    .await;
+    if may_respond(corrected) {
+        write_error_bounded(
+            stream,
+            cfg,
+            ProtoErrCode::Internal,
+            "response encoding failed",
+        )
+        .await;
+    }
+}
+
+/// SIZE-BOUNDED write of an already-encoded response, like the read path: a
+/// PERMIT whose delivery is refused is refused EXPLICITLY (`TooLarge` with a
+/// corrective record), never truncated and never silently oversized. The write
+/// is bounded by `read_timeout_ms`, which doubles as the write bound (both cap
+/// how long one peer may hold this permit). `seq` is consumed ONLY on the
+/// corrective branch; a successful write burns no sequence number. Never
+/// closes the stream.
+#[allow(clippy::too_many_arguments)]
+async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    bytes: &[u8],
+    emit: &Arc<E>,
+    host: &str,
+    socket: &str,
+    peer_uid: u32,
+    peer_uri: &str,
+    session_id: u64,
+    seq: &Seq,
+    action: &str,
+    au3_1: &serde_json::Value,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if bytes.len() > cfg.frame_max_bytes {
+        refuse_oversize_bounded(
+            stream, cfg, emit, host, socket, peer_uid, peer_uri, session_id, seq, action, au3_1,
+        )
+        .await;
+        return;
+    }
+    let _ = tokio::time::timeout(
+        Duration::from_millis(cfg.read_timeout_ms),
+        write_frame(stream, bytes),
+    )
+    .await;
 }
 
 /// Write one generic error frame, bounded like every response write. The
@@ -1536,6 +1970,9 @@ pub async fn accept_loop<A, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    // #172: captured at boot like the two names above.
+    provider_name: Arc<Option<String>>,
+    egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -1638,6 +2075,8 @@ where
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
+                                let provider_name = Arc::clone(&provider_name);
+                                let egress = Arc::clone(&egress);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -1729,6 +2168,8 @@ where
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
+                                                provider_name,
+                                                egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
                                                 // client listener, so every connection
@@ -2375,6 +2816,11 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // from `core.handling.policy` (ADR-0022) -- captured here for the same
     // reason as the backend name: fixed for the life of the process.
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
+    // #172: the registered provider's name (the egress destination the PEP
+    // stamps) and the egress backend, both fixed for the life of the process.
+    // Cooky's only backend is `Unavailable`; #240 supplies the real one.
+    let provider_name = Arc::new(boot.provider().map(|p| p.name.clone()));
+    let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -2390,6 +2836,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         config_view,
         authz_backend_name,
         classification_policy_name,
+        provider_name,
+        egress,
     )
     .await;
 
@@ -2427,6 +2875,8 @@ async fn serve_after_mint<B>(
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    provider_name: Arc<Option<String>>,
+    egress: Arc<dyn crate::egress::Egress>,
 ) -> Result<ServeOutcome, String>
 where
     B: maknae_authz_basic::Baseline,
@@ -2468,6 +2918,8 @@ where
         config_view,
         authz_backend_name,
         classification_policy_name,
+        provider_name,
+        egress,
     )
     .await;
     Ok(outcome)

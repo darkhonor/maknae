@@ -223,7 +223,7 @@ fn authorize<P: Authorizer>(
     authorizer: &P,
 ) -> Result<(), (String, String)> {
     for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, Lane::Local, None);
+        let mut request = build_authz_request(verb, uid, Lane::Local, None, None);
         request
             .resource
             .0

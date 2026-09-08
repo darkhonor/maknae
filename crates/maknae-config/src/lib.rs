@@ -55,8 +55,8 @@ pub use authz::load_authz_with_requirement;
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
-    load_authz, parse_authz, AuthzError, AuthzPolicy, Decision, Match3, PathGlob, Pattern,
-    RawActionGrants, Request,
+    destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, Decision,
+    Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
@@ -69,7 +69,8 @@ pub use maknae_security::{ClassificationPolicy, Level};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use provider::{
-    provider_from_section, refuse_plaintext_keys, ProviderConfig, PROVIDER_SECTION,
+    provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_PROVIDER_NAME_BYTES,
+    PROVIDER_SECTION,
 };
 pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
 pub use value::Value;

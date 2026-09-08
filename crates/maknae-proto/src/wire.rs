@@ -1,6 +1,6 @@
 //! Versioned CBOR request/response contract (spec §3).
 use crate::error::ProtoCodecError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/`Payload::ReadContent`/
 // `ProtoErrCode::TooLarge` are ADDITIVE CBOR enum variants — no version bump.
@@ -17,6 +17,97 @@ use serde::{Deserialize, Serialize};
 // needs the new CLI. A version bump would be an irreversible hard mutual
 // break (strict-equality check both directions) and was NOT authorized.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Upper bound on the loop's conversation identifier (#241). Informational
+/// only: recorded, never decided on. 32, not 64: it is written into every
+/// egress audit record, and the macOS unified-log line cap was measured with
+/// this bound (maknae-audit-append `syslog_fmt.rs` tests).
+pub const MAX_CONVERSATION_ID_BYTES: usize = 32;
+
+/// `[A-Za-z0-9._-]{1,32}`: it reaches audit records and terminals, so no
+/// whitespace, no control bytes, no path separators. Enforced by the kernel
+/// before the PDP sees the request; the decoder stays shape-only.
+pub fn conversation_id_is_acceptable(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_CONVERSATION_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Prompt text: secret-adjacent like file content (`Bytes`), so it zeroizes
+/// on drop and `Debug` redacts; unlike `Bytes` it is a CBOR TEXT string,
+/// because ACP's `text` is a string and a peer must not have to re-encode.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretText(pub zeroize::Zeroizing<String>);
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+impl Serialize for SecretText {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+impl<'de> Deserialize<'de> for SecretText {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(|s| SecretText(zeroize::Zeroizing::new(s)))
+    }
+}
+
+/// ACP content blocks at pin `9f40e018` (`docs/protocol/v1/content.mdx`): the
+/// five types, variant names tracking ACP's `type` values. The CBOR tagging is
+/// serde's default (externally tagged), NOT ACP's `{"type": …}` JSON shape;
+/// the egress process (#240) owns the ACP translation. Only `Text` is admitted
+/// in Cooky, in BOTH directions: a prompt carrying another kind is refused
+/// before the PDP, and a reply carrying one is refused for delivery after the
+/// send is recorded (#153: images defeat structural marking; nothing stamps
+/// markings yet, #229). Fields are the ones Maknae would ever read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContentBlock {
+    Text {
+        text: SecretText,
+    },
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    Audio {
+        data: String,
+        mime_type: String,
+    },
+    Resource {
+        uri: String,
+        text: Option<SecretText>,
+    },
+    ResourceLink {
+        uri: String,
+        name: String,
+    },
+}
+
+impl ContentBlock {
+    /// ACP's `type` value for this variant, as a Rust-side label (used in refusal reasons).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ContentBlock::Text { .. } => "text",
+            ContentBlock::Image { .. } => "image",
+            ContentBlock::Audio { .. } => "audio",
+            ContentBlock::Resource { .. } => "resource",
+            ContentBlock::ResourceLink { .. } => "resource_link",
+        }
+    }
+}
+
+/// The response leg of `session.prompt`. In Cooky the release to the requesting
+/// loop is the prompt verdict itself (ADR-0023); the shape exists so #240 has
+/// something to fill. `Unavailable` never returns one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptReply {
+    pub blocks: Vec<ContentBlock>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verb {
@@ -149,8 +240,14 @@ pub enum Verb {
     /// is EGRESS — content leaving the trust plane toward a model endpoint. The
     /// term #147's destination governance attaches to; its default is #153's.
     /// Un-recallable once sent — which is why it is two-phase, not audited
-    /// after the fact.
-    SessionPrompt,
+    /// after the fact. **Operands (#172, Cooky):** `conversation` is the loop's
+    /// identifier (#241), bounded by [`conversation_id_is_acceptable`],
+    /// informational, never an input to a verdict; `content` is ACP content,
+    /// text only in Cooky. Additive payload on the existing variant name.
+    SessionPrompt {
+        conversation: String,
+        content: Vec<ContentBlock>,
+    },
     /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: NOT built
     /// in Cooky — the operand names a session and no session identity exists
     /// there; stopping the loop is the subject stopping its own process. #172's
@@ -328,6 +425,10 @@ pub enum Payload {
     /// An existing-file replacement completed under daemon observation and its
     /// completion record was durably appended. Namespace reports use MutationAck.
     MutationComplete,
+    /// The provider's reply to a permitted `session.prompt` (#172): released to
+    /// the requesting loop only on the PDP's Permit and after the outcome record
+    /// landed. Text only in Cooky; `Unavailable` never produces one.
+    PromptReply(PromptReply),
 }
 
 /// What `admin.status` discloses. Every field is deployment SHAPE the operator
@@ -520,6 +621,146 @@ mod tests {
         assert!(encode_request_zeroizing(&request, 0).is_err());
     }
     use super::*;
+
+    fn text(s: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: SecretText(zeroize::Zeroizing::new(s.to_string())),
+        }
+    }
+
+    #[test]
+    fn session_prompt_round_trips_and_debug_redacts_content() {
+        let req = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "conv-1".into(),
+                content: vec![text("the secret plan")],
+            },
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap(), req);
+        let dbg = format!("{:?}", req.verb);
+        assert!(
+            !dbg.contains("secret plan"),
+            "content leaked through Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("conv-1") && dbg.contains("<15 bytes>"),
+            "{dbg}"
+        );
+    }
+
+    #[test]
+    fn secret_text_is_a_cbor_text_string_not_a_byte_string() {
+        // ACP's `text` is a string; a byte-string would make every ACP peer re-encode.
+        let mut buf = Vec::new();
+        ciborium::into_writer(&SecretText(zeroize::Zeroizing::new("ab".into())), &mut buf).unwrap();
+        assert_eq!(buf, [0x62, b'a', b'b'], "major type 3 (text), length 2");
+    }
+
+    #[test]
+    fn every_acp_content_block_kind_decodes_and_names_itself() {
+        let blocks = vec![
+            text("t"),
+            ContentBlock::Image {
+                data: "AA==".into(),
+                mime_type: "image/png".into(),
+            },
+            ContentBlock::Audio {
+                data: "AA==".into(),
+                mime_type: "audio/wav".into(),
+            },
+            ContentBlock::Resource {
+                uri: "file:///x".into(),
+                text: Some(SecretText(zeroize::Zeroizing::new("body".into()))),
+            },
+            ContentBlock::ResourceLink {
+                uri: "https://x".into(),
+                name: "x".into(),
+            },
+        ];
+        assert_eq!(
+            blocks.iter().map(ContentBlock::kind).collect::<Vec<_>>(),
+            ["text", "image", "audio", "resource", "resource_link"]
+        );
+        let req = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: blocks,
+            },
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap(), req);
+    }
+
+    #[test]
+    fn conversation_id_grammar_is_bounded() {
+        assert!(conversation_id_is_acceptable("a"));
+        assert!(conversation_id_is_acceptable("conv-2026.09.08_x"));
+        assert!(conversation_id_is_acceptable(
+            &"a".repeat(MAX_CONVERSATION_ID_BYTES)
+        ));
+        for bad in ["", "has space", "é", "a/b", "a\tb"] {
+            assert!(!conversation_id_is_acceptable(bad), "{bad:?}");
+        }
+        assert!(!conversation_id_is_acceptable(
+            &"a".repeat(MAX_CONVERSATION_ID_BYTES + 1)
+        ));
+    }
+
+    #[test]
+    fn prompt_reply_payload_round_trips_and_redacts() {
+        let resp = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                blocks: vec![text("hi there")],
+            })),
+        };
+        let bytes = encode_response(&resp).unwrap();
+        assert_eq!(decode_response(&bytes).unwrap(), resp);
+        assert!(!format!("{resp:?}").contains("hi there"));
+    }
+
+    #[test]
+    fn the_other_session_verbs_keep_their_unit_encoding_and_the_version_is_one() {
+        for (v, name) in [
+            (Verb::SessionCancel, &b"SessionCancel"[..]),
+            (Verb::SessionUpdate, &b"SessionUpdate"[..]),
+        ] {
+            let bytes = encode_request(&Request {
+                protocol_version: PROTOCOL_VERSION,
+                verb: v,
+            })
+            .unwrap();
+            // Unit variants encode as the bare variant-name text string inside the request map.
+            assert!(bytes.windows(name.len()).any(|w| w == name));
+        }
+        assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn an_unknown_verb_name_fails_to_decode() {
+        // Spec §6 test 28: an unknown verb is a codec error, refused before any behaviour.
+        // NOT red-first: decode_request already refuses an unknown variant; this pins the obligation.
+        use ciborium::value::Value;
+        let mut buf = Vec::new();
+        ciborium::into_writer(
+            &Value::Map(vec![
+                (
+                    Value::Text("protocol_version".into()),
+                    Value::Integer(1.into()),
+                ),
+                (
+                    Value::Text("verb".into()),
+                    Value::Text("SessionGhost".into()),
+                ),
+            ]),
+            &mut buf,
+        )
+        .unwrap();
+        assert!(decode_request(&buf).is_err());
+    }
     #[test]
     fn mutation_operands_round_trip_without_exposing_content_in_debug() {
         let verbs = [

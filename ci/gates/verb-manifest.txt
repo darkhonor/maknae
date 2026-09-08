@@ -26,7 +26,7 @@ action	session.close	not-granted	enumerated, decided, unbuilt — answers Unauth
 action	session.delete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.fork	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	session.prompt	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	session.prompt	not-granted-but-grantable	BUILT (#172, Cooky): the egress verb — decided by the role's own grant AND the destinations: allowlist, write-ahead intent, text only, Unavailable backend until #240. Ungranted by default; operator MAY grant per-role — see the grantable row
 action	session.cancel	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_config_option	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.set_mode	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -65,4 +65,5 @@ capability	Read	granted	grammar capability; shipped Read allow; Bash retired by 
 grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.config.show	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
 grantable	admin.subject.list	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
+grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); ships ungranted and unlisted
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)

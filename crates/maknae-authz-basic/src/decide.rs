@@ -20,20 +20,46 @@ pub(crate) const SUBJECT_UID: &str = "uid";
 pub(crate) const SUBJECT_NAME: &str = "name";
 /// Resource attribute key for `fs.*` (spec §4.4).
 pub(crate) const RESOURCE_PATH: &str = "path";
+/// Resource attribute carrying the resolved egress destination of a
+/// `session.prompt` (#172): `provider:<name>`, the provider registered at boot
+/// (#243). Set by the kernel, never the client; absent means "no provider
+/// registered", which the arm refuses.
+pub(crate) const RESOURCE_DESTINATION: &str = "destination";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
     pub(crate) policy: maknae_config::AuthzPolicy,
     pub(crate) roles: ResolvedBindings,
     pub(crate) action_grants: ActionGrants,
+    pub(crate) destinations: DestinationGrants,
 }
 
-/// The `admin.*` terms an operator may grant or deny per-role (#162 Phase 1).
+/// Validated `destinations:` allowlists (#172), role key → `provider:<name>`
+/// entries. Built only by `validate_destinations`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct DestinationGrants(pub(crate) std::collections::BTreeMap<String, Vec<String>>);
+
+impl DestinationGrants {
+    /// Absent role or empty list is `false`: the allowlist never defaults open
+    /// (#172 spec §2.2).
+    pub(crate) fn allows(&self, role_key: &str, destination: &str) -> bool {
+        self.0
+            .get(role_key)
+            .is_some_and(|l| l.iter().any(|e| e == destination))
+    }
+}
+
+/// The terms an operator may grant or deny per-role: three `admin.*`
+/// disclosure terms (#162 Phase 1: status, config display, subject listing)
+/// and, since 2026-09-09 (#172), the content-plane egress term
+/// `session.prompt`, grantable to `admin` and `user` (the `user` key holds
+/// that one term only, ADR-0010 decision 4 as superseded). *(Corrected
+/// 2026-09-09: this said "the `admin.*` terms" and "these three are
+/// disclosure-only"; the fourth is neither.)*
 ///
 /// Code-defined and unconfigurable: a term absent from this list is refused at
-/// load, so `roles:` can never reach a verb the arm below does not consult.
-/// These three are disclosure-only -- status, config display, subject listing
-/// -- and deliberately NOT `admin.contain`, `admin.credential.broker` or
+/// load, so `roles:` can never reach a verb the arms below do not consult.
+/// Deliberately NOT `admin.contain`, `admin.credential.broker` or
 /// `admin.policy.reload`, which change state and are Phase 2's question.
 //
 // ONE LINE, deliberately: the drift gate's extractor scans only the matched
@@ -41,7 +67,7 @@ pub(crate) struct LoadedPolicy {
 // max_width=100, so without the skip rustfmt wraps it and the gate extracts
 // ZERO terms -- green, inventorying nothing.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 3] = ["admin.status", "admin.config.show", "admin.subject.list"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 4] = ["admin.status", "admin.config.show", "admin.subject.list", "session.prompt"];
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -82,11 +108,12 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c] = GRANTABLE_ACTIONS;
+    let [a, b, c, d] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(c, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(d, "admin.whoami"), "{}", WHY);
 };
 
 /// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
@@ -279,6 +306,53 @@ pub(crate) fn os_dac_gate(req: &SecRequest) -> OsDacGate {
     }
 }
 
+/// The one spelling of the absence note, shared by every arm that abstains
+/// on a role's reach (#172): three tests depend on the class arm and the
+/// prompt arm agreeing byte for byte, so the agreement is one function.
+fn no_rule_note(role_key: &str, action: &str) -> String {
+    format!("role {role_key}: no rule for {action}")
+}
+
+/// The `session.prompt` arm (#172): the role's own action grant AND the
+/// kernel-resolved destination in the role's allowlist. Deny-overrides inside
+/// the role; an absent grant is an absence (finalize refuses once). An absent
+/// destination attribute means no provider is registered: a Deny the trail
+/// must show, not a policy gap.
+fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
+    match lp
+        .action_grants
+        .evaluate3_action(role_key, "session.prompt")
+    {
+        maknae_config::Match3::DenyMatch { source } => {
+            return Verdict::Deny {
+                reason: format!("denied by role grant {source}"),
+            }
+        }
+        maknae_config::Match3::NoMatch => {
+            return Verdict::NotApplicable {
+                note: Some(no_rule_note(role_key, "session.prompt")),
+            }
+        }
+        maknae_config::Match3::AllowMatch => {}
+    }
+    let destination = match req.resource.0.get(RESOURCE_DESTINATION) {
+        Some(AttrValue::Str(d)) => d.as_str(),
+        Some(_) => return Verdict::Indeterminate,
+        None => {
+            return Verdict::Deny {
+                reason: "no provider registered for session.prompt".into(),
+            }
+        }
+    };
+    if lp.destinations.allows(role_key, destination) {
+        permit_with_audit()
+    } else {
+        Verdict::Deny {
+            reason: format!("destination not allowlisted for role {role_key}: {destination}"),
+        }
+    }
+}
+
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
 pub(crate) fn decide_loaded(
     lp: &LoadedPolicy,
@@ -339,6 +413,15 @@ pub(crate) fn decide_loaded(
                 Err(verdict) => verdict,
             }
         }
+        // #172: the content-plane egress term, decided for admin AND user by
+        // each role's OWN grant plus its OWN destination allowlist. The
+        // position is load-bearing: the `Guest | User` class arm and the
+        // `Admin` class arm below both match this action, so this arm must
+        // precede both or it is dead for that role; it sits after the fs arms
+        // only for reading order (their guards key on other action strings).
+        Role::Admin | Role::User if req.action.0 == "session.prompt" => {
+            decide_prompt(lp, req, role.key())
+        }
         Role::Adversary => Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
         },
@@ -349,7 +432,7 @@ pub(crate) fn decide_loaded(
             // -- never the roadmap, which is admin-visible only; the wire is
             // the same generic Unauthorized either way (ruling R1).
             _ => Verdict::NotApplicable {
-                note: Some(format!("role {}: no rule for {}", role.key(), req.action.0)),
+                note: Some(no_rule_note(role.key(), &req.action.0)),
             },
         },
         Role::Admin => match class {
@@ -386,7 +469,7 @@ pub(crate) fn decide_loaded(
                     // Case-2 testimony: a grant COULD exist and none is
                     // written -- a policy question, named by term.
                     maknae_config::Match3::NoMatch => Verdict::NotApplicable {
-                        note: Some(format!("role admin: no rule for {}", req.action.0)),
+                        note: Some(no_rule_note("admin", &req.action.0)),
                     },
                 }
             }
@@ -558,6 +641,7 @@ mod tests {
             // sites of `lp_with` -- the golden matrix among them -- must keep
             // seeing an empty grant map, or the pin stops pinning.
             action_grants: ActionGrants::default(),
+            destinations: DestinationGrants::default(),
         }
     }
 
@@ -856,7 +940,7 @@ mod tests {
 
     /// A SUPERSET of the golden matrix's columns, not the same list. The loops
     /// over this (adversary-denies-everything, guest-and-user-permit-only-
-    /// liveness) must exercise the three grantable terms too, so a future
+    /// liveness) must exercise the grantable terms too, so a future
     /// permissive arm for them turns those tests red as well as the matrix.
     const ALL_ACTIONS: &[&str] = &[
         "liveness.ping",
@@ -1025,7 +1109,9 @@ mod tests {
     #[test]
     fn admin_reserved_classes_are_not_applicable() {
         let lp = lp_with(None, &[]);
-        for action in ["session.prompt", "terminal.create", "unknown.thing"] {
+        // `session.prompt` left this list with #172: it has an arm now, and its
+        // absence note is pinned by the prompt tests (`role admin: no rule…`).
+        for action in ["terminal.create", "unknown.thing"] {
             let v = decide_loaded(
                 &lp,
                 &principal(),
@@ -1260,13 +1346,212 @@ mod tests {
     /// does nothing: exactly the "accepted but inert" outcome the spec claims
     /// is impossible by construction. It was impossible by one check, not two.
     #[test]
-    fn every_grantable_term_is_in_the_admin_class() {
+    fn every_grantable_term_has_an_arm_that_consults_grants() {
+        // Structural: a grantable term that no arm consults would abstain.
+        // Granted in full to admin, with the prompt term's second condition
+        // (the destination attribute) satisfied for that term only.
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            GRANT_UIDS,
+        );
         for t in GRANTABLE_ACTIONS {
+            let req = if t == "session.prompt" {
+                prompt_req(1001, Some("provider:openai"))
+            } else {
+                request(None, Some(1001), t, None)
+            };
             assert_eq!(
-                class_of(t),
-                Some(Class::Admin),
-                "`{t}` is grantable but would never reach the arm that consults grants"
+                decide_loaded(&lp, &principal(), &req),
+                permit_with_audit(),
+                "`{t}` is grantable but no arm consulted its grant"
             );
+        }
+    }
+
+    fn prompt_req(uid: u32, destination: Option<&str>) -> SecRequest {
+        let mut r = request(None, Some(uid as i64), "session.prompt", None);
+        if let Some(d) = destination {
+            r.resource
+                .0
+                .insert(RESOURCE_DESTINATION, AttrValue::Str(d.into()));
+        }
+        r
+    }
+    fn lp_prompt(roles: &str, dests: &str) -> LoadedPolicy {
+        lp_with_grants(&format!("{roles}{dests}"), GRANT_UIDS)
+    }
+    const USER_PROMPT: &str = "roles:\n  user:\n    allow: [\"session.prompt\"]\n";
+    const USER_OPENAI: &str = "destinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+
+    #[test]
+    fn prompt_permits_only_with_the_grant_and_an_allowlisted_destination() {
+        let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1002, Some("provider:openai"))
+            ),
+            permit_with_audit()
+        );
+    }
+
+    #[test]
+    fn prompt_with_the_grant_but_an_unlisted_destination_is_a_deny_naming_it() {
+        let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &prompt_req(1002, Some("provider:other"))),
+            Verdict::Deny {
+                reason: "destination not allowlisted for role user: provider:other".into()
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_with_no_destinations_block_or_an_empty_one_is_a_deny() {
+        // Spec §6: "observed failing if absence defaults open" (observed at
+        // implementation time by making `allows` default open; the deny below
+        // went red on the "" case and green on revert).
+        for dests in ["", "destinations:\n  user:\n    allow: []\n"] {
+            let lp = lp_prompt(USER_PROMPT, dests);
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &prompt_req(1002, Some("provider:openai"))
+                ),
+                Verdict::Deny {
+                    reason: "destination not allowlisted for role user: provider:openai".into()
+                },
+                "{dests:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_with_no_registered_provider_is_a_deny_and_a_non_string_destination_is_indeterminate()
+    {
+        let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &prompt_req(1002, None)),
+            Verdict::Deny {
+                reason: "no provider registered for session.prompt".into()
+            }
+        );
+        let mut r = prompt_req(1002, None);
+        r.resource.0.insert(RESOURCE_DESTINATION, AttrValue::Int(1));
+        assert_eq!(decide_loaded(&lp, &principal(), &r), Verdict::Indeterminate);
+    }
+
+    #[test]
+    fn prompt_without_the_action_grant_is_an_absence_even_with_a_destination() {
+        let lp = lp_prompt("", USER_OPENAI);
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1002, Some("provider:openai"))
+            ),
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for session.prompt".into())
+            }
+        );
+        // The admin absence note (this term left `admin_reserved_classes_are_not_applicable`).
+        assert_eq!(
+            decide_loaded(
+                &lp_prompt("", ""),
+                &principal(),
+                &prompt_req(1001, Some("provider:openai"))
+            ),
+            Verdict::NotApplicable {
+                note: Some("role admin: no rule for session.prompt".into())
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_deny_grant_beats_allow_and_names_the_source() {
+        let lp = lp_prompt(
+            "roles:\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\n",
+            USER_OPENAI,
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1002, Some("provider:openai"))
+            ),
+            Verdict::Deny {
+                reason: "denied by role grant session.prompt".into()
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_grants_are_per_role_admin_and_user_do_not_share() {
+        let lp = lp_prompt(
+            "roles:\n  admin:\n    allow: [\"session.prompt\"]\n",
+            "destinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1001, Some("provider:openai"))
+            ),
+            permit_with_audit()
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1002, Some("provider:openai"))
+            ),
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for session.prompt".into())
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_is_contained_for_adversary_and_absent_for_guest() {
+        let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1004, Some("provider:openai"))
+            ),
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &prompt_req(1003, Some("provider:openai"))
+            ),
+            Verdict::NotApplicable {
+                note: Some("role guest: no rule for session.prompt".into())
+            }
+        );
+    }
+
+    #[test]
+    fn the_other_session_terms_did_not_flip() {
+        let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
+        for term in ["session.cancel", "session.update"] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &request(None, Some(1001), term, None)),
+                Verdict::NotApplicable {
+                    note: Some(format!("term enumerated, not implemented: {term}"))
+                }
+            );
+            assert!(matches!(
+                decide_loaded(&lp, &principal(), &request(None, Some(1002), term, None)),
+                Verdict::NotApplicable { .. }
+            ));
         }
     }
 
@@ -1293,9 +1578,14 @@ mod tests {
             maknae_config::parse_authz(&body, Some(std::path::Path::new("/home/operator")))
                 .unwrap();
         let lookup: UidMap = uid_map.iter().map(|(n, u)| (n.to_string(), *u)).collect();
+        // Bound BEFORE the literal: `policy` is moved into it. This is also the
+        // killer for the `Ok(DestinationGrants::default())` mutant on
+        // `validate_destinations`: every permit test builds its allowlist here.
+        let destinations = crate::validate_destinations(&policy.destinations).unwrap();
         LoadedPolicy {
             roles: resolve(&policy.bindings, &lookup).unwrap(),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations,
             policy,
         }
     }
@@ -1462,7 +1752,9 @@ mod tests {
     /// assertion that makes the plain-map-not-Option decision in maknae-config
     /// testable rather than merely asserted.
     #[test]
-    fn empty_roles_block_leaves_the_three_terms_not_applicable() {
+    fn empty_roles_block_leaves_the_grantable_terms_not_applicable() {
+        // `decide_prompt`'s NoMatch note is byte-identical to the class arm's on
+        // purpose (`no_rule_note`), which is why this loop covers all four.
         for block in ["", "roles: {}\n", "roles:\n  admin: {}\n"] {
             let lp = lp_with_grants(block, GRANT_UIDS);
             for t in GRANTABLE_ACTIONS {
@@ -1616,7 +1908,6 @@ mod tests {
     fn every_new_class_resolves_and_abstains() {
         let lp = lp_with(None, &[]);
         for (action, expect) in [
-            ("session.prompt", Class::Session),
             ("terminal.create", Class::Terminal),
             ("mcp.tool.call", Class::Mcp),
             ("fs.move", Class::Fs),
@@ -1641,6 +1932,10 @@ mod tests {
                 "{action} must abstain"
             );
         }
+        // `session.prompt` still resolves; its abstention is pinned by
+        // `prompt_without_the_action_grant_is_an_absence_even_with_a_destination`
+        // with a different note, because the arm exists now (#172).
+        assert_eq!(class_of("session.prompt"), Some(Class::Session));
     }
 
     /// The old prefix is GONE, not aliased — a stale caller resolves to no

@@ -10,6 +10,7 @@ mod boot_gate;
 mod ceiling_authz;
 pub mod classification;
 mod composition;
+mod egress;
 mod groupres;
 mod handler;
 mod mutation;
@@ -21,6 +22,10 @@ pub use boot::{boot, BootConfig};
 pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
+pub use egress::{
+    admitted_reply, production_egress, reply_capacity, reply_text_length, DurableEgressIntent,
+    Egress, EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
+};
 pub use groupres::*;
 pub use handler::{
     build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
