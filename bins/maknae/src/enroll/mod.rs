@@ -2062,7 +2062,13 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
         // A well-formed https:// address that is never actually connected to —
         // `OperatorClient::new` only builds settings + reads/parses the CA
-        // file; it makes no request (verified against vaultrs 0.7.4).
+        // file; it makes no request (verified against vaultrs 0.7.4 and 0.8.0).
+        // Since vaultrs 0.8.0 (reqwest 0.13 under `rustls-no-provider`) building
+        // the client REQUIRES a process-level crypto provider and panics without
+        // one; production installs it first (`cli.rs`), so the fixture does the
+        // same. The panic is reqwest's, not a refusal of ours -- see the note on
+        // the typed guard in the PR that took this bump.
+        maknae_vault::install_default_crypto_provider();
         let client = maknae_vault::OperatorClient::new(
             "https://vault.invalid.example:8200",
             &ca_path,
