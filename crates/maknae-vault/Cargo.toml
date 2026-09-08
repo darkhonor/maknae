@@ -43,7 +43,7 @@ rustls = { version = "0.23", default-features = false, features = ["fips"] }
 # The failure this pin prevents: the lockfile had already drifted to 1.18.0 /
 # aws-lc-fips-sys 0.14.1 (the in-process module) before the pin existed.
 aws-lc-rs = { version = ">=1.17.3, <1.18.0", features = ["fips"] }
-x509-parser = "0.16"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
+x509-parser = "0.18"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
