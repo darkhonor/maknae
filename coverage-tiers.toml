@@ -149,6 +149,9 @@ files = [
   # 95% floor; NOT ratchet_cohort).
   "crates/maknae-config/src/authz.rs",
   "crates/maknae-audit-append/src/record.rs",
+  # #172: the Egress seam — the DurableEgressIntent type gate, the reply admission, the
+  # outcome record derivation. The write-ahead order is a type here, so this file is T1.
+  "crates/maknae-kernel/src/egress.rs",
   # #189's journald wire encoder: a malformed field name corrupts the entire
   # datagram (not merely its own field), and a wrong PrimaryOutcome arm makes
   # the two audit sinks diverge silently. Pure computation; the socket lives in
