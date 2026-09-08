@@ -635,4 +635,25 @@ mod tests {
             Verdict::Deny { .. }
         ));
     }
+
+    /// #172: the egress verb is CONTENT-plane, so the ceiling operand decides
+    /// it like any other content term — a prompt marked above the declared
+    /// level is refused, unmarked text flows (nothing stamps markings yet, #229;
+    /// the attribute is set directly here).
+    #[test]
+    fn a_prompt_marked_above_the_ceiling_is_refused_and_unmarked_text_flows() {
+        let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
+        assert!(matches!(
+            op.decide(&req(
+                "session.prompt",
+                Some(AttrValue::Str("SECRET".into()))
+            )),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            op.decide(&req("session.prompt", None)),
+            Verdict::NotApplicable { .. }
+        ));
+        assert!(!is_control_plane("session.prompt"));
+    }
 }
