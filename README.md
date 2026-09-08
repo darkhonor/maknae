@@ -102,9 +102,11 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 Rust 1.98.1 (the pinned toolchain; `rustup` installs it from `rust-toolchain.toml`) on Linux (amd64/arm64) or macOS on Apple Silicon.
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+cargo build --locked --workspace
+cargo test --locked --workspace
 ```
+
+`--locked` is not optional here: CI refuses a manifest that drifts from `Cargo.lock`, and so should your shell.
 
 The pre-push gate (formatting, clippy as errors, the coverage-tier and drift gates) is described in [`CONTRIBUTING.md`](CONTRIBUTING.md#the-pre-push-gate). Packaging for deb, rpm and macOS lives under [`packaging/`](packaging/).
 

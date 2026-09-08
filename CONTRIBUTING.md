@@ -69,12 +69,15 @@ CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affec
 
 For Rust changes, before committing:
 
+Every dependency-resolving Cargo command below carries `--locked`, exactly as CI runs it: a manifest that drifts from `Cargo.lock` fails here the same way it fails in `build-and-gate`, instead of resolving a different graph and going green locally. The clippy package list is the workflow's; when `ci.yml` changes it, change it here in the same commit.
+
 ```bash
 cargo fmt --all --check
-for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs; do
-  cargo clippy -p "$p" --all-targets -- -D warnings
+for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic maknae-classification-aus; do
+  cargo clippy --locked -p "$p" --all-targets -- -D warnings
 done
-cargo test --workspace
+cargo clippy --locked -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
+cargo test --locked --workspace
 ```
 
 For documentation-only changes, run these checks without compiling Rust:
@@ -87,7 +90,7 @@ bash ci/gates/isolation-contract-lint.sh
 For source changes, run the applicable heavier gates before pushing (derive the current, authoritative set from `ci.yml`):
 
 ```bash
-cargo deny check
+cargo deny --locked check
 ci/gates/p1-manifest-lint.sh
 ci/gates/p2-invert-tree.sh
 ci/gates/p2-artifact-witness.sh
