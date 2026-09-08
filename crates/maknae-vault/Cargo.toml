@@ -15,7 +15,7 @@ workspace = true
 maknae-config = { path = "../maknae-config" }
 
 vaultrs = { version = "=0.7.4", default-features = false, features = ["rustls"] }  # its reqwest uses the installed FIPS default (§6.1); reqwest/tokio-tls are transitive
-rustify = { version = "=0.6.1", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint (vaultrs 0.7.4 has no op for it); already transitive via vaultrs, pinned to the resolved Cargo.lock version; no features of our own — vaultrs' own "rustls" feature request unifies the rustls-tls backend, never default-tls
+rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint (vaultrs 0.7.4 has no op for it); already transitive via vaultrs, pinned to the resolved Cargo.lock version; no features of our own — vaultrs' own "rustls" feature request unifies the rustls-tls backend, never default-tls
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
