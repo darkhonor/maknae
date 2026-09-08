@@ -87,6 +87,26 @@ fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
         .expect("a session.prompt record")
 }
 
+/// A PDP wrapper that COUNTS decisions and delegates everything to the real
+/// composition, so a test can prove a path never consulted the PDP.
+struct Counting<A> {
+    inner: Arc<A>,
+    decisions: std::sync::atomic::AtomicUsize,
+}
+impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A> {
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide(req)
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
 const GRANTED: &str =
     "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
 
@@ -481,6 +501,139 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         );
         assert!(eg.calls().is_empty());
     }
+}
+
+#[tokio::test]
+async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() {
+    // The Composition, wrapped so its decisions can be counted. First prove the
+    // observer works: a well-formed prompt is decided exactly once.
+    let fx = Fixture::with_policy("prompt-pdp-count", "Read", GRANTED);
+    let counting = Arc::new(Counting {
+        inner: fx.authorizer(),
+        decisions: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let resp = fx
+        .roundtrip_with_authorizer(
+            Arc::clone(&counting),
+            prompt("hello"),
+            Records::new(0),
+            Some("openai"),
+            Arc::new(Recording::default()),
+        )
+        .await
+        .expect("a frame");
+    assert!(matches!(
+        resp.result,
+        RespResult::Ok(Payload::PromptReply(_))
+    ));
+    assert_eq!(
+        counting.decisions.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the observer must see the one decision a well-formed prompt gets"
+    );
+    // Now every malformed shape: BadRequest, and ZERO decisions.
+    for verb in [
+        Verb::SessionPrompt {
+            conversation: "c".into(),
+            content: vec![ContentBlock::Image {
+                data: "AA==".into(),
+                mime_type: "image/png".into(),
+            }],
+        },
+        Verb::SessionPrompt {
+            conversation: "has space".into(),
+            content: vec![text("x")],
+        },
+        Verb::SessionPrompt {
+            conversation: "c".into(),
+            content: vec![],
+        },
+    ] {
+        let counting = Arc::new(Counting {
+            inner: fx.authorizer(),
+            decisions: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resp = fx
+            .roundtrip_with_authorizer(
+                Arc::clone(&counting),
+                verb,
+                Records::new(0),
+                Some("openai"),
+                Arc::new(Recording::default()),
+            )
+            .await
+            .expect("a BadRequest frame");
+        assert!(
+            matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::BadRequest)
+        );
+        assert_eq!(
+            counting.decisions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a malformed operand must be refused BEFORE the PDP"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_malformed_prompt_frame_never_carries_its_bytes_into_the_trail() {
+    // A decode failure's diagnostic quotes the offending value (serde: `invalid
+    // type: string "…"`). A block shaped `{"Text": "<sentinel>"}` is malformed
+    // (Text is a map), and the sentinel must not reach any record.
+    // Hand-emitted CBOR (the kernel's test crate carries no CBOR dependency):
+    // {"protocol_version": 1, "verb": {"SessionPrompt": {"conversation": "c",
+    //  "content": [{"Text": "<sentinel>"}]}}}. `Text` must be a map; a bare
+    // string is what makes the decoder quote the value in its diagnostic.
+    let sentinel = "PROMPT_PLAINTEXT_REVIEW_SENTINEL";
+    fn tstr(out: &mut Vec<u8>, s: &str) {
+        let n = s.len();
+        if n < 24 {
+            out.push(0x60 | n as u8);
+        } else {
+            out.push(0x78);
+            out.push(n as u8);
+        }
+        out.extend_from_slice(s.as_bytes());
+    }
+    let mut raw = Vec::new();
+    raw.push(0xa2);
+    tstr(&mut raw, "protocol_version");
+    raw.push(0x01);
+    tstr(&mut raw, "verb");
+    raw.push(0xa1);
+    tstr(&mut raw, "SessionPrompt");
+    raw.push(0xa2);
+    tstr(&mut raw, "conversation");
+    tstr(&mut raw, "c");
+    tstr(&mut raw, "content");
+    raw.push(0x81);
+    raw.push(0xa1);
+    tstr(&mut raw, "Text");
+    tstr(&mut raw, sentinel);
+    // Prove the frame is the malformed shape intended: it must NOT decode.
+    assert!(maknae_proto::decode_request(&raw).is_err());
+    let fx = Fixture::with_policy("prompt-sentinel", "Read", GRANTED);
+    let records = Records::new(0);
+    let resp = fx
+        .roundtrip_raw(
+            &raw,
+            Arc::clone(&records),
+            Some("openai"),
+            Arc::new(Recording::default()),
+        )
+        .await;
+    assert!(
+        resp.is_none(),
+        "a decode failure is audited and CLOSED, never answered: {resp:?}"
+    );
+    let trail = serde_json::to_string(&records.snapshot()).unwrap();
+    assert!(
+        !trail.contains(sentinel),
+        "client bytes reached the trail: {trail}"
+    );
+    assert!(
+        trail.contains("malformed request: decode"),
+        "the class is recorded, not the diagnostic: {trail}"
+    );
 }
 
 #[tokio::test]

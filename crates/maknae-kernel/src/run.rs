@@ -515,7 +515,10 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 "decode",
-                &format!("malformed request: {e}"),
+                // The CLASS only (#172): serde's diagnostic quotes the offending
+                // value, so a malformed prompt would carry prompt text into the
+                // trail through `{e}`.
+                &format!("malformed request: {}", e.category()),
                 &au3_1,
             )
             .await;

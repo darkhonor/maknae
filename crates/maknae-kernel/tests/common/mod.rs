@@ -286,13 +286,42 @@ impl Fixture {
         tokio::task::JoinHandle<()>,
         Vec<u8>,
     ) {
+        self.start_with_authorizer(
+            self.authorizer(),
+            verb,
+            fd,
+            records,
+            config,
+            provider,
+            egress,
+        )
+    }
+    /// The starter with the PDP supplied by the caller (a wrapper around the
+    /// real composition, for tests that must OBSERVE whether it was consulted).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_authorizer<P>(
+        &self,
+        authz: Arc<P>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
             fds.push(fd);
         }
         let principal = Arc::new(self.principal.clone());
-        let authz = self.authorizer();
         let task = tokio::spawn(maknae_kernel::handle(
             server,
             "maknae://d/plane/cli".into(),
@@ -347,19 +376,81 @@ impl Fixture {
         egress: Arc<dyn maknae_kernel::Egress>,
         config: maknae_config::TransportConfig,
     ) -> Option<Response> {
-        let (mut client, task, body) =
-            self.start_egress(verb, None, records, config, provider, egress);
-        maknae_proto::write_frame(&mut client, &body).await.unwrap();
-        let response = tokio::time::timeout(
-            Duration::from_secs(3),
-            maknae_proto::read_frame(&mut client, 65536),
-        )
-        .await
-        .ok()?
-        .ok()
-        .and_then(|body| maknae_proto::decode_response(&body).ok());
-        task.await.unwrap();
-        response
+        let (client, task, body) = self.start_egress(verb, None, records, config, provider, egress);
+        Self::exchange(client, task, &body).await
+    }
+    /// `roundtrip` over a caller-supplied PDP.
+    pub async fn roundtrip_with_authorizer<P>(
+        &self,
+        authz: Arc<P>,
+        verb: Verb,
+        records: Arc<Records>,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> Option<Response>
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
+        let (client, task, body) = self.start_with_authorizer(
+            authz,
+            verb,
+            None,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            provider,
+            egress,
+        );
+        Self::exchange(client, task, &body).await
+    }
+    /// `roundtrip` with the request bytes supplied RAW (a malformed frame the
+    /// encoder would never produce).
+    pub async fn roundtrip_raw(
+        &self,
+        raw_body: &[u8],
+        records: Arc<Records>,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+    ) -> Option<Response> {
+        let (client, task, _body) = self.start_egress(
+            Verb::Ping,
+            None,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            provider,
+            egress,
+        );
+        Self::exchange(client, task, raw_body).await
+    }
+    /// Write one frame, then read EVERYTHING the daemon sends until it closes.
+    /// `None` means a CLEAN close with zero bytes; a timeout (the handler hung),
+    /// a truncated frame, or an undecodable frame each PANIC, so a test that
+    /// asserts `is_none()` proves frameless closure and not merely "no
+    /// complete frame arrived".
+    async fn exchange(
+        mut client: tokio::io::DuplexStream,
+        task: tokio::task::JoinHandle<()>,
+        body: &[u8],
+    ) -> Option<Response> {
+        use tokio::io::AsyncReadExt;
+        maknae_proto::write_frame(&mut client, body).await.unwrap();
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut received))
+            .await
+            .expect("the daemon must close the connection within 3s")
+            .expect("reading until close must not error");
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("the handler must finish within 3s")
+            .unwrap();
+        if received.is_empty() {
+            return None;
+        }
+        let mut cursor = &received[..];
+        let frame = maknae_proto::read_frame(&mut cursor, 65536)
+            .await
+            .expect("bytes on the wire must be one complete frame, never a partial one");
+        assert!(cursor.is_empty(), "exactly one frame, nothing after it");
+        Some(maknae_proto::decode_response(&frame).expect("the frame must decode"))
     }
 }
 impl Drop for Fixture {
