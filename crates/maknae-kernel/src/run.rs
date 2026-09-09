@@ -257,6 +257,10 @@ pub const MAX_SUBJECT_USER_BYTES: usize = 32;
 
 /// The decided subject identity stamped onto a record (#275). Audit-only:
 /// nothing here is an authorization input.
+pub(crate) fn admitted_user_pub(user: Option<&str>) -> Option<String> {
+    admitted_user(user)
+}
+
 fn admitted_user(user: Option<&str>) -> Option<String> {
     user.filter(|u| u.len() <= MAX_SUBJECT_USER_BYTES)
         .map(str::to_string)
@@ -1286,8 +1290,11 @@ pub async fn handle<S, E, P>(
                     "unavailable",
                     &au3_1,
                 );
-                // #275: the peer identity, bounded and audit-only.
+                // #275: the peer identity AND the role this very decision was
+                // made on. The egress records are permitted decisions, so
+                // omitting the role would make every prompt say role=none.
                 rec.subject.user = admitted_user(peer_user.as_deref());
+                rec.subject.role = decided_role.map(str::to_string);
                 rec.egress = Some(egress_meta(EgressStatus::BackendUnavailable));
                 let appended =
                     emit_or_report(&emit, &rec, "egress refusal", peer_uid, session_id).await;
@@ -1323,8 +1330,11 @@ pub async fn handle<S, E, P>(
                 "authorized",
                 &au3_1,
             );
-            // #275: the peer identity, bounded and audit-only.
+            // #275: identity AND role. The OUTCOME record is derived from this
+            // intent by clone, so an omission here propagates to both halves of
+            // the write-ahead pair.
             intent.subject.user = admitted_user(peer_user.as_deref());
+            intent.subject.role = decided_role.map(str::to_string);
             intent.egress = Some(egress_meta(EgressStatus::IntentOnly));
             let intent = match crate::egress::commit_intent(&*emit, intent).await {
                 Ok(i) => i,

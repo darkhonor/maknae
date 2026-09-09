@@ -39,6 +39,42 @@ async fn the_record_carries_the_role_the_decision_was_made_on_for_every_shipped_
     }
 }
 
+/// #275 (codex C1): the EGRESS records carry the role too. The backend-refusal
+/// record and the write-ahead intent are permitted decisions, and the outcome
+/// record is derived from the intent by clone — so an omission on the intent
+/// propagates to both halves of the write-ahead pair and every prompt in the
+/// trail reads `role=none`.
+#[tokio::test]
+async fn the_egress_refusal_record_carries_the_decided_role() {
+    const GRANTED: &str = "roles:\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
+    let fx = Fixture::with_policy("prompt-role", "Read", GRANTED);
+    let records = Records::new(0);
+    let _ = fx
+        .roundtrip(
+            Verb::SessionPrompt {
+                conversation: "conv-1".into(),
+                content: vec![maknae_proto::ContentBlock::Text {
+                    text: maknae_proto::SecretText(maknae_io::Zeroizing::new("hi".into())),
+                }],
+            },
+            Arc::clone(&records),
+            Some("openai"),
+            Arc::new(maknae_kernel::Unavailable),
+        )
+        .await;
+    let rec = records
+        .snapshot()
+        .into_iter()
+        .rev()
+        .find(|r| r.action == "session.prompt")
+        .expect("a session.prompt record");
+    assert_eq!(
+        rec.subject.role.as_deref(),
+        Some("user"),
+        "a permitted prompt must attest the role it was decided under"
+    );
+}
+
 /// A record with no decision behind it carries no role, and renders the NAMED
 /// absence rather than borrowing the subject's `unknown`.
 #[tokio::test]
@@ -63,7 +99,68 @@ async fn a_record_without_a_decision_carries_no_role() {
 
 /// An over-long username is REFUSED to `None`, never truncated: a truncated
 /// identity in an audit trail is a wrong identity, which is worse than none.
+///
+/// Drives the REAL admission function over the boundary. An earlier form
+/// asserted only that the constant equals 32, which a removed filter or a
+/// switch to truncation would both have survived (codex).
 #[test]
-fn an_over_long_username_is_refused_not_truncated() {
-    assert_eq!(maknae_kernel::MAX_SUBJECT_USER_BYTES, 32);
+fn an_over_long_username_is_refused_and_the_boundary_is_exact() {
+    let at = "u".repeat(maknae_kernel::MAX_SUBJECT_USER_BYTES);
+    let over = "u".repeat(maknae_kernel::MAX_SUBJECT_USER_BYTES + 1);
+    assert_eq!(
+        maknae_kernel::admitted_user_for_test(Some(&at)).as_deref(),
+        Some(at.as_str()),
+        "exactly at the bound must be admitted UNCHANGED"
+    );
+    assert_eq!(
+        maknae_kernel::admitted_user_for_test(Some(&over)),
+        None,
+        "over the bound must be REFUSED, never truncated"
+    );
+    // Multi-byte: 11 three-byte characters = 33 bytes, over the bound. The
+    // check is on BYTES, and refusing avoids ever clipping mid-codepoint.
+    let multi = "한".repeat(11);
+    assert_eq!(multi.len(), 33);
+    assert_eq!(maknae_kernel::admitted_user_for_test(Some(&multi)), None);
+    let fits = "한".repeat(10);
+    assert_eq!(fits.len(), 30);
+    assert_eq!(
+        maknae_kernel::admitted_user_for_test(Some(&fits)).as_deref(),
+        Some(fits.as_str())
+    );
+    assert_eq!(maknae_kernel::admitted_user_for_test(None), None);
+}
+
+/// #276: `SUBJECT_NAME` must never be inserted into a PDP request, for ANY
+/// verb. `RoleMap::role_for` resolves the reserved name FIRST, never through
+/// uid, and `AGENT_SUBJECT` is the bare string "agent" -- so inserting an OS
+/// username would let a local account named `agent` take the runtime's reserved
+/// subject identity and bypass the uid map. The branch is safe today for
+/// exactly one reason: nothing on the request path inserts a name.
+///
+/// Exhaustive over the `Verb` enum by construction: a new variant fails to
+/// COMPILE here rather than silently escaping the pin.
+#[test]
+fn build_authz_request_never_inserts_subject_name_for_any_verb() {
+    use maknae_proto::Verb;
+    let every: Vec<(&str, Verb)> = maknae_kernel::every_verb_for_test();
+    assert!(every.len() >= 8, "the vocabulary shrank unexpectedly");
+    for (label, verb) in every {
+        for provider in [None, Some("openai")] {
+            let req = maknae_kernel::build_authz_request(
+                &verb,
+                1000,
+                maknae_security::Lane::Local,
+                None,
+                provider,
+            );
+            assert!(
+                req.subject
+                    .0
+                    .get(maknae_authz_basic::SUBJECT_NAME_KEY)
+                    .is_none(),
+                "{label}: SUBJECT_NAME must not be inserted -- see #276"
+            );
+        }
+    }
 }

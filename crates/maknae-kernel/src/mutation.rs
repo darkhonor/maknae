@@ -807,12 +807,23 @@ mod tests {
     }
     impl<P: Authorizer> Authorizer for Delayed<P> {
         fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_reporting_role(request).0
+        }
+
+        /// Delegates rather than taking the trait default (#275): a wrapper
+        /// that forwards only `decide` reports no role for a decision that had
+        /// one. The delay behaviour is unchanged -- it gates BOTH entry points
+        /// because `decide` is now this function's `.0`.
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
             let (lock, wake) = &*self.gate;
             let mut released = lock.lock().unwrap();
             while !*released {
                 released = wake.wait(released).unwrap();
             }
-            self.pdp.decide(request)
+            self.pdp.decide_reporting_role(request)
         }
     }
     #[tokio::test]

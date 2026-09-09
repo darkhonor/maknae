@@ -1093,24 +1093,22 @@ mod tests {
             "the unified-log copy and the JSONL line must be byte-identical"
         );
 
-        // #275: an oversize record is no longer DROPPED — it is delivered in
-        // DEGRADED form. What must never happen is a truncated full record: the
-        // degraded line carries no `MAKNAE_RECORD=` payload at all.
-        let marker = format!("seq={oversize_nonce} ");
-        let degraded: Vec<&String> = msgs
+        // #275: an oversize record is no longer DROPPED -- it is delivered in
+        // DEGRADED form. Assert POSITIVELY on THIS record's identity: an
+        // earlier form searched `seq={oversize_nonce}` while the nonce was set
+        // on `session_id`, and accepted absence through an `||`, so suppressing
+        // degradation entirely would have left it green.
+        let want_session = format!("MAKNAE_SESSION={oversize_nonce}");
+        let degraded = msgs
             .iter()
-            .filter(|m| m.contains("MAKNAE_DEGRADED="))
-            .collect();
+            .find(|m| m.contains(&want_session) && m.contains("MAKNAE_DEGRADED="))
+            .unwrap_or_else(|| {
+                panic!("the oversize record must be delivered as a degraded marker: {msgs:?}")
+            });
         assert!(
-            !degraded.is_empty() || !msgs.iter().any(|m| m.contains(&marker)),
-            "an oversize record must be degraded, never truncated"
+            !degraded.contains("MAKNAE_RECORD="),
+            "a degraded line must not carry the payload: {degraded}"
         );
-        for m in degraded {
-            assert!(
-                !m.contains("MAKNAE_RECORD="),
-                "a degraded line must not carry the payload: {m}"
-            );
-        }
     }
 
     #[cfg(target_os = "macos")]

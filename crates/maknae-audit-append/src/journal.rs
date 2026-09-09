@@ -191,7 +191,15 @@ pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec
     );
     push_field(&mut buf, "MAKNAE_SEQ", f.seq.to_string().as_bytes());
     push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
-    push_field(&mut buf, "MAKNAE_DEGRADED", b"read-primary-jsonl");
+    // The SAME distinction the macOS marker makes: three of PrimaryOutcome's
+    // four values mean the primary never durably wrote, and pointing an
+    // operator at a record that was never written is worse than silence.
+    let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
+        &b"read-primary-jsonl"[..]
+    } else {
+        &b"primary-did-not-write"[..]
+    };
+    push_field(&mut buf, "MAKNAE_DEGRADED", where_to_read);
     buf
 }
 
@@ -489,6 +497,27 @@ mod tests {
             "seq=3",
         ] {
             assert!(s.contains(needle), "summary must carry {needle}: {s}");
+        }
+    }
+
+    /// #275: the journald degraded datagram makes the SAME primary distinction
+    /// the macOS marker does. Kills `== -> !=` on that branch.
+    #[test]
+    fn the_degraded_datagram_only_points_at_a_primary_that_actually_wrote() {
+        let r = rec("no");
+        let ok = String::from_utf8_lossy(&encode_degraded(&r, PrimaryOutcome::Ok)).to_string();
+        assert!(ok.contains("read-primary-jsonl"), "{ok}");
+        assert!(!ok.contains("MAKNAE_RECORD"), "{ok}");
+        for p in [
+            PrimaryOutcome::WriteFailed,
+            PrimaryOutcome::RefusedBreakerOpen,
+            PrimaryOutcome::RefusedAtCapacity,
+        ] {
+            let bad = String::from_utf8_lossy(&encode_degraded(&r, p)).to_string();
+            assert!(
+                bad.contains("primary-did-not-write"),
+                "{p:?} must not send the operator to a record that was never written: {bad}"
+            );
         }
     }
 }

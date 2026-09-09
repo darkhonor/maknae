@@ -96,7 +96,15 @@ mod scrubbed {
     /// parsing is unaffected). And `invalid` is not reserved — a value literally
     /// equal to `invalid` is indistinguishable from a scrubbed one.
     pub(crate) fn scrub(v: &str) -> Scrubbed<'_> {
-        if v.contains("MAKNAE_") || v.contains('=') || v.contains('\n') || v.contains('\r') {
+        // `\0` joins the set: `syslog(3)` takes a C string, so an interior NUL
+        // makes the conversion fail and the line is silently never emitted
+        // (#275; `syslog_io` discards that error by design).
+        if v.contains("MAKNAE_")
+            || v.contains('=')
+            || v.contains('\n')
+            || v.contains('\r')
+            || v.contains('\0')
+        {
             Scrubbed("invalid")
         } else {
             Scrubbed(v)
@@ -272,11 +280,28 @@ pub(crate) fn note_degraded_mirror() {
 /// token truncated at [`DEGRADED_TOKEN_MAX`], so its length is bounded by
 /// construction and carries no operator-controlled string — no host, no socket,
 /// no object, no `au3_1`, no path.
+/// Clip at a UTF-8 boundary. `String::truncate` PANICS mid-codepoint, and this
+/// runs on the audit path over `action`/`outcome.result`, which are `String` on
+/// the record and therefore not a closed vocabulary at the type level: 47 ASCII
+/// bytes followed by a two-byte character would have aborted the emission.
+fn clip_at_boundary(v: &str, max: usize) -> String {
+    // A FORWARD scan, not a decrementing search backwards from `max`. The
+    // backward form needed `end -= 1` in a loop, and `-= -> /=` is a mutant that
+    // never terminates — an unkillable TIMEOUT on a `[t1]` file. Accumulating
+    // whole characters while they fit has no such shape and is exact.
+    let mut out = String::new();
+    for c in v.chars() {
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn degraded_line(f: &RecordFields<'_>) -> String {
-    let mut action = scrub(f.action).as_str().to_string();
-    action.truncate(DEGRADED_TOKEN_MAX);
-    let mut outcome = scrub(f.outcome).as_str().to_string();
-    outcome.truncate(DEGRADED_TOKEN_MAX);
+    let action = clip_at_boundary(scrub(f.action).as_str(), DEGRADED_TOKEN_MAX);
+    let outcome = clip_at_boundary(scrub(f.outcome).as_str(), DEGRADED_TOKEN_MAX);
     // Only an actually-durable primary may be pointed at.
     let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
         "read-primary-jsonl"
@@ -284,8 +309,11 @@ fn degraded_line(f: &RecordFields<'_>) -> String {
         "primary-did-not-write"
     };
     format!(
-        "maknae audit: DEGRADED {action} {outcome} session={} seq={} SYSLOG_IDENTIFIER={} MAKNAE_PRIMARY={} MAKNAE_DEGRADED={}",
-        f.session_id, f.seq, SYSLOG_IDENTIFIER, f.primary, where_to_read
+        // Same key names as the journald degraded datagram, so an operator
+        // greps ONE string on both platforms (the rule this file already
+        // follows for the full line).
+        "maknae audit: DEGRADED {action} {outcome} session={} seq={} SYSLOG_IDENTIFIER={} MAKNAE_SESSION={} MAKNAE_SEQ={} MAKNAE_PRIMARY={} MAKNAE_DEGRADED={}",
+        f.session_id, f.seq, SYSLOG_IDENTIFIER, f.session_id, f.seq, f.primary, where_to_read
     )
 }
 
@@ -480,10 +508,107 @@ mod tests {
         assert!(deg.is_degraded() && !deg.is_full());
     }
 
-    /// The eight #172 egress shapes at a REAL identity, plus a deliberately
-    /// pathological deployment. `host`, `socket`, `object` and `au3_1` are
-    /// unbounded by design, so no sample is "the widest legal width" — the
-    /// pathological case is here so the degraded arm is always exercised.
+    /// Direct, exact-output tests on the clip. The formatter-level tests only
+    /// assert "fits and does not panic", which every arithmetic mutant on this
+    /// helper survives.
+    #[test]
+    fn clip_at_boundary_is_exact() {
+        assert_eq!(
+            clip_at_boundary("abc", 10),
+            "abc",
+            "under the max is unchanged"
+        );
+        assert_eq!(
+            clip_at_boundary("abcde", 5),
+            "abcde",
+            "exactly at the max is kept whole"
+        );
+        assert_eq!(
+            clip_at_boundary("abcdef", 5),
+            "abcde",
+            "over the max clips to the max"
+        );
+        assert_eq!(clip_at_boundary("", 5), "");
+        assert_eq!(
+            clip_at_boundary("abc", 0),
+            "",
+            "a zero budget keeps nothing"
+        );
+        // Multi-byte: 'é' is 2 bytes, so a 3-byte budget over "aéb" keeps "aé"
+        // and a 2-byte budget keeps only "a" -- never a half character.
+        assert_eq!(clip_at_boundary("aéb", 3), "aé");
+        assert_eq!(clip_at_boundary("aéb", 2), "a");
+        assert_eq!(
+            clip_at_boundary("한한", 3),
+            "한",
+            "3 bytes fits exactly one"
+        );
+        assert_eq!(
+            clip_at_boundary("한한", 2),
+            "",
+            "under one character keeps none"
+        );
+        for s in ["한한한", "🙂🙂", "aé한🙂"] {
+            for max in 0..=s.len() + 2 {
+                let got = clip_at_boundary(s, max);
+                assert!(got.len() <= max, "{s:?}/{max}: {got:?}");
+                assert!(
+                    s.starts_with(&got),
+                    "{s:?}/{max}: must be a PREFIX: {got:?}"
+                );
+            }
+        }
+    }
+
+    /// The degraded builder must not PANIC on a multi-byte boundary.
+    ///
+    /// `String::truncate` panics mid-codepoint, and `action`/`outcome.result`
+    /// are `String` on the record — not a closed vocabulary at the type level.
+    /// 47 ASCII bytes followed by a two-byte character lands the cut inside
+    /// that character, which aborted the emission before this was fixed.
+    #[test]
+    fn the_degraded_builder_clips_at_a_utf8_boundary_and_never_panics() {
+        for tail in ["é", "한", "🙂"] {
+            let mut r = rec("no");
+            r.action = format!("{}{tail}", "a".repeat(DEGRADED_TOKEN_MAX - 1));
+            r.outcome.result = format!("{}{tail}", "d".repeat(DEGRADED_TOKEN_MAX - 1));
+            r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+            let Mirrored::Degraded(l) = format_record(&r, PrimaryOutcome::Ok).unwrap() else {
+                panic!("must degrade");
+            };
+            assert!(l.len() <= MACOS_SYSLOG_MAX, "{}", l.len());
+        }
+    }
+
+    /// An interior NUL is scrubbed. `syslog(3)` takes a C string, so a NUL makes
+    /// the conversion fail and `syslog_io` discards that error by design — the
+    /// line would be silently never emitted. Reject it like the other structural
+    /// tokens rather than letting it reach the platform.
+    #[test]
+    fn an_interior_nul_is_scrubbed_rather_than_silently_dropping_the_line() {
+        let mut r = rec("no");
+        r.subject.user = Some("ali\0ce".into());
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        assert!(!s.contains('\0'), "no NUL may reach the platform: {s:?}");
+        assert!(s.contains("subject=invalid"), "{s}");
+    }
+
+    /// FOUR of the #172 egress shapes at a real identity, plus a deliberately
+    /// pathological deployment. Not eight, and not claimed as production
+    /// evidence: these are SYNTHETIC width fixtures whose only job is to drive
+    /// both arms of the mirror. Roles and outcomes are paired for WIDTH, not
+    /// for reachability — `adversary` would not in fact obtain a permitted
+    /// send, and the reason strings are the widest of the vocabulary rather
+    /// than the exact ones `outcome_for` emits. The production-path evidence
+    /// lives in `crates/maknae-kernel/tests/`, where records come from real
+    /// decisions.
+    ///
+    /// `host`, `socket`, `object` and `au3_1` are unbounded by design, so no
+    /// sample is "the widest legal width" — the pathological case is here so
+    /// the degraded arm is always exercised.
     fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
         let mut out = Vec::new();
         for (label, status, reply, result, reason, posture) in [

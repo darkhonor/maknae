@@ -41,7 +41,11 @@ pub struct Membership {
 }
 
 pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
-    let grp = resolve_maknae_group()?;
+    // The USER is resolved FIRST, and deliberately so (#275). Resolving the
+    // group first meant a host without a `maknae` group -- CI's ubuntu-latest
+    // has none -- returned early and the connection-deny record rendered
+    // `subject=unknown`, discarding an identity that was independently
+    // available. The membership answer may fail; the identity should survive it.
     let user = User::from_uid(Uid::from_raw(uid))
         .map_err(|e| AuthzError::Resolve(e.to_string()))?
         .ok_or_else(|| AuthzError::Resolve(format!("no user for uid {uid}")))?;
@@ -51,6 +55,11 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
             in_group,
             user: name.clone(),
         })
+    };
+    // A group that cannot be resolved is NOT a member -- fail closed -- but the
+    // username stands.
+    let Ok(grp) = resolve_maknae_group() else {
+        return member(false);
     };
     // Explicit membership (gr_mem) — populated on both Linux and macOS (Directory Services).
     if grp.mem.contains(&user.name) {
@@ -66,10 +75,12 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
         use std::ffi::CString;
         let cname =
             CString::new(user.name.clone()).map_err(|e| AuthzError::Resolve(e.to_string()))?;
-        let groups = nix::unistd::getgrouplist(&cname, user.gid)
-            .map_err(|e| AuthzError::Resolve(e.to_string()))?;
-        if groups.contains(&grp.gid) {
-            return member(true);
+        // A failed supplementary-group lookup is NOT a member -- fail closed --
+        // but it must not discard the username we already have (#275).
+        match nix::unistd::getgrouplist(&cname, user.gid) {
+            Ok(groups) if groups.contains(&grp.gid) => return member(true),
+            Ok(_) => {}
+            Err(_) => return member(false),
         }
     }
     member(false)

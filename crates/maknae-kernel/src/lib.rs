@@ -28,8 +28,8 @@ pub use egress::{
 };
 pub use groupres::*;
 pub use handler::{
-    build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
-    KERNEL_ACTIONS,
+    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, every_verb_for_test,
+    may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
 };
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{

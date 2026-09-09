@@ -323,7 +323,16 @@ pub fn compose_subjects(operands: &[&dyn Authorizer]) -> Option<Vec<SubjectBindi
 
 impl Authorizer for ConjunctionAuthorizer {
     fn decide(&self, req: &Request) -> Verdict {
-        compose_decide(&self.refs(), req)
+        self.decide_reporting_role(req).0
+    }
+
+    /// Delegates rather than inheriting the trait default (#275). **Any wrapper
+    /// that forwards `decide` must forward this too**, or it silently reports
+    /// no role for a decision that had one — the default answers `None`, which
+    /// is honest for an operand that does not key on roles and a LIE for a
+    /// wrapper around one that does.
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        compose_decide_reporting_role(&self.refs(), req)
     }
 
     /// Names every operand, in composition order.
@@ -880,6 +889,68 @@ mod tests {
             Box::new(Panics),
         ]);
         assert!(matches!(c.decide(&req()), Verdict::Deny { .. }));
+    }
+
+    #[test]
+    fn compose_decide_is_exactly_the_role_reporting_fold_without_the_role() {
+        // `compose_decide` has no production caller since #275 -- both the
+        // kernel's Composition and ConjunctionAuthorizer fold through the
+        // role-reporting twin. It stays as the seam's verdict-only entry point,
+        // and this pins it as that function's `.0` so the two can never drift.
+        struct Permits;
+        impl Authorizer for Permits {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+        }
+        struct Denies;
+        impl Authorizer for Denies {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "ceiling".into(),
+                }
+            }
+        }
+        for ops in [
+            vec![&Permits as &dyn Authorizer],
+            vec![&Permits as &dyn Authorizer, &Denies],
+            vec![&Denies as &dyn Authorizer, &Permits],
+        ] {
+            assert_eq!(
+                compose_decide(&ops, &req()),
+                compose_decide_reporting_role(&ops, &req()).0
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapping_authorizer_must_not_swallow_the_role() {
+        // #275: `ConjunctionAuthorizer` delegates `decide_reporting_role` rather
+        // than inheriting the default. A wrapper that forwards only `decide`
+        // reports None for a decision that HAD a role — honest for an operand
+        // that does not key on roles, a lie for a wrapper around one that does.
+        struct WithRole;
+        impl Authorizer for WithRole {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some("admin"))
+            }
+            fn backend_name(&self) -> String {
+                "with-role".into()
+            }
+        }
+        let c = ConjunctionAuthorizer::new(vec![Box::new(WithRole)]);
+        let (v, role) = c.decide_reporting_role(&req());
+        assert_eq!(role, Some("admin"), "the wrapper must not swallow the role");
+        assert!(matches!(v, Verdict::Permit { .. }), "{v:?}");
+        // and `decide` is that function's `.0`, so the two cannot disagree
+        assert_eq!(c.decide(&req()), c.decide_reporting_role(&req()).0);
     }
 
     #[test]
