@@ -569,3 +569,61 @@ async fn shutdown_signal_yields_graceful_outcome() {
         "expected ServeOutcome::GracefulShutdown, got {outcome:?}"
     );
 }
+
+/// #275: the record carries the OS username the accept loop resolved.
+///
+/// **Scripts the RUNNING euid, deliberately.** Every other uid in this file is
+/// synthetic (1001, 2001, 3001, …) and resolves to no user on macOS and to
+/// `runner` on ubuntu CI — so an assertion over those is either host-divergent
+/// or vacuously `None`, which is exactly the class of test this slice exists to
+/// kill. The expectation comes from an INDEPENDENT `User::from_uid` of the same
+/// uid, so this is not the harness asserting its own input back at itself.
+///
+/// Skips loudly, never silently, when the `maknae` group is absent (CI's
+/// ubuntu-latest has none — `packaging/deb/postinst` is its only creator), or
+/// when the euid does not resolve. Both are preconditions of the mechanism, not
+/// of the assertion.
+#[tokio::test]
+async fn the_record_carries_the_username_the_accept_loop_resolved() {
+    let me = nix::unistd::geteuid().as_raw();
+    let Ok(Some(u)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(me)) else {
+        eprintln!("SKIP: euid {me} does not resolve to a user on this host");
+        return;
+    };
+    if nix::unistd::Group::from_name("maknae")
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        eprintln!("SKIP: no `maknae` group on this host — the lookup fails closed before any name");
+        return;
+    }
+    let recs = drive(vec![ok_conn("maknae://d/plane/cli", me)], cfg_with(8, 500)).await;
+    let conn = recs
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection record");
+    assert_eq!(
+        conn.subject.user.as_deref(),
+        Some(u.name.as_str()),
+        "the record must carry the name the accept loop resolved, not a sentinel"
+    );
+}
+
+/// The fail-closed arms carry NO username, and that is deliberate: resolving one
+/// there would put an unbounded `getpwuid` back on the async worker, which is
+/// what the group-lookup circuit breaker exists to prevent (`run.rs:2090-2098`).
+#[tokio::test]
+async fn a_refused_connection_carries_no_username_because_nss_was_not_spawned() {
+    let recs = drive(
+        vec![ok_conn("maknae://d/plane/cli", 999_999)],
+        cfg_with(8, 500),
+    )
+    .await;
+    let conn = recs
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection record");
+    assert_eq!(conn.subject.user, None);
+    assert_eq!(conn.subject.role, None, "a connection is not a decision");
+}

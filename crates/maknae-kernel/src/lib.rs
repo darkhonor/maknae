@@ -35,7 +35,9 @@ pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
 };
-pub use run::{accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx};
+pub use run::{
+    accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";
