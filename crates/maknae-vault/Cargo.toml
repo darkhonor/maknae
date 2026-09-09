@@ -25,7 +25,7 @@ maknae-config = { path = "../maknae-config" }
 vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
 # UPPER BOUND IS A COMPLIANCE CONTROL, NOT DEPENDENCY HYGIENE. Do not relax it to
 # take a routine Dependabot bump (the dependabot.yml ignore rule mirrors it).
