@@ -990,7 +990,6 @@ mod tests {
 
     /// Poll with a bounded backoff (records take ~1s to appear). NOT a fixed
     /// sleep, and NOT unbounded.
-    #[cfg(target_os = "macos")]
     /// Poll the real unified log for a record we just submitted.
     ///
     /// **Fails fast when the formatter cannot produce the needle at all.** The
@@ -1001,6 +1000,7 @@ mod tests {
     /// timeouts exactly as it fails on misses. Checking the LOCAL formatting
     /// first turns that into an immediate, honest failure. Same reasoning as
     /// `syslog_fmt::tests::record_formatting_to_exactly`'s bounded loop.
+    #[cfg(target_os = "macos")]
     fn macos_await_nonce_for(rec: &AuditRecord, nonce: u64) -> Vec<String> {
         let local = crate::syslog_fmt::format_line_unchecked(rec, PrimaryOutcome::Ok)
             .expect("the record must format at all");
@@ -1013,6 +1013,7 @@ mod tests {
         macos_await_nonce(nonce)
     }
 
+    #[cfg(target_os = "macos")]
     fn macos_await_nonce(nonce: u64) -> Vec<String> {
         let needle = format!("session={nonce} ");
         let mut waited = std::time::Duration::ZERO;
