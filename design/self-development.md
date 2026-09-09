@@ -70,11 +70,17 @@ The sharpest form: **an agent that can weaken the review process can weaken ever
 
 Merging every PR is the current answer, it is **ruled** rather than merely habitual (see above), and it does not scale to the stated intent. But the merge is not the only candidate control point: design agreement, ADR ratification, and the gate set are all places a human decision is load-bearing. Which of them are *sufficient*, and which are merely *habitual*, has not been tested.
 
-### 4. How does dreaming relate to this?
+### 4. Where does actor provenance belong, and who owns closing it?
+
+[ADR-0024](adr/ADR-0024-tenancy-model-and-agent-identity.md) separates the **authorization subject** (whose authority was used — the uid, decided by the PDP) from the **request origin** (human client vs agent runtime — audit-only, never an authorization input), and records that the second has no carrier today: `Plane` is `Kernel | Cli`, so a runtime is indistinguishable from a CLI on the wire and in the record.
+
+That gap is owned by [#241](https://github.com/darkhonor/maknae/issues/241). It bears on this discussion because **self-development makes it sharper**: an agent that originates work on the platform is exactly the case where "who asked for this" is the first question a reviewer asks, and the trail currently cannot answer it. A change proposed by an agent and a change proposed by the operator would read identically.
+
+### 5. How does dreaming relate to this?
 
 Reflection over past and pending work — see below — is deliberately **not** an authorization surface, because it produces disposition rather than action. But the boundary needs stating: at what point does "a better way to approach this" become "a change I am making"? The transition from reflection to proposal to action is where the control belongs, and it is not currently named.
 
-### 5. What happens when the agent is wrong in a way the gates do not catch?
+### 6. What happens when the agent is wrong in a way the gates do not catch?
 
 The gates catch a large and growing class — this repository's history is substantially a record of gates added after something escaped. They do not catch design error, and design error is exactly what an under-directed agent produces most. The reviewer of last resort is currently a human reading a PR body. That is a real control and it has a bandwidth limit.
 
@@ -90,4 +96,4 @@ That distinction is load-bearing and should survive into whatever this document 
 
 ## What would close this discussion
 
-An ADR, once the questions in §2 and §3 have concrete answers, stating: the classes of change an agent may originate; the control points a human holds; and how an unprompted action is expressed in the vocabulary so that it can be authorized *as* unprompted. Until then this file is the record that the question is open and known.
+An ADR, once the questions in §2, §3 and §4 have concrete answers, stating: the classes of change an agent may originate; the control points a human holds; and how an unprompted action is expressed in the vocabulary so that it can be authorized *as* unprompted. Until then this file is the record that the question is open and known.
