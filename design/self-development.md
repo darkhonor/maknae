@@ -10,6 +10,30 @@ The operator's stated goal (2026-09-10): an agent persona takes on **future deve
 
 This is not a hypothetical. Every ADR, plan, gate and commit in this repository since inception has been produced by an AI agent under operator direction. The question is not *whether* an agent develops Maknae; it is **what governs that, when the direction becomes less frequent and less specific.**
 
+## The ruling that governs this today, and why it is narrower than it sounds
+
+**Operator ruling, 2026-09-10: pull requests are human-gated. For now, without exception.**
+
+**What this is not.** The public concern about "models developing themselves" is about a model improving its own weights or successor. **That is not what happens here, and the distinction is a layer, not a quibble:** the artifact under development is the *agent platform* — tooling that leverages a model — not the model. Maknae's kernel does not train, fine-tune, or produce a model; it authorizes what tooling built around one may do. Conflating the two would both overstate what this project does and understate why the gate matters for what it actually does.
+
+**Why the gate stands anyway**, in the operator's terms:
+
+1. **Involvement in the outcome is the point, not overhead.** Design is where the operator wants to be, on this project and others. A governance model that optimises the human out of the design loop optimises away the reason for building it.
+
+2. **The evidence is not there yet.** Current models — Fable and Astra included — have not been shown to *reliably select design choices that satisfy poorly framed intent*. And poorly framed intent is the normal case: it is what most requirements documents are. A corpus of security requirements and design best practice — Maknae's lake — narrows the search but does not close this gap, because the gap is not one of retrieval.
+
+**This project's own record supports (2) directly, and the clearest evidence is a single night.** Building [#275](https://github.com/darkhonor/maknae/issues/275) (2026-09-09/10), the agent — working from an approved spec, the lake, every ADR, and the full gate set — produced these **design** errors, each caught by review rather than by tooling:
+
+- A role-threading mechanism that **could not reach the production decision site at all** (`handle` is bounded on the seam trait, not the sealed one).
+- A **second decision surface missed entirely** (`mutation.rs`), so every filesystem-mutation record would have carried no role.
+- A recommended "deployment envelope" that **measurement showed did not exist**, concurred in by the operator before it was measured.
+- A proposal to populate a request attribute that would have let a local account named `agent` **take the runtime's reserved identity** — introduced as a bonus, not asked for.
+- A blocking NSS lookup placed on **the exact circuit-breaker arm whose own message reads "failing closed without spawning more NSS work."**
+- A byte budget measured **twice** against the wrong record shape.
+- Six instances, across five review rounds, of *a test that validates a mechanism at a value the production path never produces*.
+
+**What did not fail is as informative as what did.** Every one of the above was a *design judgment under under-specified intent*. None was an execution failure: the code compiled, the suites passed, the gates were green, the measurements that were taken were taken correctly. Execution — TDD, measurement discipline, running the pipeline on both hosts, refusing to claim green without evidence — held. **The failure mode is specifically the one the ruling names**, and it was caught by adversarial review and by a human reading the result, which is what the gate is.
+
 ## What is already true, and is the seed of the answer
 
 **The operator never lets the agent land its own change.** Every commit reaches `main` through a pull request the operator merges. The agent proposes, measures, argues, and revises; it does not decide. This has held without exception and without a written rule.
@@ -44,7 +68,7 @@ The sharpest form: **an agent that can weaken the review process can weaken ever
 
 ### 3. What is the human's minimum viable involvement?
 
-Merging every PR is the current answer and it does not scale to the stated intent. But the merge is not the only candidate control point: design agreement, ADR ratification, and the gate set are all places a human decision is load-bearing. Which of them are *sufficient*, and which are merely *habitual*, has not been tested.
+Merging every PR is the current answer, it is **ruled** rather than merely habitual (see above), and it does not scale to the stated intent. But the merge is not the only candidate control point: design agreement, ADR ratification, and the gate set are all places a human decision is load-bearing. Which of them are *sufficient*, and which are merely *habitual*, has not been tested.
 
 ### 4. How does dreaming relate to this?
 
