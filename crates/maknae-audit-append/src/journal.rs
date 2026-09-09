@@ -176,14 +176,27 @@ pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
 /// primary never durably wrote.
 pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec<u8> {
     let f = fields_of(rec, primary);
+    // The SAME distinction the macOS marker makes: three of PrimaryOutcome's
+    // four values mean the primary never durably wrote, and pointing an
+    // operator at a record that was never written is worse than silence.
+    // MESSAGE and MAKNAE_DEGRADED are derived TOGETHER: a human-readable
+    // "read the primary JSONL" beside a machine field saying
+    // `primary-did-not-write` is a contradiction the operator has to resolve.
+    let (message, where_to_read): (&[u8], &[u8]) = if f.primary == PrimaryOutcome::Ok.as_field() {
+        (
+            b"maknae audit: DEGRADED - read the primary JSONL",
+            b"read-primary-jsonl",
+        )
+    } else {
+        (
+            b"maknae audit: DEGRADED - the primary sink did not write this record",
+            b"primary-did-not-write",
+        )
+    };
     let mut buf = Vec::new();
     push_field(&mut buf, "PRIORITY", b"4");
     push_field(&mut buf, "SYSLOG_IDENTIFIER", SYSLOG_IDENTIFIER.as_bytes());
-    push_field(
-        &mut buf,
-        "MESSAGE",
-        b"maknae audit: DEGRADED - read the primary JSONL",
-    );
+    push_field(&mut buf, "MESSAGE", message);
     push_field(
         &mut buf,
         "MAKNAE_SESSION",
@@ -191,14 +204,6 @@ pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec
     );
     push_field(&mut buf, "MAKNAE_SEQ", f.seq.to_string().as_bytes());
     push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
-    // The SAME distinction the macOS marker makes: three of PrimaryOutcome's
-    // four values mean the primary never durably wrote, and pointing an
-    // operator at a record that was never written is worse than silence.
-    let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
-        &b"read-primary-jsonl"[..]
-    } else {
-        &b"primary-did-not-write"[..]
-    };
     push_field(&mut buf, "MAKNAE_DEGRADED", where_to_read);
     buf
 }
@@ -507,6 +512,7 @@ mod tests {
         let r = rec("no");
         let ok = String::from_utf8_lossy(&encode_degraded(&r, PrimaryOutcome::Ok)).to_string();
         assert!(ok.contains("read-primary-jsonl"), "{ok}");
+        assert!(ok.contains("read the primary JSONL"), "{ok}");
         assert!(!ok.contains("MAKNAE_RECORD"), "{ok}");
         for p in [
             PrimaryOutcome::WriteFailed,
@@ -517,6 +523,14 @@ mod tests {
             assert!(
                 bad.contains("primary-did-not-write"),
                 "{p:?} must not send the operator to a record that was never written: {bad}"
+            );
+            assert!(
+                bad.contains("the primary sink did not write this record"),
+                "{p:?}: MESSAGE must agree with MAKNAE_DEGRADED: {bad}"
+            );
+            assert!(
+                !bad.contains("read the primary JSONL"),
+                "{p:?}: MESSAGE must not contradict MAKNAE_DEGRADED: {bad}"
             );
         }
     }

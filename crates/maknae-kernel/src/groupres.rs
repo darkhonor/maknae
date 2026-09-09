@@ -106,4 +106,41 @@ mod tests {
             Err(AuthzError::Resolve(msg)) => assert!(!msg.is_empty()),
         }
     }
+
+    /// #275: the username is a property of the PEER UID and must be populated
+    /// whatever the membership answer is.
+    ///
+    /// **Honest about what discriminates.** On a host that HAS a `maknae` group
+    /// both the correct order (user first) and the old one (group first) resolve
+    /// the name, so this assertion cannot tell them apart here. It discriminates
+    /// on a host WITHOUT the group -- CI's ubuntu-latest, where
+    /// `packaging/deb/postinst` is the only creator -- which is exactly the
+    /// deployment where the old order returned early and blanked the identity on
+    /// the connection-deny record. The invariant is asserted on both kinds of
+    /// host; only one kind can fail it.
+    #[test]
+    fn the_username_is_resolved_whatever_the_membership_answer_is() {
+        let me = nix::unistd::geteuid().as_raw();
+        let Ok(Some(u)) = User::from_uid(Uid::from_raw(me)) else {
+            eprintln!("SKIP: euid {me} does not resolve to a user on this host");
+            return;
+        };
+        let m = uid_in_maknae_group(me).expect("a resolvable uid must not error");
+        assert_eq!(
+            m.user, u.name,
+            "the name must be carried regardless of in_group={}",
+            m.in_group
+        );
+    }
+
+    /// A uid that resolves to no user is still an ERROR -- fail closed. The
+    /// reordering must not have turned an unresolvable peer into a non-member
+    /// with an empty name.
+    #[test]
+    fn an_unresolvable_uid_is_still_an_error_not_a_silent_non_member() {
+        assert!(
+            uid_in_maknae_group(999_999).is_err(),
+            "an unresolvable uid must fail closed, not resolve to a nameless non-member"
+        );
+    }
 }
