@@ -27,6 +27,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0021 | Fail-closed storage I/O tightenings | Accepted (operator-ratified 2026-08-26) *(row added 2026-09-07)* |
 | 0022 | A `ClassificationPolicy` seam — kernel ships US, `maknae-classification-aus` ships PSPF, `rust-dcs` brings the lattice | Accepted (operator-ratified 2026-09-06) *(row added 2026-09-07)* |
 | 0023 | The runtime loop is the ACP Agent, the kernel the Client — Rust MVP loop as `maknae agent`, model egress brokered per turn | **Proposed (2026-09-07)** — Cooky's implementation issues cite it while Proposed, as with 0010; ratification at or after #242 |
+| 0024 | Tenancy model — Maknae is multi-tenant (several humans, several agent personas, one kernel); every subject is uid-derived and an agent holds no identity of its own; the reserved `agent` token is struck | Accepted (operator-ratified 2026-09-10) |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 
