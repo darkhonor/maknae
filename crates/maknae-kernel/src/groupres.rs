@@ -23,18 +23,42 @@ pub fn maknae_gid() -> Result<nix::unistd::Gid, AuthzError> {
     Ok(resolve_maknae_group()?.gid)
 }
 
-pub fn uid_in_maknae_group(uid: u32) -> Result<bool, AuthzError> {
+/// Membership AND the peer's OS username, from the ONE `User::from_uid` this
+/// function already performs (#275).
+///
+/// The name rides along rather than being fetched by a sibling helper for two
+/// reasons. First, this function needs `user.name` for `gr_mem` AND `user.gid`
+/// for the primary and supplementary tests, so a name-only helper could not
+/// substitute for it — an edit that tried would silently delete the primary-gid
+/// and `getgrouplist` branches and deny every member whose membership is not
+/// explicit. Second, the caller runs this on the BLOCKING pool under a timeout
+/// and a circuit breaker precisely because NSS can stall; resolving the name
+/// anywhere else would put an unbounded `getpwuid` back on the async worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Membership {
+    pub in_group: bool,
+    pub user: String,
+}
+
+pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
     let grp = resolve_maknae_group()?;
     let user = User::from_uid(Uid::from_raw(uid))
         .map_err(|e| AuthzError::Resolve(e.to_string()))?
         .ok_or_else(|| AuthzError::Resolve(format!("no user for uid {uid}")))?;
+    let name = user.name.clone();
+    let member = |in_group: bool| {
+        Ok(Membership {
+            in_group,
+            user: name.clone(),
+        })
+    };
     // Explicit membership (gr_mem) — populated on both Linux and macOS (Directory Services).
     if grp.mem.contains(&user.name) {
-        return Ok(true);
+        return member(true);
     }
     // Primary group.
     if user.gid == grp.gid {
-        return Ok(true);
+        return member(true);
     }
     // Supplementary groups: getgrouplist exists on Linux; nix cfg-gates it OUT on Apple targets.
     #[cfg(target_os = "linux")]
@@ -45,10 +69,10 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<bool, AuthzError> {
         let groups = nix::unistd::getgrouplist(&cname, user.gid)
             .map_err(|e| AuthzError::Resolve(e.to_string()))?;
         if groups.contains(&grp.gid) {
-            return Ok(true);
+            return member(true);
         }
     }
-    Ok(false)
+    member(false)
 }
 
 #[cfg(test)]

@@ -114,6 +114,7 @@ async fn audit_failure_withholds_response() {
         "maknae://d/plane/cli".to_string(),
         501,
         true,
+        None,
         emit.clone(),
         1,
         default_cfg(),
@@ -167,7 +168,8 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         s,
         "maknae://d/plane/cli".to_string(),
         501,
-        true, // in_group -> Permit
+        true,
+        None, // in_group -> Permit
         emit.clone(),
         99,
         default_cfg(),
@@ -225,7 +227,8 @@ async fn deny_audits_then_closes() {
         s,
         "maknae://d/plane/cli".to_string(),
         501,
-        false, // in_group = false → Deny
+        false,
+        None, // in_group = false → Deny
         emit.clone(),
         7,
         default_cfg(),
@@ -281,6 +284,7 @@ async fn happy_ping_responds() {
         "maknae://d/plane/cli".to_string(),
         501,
         true,
+        None,
         emit.clone(),
         1,
         default_cfg(),
@@ -332,7 +336,8 @@ async fn permit_admission_precedes_request_record() {
         s,
         "maknae://d/plane/cli".to_string(),
         501,
-        true, // in_group -> Permit
+        true,
+        None, // in_group -> Permit
         emit.clone(),
         42,
         default_cfg(),
@@ -394,6 +399,7 @@ async fn happy_whoami_carries_peer_facts() {
         "maknae://d/plane/cli".to_string(),
         501,
         true,
+        None,
         emit.clone(),
         1,
         default_cfg(),
@@ -436,6 +442,7 @@ async fn read_timeout_closes() {
         "maknae://d/plane/cli".to_string(),
         501,
         true,
+        None,
         emit.clone(),
         1,
         cfg,
@@ -496,6 +503,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         "maknae://d/plane/cli".to_string(),
         501,
         true,
+        None,
         emit.clone(),
         1,
         default_cfg(),
@@ -531,7 +539,8 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         s2,
         "maknae://d/plane/cli".to_string(),
         501,
-        false, // in_group = false -> Deny
+        false,
+        None, // in_group = false -> Deny
         emit2.clone(),
         1,
         default_cfg(),
@@ -595,6 +604,7 @@ async fn unread_response_does_not_hang_the_handler() {
             "maknae://d/plane/cli".to_string(),
             501,
             true,
+            None,
             emit.clone(),
             7,
             cfg,

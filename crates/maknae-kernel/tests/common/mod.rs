@@ -327,6 +327,7 @@ impl Fixture {
             "maknae://d/plane/cli".into(),
             0,
             true,
+            None,
             records,
             718,
             config,

@@ -247,6 +247,21 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
     }
 }
 
+/// `LOGIN_NAME_MAX` on Linux, and the bound on `subject.user` (#275).
+///
+/// An over-long name is refused to `None`, never truncated: a truncated
+/// identity in an audit trail is a WRONG identity, which is worse than an
+/// absent one. A new field must also not be unbounded — that is the class of
+/// defect the mirror's budget test exists to catch.
+pub const MAX_SUBJECT_USER_BYTES: usize = 32;
+
+/// The decided subject identity stamped onto a record (#275). Audit-only:
+/// nothing here is an authorization input.
+fn admitted_user(user: Option<&str>) -> Option<String> {
+    user.filter(|u| u.len() <= MAX_SUBJECT_USER_BYTES)
+        .map(str::to_string)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_record(
     event: &str,
@@ -348,6 +363,11 @@ pub async fn handle<S, E, P>(
     peer_uri: String,
     peer_uid: u32,
     in_group: bool,
+    // #275: the peer OS username, resolved on the blocking pool alongside the
+    // group check. `None` on every fail-closed accept-loop arm, where not
+    // spawning NSS work is the point -- the record then renders
+    // `subject=unknown`, which is honest.
+    peer_user: Option<String>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
@@ -396,7 +416,7 @@ pub async fn handle<S, E, P>(
     //    complete.
     match authorize_connection(true, in_group) {
         ConnDecision::Deny { reason } => {
-            let rec = make_record(
+            let mut rec = make_record(
                 "connection",
                 &host,
                 &socket,
@@ -413,6 +433,8 @@ pub async fn handle<S, E, P>(
                 "unauthorized",
                 &au3_1,
             );
+            // #275: the peer identity, bounded and audit-only.
+            rec.subject.user = admitted_user(peer_user.as_deref());
             if let Err(e) = emit.emit(&rec).await {
                 // Mid-life audit-write failure on a deny path is logged but does not change
                 // the already-fail-closed outcome (the connection is refused); the permit
@@ -430,7 +452,7 @@ pub async fn handle<S, E, P>(
             // response — so the admission append must succeed before the request is even
             // read, exactly like the request-record gate below. A failed admission append
             // must not be papered over by a later-successful request append.
-            let rec = make_record(
+            let mut rec = make_record(
                 "connection",
                 &host,
                 &socket,
@@ -447,6 +469,8 @@ pub async fn handle<S, E, P>(
                 "authorized",
                 &au3_1,
             );
+            // #275: the peer identity, bounded and audit-only.
+            rec.subject.user = admitted_user(peer_user.as_deref());
             let admission_result = emit.emit(&rec).await;
             if !may_respond(admission_result.is_ok()) {
                 if let Err(e) = admission_result {
@@ -474,6 +498,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                None,
                 session_id,
                 seq.next(),
                 "read",
@@ -491,6 +517,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                None,
                 session_id,
                 seq.next(),
                 "read",
@@ -513,6 +541,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                None,
                 session_id,
                 seq.next(),
                 "decode",
@@ -541,6 +571,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                None,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -587,6 +619,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                None,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -616,7 +650,7 @@ pub async fn handle<S, E, P>(
         request.verb,
         Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. }
     ) {
-        let record = make_record(
+        let mut record = make_record(
             "request",
             &host,
             &socket,
@@ -633,6 +667,8 @@ pub async fn handle<S, E, P>(
             "unauthorized",
             &au3_1,
         );
+        // #275: the peer identity, bounded and audit-only.
+        record.subject.user = admitted_user(peer_user.as_deref());
         crate::mutation::handle(
             &mut stream,
             &request.verb,
@@ -690,7 +726,6 @@ pub async fn handle<S, E, P>(
     // deliberately: it is what turns an Indeterminate into the
     // "indeterminate operand blocks (fail-closed)" trail string, and dropping
     // the wrapper would change that string silently.
-    #[allow(unused_assignments)] // consumed once Subject carries `role` (Task 7)
     let mut decided_role: Option<&'static str> = None;
     let verdict = match authz_admission {
         BreakerAdmission::RefuseOpen => maknae_security::Verdict::Deny {
@@ -774,6 +809,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                decided_role,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -810,6 +847,8 @@ pub async fn handle<S, E, P>(
             &socket,
             peer_uid,
             &peer_uri,
+            peer_user.as_deref(),
+            decided_role,
             session_id,
             seq.next(),
             verb_to_action(&request.verb),
@@ -847,6 +886,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                decided_role,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -884,6 +925,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                decided_role,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -925,6 +968,8 @@ pub async fn handle<S, E, P>(
                 &socket,
                 peer_uid,
                 &peer_uri,
+                peer_user.as_deref(),
+                decided_role,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -1062,6 +1107,8 @@ pub async fn handle<S, E, P>(
                                 &socket,
                                 peer_uid,
                                 &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
                                 session_id,
                                 seq.next(),
                                 verb_to_action(&request.verb),
@@ -1132,6 +1179,8 @@ pub async fn handle<S, E, P>(
                         &socket,
                         peer_uid,
                         &peer_uri,
+                        peer_user.as_deref(),
+                        decided_role,
                         session_id,
                         &seq,
                         verb_to_action(&request.verb),
@@ -1148,6 +1197,8 @@ pub async fn handle<S, E, P>(
                         &socket,
                         peer_uid,
                         &peer_uri,
+                        peer_user.as_deref(),
+                        decided_role,
                         session_id,
                         &seq,
                         verb_to_action(&request.verb),
@@ -1182,6 +1233,8 @@ pub async fn handle<S, E, P>(
                     &socket,
                     peer_uid,
                     &peer_uri,
+                    peer_user.as_deref(),
+                    decided_role,
                     session_id,
                     seq.next(),
                     "session.prompt",
@@ -1233,6 +1286,8 @@ pub async fn handle<S, E, P>(
                     "unavailable",
                     &au3_1,
                 );
+                // #275: the peer identity, bounded and audit-only.
+                rec.subject.user = admitted_user(peer_user.as_deref());
                 rec.egress = Some(egress_meta(EgressStatus::BackendUnavailable));
                 let appended =
                     emit_or_report(&emit, &rec, "egress refusal", peer_uid, session_id).await;
@@ -1268,6 +1323,8 @@ pub async fn handle<S, E, P>(
                 "authorized",
                 &au3_1,
             );
+            // #275: the peer identity, bounded and audit-only.
+            intent.subject.user = admitted_user(peer_user.as_deref());
             intent.egress = Some(egress_meta(EgressStatus::IntentOnly));
             let intent = match crate::egress::commit_intent(&*emit, intent).await {
                 Ok(i) => i,
@@ -1385,6 +1442,8 @@ pub async fn handle<S, E, P>(
                                     &socket,
                                     peer_uid,
                                     &peer_uri,
+                                    peer_user.as_deref(),
+                                    decided_role,
                                     session_id,
                                     &seq,
                                     "session.prompt",
@@ -1401,6 +1460,8 @@ pub async fn handle<S, E, P>(
                                     &socket,
                                     peer_uid,
                                     &peer_uri,
+                                    peer_user.as_deref(),
+                                    decided_role,
                                     session_id,
                                     &seq,
                                     "session.prompt",
@@ -1502,6 +1563,8 @@ pub async fn handle<S, E, P>(
                         &socket,
                         peer_uid,
                         &peer_uri,
+                        peer_user.as_deref(),
+                        decided_role,
                         session_id,
                         seq.next(),
                         verb_to_action(&request.verb),
@@ -1544,6 +1607,8 @@ pub async fn handle<S, E, P>(
                         &socket,
                         peer_uid,
                         &peer_uri,
+                        peer_user.as_deref(),
+                        decided_role,
                         session_id,
                         seq.next(),
                         verb_to_action(&request.verb),
@@ -1625,6 +1690,9 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
     socket: &str,
     peer_uid: u32,
     peer_uri: &str,
+    // #275: the peer's OS username, already bounded.
+    peer_user: Option<&str>,
+    role: Option<&'static str>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1640,6 +1708,8 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
         socket,
         peer_uid,
         peer_uri,
+        peer_user,
+        role,
         session_id,
         seq.next(),
         action,
@@ -1677,6 +1747,9 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     socket: &str,
     peer_uid: u32,
     peer_uri: &str,
+    // #275: the peer's OS username, already bounded.
+    peer_user: Option<&str>,
+    role: Option<&'static str>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1690,6 +1763,8 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
         socket,
         peer_uid,
         peer_uri,
+        peer_user,
+        role,
         session_id,
         seq.next(),
         action,
@@ -1729,6 +1804,8 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     socket: &str,
     peer_uid: u32,
     peer_uri: &str,
+    peer_user: Option<&str>,
+    role: Option<&'static str>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1738,7 +1815,8 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 {
     if bytes.len() > cfg.frame_max_bytes {
         refuse_oversize_bounded(
-            stream, cfg, emit, host, socket, peer_uid, peer_uri, session_id, seq, action, au3_1,
+            stream, cfg, emit, host, socket, peer_uid, peer_uri, peer_user, role, session_id, seq,
+            action, au3_1,
         )
         .await;
         return;
@@ -1787,6 +1865,11 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     socket: &str,
     uid: u32,
     peer_uri: &str,
+    // #275: the peer's OS username, already bounded by `admitted_user`.
+    peer_user: Option<&str>,
+    // #275: the role the decision was MADE ON, or None on records that
+    // carry no decision (connection/transport pseudo-actions).
+    role: Option<&'static str>,
     session_id: u64,
     seq: u64,
     action: &str,
@@ -1816,6 +1899,9 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
         posture,
         au3_1,
     );
+    // #275: the peer identity, bounded and audit-only.
+    rec.subject.user = admitted_user(peer_user);
+    rec.subject.role = role.map(str::to_string);
     rec.object_requested = object_requested.map(str::to_string);
     match emit.emit(&rec).await {
         Ok(()) => true,
@@ -1835,13 +1921,18 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     socket: &str,
     uid: u32,
     peer_uri: &str,
+    // #275: the peer's OS username, already bounded by `admitted_user`.
+    peer_user: Option<&str>,
+    // #275: the role the decision was MADE ON, or None on records that
+    // carry no decision (connection/transport pseudo-actions).
+    role: Option<&'static str>,
     session_id: u64,
     seq: u64,
     action: &str,
     reason: &str,
     au3_1: &serde_json::Value,
 ) {
-    let rec = make_record(
+    let mut rec = make_record(
         "request",
         host,
         socket,
@@ -1858,6 +1949,9 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
         "unauthorized",
         au3_1,
     );
+    // #275: the peer identity, bounded and audit-only.
+    rec.subject.user = admitted_user(peer_user);
+    rec.subject.role = role.map(str::to_string);
     if let Err(e) = emit.emit(&rec).await {
         // See the group-check deny above: logged, not control-flow-changing — the
         // caller already closes the connection regardless.
@@ -2116,7 +2210,17 @@ where
                                             let now = Instant::now();
                                             let admission =
                                                 group_breaker.lock().await.begin_attempt_at(now);
-                                            let in_group = match admission {
+                                            // #275: the peer's OS username rides
+                                            // out of the SAME blocking lookup that
+                                            // answers membership, so it inherits the
+                                            // timeout and the breaker. Resolving it
+                                            // anywhere else would put an unbounded
+                                            // getpwuid back on this async worker —
+                                            // exactly what the breaker exists to
+                                            // prevent. On every fail-closed arm the
+                                            // name is absent, deliberately: not
+                                            // spawning NSS work is the point.
+                                            let (in_group, peer_user) = match admission {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker
                                                         .lock()
@@ -2127,9 +2231,9 @@ where
                                                             "maknaed: `maknae` group lookup circuit breaker open for uid={uid} — failing closed without spawning more NSS work"
                                                         );
                                                     }
-                                                    false
+                                                    (false, None)
                                                 }
-                                                BreakerAdmission::RefuseAtCapacity => false,
+                                                BreakerAdmission::RefuseAtCapacity => (false, None),
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
                                                     GROUP_LOOKUP_TIMEOUT,
                                                     tokio::task::spawn_blocking(move || {
@@ -2142,8 +2246,10 @@ where
                                                         // The NSS worker returned or panicked;
                                                         // either way it is no longer an orphan.
                                                         group_breaker.lock().await.record_success();
-                                                        join.map(|r| r.unwrap_or(false))
-                                                            .unwrap_or(false)
+                                                        match join {
+                                                            Ok(Ok(m)) => (m.in_group, Some(m.user)),
+                                                            _ => (false, None),
+                                                        }
                                                     }
                                                     Err(_elapsed) => {
                                                         if group_breaker
@@ -2162,7 +2268,7 @@ where
                                                                 GROUP_LOOKUP_TIMEOUT.as_secs()
                                                             );
                                                         }
-                                                        false
+                                                        (false, None)
                                                     }
                                                 },
                                             };
@@ -2173,6 +2279,7 @@ where
                                             // proven in the handle() suite).
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
+                                                peer_user,
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer, principal,
                                                 config_view,

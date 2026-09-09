@@ -252,6 +252,7 @@ where
         "maknae://d/plane/cli".to_string(),
         peer_uid,
         true,
+        None,
         emit,
         1,
         transport,

@@ -440,9 +440,14 @@ where
         record.object_requested = Some(asked.into());
     }
     record.object = Some(decided);
-    // #275: the role is threaded here and stamped once `Subject` carries the
-    // field (Task 7). Both arms carry it so the REFUSED mutation -- the
-    // security-interesting record -- attests the role it was refused under.
+    // #275: stamp the role BEFORE the deny branch, so the REFUSED mutation --
+    // the security-interesting record -- attests the role it was refused under.
+    // Both arms carry it; the permit arm alone would leave every denied
+    // fs.write/fs.delete/fs.mkdir saying role=none while a role WAS resolved.
+    record.subject.role = match &decision {
+        Ok(role) => role.map(str::to_string),
+        Err((_, _, role)) => role.map(str::to_string),
+    };
     if let Err((reason, denied_path, _role)) = decision {
         record.object_requested = (asked != denied_path).then(|| asked.into());
         record.object = Some(denied_path);
