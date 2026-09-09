@@ -63,7 +63,7 @@ use crate::handler::{
 use maknae_config::Principal;
 use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing};
 use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
-use maknae_security::{combine, finalize, guarded_decide, Authorizer, Decision};
+use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
 
 static AUTHZ_DECIDE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 static READ_PEP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
@@ -684,6 +684,13 @@ pub async fn handle<S, E, P>(
     );
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
+    // #275: the role rides out WITH the verdict so the audit record attests the
+    // role this very decision was made on. `combine(vec![..])` is preserved
+    // deliberately: it is what turns an Indeterminate into the
+    // "indeterminate operand blocks (fail-closed)" trail string, and dropping
+    // the wrapper would change that string silently.
+    #[allow(unused_assignments)] // consumed once Subject carries `role` (Task 7)
+    let mut decided_role: Option<&'static str> = None;
     let verdict = match authz_admission {
         BreakerAdmission::RefuseOpen => maknae_security::Verdict::Deny {
             reason: "authorization decision circuit breaker open".into(),
@@ -697,14 +704,16 @@ pub async fn handle<S, E, P>(
                 tokio::time::timeout(
                     authz_decide_timeout,
                     tokio::task::spawn_blocking(move || {
-                        combine(vec![guarded_decide(&*a, &sec_req)])
+                        let (v, role) = guarded_decide_reporting_role(&*a, &sec_req);
+                        (combine(vec![v]), role)
                     }),
                 )
                 .await
             };
             match decided {
-                Ok(Ok(v)) => {
+                Ok(Ok((v, role))) => {
                     authz_breaker.lock().await.record_success();
+                    decided_role = role;
                     v
                 }
                 Ok(Err(_join)) => {

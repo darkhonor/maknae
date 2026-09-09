@@ -34,8 +34,8 @@
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
-    compose_backend_name, compose_decide, compose_subjects, Authorizer, Request, SubjectBinding,
-    Verdict,
+    compose_backend_name, compose_decide_reporting_role, compose_subjects, Authorizer, Request,
+    SubjectBinding, Verdict,
 };
 
 /// The daemon's PDP: baseline ∧ ceiling, deny-overrides.
@@ -78,7 +78,16 @@ pub fn build_pdp<B: Baseline>(boot: &crate::boot::BootConfig, baseline: B) -> Co
 
 impl<B: Baseline> Authorizer for Composition<B> {
     fn decide(&self, req: &Request) -> Verdict {
-        compose_decide(&self.operands(), req)
+        self.decide_reporting_role(req).0
+    }
+
+    /// The one decision path (#275). Folds through the seam's
+    /// `compose_decide_reporting_role`, so `combine` and the panic boundary stay
+    /// defined in one place and a future extensions operand is picked up by
+    /// `operands()` automatically. `decide` is this function's `.0`, so every
+    /// existing composition test still covers what production runs.
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        compose_decide_reporting_role(&self.operands(), req)
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
