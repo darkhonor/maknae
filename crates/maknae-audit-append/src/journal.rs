@@ -167,6 +167,34 @@ pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
 /// copy and the JSONL line can never disagree. The filterable `MAKNAE_*` fields
 /// are duplicates of record content for `journalctl` querying, never a second
 /// source of truth.
+/// The DEGRADED journald datagram (#275): the availability marker, small enough
+/// to survive an `EMSGSIZE` that rejected the full record.
+///
+/// Same discipline as the macOS degraded line — `session_id` + `seq` ARE the
+/// pointer into the primary JSONL, so no digest and no payload; `MAKNAE_PRIMARY`
+/// rides along because three of [`PrimaryOutcome`]'s four values mean the
+/// primary never durably wrote.
+pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec<u8> {
+    let f = fields_of(rec, primary);
+    let mut buf = Vec::new();
+    push_field(&mut buf, "PRIORITY", b"4");
+    push_field(&mut buf, "SYSLOG_IDENTIFIER", SYSLOG_IDENTIFIER.as_bytes());
+    push_field(
+        &mut buf,
+        "MESSAGE",
+        b"maknae audit: DEGRADED - read the primary JSONL",
+    );
+    push_field(
+        &mut buf,
+        "MAKNAE_SESSION",
+        f.session_id.to_string().as_bytes(),
+    );
+    push_field(&mut buf, "MAKNAE_SEQ", f.seq.to_string().as_bytes());
+    push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
+    push_field(&mut buf, "MAKNAE_DEGRADED", b"read-primary-jsonl");
+    buf
+}
+
 pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u8>, AuditError> {
     let canonical = canonical_json(rec)?;
     let f = fields_of(rec, primary);
