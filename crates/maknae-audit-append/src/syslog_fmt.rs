@@ -225,7 +225,11 @@ pub(crate) enum Mirrored {
     Degraded(String),
 }
 
-#[cfg(test)]
+// Test-surface helpers. `#[allow(dead_code)]` rather than `#[cfg(test)]`: the
+// coverage gate requires a column-0 `#[cfg(test)]` to introduce a `mod`, and
+// these are inherent methods. They are exercised by this file's tests, so they
+// cost no uncovered regions.
+#[allow(dead_code)]
 impl Mirrored {
     /// The full line, or `None` when the record could only be degraded.
     /// Existing assertions that mean "this record mirrors in full" read
@@ -255,7 +259,7 @@ static DEGRADED_MIRRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// disclose it on the wire (no `admin.status` field, no disclosure-manifest
 /// row), and a `[t1]` file needs an observer or the `fetch_add` mutant is
 /// unkillable. Wiring it to an operator surface is a follow-on.
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn degraded_mirror_count() -> u64 {
     DEGRADED_MIRRORS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -405,6 +409,75 @@ mod tests {
             "a degraded emission must be counted: {before} -> {}",
             degraded_mirror_count()
         );
+    }
+
+    /// The degraded line's CONTENT, pinned. Kills the two
+    /// `degraded_line -> String` stubs: every other assertion looks at lengths
+    /// or at the absence of the payload, both of which an empty string
+    /// satisfies.
+    #[test]
+    fn the_degraded_line_carries_the_pointer_into_the_primary_jsonl() {
+        let mut r = rec("no");
+        r.session_id = 4242;
+        r.seq = 77;
+        r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        let Mirrored::Degraded(l) = format_record(&r, PrimaryOutcome::Ok).unwrap() else {
+            panic!("the pathological record must degrade");
+        };
+        // session + seq ARE the pointer -- without them the marker proves a
+        // record existed but not WHICH one, which is not a pointer at all.
+        assert!(l.contains("session=4242"), "{l}");
+        assert!(l.contains("seq=77"), "{l}");
+        assert!(l.contains("MAKNAE_DEGRADED="), "{l}");
+        assert!(l.contains(SYSLOG_IDENTIFIER), "{l}");
+        assert!(l.contains("DEGRADED"), "{l}");
+        assert!(!l.contains("MAKNAE_RECORD="), "{l}");
+    }
+
+    /// Both branches of the primary-outcome test. Kills `== -> !=`.
+    ///
+    /// The distinction is load-bearing: three of `PrimaryOutcome`'s four values
+    /// mean the primary never durably wrote, and a marker that says "read the
+    /// JSONL" for a record that was never written is worse than silence.
+    #[test]
+    fn the_degraded_line_only_points_at_a_primary_that_actually_wrote() {
+        let mut r = rec("no");
+        r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+
+        let Mirrored::Degraded(ok) = format_record(&r, PrimaryOutcome::Ok).unwrap() else {
+            panic!("must degrade");
+        };
+        assert!(
+            ok.contains("MAKNAE_DEGRADED=read-primary-jsonl"),
+            "a durable primary must be pointed at: {ok}"
+        );
+
+        for p in [
+            PrimaryOutcome::WriteFailed,
+            PrimaryOutcome::RefusedBreakerOpen,
+            PrimaryOutcome::RefusedAtCapacity,
+        ] {
+            let Mirrored::Degraded(bad) = format_record(&r, p).unwrap() else {
+                panic!("must degrade");
+            };
+            assert!(
+                bad.contains("MAKNAE_DEGRADED=primary-did-not-write"),
+                "{p:?}: must NOT send the operator to a record that was never written: {bad}"
+            );
+        }
+    }
+
+    /// `is_full` / `is_degraded` must disagree on the same value — kills the
+    /// `-> true` stubs, which every existing use survives because each is only
+    /// ever asserted in the direction it already holds.
+    #[test]
+    fn the_two_mirror_predicates_are_exclusive() {
+        let full = format_record(&rec("no"), PrimaryOutcome::Ok).unwrap();
+        assert!(full.is_full() && !full.is_degraded());
+        let mut r = rec("no");
+        r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        let deg = format_record(&r, PrimaryOutcome::Ok).unwrap();
+        assert!(deg.is_degraded() && !deg.is_full());
     }
 
     /// The eight #172 egress shapes at a REAL identity, plus a deliberately

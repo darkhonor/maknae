@@ -360,7 +360,7 @@ fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict
 /// exists so the 54 in-file assertions keep asserting on a bare `Verdict`
 /// rather than being rewritten to `.0` — the verdict they check is byte-for-byte
 /// the one production enforces.
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn decide_loaded(
     lp: &LoadedPolicy,
     principal: &maknae_config::Principal,

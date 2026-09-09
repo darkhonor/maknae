@@ -991,6 +991,28 @@ mod tests {
     /// Poll with a bounded backoff (records take ~1s to appear). NOT a fixed
     /// sleep, and NOT unbounded.
     #[cfg(target_os = "macos")]
+    /// Poll the real unified log for a record we just submitted.
+    ///
+    /// **Fails fast when the formatter cannot produce the needle at all.** The
+    /// 15s ceiling exists to let the log store settle, but under mutation a
+    /// broken formatter would simply never emit the needle and this would burn
+    /// the whole ceiling — cargo-mutants' auto timeout is 20s, so the mutant
+    /// reports TIMEOUT rather than CAUGHT, and `coverage-tiers.sh` fails on
+    /// timeouts exactly as it fails on misses. Checking the LOCAL formatting
+    /// first turns that into an immediate, honest failure. Same reasoning as
+    /// `syslog_fmt::tests::record_formatting_to_exactly`'s bounded loop.
+    fn macos_await_nonce_for(rec: &AuditRecord, nonce: u64) -> Vec<String> {
+        let local = crate::syslog_fmt::format_line_unchecked(rec, PrimaryOutcome::Ok)
+            .expect("the record must format at all");
+        let needle = format!("session={nonce} ");
+        assert!(
+            local.contains(&needle),
+            "the formatter does not produce the needle locally, so waiting on the \
+             platform would only burn the ceiling: {local}"
+        );
+        macos_await_nonce(nonce)
+    }
+
     fn macos_await_nonce(nonce: u64) -> Vec<String> {
         let needle = format!("session={nonce} ");
         let mut waited = std::time::Duration::ZERO;
@@ -1036,7 +1058,7 @@ mod tests {
         rec.session_id = sentinel_nonce;
         sink.append(&rec).await.unwrap();
 
-        let msgs = macos_await_nonce(sentinel_nonce);
+        let msgs = macos_await_nonce_for(&rec, sentinel_nonce);
 
         // POSITIVE CONTROL FIRST: at least one record carrying THIS RUN's nonce
         // — never merely "the set is non-empty".
@@ -1142,7 +1164,11 @@ mod tests {
             );
         }
 
-        let msgs = macos_await_nonce(n_failed);
+        // Same fast-fail as the other two sites; `r` is the last record built
+        // above and carries `n_failed`.
+        let mut probe = sample_record();
+        probe.session_id = n_failed;
+        let msgs = macos_await_nonce_for(&probe, n_failed);
         for (nonce, marker) in [
             (n_ok, "MAKNAE_PRIMARY=ok"),
             (n_breaker, "MAKNAE_PRIMARY=refused-breaker-open"),
@@ -1221,7 +1247,7 @@ mod tests {
         let sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
         sink.append(&at_cap).await.unwrap();
 
-        let msgs = macos_await_nonce(nonce);
+        let msgs = macos_await_nonce_for(&at_cap, nonce);
         let needle = format!("session={nonce} ");
         let got = msgs
             .iter()

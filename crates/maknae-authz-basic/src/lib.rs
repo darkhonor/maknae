@@ -165,7 +165,7 @@ impl BasicAuthorizer {
     /// [`Self::decide_with_loader_reporting_role`]. Kept so the five existing
     /// assertions bind a bare `Verdict`; it is that function's `.0`, so they
     /// check exactly what production enforces.
-    #[cfg(test)]
+    #[allow(dead_code)]
     fn decide_with_loader(
         &self,
         req: &maknae_security::Request,
