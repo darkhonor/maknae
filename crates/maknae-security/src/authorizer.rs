@@ -23,6 +23,31 @@ pub struct SubjectBinding {
 pub trait Authorizer {
     fn decide(&self, req: &Request) -> Verdict;
 
+    /// The verdict AND the role it was decided on, from the SAME evaluation.
+    ///
+    /// **Defaulted on purpose.** An operand that does not key on roles — the
+    /// mandatory classification ceiling, every test double, any future additive
+    /// operand — inherits this unchanged and reports no role, which is honest.
+    /// Only the RBAC baseline and the composition override it.
+    ///
+    /// **Why it exists (#275).** The audit record must carry the role the
+    /// decision was MADE ON. The in-repo RBAC operand re-reads its policy file
+    /// on every decision, so resolving the role in a second call would both
+    /// read twice and open a window in which the file changes between the
+    /// decision and the stamp — the record would then attest a role the
+    /// decision was not made on. Returning both facts together closes that by
+    /// construction.
+    ///
+    /// **A wrapper that delegates [`Authorizer::decide`] MUST also delegate
+    /// this**, or it silently reports no role for a decision that had one.
+    ///
+    /// `&'static str` because the role vocabulary is fixed and compiled in; the
+    /// seam stays policy-agnostic by reporting an opaque token it never
+    /// interprets, exactly as [`SubjectBinding`] does.
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        (self.decide(req), None)
+    }
+
     /// The bindings this PDP would resolve **right now**, for
     /// `admin.subject.list`.
     ///
@@ -118,6 +143,35 @@ mod tests {
             action: Action("x".into()),
             context: Context(Attributes::new()),
         }
+    }
+
+    #[test]
+    fn an_authorizer_that_does_not_key_on_roles_reports_no_role_by_default() {
+        // #275: the default must report the SAME verdict `decide` does, and no
+        // role — never an invented one. Every operand that does not key on
+        // roles (the classification ceiling, every test double, any future
+        // additive operand) inherits exactly this.
+        let a = Always(Verdict::Permit {
+            obligations: Vec::new(),
+        });
+        let (v, role) = a.decide_reporting_role(&req());
+        assert_eq!(
+            v,
+            Verdict::Permit {
+                obligations: Vec::new()
+            }
+        );
+        assert_eq!(role, None, "the default must never invent a role");
+    }
+
+    #[test]
+    fn reporting_the_role_keeps_the_trait_object_safe() {
+        // The coercion compiling IS the proof; a generic or `Self`-returning
+        // method would break `Box<dyn Authorizer>` and the composed build.
+        let b: Box<dyn Authorizer> = Box::new(Always(Verdict::Indeterminate));
+        let (v, role) = b.decide_reporting_role(&req());
+        assert_eq!(v, Verdict::Indeterminate);
+        assert_eq!(role, None);
     }
 
     #[test]
