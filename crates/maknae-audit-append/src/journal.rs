@@ -108,7 +108,15 @@ pub(crate) struct RecordFields<'a> {
     pub(crate) action: &'a str,
     pub(crate) outcome: &'a str,
     /// `"unknown"` when the record carries no subject user.
+    ///
+    /// Deliberately DISTINCT from [`RecordFields::role`]'s `"none"`: `unknown`
+    /// means the record carried no user, `none` means the PDP resolved no role.
+    /// Collapsing the two would hide which of them happened (#275).
     pub(crate) subject: &'a str,
+    /// `"none"` when the PDP resolved no role, or the record carries no
+    /// decision at all. See [`RecordFields::subject`] on why this is not
+    /// `"unknown"`.
+    pub(crate) role: &'a str,
     /// `"-"` when the record names no object.
     pub(crate) object: &'a str,
     pub(crate) primary: &'static str,
@@ -129,6 +137,7 @@ pub(crate) fn fields_of(rec: &AuditRecord, primary: PrimaryOutcome) -> RecordFie
         action: &rec.action,
         outcome: &rec.outcome.result,
         subject: rec.subject.user.as_deref().unwrap_or("unknown"),
+        role: rec.subject.role.as_deref().unwrap_or("none"),
         object: rec.object.as_deref().unwrap_or("-"),
         primary: primary.as_field(),
         is_deny: rec.outcome.result == "deny",
@@ -147,8 +156,8 @@ pub(crate) fn fields_of(rec: &AuditRecord, primary: PrimaryOutcome) -> RecordFie
 /// forgery surface there and the operator keeps the object.
 pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
     format!(
-        "maknae audit: {} {} subject={} object={} session={} seq={}",
-        f.action, f.outcome, f.subject, f.object, f.session_id, f.seq
+        "maknae audit: {} {} subject={} role={} object={} session={} seq={}",
+        f.action, f.outcome, f.subject, f.role, f.object, f.session_id, f.seq
     )
 }
 
@@ -176,6 +185,7 @@ pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u
     push_field(&mut buf, "MAKNAE_ACTION", f.action.as_bytes());
     push_field(&mut buf, "MAKNAE_OUTCOME", f.outcome.as_bytes());
     push_field(&mut buf, "MAKNAE_SUBJECT", f.subject.as_bytes());
+    push_field(&mut buf, "MAKNAE_ROLE", f.role.as_bytes());
     push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
     push_field(&mut buf, "MAKNAE_RECORD", canonical.as_bytes());
     Ok(buf)
@@ -208,6 +218,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: None,
             },
             action: "fs.read".into(),

@@ -101,8 +101,12 @@ impl SyslogMirror {
     /// (`nix-0.31.3/src/lib.rs:351-362`) with a heap `CString` and no error, so
     /// the 1015-byte cap is the PLATFORM's, not the crate's.
     pub(crate) fn mirror(&self, rec: &AuditRecord, primary: PrimaryOutcome) {
-        let Ok(Some(line)) = format_record(rec, primary) else {
-            return;
+        // BOTH arms are emitted. A degraded line is the availability marker
+        // (#275) -- never silence, which is what this used to do.
+        let line = match format_record(rec, primary) {
+            Ok(crate::syslog_fmt::Mirrored::Full(l))
+            | Ok(crate::syslog_fmt::Mirrored::Degraded(l)) => l,
+            Err(_) => return,
         };
         let _ = syslog(
             Priority::new(Severity::LOG_WARNING, Facility::LOG_LOCAL0),
@@ -134,6 +138,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: None,
             },
             action: "fs.read".into(),

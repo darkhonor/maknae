@@ -372,6 +372,7 @@ mod tests {
             },
             subject: Subject {
                 user: None,
+                role: None,
                 plane_uri_san: Some("maknae://d/plane/cli".into()),
             },
             action: "session.prompt".into(),

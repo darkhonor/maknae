@@ -303,6 +303,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: Some("urn:maknae:plane:cli".into()),
             },
             action: "connect".into(),
@@ -1069,12 +1070,24 @@ mod tests {
             "the unified-log copy and the JSONL line must be byte-identical"
         );
 
-        // The oversize record was DROPPED by the formatter, never truncated.
-        let dropped = format!("session={oversize_nonce} ");
+        // #275: an oversize record is no longer DROPPED — it is delivered in
+        // DEGRADED form. What must never happen is a truncated full record: the
+        // degraded line carries no `MAKNAE_RECORD=` payload at all.
+        let marker = format!("seq={oversize_nonce} ");
+        let degraded: Vec<&String> = msgs
+            .iter()
+            .filter(|m| m.contains("MAKNAE_DEGRADED="))
+            .collect();
         assert!(
-            !msgs.iter().any(|m| m.contains(&dropped)),
-            "an oversize record must be DROPPED, not delivered truncated"
+            !degraded.is_empty() || !msgs.iter().any(|m| m.contains(&marker)),
+            "an oversize record must be degraded, never truncated"
         );
+        for m in degraded {
+            assert!(
+                !m.contains("MAKNAE_RECORD="),
+                "a degraded line must not carry the payload: {m}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

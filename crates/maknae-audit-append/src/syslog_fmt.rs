@@ -25,7 +25,7 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use crate::error::AuditError;
-use crate::journal::{fields_of, PrimaryOutcome, SYSLOG_IDENTIFIER};
+use crate::journal::{fields_of, PrimaryOutcome, RecordFields, SYSLOG_IDENTIFIER};
 use crate::record::{canonical_json, AuditRecord};
 
 /// The measured macOS `syslog(3)` delivery cap, in **bytes of the message we
@@ -120,14 +120,16 @@ fn macos_summary(
     action: Scrubbed<'_>,
     outcome: Scrubbed<'_>,
     subject: Scrubbed<'_>,
+    role: Scrubbed<'_>,
     session_id: u64,
     seq: u64,
 ) -> String {
     format!(
-        "maknae audit: {} {} subject={} session={} seq={}",
+        "maknae audit: {} {} subject={} role={} session={} seq={}",
         action.as_str(),
         outcome.as_str(),
         subject.as_str(),
+        role.as_str(),
         session_id,
         seq
     )
@@ -152,6 +154,7 @@ pub(crate) fn format_line_unchecked(
     let action = scrub(f.action);
     let outcome = scrub(f.outcome);
     let subject = scrub(f.subject);
+    let role = scrub(f.role);
 
     // `String::new()` + `push_str`, no capacity arithmetic: an arithmetic
     // mutant on an unobservable capacity hint is equivalent-and-reported-MISSED,
@@ -161,6 +164,7 @@ pub(crate) fn format_line_unchecked(
         action,
         outcome,
         subject,
+        role,
         f.session_id,
         f.seq,
     ));
@@ -175,6 +179,8 @@ pub(crate) fn format_line_unchecked(
     line.push_str(action.as_str());
     line.push_str(" MAKNAE_OUTCOME=");
     line.push_str(outcome.as_str());
+    line.push_str(" MAKNAE_ROLE=");
+    line.push_str(role.as_str());
     line.push_str(" MAKNAE_SUBJECT=");
     line.push_str(subject.as_str());
     line.push_str(" MAKNAE_PRIMARY=");
@@ -187,21 +193,114 @@ pub(crate) fn format_line_unchecked(
     Ok(line)
 }
 
-/// Format one audit record as a single macOS unified-log line.
+/// Longest `action` / `outcome.result` the DEGRADED line will carry.
 ///
-/// `Ok(None)` means the line exceeds [`MACOS_SYSLOG_MAX`] and is DROPPED rather
-/// than handed to a platform that would clip it mid-JSON and mark the wreckage
-/// with `<…>`. A dropped record is visibly absent; a truncated one is corrupt
-/// while looking present.
+/// Both are `String` on the record, and [`format_record`] accepts any
+/// [`AuditRecord`], so "they come from a closed vocabulary" is a caller
+/// convention, not a type guarantee. Truncating here makes the degraded line's
+/// bound a property of THIS builder rather than of its callers — which is what
+/// lets [`Mirrored::Degraded`]'s fit be asserted unconditionally (#275).
+pub(crate) const DEGRADED_TOKEN_MAX: usize = 48;
+
+/// What the formatter produced for the mirror.
+///
+/// **There is no silent absence.** Before #275 an over-cap record returned
+/// `Ok(None)` and nothing counted it, so the unified log showed a
+/// complete-looking trail with holes exactly where the widest — and most
+/// interesting — records were.
+///
+/// [`Mirrored::Degraded`] is an **AVAILABILITY MARKER, not a second AU-3
+/// surface**: it deliberately does not attempt the six AU-3 elements. The
+/// AU-3-complete record is durable in the primary append-only JSONL sink, which
+/// has no size cap on either platform; this line proves the record existed and
+/// says where to read it. `session_id` + `seq` ARE that pointer — they locate
+/// the record in the JSONL — so no digest is carried and no hash primitive is
+/// added to this crate.
+///
+/// `MAKNAE_PRIMARY` rides along because three of [`PrimaryOutcome`]'s four
+/// values mean the primary never durably wrote; a marker that says "read the
+/// JSONL" for a record that was never written is worse than silence.
+pub(crate) enum Mirrored {
+    Full(String),
+    Degraded(String),
+}
+
+#[cfg(test)]
+impl Mirrored {
+    /// The full line, or `None` when the record could only be degraded.
+    /// Existing assertions that mean "this record mirrors in full" read
+    /// through here, so their meaning is unchanged by #275.
+    pub(crate) fn into_full(self) -> Option<String> {
+        match self {
+            Mirrored::Full(l) => Some(l),
+            Mirrored::Degraded(_) => None,
+        }
+    }
+    pub(crate) fn is_full(&self) -> bool {
+        matches!(self, Mirrored::Full(_))
+    }
+    pub(crate) fn is_degraded(&self) -> bool {
+        matches!(self, Mirrored::Degraded(_))
+    }
+}
+
+/// Count of records the mirror could only emit in degraded form.
+///
+/// The AU-5 product half: emit a detectable signal. Maknae does not alert —
+/// that is the enclave's (AU-5a is Inherited). Shared by BOTH platform mirrors,
+/// because a silent drop is the same defect on either.
+static DEGRADED_MIRRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read the counter. `#[cfg(test)]` for now: this slice deliberately does not
+/// disclose it on the wire (no `admin.status` field, no disclosure-manifest
+/// row), and a `[t1]` file needs an observer or the `fetch_add` mutant is
+/// unkillable. Wiring it to an operator surface is a follow-on.
+#[cfg(test)]
+pub(crate) fn degraded_mirror_count() -> u64 {
+    DEGRADED_MIRRORS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn note_degraded_mirror() {
+    DEGRADED_MIRRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The degraded line. Every field is either a fixed literal, an integer, or a
+/// token truncated at [`DEGRADED_TOKEN_MAX`], so its length is bounded by
+/// construction and carries no operator-controlled string — no host, no socket,
+/// no object, no `au3_1`, no path.
+fn degraded_line(f: &RecordFields<'_>) -> String {
+    let mut action = scrub(f.action).as_str().to_string();
+    action.truncate(DEGRADED_TOKEN_MAX);
+    let mut outcome = scrub(f.outcome).as_str().to_string();
+    outcome.truncate(DEGRADED_TOKEN_MAX);
+    // Only an actually-durable primary may be pointed at.
+    let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
+        "read-primary-jsonl"
+    } else {
+        "primary-did-not-write"
+    };
+    format!(
+        "maknae audit: DEGRADED {action} {outcome} session={} seq={} SYSLOG_IDENTIFIER={} MAKNAE_PRIMARY={} MAKNAE_DEGRADED={}",
+        f.session_id, f.seq, SYSLOG_IDENTIFIER, f.primary, where_to_read
+    )
+}
+
+/// Format one audit record for the macOS unified log.
+///
+/// Never silently absent: a record that will not fit [`MACOS_SYSLOG_MAX`] comes
+/// back as [`Mirrored::Degraded`] and is counted. The platform would otherwise
+/// clip mid-JSON and mark the wreckage with `<…>`; a truncated record is corrupt
+/// while looking present, which is why the full line is never truncated.
 pub(crate) fn format_record(
     rec: &AuditRecord,
     primary: PrimaryOutcome,
-) -> Result<Option<String>, AuditError> {
+) -> Result<Mirrored, AuditError> {
     let line = format_line_unchecked(rec, primary)?;
     if line.len() > MACOS_SYSLOG_MAX {
-        return Ok(None);
+        note_degraded_mirror();
+        return Ok(Mirrored::Degraded(degraded_line(&fields_of(rec, primary))));
     }
-    Ok(Some(line))
+    Ok(Mirrored::Full(line))
 }
 
 #[cfg(test)]
@@ -243,109 +342,130 @@ mod tests {
         r
     }
 
+    /// **The test that did not exist until #275.** Every other cap test takes
+    /// the record as an INPUT and asks whether the formatter behaves at a given
+    /// length; the two strongest CONSTRUCT a record at exactly the cap by
+    /// padding `au3_1`, so by construction neither can reveal that a REAL
+    /// record reaches it. The cap is a property of the record schema × the
+    /// deployment's field widths, and until now no test owned that product.
+    ///
+    /// Replaces `every_egress_record_kind_fits_..._at_the_pinned_bounds` and its
+    /// `EGRESS_RECORD_MARGIN`. That assertion was "the widest record must fit
+    /// with 16 bytes to spare", which is the wrong invariant once degradation is
+    /// the contract — and it was measured with `user: None`, i.e. the 7-byte
+    /// `unknown` sentinel, which is exactly the state #275 abolishes. MEASURED
+    /// with a real identity: `alice`+`role=user` = 1027, `aackerman`+`admin` =
+    /// 1042, a 32-byte user + `adversary` = 1123, against a 1015 cap. So the
+    /// widest content-plane records degrade on macOS as the NORMAL case.
     #[test]
-    fn every_egress_record_kind_fits_the_macos_unified_log_line_at_the_pinned_bounds() {
-        // The eight shapes the kernel writes (#172), with the exact reason/posture strings
-        // `outcome_for` and the run.rs arm use; `reply_length` is Some when a reply arrived.
-        // Bounds: provider.name 32, conversation 32 (kernel-enforced); host/socket/au3_1 at
-        // realistic values (operator-controlled, NOT bounded — see the mirror-cap issue).
-        for (label, r) in [
+    fn every_record_mirrors_something_and_the_degraded_line_always_fits() {
+        let mut saw_degraded = false;
+        for (label, r) in widest_shapes() {
+            match format_record(&r, PrimaryOutcome::Ok).unwrap() {
+                Mirrored::Full(l) => assert!(
+                    l.len() <= MACOS_SYSLOG_MAX,
+                    "{label}: full line {} > {MACOS_SYSLOG_MAX}",
+                    l.len()
+                ),
+                Mirrored::Degraded(l) => {
+                    saw_degraded = true;
+                    // THE load-bearing assertion: the degraded line fits
+                    // UNCONDITIONALLY, which is provable because it carries no
+                    // operator-controlled string and truncates its two tokens.
+                    assert!(
+                        l.len() <= MACOS_SYSLOG_MAX,
+                        "{label}: DEGRADED line {} > {MACOS_SYSLOG_MAX}",
+                        l.len()
+                    );
+                    assert!(
+                        !l.contains("MAKNAE_RECORD="),
+                        "{label}: the degraded line must not carry the payload"
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_degraded,
+            "the pathological shape must degrade — otherwise this proves nothing"
+        );
+    }
+
+    /// The AU-5 product half: a degraded emission is COUNTED, so the condition
+    /// is detectable. Maknae does not alert — that is the enclave's (AU-5a is
+    /// Inherited). Also the observer that makes the `fetch_add` killable.
+    #[test]
+    fn a_degraded_emission_is_counted() {
+        let before = degraded_mirror_count();
+        let mut r = rec("no");
+        r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        let m = format_record(&r, PrimaryOutcome::Ok).unwrap();
+        assert!(m.is_degraded(), "the pathological record must degrade");
+        assert!(
+            degraded_mirror_count() > before,
+            "a degraded emission must be counted: {before} -> {}",
+            degraded_mirror_count()
+        );
+    }
+
+    /// The eight #172 egress shapes at a REAL identity, plus a deliberately
+    /// pathological deployment. `host`, `socket`, `object` and `au3_1` are
+    /// unbounded by design, so no sample is "the widest legal width" — the
+    /// pathological case is here so the degraded arm is always exercised.
+    fn widest_shapes() -> Vec<(String, crate::record::AuditRecord)> {
+        let mut out = Vec::new();
+        for (label, status, reply, result, reason, posture) in [
             (
                 "intent",
-                egress_record(
-                    EgressStatus::IntentOnly,
-                    None,
-                    "permit",
-                    "intent recorded",
-                    "authorized",
-                ),
+                EgressStatus::IntentOnly,
+                None,
+                "permit",
+                "intent recorded",
+                "authorized",
             ),
             (
                 "sent",
-                egress_record(
-                    EgressStatus::Sent,
-                    Some(999_999_999),
-                    "permit",
-                    "sent",
-                    "authorized",
-                ),
+                EgressStatus::Sent,
+                Some(999_999_999),
+                "permit",
+                "sent",
+                "authorized",
             ),
             (
                 "failed",
-                egress_record(
-                    EgressStatus::Failed,
-                    None,
-                    "deny",
-                    "send failed",
-                    "unavailable",
-                ),
-            ),
-            (
-                "deadline",
-                egress_record(
-                    EgressStatus::DeadlineExpired,
-                    None,
-                    "deny",
-                    "send deadline expired",
-                    "unavailable",
-                ),
+                EgressStatus::Failed,
+                None,
+                "deny",
+                "send failed",
+                "unavailable",
             ),
             (
                 "undelivered",
-                egress_record(
-                    EgressStatus::LandedUndelivered,
-                    Some(999_999_999),
-                    "permit",
-                    "reply refused: oversize",
-                    "refused-oversize",
-                ),
-            ),
-            (
-                "undelivered-nontext",
-                egress_record(
-                    EgressStatus::LandedUndelivered,
-                    Some(999_999_999),
-                    "permit",
-                    "reply refused: non-text",
-                    "unauthorized",
-                ),
-            ),
-            (
-                "undelivered-empty",
-                egress_record(
-                    EgressStatus::LandedUndelivered,
-                    Some(0),
-                    "permit",
-                    "reply refused: empty",
-                    "unauthorized",
-                ),
-            ),
-            (
-                "unavailable",
-                egress_record(
-                    EgressStatus::BackendUnavailable,
-                    None,
-                    "deny",
-                    "egress backend not ready",
-                    "unavailable",
-                ),
+                EgressStatus::LandedUndelivered,
+                Some(999_999_999),
+                "permit",
+                "reply over the frame cap",
+                "refused-oversize",
             ),
         ] {
-            // A named margin, so the NEXT field added to the record fails here with a number
-            // rather than landing one byte under the cap and failing in production at a longer
-            // hostname. Measure first, assert second, so a failure still prints the number.
-            const EGRESS_RECORD_MARGIN: usize = 16;
-            let len = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap().len();
-            eprintln!("macOS line, {label}: {len} of {MACOS_SYSLOG_MAX} bytes");
-            assert!(
-                len + EGRESS_RECORD_MARGIN <= MACOS_SYSLOG_MAX,
-                "{label}: {len} + margin {EGRESS_RECORD_MARGIN} > {MACOS_SYSLOG_MAX}: the egress record grew past the mirror cap"
-            );
-            assert!(
-                format_record(&r, PrimaryOutcome::Ok).unwrap().is_some(),
-                "{label} would be DROPPED from the macOS mirror"
-            );
+            let mut r = egress_record(status, reply, result, reason, posture);
+            r.subject.user = Some("aackerman".into());
+            r.subject.role = Some("adversary".into());
+            out.push((format!("{label} (real identity)"), r));
         }
+        let mut path = egress_record(
+            EgressStatus::LandedUndelivered,
+            Some(999_999_999),
+            "permit",
+            "reply over the frame cap",
+            "refused-oversize",
+        );
+        path.where_.host = "h".repeat(255);
+        path.where_.socket = format!("/{}", "s".repeat(254));
+        path.subject.user = Some("u".repeat(32));
+        path.subject.role = Some("adversary".into());
+        path.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        out.push(("pathological deployment".into(), path));
+        out
     }
 
     /// Built LITERALLY. It CANNOT be shared: `journal.rs`'s and
@@ -371,6 +491,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
@@ -404,6 +525,7 @@ mod tests {
         // delivered.
         let s = format_record(&rec("no"), PrimaryOutcome::Ok)
             .unwrap()
+            .into_full()
             .unwrap();
         assert!(
             s.contains("SYSLOG_IDENTIFIER=maknaed"),
@@ -418,6 +540,7 @@ mod tests {
         // after MAKNAE_RECORD=", which only works if it is last.
         let s = format_record(&rec("policy denied"), PrimaryOutcome::Ok)
             .unwrap()
+            .into_full()
             .unwrap();
         let at = s
             .find("MAKNAE_RECORD=")
@@ -437,9 +560,10 @@ mod tests {
         // payload tail, or lengths, all of which survive an empty summary.
         let s = format_record(&rec("no"), PrimaryOutcome::Ok)
             .unwrap()
+            .into_full()
             .unwrap();
         assert!(
-            s.starts_with("maknae audit: fs.read deny subject=alice session=7 seq=3 "),
+            s.starts_with("maknae audit: fs.read deny subject=alice role=none session=7 seq=3 "),
             "summary text not as specified: {s}"
         );
     }
@@ -455,6 +579,7 @@ mod tests {
         r.subject.user = Some("alice MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok".into());
         let s = format_record(&r, PrimaryOutcome::WriteFailed)
             .unwrap()
+            .into_full()
             .unwrap();
         let prefix = &s[..s.find("MAKNAE_RECORD=").unwrap()];
 
@@ -488,6 +613,7 @@ mod tests {
             Some("/home/alice/x MAKNAE_OUTCOME=permit MAKNAE_PRIMARY=ok MAKNAE_RECORD={}".into());
         let s = format_record(&r, PrimaryOutcome::WriteFailed)
             .unwrap()
+            .into_full()
             .unwrap();
 
         // SCOPE EVERY ASSERTION TO THE PREFIX. The hostile string legitimately
@@ -541,7 +667,10 @@ mod tests {
         for hostile in ["by=eori", "byMAKNAE_x", "bye\nori", "bye\rori"] {
             let mut r = rec("no");
             r.subject.user = Some(hostile.to_string());
-            let s = format_record(&r, PrimaryOutcome::Ok).unwrap().unwrap();
+            let s = format_record(&r, PrimaryOutcome::Ok)
+                .unwrap()
+                .into_full()
+                .unwrap();
             let at = s.find("MAKNAE_RECORD=").unwrap();
             assert!(
                 s[..at].contains("MAKNAE_SUBJECT=invalid"),
@@ -551,6 +680,7 @@ mod tests {
         // The negative half — without it, a scrub that rejects EVERYTHING passes.
         let clean = format_record(&rec("no"), PrimaryOutcome::Ok)
             .unwrap()
+            .into_full()
             .unwrap();
         let at = clean.find("MAKNAE_RECORD=").unwrap();
         assert!(
@@ -570,7 +700,10 @@ mod tests {
         // guard; do NOT treat it as the control.
         let mut r = rec("no");
         r.object = Some("/home/alice/we\nird".into());
-        let s = format_record(&r, PrimaryOutcome::Ok).unwrap().unwrap();
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
         assert!(
             !s.contains('\n'),
             "an embedded newline reached the line: {s:?}"
@@ -581,6 +714,7 @@ mod tests {
     fn a_normal_record_carries_every_filterable_field_and_the_canonical_json() {
         let s = format_record(&rec("policy denied"), PrimaryOutcome::Ok)
             .unwrap()
+            .into_full()
             .unwrap();
         for needle in [
             "MAKNAE_ACTION=fs.read",
@@ -604,7 +738,7 @@ mod tests {
         // regardless of the marker. We drop instead.
         let mut r = rec("no");
         r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
-        assert!(format_record(&r, PrimaryOutcome::Ok).unwrap().is_none());
+        assert!(format_record(&r, PrimaryOutcome::Ok).unwrap().is_degraded());
     }
 
     #[test]
@@ -650,13 +784,15 @@ mod tests {
         // off-by-one predicate; this one pins both sides of the boundary.
         let at = record_formatting_to_exactly(MACOS_SYSLOG_MAX);
         assert!(
-            format_record(&at, PrimaryOutcome::Ok).unwrap().is_some(),
+            format_record(&at, PrimaryOutcome::Ok).unwrap().is_full(),
             "a line of exactly MACOS_SYSLOG_MAX bytes must be KEPT"
         );
 
         let over = record_formatting_to_exactly(MACOS_SYSLOG_MAX + 1);
         assert!(
-            format_record(&over, PrimaryOutcome::Ok).unwrap().is_none(),
+            format_record(&over, PrimaryOutcome::Ok)
+                .unwrap()
+                .is_degraded(),
             "a line one byte past the cap must be DROPPED"
         );
     }
@@ -670,17 +806,20 @@ mod tests {
             let mut r = rec("no");
             r.au3_1 = serde_json::json!({ "p": "x".repeat(pad) });
             match format_record(&r, PrimaryOutcome::Ok).unwrap() {
-                Some(s) => {
+                Mirrored::Full(s) => {
                     assert!(s.len() <= MACOS_SYSLOG_MAX);
                     last_kept = s.len();
                 }
-                None => {
-                    assert!(last_kept > 0, "dropped before ever keeping one");
+                Mirrored::Degraded(s) => {
+                    assert!(last_kept > 0, "degraded before ever keeping one");
+                    // #275: the degraded line must fit too — that is the whole
+                    // point of it existing.
+                    assert!(s.len() <= MACOS_SYSLOG_MAX, "degraded line {}", s.len());
                     return;
                 }
             }
         }
-        panic!("formatter never dropped — the oversize predicate is not firing");
+        panic!("formatter never degraded — the oversize predicate is not firing");
     }
 
     #[test]
@@ -689,6 +828,7 @@ mod tests {
         // the journald datagram, so an operator greps one string on both.
         let s = format_record(&rec("no"), PrimaryOutcome::WriteFailed)
             .unwrap()
+            .into_full()
             .unwrap();
         for kv in s.split_whitespace().filter(|w| w.starts_with("MAKNAE_")) {
             let key = kv.split('=').next().unwrap();
@@ -707,7 +847,7 @@ mod tests {
         ]
         .iter()
         .map(|p| {
-            let s = format_record(&rec("no"), *p).unwrap().unwrap();
+            let s = format_record(&rec("no"), *p).unwrap().into_full().unwrap();
             s.split_whitespace()
                 .find(|w| w.starts_with("MAKNAE_PRIMARY="))
                 .unwrap()

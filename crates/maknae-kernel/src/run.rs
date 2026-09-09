@@ -281,6 +281,7 @@ fn make_record(
         },
         subject: Subject {
             user: None,
+            role: None,
             plane_uri_san: peer_uri.map(str::to_string),
         },
         action: action.to_string(),
