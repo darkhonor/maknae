@@ -257,6 +257,167 @@ pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 /// that a `Deny`.
 pub type VerifiedObject<'a> = Option<&'a str>;
 
+/// Every `Verb` variant, with a compile-time exhaustiveness guard (#275/#276).
+///
+/// The guard is the `match` at the bottom: adding a variant to the protocol
+/// makes THIS FILE fail to compile, so the `SUBJECT_NAME` regression can never
+/// silently fall behind the vocabulary.
+pub fn every_verb_for_test() -> Vec<(&'static str, maknae_proto::Verb)> {
+    use maknae_proto::Verb;
+    let all: Vec<(&'static str, Verb)> = vec![
+        ("Ping", Verb::Ping),
+        ("Whoami", Verb::Whoami),
+        ("AdminStatus", Verb::AdminStatus),
+        ("AdminConfigShow", Verb::AdminConfigShow),
+        ("AdminAuditTail", Verb::AdminAuditTail),
+        ("AdminPolicyReload", Verb::AdminPolicyReload),
+        ("AdminSubjectList", Verb::AdminSubjectList),
+        ("AdminSubjectBind", Verb::AdminSubjectBind),
+        ("AdminSubjectUnbind", Verb::AdminSubjectUnbind),
+        ("AdminContain", Verb::AdminContain),
+        ("AdminRelease", Verb::AdminRelease),
+        ("AdminCredentialRotate", Verb::AdminCredentialRotate),
+        ("AdminProviderList", Verb::AdminProviderList),
+        ("AdminProviderSet", Verb::AdminProviderSet),
+        ("AdminProviderDisable", Verb::AdminProviderDisable),
+        ("AdminCredentialBroker", Verb::AdminCredentialBroker),
+        ("AdminSessionList", Verb::AdminSessionList),
+        ("AdminSessionTerminate", Verb::AdminSessionTerminate),
+        ("SessionNew", Verb::SessionNew),
+        ("SessionResume", Verb::SessionResume),
+        ("SessionClose", Verb::SessionClose),
+        ("SessionDelete", Verb::SessionDelete),
+        ("SessionList", Verb::SessionList),
+        ("SessionFork", Verb::SessionFork),
+        ("SessionCancel", Verb::SessionCancel),
+        ("SessionSetconfigoption", Verb::SessionSetconfigoption),
+        ("SessionSetmode", Verb::SessionSetmode),
+        ("SessionLoad", Verb::SessionLoad),
+        ("SessionUpdate", Verb::SessionUpdate),
+        ("SessionRequestpermission", Verb::SessionRequestpermission),
+        ("SessionElicitCreate", Verb::SessionElicitCreate),
+        ("SessionElicitComplete", Verb::SessionElicitComplete),
+        ("SessionCompact", Verb::SessionCompact),
+        ("FsMove", Verb::FsMove),
+        ("FsList", Verb::FsList),
+        ("FsStat", Verb::FsStat),
+        ("FsLink", Verb::FsLink),
+        ("FsChmod", Verb::FsChmod),
+        ("FsChown", Verb::FsChown),
+        ("TerminalCreate", Verb::TerminalCreate),
+        ("TerminalOutput", Verb::TerminalOutput),
+        ("TerminalWaitforexit", Verb::TerminalWaitforexit),
+        ("TerminalKill", Verb::TerminalKill),
+        ("TerminalRelease", Verb::TerminalRelease),
+        ("TerminalInput", Verb::TerminalInput),
+        ("McpConnect", Verb::McpConnect),
+        ("McpDisconnect", Verb::McpDisconnect),
+        ("McpMessage", Verb::McpMessage),
+        ("McpToolCall", Verb::McpToolCall),
+        ("McpResourceRead", Verb::McpResourceRead),
+        ("McpPromptGet", Verb::McpPromptGet),
+        ("McpSamplingCreate", Verb::McpSamplingCreate),
+        (
+            "SessionPrompt",
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: Vec::new(),
+            },
+        ),
+        ("Read", Verb::Read { path: "~/x".into() }),
+        (
+            "FsWrite",
+            Verb::FsWrite {
+                path: "~/x".into(),
+                content: maknae_proto::Bytes(maknae_io::Zeroizing::new(Vec::new())),
+                mode: maknae_proto::WriteMode::Existing,
+            },
+        ),
+        (
+            "FsDelete",
+            Verb::FsDelete {
+                path: "~/x".into(),
+                recursive: false,
+            },
+        ),
+        (
+            "FsMkdir",
+            Verb::FsMkdir {
+                path: "~/x".into(),
+                parents: false,
+                components: Vec::new(),
+            },
+        ),
+    ];
+    for (_, v) in &all {
+        match v {
+            Verb::Ping => {}
+            Verb::Whoami => {}
+            Verb::AdminStatus => {}
+            Verb::AdminConfigShow => {}
+            Verb::AdminAuditTail => {}
+            Verb::AdminPolicyReload => {}
+            Verb::AdminSubjectList => {}
+            Verb::AdminSubjectBind => {}
+            Verb::AdminSubjectUnbind => {}
+            Verb::AdminContain => {}
+            Verb::AdminRelease => {}
+            Verb::AdminCredentialRotate => {}
+            Verb::AdminProviderList => {}
+            Verb::AdminProviderSet => {}
+            Verb::AdminProviderDisable => {}
+            Verb::AdminCredentialBroker => {}
+            Verb::AdminSessionList => {}
+            Verb::AdminSessionTerminate => {}
+            Verb::SessionNew => {}
+            Verb::SessionResume => {}
+            Verb::SessionClose => {}
+            Verb::SessionDelete => {}
+            Verb::SessionList => {}
+            Verb::SessionFork => {}
+            Verb::SessionCancel => {}
+            Verb::SessionSetconfigoption => {}
+            Verb::SessionSetmode => {}
+            Verb::SessionLoad => {}
+            Verb::SessionUpdate => {}
+            Verb::SessionRequestpermission => {}
+            Verb::SessionElicitCreate => {}
+            Verb::SessionElicitComplete => {}
+            Verb::SessionCompact => {}
+            Verb::FsMove => {}
+            Verb::FsList => {}
+            Verb::FsStat => {}
+            Verb::FsLink => {}
+            Verb::FsChmod => {}
+            Verb::FsChown => {}
+            Verb::TerminalCreate => {}
+            Verb::TerminalOutput => {}
+            Verb::TerminalWaitforexit => {}
+            Verb::TerminalKill => {}
+            Verb::TerminalRelease => {}
+            Verb::TerminalInput => {}
+            Verb::McpConnect => {}
+            Verb::McpDisconnect => {}
+            Verb::McpMessage => {}
+            Verb::McpToolCall => {}
+            Verb::McpResourceRead => {}
+            Verb::McpPromptGet => {}
+            Verb::McpSamplingCreate => {}
+            Verb::SessionPrompt { .. } => {}
+            Verb::Read { .. } => {}
+            Verb::FsWrite { .. } => {}
+            Verb::FsDelete { .. } => {}
+            Verb::FsMkdir { .. } => {}
+        }
+    }
+    all
+}
+
+/// The bound on `subject.user`, re-exported for the identity suite.
+pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
+    crate::run::admitted_user_pub(user)
+}
+
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,

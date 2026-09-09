@@ -569,3 +569,67 @@ async fn shutdown_signal_yields_graceful_outcome() {
         "expected ServeOutcome::GracefulShutdown, got {outcome:?}"
     );
 }
+
+/// #275: the record carries the OS username the accept loop resolved, and it
+/// survives a group lookup that fails.
+///
+/// **Scripts the RUNNING EUID, deliberately.** Every other uid in this file is
+/// synthetic (1001, 2001, 3001, …) and resolves to no user on macOS and to
+/// `runner` on ubuntu CI — so an assertion over those is either host-divergent
+/// or vacuously `None`, which is exactly the class of test this slice exists to
+/// kill. The expectation comes from an INDEPENDENT `User::from_uid` of the same
+/// uid, so this is not the harness asserting its own input back at itself.
+///
+/// **No `maknae`-group precondition.** An earlier form skipped when the group
+/// was absent — which is PRECISELY the identity-loss scenario this test exists
+/// to pin, so restoring that defect would have left it green.
+///
+/// Honest about what discriminates: on a host that HAS the group, both the
+/// correct resolution order and the old group-first one produce the name, so
+/// this assertion cannot separate them here (measured — reinstating the old
+/// order leaves it green on the dev Mac). It discriminates on CI's
+/// ubuntu-latest, which has no `maknae` group. The unit-level companion is
+/// `groupres::tests::the_username_is_resolved_whatever_the_membership_answer_is`.
+#[tokio::test]
+async fn the_record_carries_the_username_even_when_the_group_lookup_fails() {
+    let me = nix::unistd::geteuid().as_raw();
+    let Ok(Some(u)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(me)) else {
+        eprintln!("SKIP: euid {me} does not resolve to a user on this host");
+        return;
+    };
+    let recs = drive(vec![ok_conn("maknae://d/plane/cli", me)], cfg_with(8, 500)).await;
+    let conn = recs
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection record");
+    assert_eq!(
+        conn.subject.user.as_deref(),
+        Some(u.name.as_str()),
+        "the record must carry the resolved name whether or not the group resolved"
+    );
+}
+
+/// A uid that resolves to NO user carries no username — there is nothing to
+/// carry, and `uid_in_maknae_group` fails closed on it.
+///
+/// Named for what it actually proves. An earlier form was called
+/// `a_refused_connection_carries_no_username_because_nss_was_not_spawned`,
+/// which was false: uid 999999 takes the ordinary blocking lookup path, so the
+/// test passed while its name described a breaker arm it never reached. The
+/// no-NSS-on-the-breaker-arm property is held by the accept loop's own
+/// structure (`run.rs`: the refuse arms return before `spawn_blocking`), not by
+/// this test.
+#[tokio::test]
+async fn an_unresolvable_uid_carries_no_username_and_no_role() {
+    let recs = drive(
+        vec![ok_conn("maknae://d/plane/cli", 999_999)],
+        cfg_with(8, 500),
+    )
+    .await;
+    let conn = recs
+        .iter()
+        .find(|r| r.event == "connection")
+        .expect("a connection record");
+    assert_eq!(conn.subject.user, None, "no user resolves for this uid");
+    assert_eq!(conn.subject.role, None, "a connection is not a decision");
+}

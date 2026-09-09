@@ -108,7 +108,15 @@ pub(crate) struct RecordFields<'a> {
     pub(crate) action: &'a str,
     pub(crate) outcome: &'a str,
     /// `"unknown"` when the record carries no subject user.
+    ///
+    /// Deliberately DISTINCT from [`RecordFields::role`]'s `"none"`: `unknown`
+    /// means the record carried no user, `none` means the PDP resolved no role.
+    /// Collapsing the two would hide which of them happened (#275).
     pub(crate) subject: &'a str,
+    /// `"none"` when the PDP resolved no role, or the record carries no
+    /// decision at all. See [`RecordFields::subject`] on why this is not
+    /// `"unknown"`.
+    pub(crate) role: &'a str,
     /// `"-"` when the record names no object.
     pub(crate) object: &'a str,
     pub(crate) primary: &'static str,
@@ -129,6 +137,7 @@ pub(crate) fn fields_of(rec: &AuditRecord, primary: PrimaryOutcome) -> RecordFie
         action: &rec.action,
         outcome: &rec.outcome.result,
         subject: rec.subject.user.as_deref().unwrap_or("unknown"),
+        role: rec.subject.role.as_deref().unwrap_or("none"),
         object: rec.object.as_deref().unwrap_or("-"),
         primary: primary.as_field(),
         is_deny: rec.outcome.result == "deny",
@@ -147,8 +156,8 @@ pub(crate) fn fields_of(rec: &AuditRecord, primary: PrimaryOutcome) -> RecordFie
 /// forgery surface there and the operator keeps the object.
 pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
     format!(
-        "maknae audit: {} {} subject={} object={} session={} seq={}",
-        f.action, f.outcome, f.subject, f.object, f.session_id, f.seq
+        "maknae audit: {} {} subject={} role={} object={} session={} seq={}",
+        f.action, f.outcome, f.subject, f.role, f.object, f.session_id, f.seq
     )
 }
 
@@ -158,6 +167,47 @@ pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
 /// copy and the JSONL line can never disagree. The filterable `MAKNAE_*` fields
 /// are duplicates of record content for `journalctl` querying, never a second
 /// source of truth.
+/// The DEGRADED journald datagram (#275): the availability marker, small enough
+/// to survive an `EMSGSIZE` that rejected the full record.
+///
+/// Same discipline as the macOS degraded line — `session_id` + `seq` ARE the
+/// pointer into the primary JSONL, so no digest and no payload; `MAKNAE_PRIMARY`
+/// rides along because three of [`PrimaryOutcome`]'s four values mean the
+/// primary never durably wrote.
+pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec<u8> {
+    let f = fields_of(rec, primary);
+    // The SAME distinction the macOS marker makes: three of PrimaryOutcome's
+    // four values mean the primary never durably wrote, and pointing an
+    // operator at a record that was never written is worse than silence.
+    // MESSAGE and MAKNAE_DEGRADED are derived TOGETHER: a human-readable
+    // "read the primary JSONL" beside a machine field saying
+    // `primary-did-not-write` is a contradiction the operator has to resolve.
+    let (message, where_to_read): (&[u8], &[u8]) = if f.primary == PrimaryOutcome::Ok.as_field() {
+        (
+            b"maknae audit: DEGRADED - read the primary JSONL",
+            b"read-primary-jsonl",
+        )
+    } else {
+        (
+            b"maknae audit: DEGRADED - the primary sink did not write this record",
+            b"primary-did-not-write",
+        )
+    };
+    let mut buf = Vec::new();
+    push_field(&mut buf, "PRIORITY", b"4");
+    push_field(&mut buf, "SYSLOG_IDENTIFIER", SYSLOG_IDENTIFIER.as_bytes());
+    push_field(&mut buf, "MESSAGE", message);
+    push_field(
+        &mut buf,
+        "MAKNAE_SESSION",
+        f.session_id.to_string().as_bytes(),
+    );
+    push_field(&mut buf, "MAKNAE_SEQ", f.seq.to_string().as_bytes());
+    push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
+    push_field(&mut buf, "MAKNAE_DEGRADED", where_to_read);
+    buf
+}
+
 pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u8>, AuditError> {
     let canonical = canonical_json(rec)?;
     let f = fields_of(rec, primary);
@@ -176,6 +226,7 @@ pub(crate) fn encode(rec: &AuditRecord, primary: PrimaryOutcome) -> Result<Vec<u
     push_field(&mut buf, "MAKNAE_ACTION", f.action.as_bytes());
     push_field(&mut buf, "MAKNAE_OUTCOME", f.outcome.as_bytes());
     push_field(&mut buf, "MAKNAE_SUBJECT", f.subject.as_bytes());
+    push_field(&mut buf, "MAKNAE_ROLE", f.role.as_bytes());
     push_field(&mut buf, "MAKNAE_PRIMARY", f.primary.as_bytes());
     push_field(&mut buf, "MAKNAE_RECORD", canonical.as_bytes());
     Ok(buf)
@@ -208,6 +259,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
@@ -450,6 +502,36 @@ mod tests {
             "seq=3",
         ] {
             assert!(s.contains(needle), "summary must carry {needle}: {s}");
+        }
+    }
+
+    /// #275: the journald degraded datagram makes the SAME primary distinction
+    /// the macOS marker does. Kills `== -> !=` on that branch.
+    #[test]
+    fn the_degraded_datagram_only_points_at_a_primary_that_actually_wrote() {
+        let r = rec("no");
+        let ok = String::from_utf8_lossy(&encode_degraded(&r, PrimaryOutcome::Ok)).to_string();
+        assert!(ok.contains("read-primary-jsonl"), "{ok}");
+        assert!(ok.contains("read the primary JSONL"), "{ok}");
+        assert!(!ok.contains("MAKNAE_RECORD"), "{ok}");
+        for p in [
+            PrimaryOutcome::WriteFailed,
+            PrimaryOutcome::RefusedBreakerOpen,
+            PrimaryOutcome::RefusedAtCapacity,
+        ] {
+            let bad = String::from_utf8_lossy(&encode_degraded(&r, p)).to_string();
+            assert!(
+                bad.contains("primary-did-not-write"),
+                "{p:?} must not send the operator to a record that was never written: {bad}"
+            );
+            assert!(
+                bad.contains("the primary sink did not write this record"),
+                "{p:?}: MESSAGE must agree with MAKNAE_DEGRADED: {bad}"
+            );
+            assert!(
+                !bad.contains("read the primary JSONL"),
+                "{p:?}: MESSAGE must not contradict MAKNAE_DEGRADED: {bad}"
+            );
         }
     }
 }

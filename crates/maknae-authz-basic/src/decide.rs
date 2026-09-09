@@ -354,44 +354,73 @@ fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict
 }
 
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
+///
+/// A thin `.0` over [`decide_loaded_with_role`]. **Test-only since #275:**
+/// production now decides through the role-reporting path, and this wrapper
+/// exists so the 54 in-file assertions keep asserting on a bare `Verdict`
+/// rather than being rewritten to `.0` — the verdict they check is byte-for-byte
+/// the one production enforces.
+#[allow(dead_code)]
 pub(crate) fn decide_loaded(
     lp: &LoadedPolicy,
     principal: &maknae_config::Principal,
     req: &SecRequest,
 ) -> Verdict {
+    decide_loaded_with_role(lp, principal, req).0
+}
+
+/// The verdict AND the role it was decided on, from the SAME `LoadedPolicy`
+/// (#275). One policy read, one resolution, both facts — so the audit record
+/// can never attest a role the decision was not made on.
+///
+/// `None` means no role was resolved: either the subject data could not be
+/// evaluated at all (the four pre-resolution returns below) or the bindings
+/// resolve the subject to nothing. A role that WAS resolved is reported even
+/// when the verdict is later `Indeterminate` — the resolution happened, and the
+/// trail should say which role was being evaluated.
+pub(crate) fn decide_loaded_with_role(
+    lp: &LoadedPolicy,
+    principal: &maknae_config::Principal,
+    req: &SecRequest,
+) -> (Verdict, Option<&'static str>) {
     // Step 2 — subject resolution, matcher invariant first: a PRESENT but
     // wrong-typed `name` or `uid` is failed-to-evaluate, never a fall-through.
     let name = match req.subject.0.get(SUBJECT_NAME) {
         None => None,
         Some(AttrValue::Str(s)) => Some(s.as_str()),
-        Some(_) => return Verdict::Indeterminate,
+        Some(_) => return (Verdict::Indeterminate, None),
     };
     let uid: Option<u32> = match req.subject.0.get(SUBJECT_UID) {
         None => None,
         Some(AttrValue::Int(i)) => match u32::try_from(*i) {
             Ok(u) => Some(u),
-            Err(_) => return Verdict::Indeterminate, // out-of-range carriage
+            Err(_) => return (Verdict::Indeterminate, None), // out-of-range carriage
         },
-        Some(_) => return Verdict::Indeterminate,
+        Some(_) => return (Verdict::Indeterminate, None),
     };
     if name.is_none() && uid.is_none() {
         // Neither identity datum present: the subject cannot be evaluated.
-        return Verdict::Indeterminate;
+        return (Verdict::Indeterminate, None);
     }
     let role = match lp.roles.role_for(name, uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
         // composes as an absence -- an extension may yet grant.
         Resolution::NoRole => {
-            return Verdict::NotApplicable {
-                note: Some("subject resolves to no role".into()),
-            }
+            return (
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into()),
+                },
+                None,
+            )
         }
     };
 
-    // Step 3 — role gates over the closed class vocabulary.
+    // Step 3 — role gates over the closed class vocabulary. The match is BOUND
+    // so the role can ride out beside the verdict; every arm stays a tail
+    // expression exactly as before.
     let class = class_of(&req.action.0);
-    match role {
+    let verdict = match role {
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
         // not filesystem privilege. Users and admins use the SAME subject OS
         // proof and universal path policy. Key the implemented term exactly;
@@ -507,7 +536,8 @@ pub(crate) fn decide_loaded(
                 )),
             },
         },
-    }
+    };
+    (verdict, Some(role.key()))
 }
 
 /// Universal filesystem capability grammar (#158). `role_key` supplies audit

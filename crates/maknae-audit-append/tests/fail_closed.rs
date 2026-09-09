@@ -21,6 +21,7 @@ fn sample_record() -> AuditRecord {
         },
         subject: Subject {
             user: Some("alice".into()),
+            role: None,
             plane_uri_san: Some("urn:maknae:plane:cli".into()),
         },
         action: "connect".into(),

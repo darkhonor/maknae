@@ -21,7 +21,17 @@ pub struct Source {
 /// `user` is the specific member, satisfying AU-3(1)'s group-account intent).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Subject {
+    /// The peer's OS username, resolved from the peer uid (#275). Bounded at
+    /// `MAX_SUBJECT_USER_BYTES`; an over-long name is refused to `None` rather
+    /// than truncated, because a truncated identity in an audit trail is a
+    /// WRONG identity, which is worse than an absent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// The role the decision was MADE ON (#275) — never a second resolution.
+    /// `None` when the PDP resolved no role, or on records that carry no
+    /// decision at all (the connection and boot pseudo-actions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub plane_uri_san: Option<String>,
 }
 
@@ -296,6 +306,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: Some("urn:maknae:plane:cli".into()),
             },
             action: "connect".into(),
@@ -518,6 +529,7 @@ mod tests {
                 },
                 subject: Subject {
                     user: None,
+                    role: None,
                     plane_uri_san: None,
                 },
                 action: "fs.read".into(),

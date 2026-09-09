@@ -161,17 +161,32 @@ impl BasicAuthorizer {
     /// the SAME maknae-io checks with a fixture-satisfiable owner requirement
     /// (the PR #139 pattern — the requirement is parameterized, the checks
     /// are real, nothing is stubbed).
+    /// **Test-only since #275** — production decides through
+    /// [`Self::decide_with_loader_reporting_role`]. Kept so the five existing
+    /// assertions bind a bare `Verdict`; it is that function's `.0`, so they
+    /// check exactly what production enforces.
+    #[allow(dead_code)]
     fn decide_with_loader(
         &self,
         req: &maknae_security::Request,
         loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
     ) -> maknae_security::Verdict {
+        self.decide_with_loader_reporting_role(req, loader).0
+    }
+
+    /// The verdict AND the role, from ONE policy read (#275). `decide_with_loader`
+    /// is its `.0`, so the two can never disagree and no existing caller changed.
+    fn decide_with_loader_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+        loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
         let Ok(policy) = loader(&self.policy_path) else {
-            return maknae_security::Verdict::Indeterminate;
+            return (maknae_security::Verdict::Indeterminate, None);
         };
         match assemble(policy, &self.uid_map) {
-            Ok(lp) => decide::decide_loaded(&lp, &self.principal, req),
-            Err(()) => maknae_security::Verdict::Indeterminate,
+            Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
+            Err(()) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
 }
@@ -321,8 +336,20 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     /// bites on the next request), then run the pure core. ANY load/parse/
     /// validation failure → `Indeterminate` (finalize turns it into deny).
     fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_reporting_role(req).0
+    }
+
+    /// One decision path: `decide` is this function's `.0`, so the verdict the
+    /// kernel enforces and the role it stamps come from the SAME policy read
+    /// (#275).
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
         let home = self.principal.home.clone();
-        self.decide_with_loader(req, move |p| maknae_config::load_authz(p, Some(&home)))
+        self.decide_with_loader_reporting_role(req, move |p| {
+            maknae_config::load_authz(p, Some(&home))
+        })
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -423,9 +450,20 @@ impl BasicAuthorizer {
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 impl maknae_security::Authorizer for HermeticAuthorizer {
     fn decide(&self, r: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_reporting_role(r).0
+    }
+
+    /// Delegates through the HERMETIC loader, exactly as `decide` does.
+    /// Delegating to `inner.decide_reporting_role` instead would silently use
+    /// the production root-owned loader and report `Indeterminate`/`None` in
+    /// every test (#275).
+    fn decide_reporting_role(
+        &self,
+        r: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
         let req = self.req.clone();
         let home = self.inner.principal.home.clone();
-        self.inner.decide_with_loader(r, move |p| {
+        self.inner.decide_with_loader_reporting_role(r, move |p| {
             maknae_config::load_authz_with_requirement(p, req.clone(), Some(&home))
         })
     }
@@ -1158,6 +1196,73 @@ mod tests {
                 matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
                 "{got:?}"
             );
+        }
+
+        /// #275: the decision reports the role it was MADE ON, from the same
+        /// policy read. All four shipped roles, through the real decide path.
+        #[test]
+        fn the_decision_reports_the_role_it_was_made_on_for_every_shipped_role() {
+            for role in ["admin", "user", "guest", "adversary"] {
+                let d = fixture_dir(&format!("role_{role}"));
+                let p = d.join("authz.yaml");
+                write_policy(&p, role);
+                let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+                let (_v, got) = auth.decide_reporting_role(&whoami_req(0));
+                let _ = std::fs::remove_dir_all(&d);
+                assert_eq!(got, Some(role), "role reported for binding {role}");
+            }
+        }
+
+        /// A subject bound to nothing reports NO role — never a default. The
+        /// verdict is the annotated absence, and the role is honestly absent.
+        #[test]
+        fn a_subject_resolving_to_no_role_reports_none_not_a_default() {
+            let d = fixture_dir("norole");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+            // uid 4242 is bound by nothing; `root` (uid 0) is the only binding.
+            let (v, got) = auth.decide_reporting_role(&whoami_req(4242));
+            let _ = std::fs::remove_dir_all(&d);
+            assert_eq!(got, None, "an unbound uid must never be given a role");
+            assert!(
+                matches!(v, Verdict::NotApplicable { .. }),
+                "expected the annotated absence, got {v:?}"
+            );
+        }
+
+        /// The wrapper must delegate through the HERMETIC loader. Delegating to
+        /// the inner authorizer's own override would use the production
+        /// root-owned loader and report Indeterminate/None here — this test is
+        /// what catches that.
+        #[test]
+        fn the_wrapper_reports_a_role_which_proves_it_used_the_hermetic_loader() {
+            let d = fixture_dir("hermloader");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+            let (v, got) = auth.decide_reporting_role(&whoami_req(0));
+            let _ = std::fs::remove_dir_all(&d);
+            assert_eq!(got, Some("admin"));
+            assert!(matches!(v, Verdict::Permit { .. }), "{v:?}");
+        }
+
+        /// `decide` IS `decide_reporting_role().0` — a guard against a future
+        /// re-implementation splitting the two paths apart again.
+        #[test]
+        fn decide_agrees_with_the_role_reporting_path() {
+            let d = fixture_dir("agree");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+            for uid in [0, 501, 4242] {
+                assert_eq!(
+                    auth.decide(&whoami_req(uid)),
+                    auth.decide_reporting_role(&whoami_req(uid)).0,
+                    "uid {uid}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&d);
         }
 
         /// Trait-path permit → containment flip: the wrapper's `decide` rides the

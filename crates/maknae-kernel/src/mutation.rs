@@ -216,12 +216,21 @@ fn prepare(
     })
 }
 
+/// Decide every path in the mutation. Returns the role the decision was made
+/// on in BOTH arms (#275): a denied `fs.write` is the security-interesting
+/// record, so stamping `role=none` on it while a role was in fact resolved
+/// would defeat the point. When several paths are decided, the reported role is
+/// the one from the last decision evaluated — on a deny, that is the path that
+/// caused the refusal.
+type AuthorizeErr = (String, String, Option<&'static str>);
+
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
     uid: u32,
     authorizer: &P,
-) -> Result<(), (String, String)> {
+) -> Result<Option<&'static str>, AuthorizeErr> {
+    let mut decided_role: Option<&'static str> = None;
     for path in &prepared.paths {
         let mut request = build_authz_request(verb, uid, Lane::Local, None, None);
         request
@@ -238,15 +247,22 @@ fn authorize<P: Authorizer>(
                 AttrValue::Bool(true),
             );
         }
-        match maknae_security::finalize(maknae_security::combine(vec![
-            maknae_security::guarded_decide(authorizer, &request),
-        ])) {
-            Decision::Permit { obligations } => discharge_plan(&obligations)
-                .map_err(|_| ("unhonorable mutation obligation".to_string(), path.clone()))?,
-            Decision::Deny { reason } => return Err((reason, path.clone())),
+        // `combine(vec![..])` preserved: it is what produces the
+        // "indeterminate operand blocks (fail-closed)" trail string.
+        let (v, role) = maknae_security::guarded_decide_reporting_role(authorizer, &request);
+        decided_role = role;
+        match maknae_security::finalize(maknae_security::combine(vec![v])) {
+            Decision::Permit { obligations } => discharge_plan(&obligations).map_err(|_| {
+                (
+                    "unhonorable mutation obligation".to_string(),
+                    path.clone(),
+                    decided_role,
+                )
+            })?,
+            Decision::Deny { reason } => return Err((reason, path.clone(), decided_role)),
         }
     }
-    Ok(())
+    Ok(decided_role)
 }
 fn mutation_meta(
     seq: u64,
@@ -424,7 +440,15 @@ where
         record.object_requested = Some(asked.into());
     }
     record.object = Some(decided);
-    if let Err((reason, denied_path)) = decision {
+    // #275: stamp the role BEFORE the deny branch, so the REFUSED mutation --
+    // the security-interesting record -- attests the role it was refused under.
+    // Both arms carry it; the permit arm alone would leave every denied
+    // fs.write/fs.delete/fs.mkdir saying role=none while a role WAS resolved.
+    record.subject.role = match &decision {
+        Ok(role) => role.map(str::to_string),
+        Err((_, _, role)) => role.map(str::to_string),
+    };
+    if let Err((reason, denied_path, _role)) = decision {
         record.object_requested = (asked != denied_path).then(|| asked.into());
         record.object = Some(denied_path);
         refuse(stream, cfg, &*emit, record, reason).await;
@@ -783,12 +807,23 @@ mod tests {
     }
     impl<P: Authorizer> Authorizer for Delayed<P> {
         fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_reporting_role(request).0
+        }
+
+        /// Delegates rather than taking the trait default (#275): a wrapper
+        /// that forwards only `decide` reports no role for a decision that had
+        /// one. The delay behaviour is unchanged -- it gates BOTH entry points
+        /// because `decide` is now this function's `.0`.
+        fn decide_reporting_role(
+            &self,
+            request: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
             let (lock, wake) = &*self.gate;
             let mut released = lock.lock().unwrap();
             while !*released {
                 released = wake.wait(released).unwrap();
             }
-            self.pdp.decide(request)
+            self.pdp.decide_reporting_role(request)
         }
     }
     #[tokio::test]

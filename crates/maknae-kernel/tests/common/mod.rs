@@ -193,6 +193,30 @@ impl Fixture {
     }
     /// `new`, then `policy_tail` appended to the policy body (a `roles:` /
     /// `destinations:` block for #172).
+    /// Same as [`Fixture::with_policy`] but binds `root` to the NAMED role, so a
+    /// test can drive the real decision path for each of the four shipped roles
+    /// (#275). The harness's peer uid is 0, which is the one uid guaranteed to
+    /// resolve on every host.
+    pub fn with_policy_bound_to(tag: &str, allow: &str, role: &str, policy_tail: &str) -> Self {
+        let f = Self::with_policy(tag, allow, policy_tail);
+        let policy = std::fs::read_to_string(f.root.join("authz.yaml")).unwrap();
+        let rebound = policy.replace(
+            "bindings:\n  user: [\"root\"]",
+            &format!("bindings:\n  {role}: [\"root\"]"),
+        );
+        assert!(
+            role == "user" || rebound != policy,
+            "the binding must actually change for {role}"
+        );
+        std::fs::write(f.root.join("authz.yaml"), rebound).unwrap();
+        std::fs::set_permissions(
+            f.root.join("authz.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        f
+    }
+
     pub fn with_policy(tag: &str, allow: &str, policy_tail: &str) -> Self {
         let root = std::env::temp_dir().join(format!("mutation_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -327,6 +351,7 @@ impl Fixture {
             "maknae://d/plane/cli".into(),
             0,
             true,
+            None,
             records,
             718,
             config,

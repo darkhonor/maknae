@@ -95,9 +95,21 @@ struct Counting<A> {
 }
 impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A> {
     fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_reporting_role(req).0
+    }
+    /// Delegates the role too (#275). A wrapper that forwards only `decide`
+    /// inherits the trait default and reports `None`, so the records this
+    /// harness observes would say `role=none` while the real composed PDP
+    /// underneath had resolved one -- the wrapper would be manufacturing the
+    /// very defect the suite exists to detect. Counting happens HERE, once, so
+    /// the observer stays exact.
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
         self.decisions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.decide(req)
+        self.inner.decide_reporting_role(req)
     }
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         self.inner.subjects()

@@ -28,14 +28,16 @@ pub use egress::{
 };
 pub use groupres::*;
 pub use handler::{
-    build_whoami, dispatch_verb, may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome,
-    KERNEL_ACTIONS,
+    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, every_verb_for_test,
+    may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
 };
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
 };
-pub use run::{accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx};
+pub use run::{
+    accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

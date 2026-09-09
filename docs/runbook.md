@@ -348,8 +348,28 @@ Each `ping`/`whoami` call lands (at least) one line — audit-then-respond order
 (`may_respond`, `maknae-kernel/src/handler.rs`) means the CLI's response was released
 **only because** this record durably landed first:
 
+**Reading `subject` and `role` (#275).** `subject.user` is the peer's OS
+username, resolved from the peer uid; `subject.role` is the role the PDP
+actually decided on. Two sentinels are deliberately distinct in the rendered
+summary: `subject=unknown` means the record carried no username — every
+fail-closed connection arm is like this, because resolving a name there would
+put a blocking NSS lookup back on the async worker — while `role=none` means the
+PDP resolved no role, or the record carries no decision at all (a connection is
+not a decision). Do not read one as the other.
+
+**macOS: a `DEGRADED` mirror line means "read the JSONL" (#275/#273).** The
+unified log delivers one line and drops anything past 1015 bytes. With identity
+on the record the widest `session.prompt` records exceed that — measured at
+1027–1123 bytes — so **on macOS those records mirror as a degraded marker as a
+matter of course, not as an exception**. The marker carries `MAKNAE_SESSION`,
+`MAKNAE_SEQ` and `MAKNAE_PRIMARY`; use the session and seq to find the complete
+record in the append-only JSONL, which has no size cap on either platform. A
+`MAKNAE_PRIMARY` other than `ok` means the primary sink did not durably write,
+so there is nothing to go read — that is an AU-5 condition, and the count of
+degraded emissions is the signal your enclave should alert on.
+
 ```json
-{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","user":null},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
+{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
 ```
 
 A **deny** record (a non-enrolled in-group uid running any verb, or a read of a

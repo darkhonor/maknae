@@ -101,8 +101,22 @@ pub fn combine(verdicts: Vec<Verdict>) -> Verdict {
 /// (Relies on unwinding panics; under `panic = "abort"` a panicking backend
 /// aborts the process, which is still fail-closed — no wrong `Permit` is served.)
 pub fn guarded_decide(a: &dyn Authorizer, req: &Request) -> Verdict {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.decide(req)))
-        .unwrap_or(Verdict::Indeterminate)
+    guarded_decide_reporting_role(a, req).0
+}
+
+/// The same panic boundary for the role-reporting seam method (#275).
+///
+/// `guarded_decide` is its `.0`, so the boundary is defined once. A panicking
+/// operand yields `(Indeterminate, None)` — fail-closed, and no role, because a
+/// decision that panicked resolved nothing we can honestly attest.
+pub fn guarded_decide_reporting_role(
+    a: &dyn Authorizer,
+    req: &Request,
+) -> (Verdict, Option<&'static str>) {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a.decide_reporting_role(req)
+    }))
+    .unwrap_or((Verdict::Indeterminate, None))
 }
 
 /// The same panic boundary for the two DISCLOSURE seam methods.
@@ -224,7 +238,35 @@ impl ConjunctionAuthorizer {
 /// exactly the same rule. Operand ORDER is the caller's: pass the baseline
 /// first, so its absence-testimony outranks (rule 4, #181).
 pub fn compose_decide(operands: &[&dyn Authorizer], req: &Request) -> Verdict {
-    combine(operands.iter().map(|a| guarded_decide(*a, req)).collect())
+    compose_decide_reporting_role(operands, req).0
+}
+
+/// The same fold, also reporting the role the decision was made on (#275).
+///
+/// **This is the single fold.** `compose_decide` is its `.0`, so there is one
+/// definition of the composition rule and the panic boundary, exactly as this
+/// module's doc requires — a second copy in a PDP host is how the two drift.
+///
+/// The FIRST operand that reports a role wins. Operand order is the caller's
+/// and the baseline is passed first, so a later operand cannot displace the
+/// role the RBAC baseline resolved. An operand that does not key on roles
+/// inherits the trait default and reports `None`, contributing nothing here.
+pub fn compose_decide_reporting_role(
+    operands: &[&dyn Authorizer],
+    req: &Request,
+) -> (Verdict, Option<&'static str>) {
+    let mut role = None;
+    let verdicts: Vec<Verdict> = operands
+        .iter()
+        .map(|a| {
+            let (v, r) = guarded_decide_reporting_role(*a, req);
+            if role.is_none() {
+                role = r;
+            }
+            v
+        })
+        .collect();
+    (combine(verdicts), role)
 }
 
 /// Name every operand, in composition order, with each name panic-guarded and
@@ -281,7 +323,16 @@ pub fn compose_subjects(operands: &[&dyn Authorizer]) -> Option<Vec<SubjectBindi
 
 impl Authorizer for ConjunctionAuthorizer {
     fn decide(&self, req: &Request) -> Verdict {
-        compose_decide(&self.refs(), req)
+        self.decide_reporting_role(req).0
+    }
+
+    /// Delegates rather than inheriting the trait default (#275). **Any wrapper
+    /// that forwards `decide` must forward this too**, or it silently reports
+    /// no role for a decision that had one — the default answers `None`, which
+    /// is honest for an operand that does not key on roles and a LIE for a
+    /// wrapper around one that does.
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        compose_decide_reporting_role(&self.refs(), req)
     }
 
     /// Names every operand, in composition order.
@@ -838,5 +889,154 @@ mod tests {
             Box::new(Panics),
         ]);
         assert!(matches!(c.decide(&req()), Verdict::Deny { .. }));
+    }
+
+    #[test]
+    fn compose_decide_is_exactly_the_role_reporting_fold_without_the_role() {
+        // `compose_decide` has no production caller since #275 -- both the
+        // kernel's Composition and ConjunctionAuthorizer fold through the
+        // role-reporting twin. It stays as the seam's verdict-only entry point,
+        // and this pins it as that function's `.0` so the two can never drift.
+        struct Permits;
+        impl Authorizer for Permits {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+        }
+        struct Denies;
+        impl Authorizer for Denies {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "ceiling".into(),
+                }
+            }
+        }
+        for ops in [
+            vec![&Permits as &dyn Authorizer],
+            vec![&Permits as &dyn Authorizer, &Denies],
+            vec![&Denies as &dyn Authorizer, &Permits],
+        ] {
+            assert_eq!(
+                compose_decide(&ops, &req()),
+                compose_decide_reporting_role(&ops, &req()).0
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapping_authorizer_must_not_swallow_the_role() {
+        // #275: `ConjunctionAuthorizer` delegates `decide_reporting_role` rather
+        // than inheriting the default. A wrapper that forwards only `decide`
+        // reports None for a decision that HAD a role — honest for an operand
+        // that does not key on roles, a lie for a wrapper around one that does.
+        struct WithRole;
+        impl Authorizer for WithRole {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some("admin"))
+            }
+            fn backend_name(&self) -> String {
+                "with-role".into()
+            }
+        }
+        let c = ConjunctionAuthorizer::new(vec![Box::new(WithRole)]);
+        let (v, role) = c.decide_reporting_role(&req());
+        assert_eq!(role, Some("admin"), "the wrapper must not swallow the role");
+        assert!(matches!(v, Verdict::Permit { .. }), "{v:?}");
+        // and `decide` is that function's `.0`, so the two cannot disagree
+        assert_eq!(c.decide(&req()), c.decide_reporting_role(&req()).0);
+    }
+
+    #[test]
+    fn the_fold_reports_the_first_operand_that_names_a_role() {
+        // Operand order is the caller's and the baseline goes first, so a later
+        // operand cannot displace the role the baseline resolved (#275).
+        struct WithRole(&'static str);
+        impl Authorizer for WithRole {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some(self.0))
+            }
+        }
+        let first = WithRole("admin");
+        let second = WithRole("guest");
+        let (_v, role) = compose_decide_reporting_role(&[&first, &second], &req());
+        assert_eq!(role, Some("admin"), "the FIRST operand's role must win");
+    }
+
+    #[test]
+    fn an_operand_that_reports_no_role_does_not_erase_one_already_found() {
+        struct WithRole;
+        impl Authorizer for WithRole {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some("user"))
+            }
+        }
+        // The ceiling operand shape: decides, reports no role (trait default).
+        struct Silent;
+        impl Authorizer for Silent {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+        }
+        let (_v, role) = compose_decide_reporting_role(&[&WithRole, &Silent], &req());
+        assert_eq!(role, Some("user"));
+    }
+
+    #[test]
+    fn every_operand_is_still_folded_when_the_role_rides_out() {
+        // A mutant that drops an operand from the fold must be caught HERE, on
+        // the path production now takes.
+        struct Denies;
+        impl Authorizer for Denies {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "ceiling".into(),
+                }
+            }
+        }
+        struct Permits;
+        impl Authorizer for Permits {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Permit {
+                    obligations: vec![],
+                }
+            }
+        }
+        let (v, _) = compose_decide_reporting_role(&[&Permits, &Denies], &req());
+        assert!(
+            matches!(v, Verdict::Deny { .. }),
+            "a second-operand Deny must survive the fold: {v:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_operand_yields_indeterminate_and_no_role() {
+        struct Boom;
+        impl Authorizer for Boom {
+            fn decide(&self, _: &Request) -> Verdict {
+                panic!("hostile operand")
+            }
+        }
+        let (v, role) = guarded_decide_reporting_role(&Boom, &req());
+        assert_eq!(v, Verdict::Indeterminate);
+        assert_eq!(role, None, "a panicked decision resolved nothing to attest");
     }
 }

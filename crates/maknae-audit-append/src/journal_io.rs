@@ -51,12 +51,31 @@ impl JournalMirror {
         Some(Self { sock })
     }
 
-    /// Encode and send. Every error path is a deliberate drop.
+    /// Encode and send.
+    ///
+    /// **`EMSGSIZE` is the ONLY failure worth retrying** (#275). `send` on this
+    /// socket also fails with `ECONNREFUSED` when the peer is gone — which after
+    /// a journald restart is *every* record, permanently (see the limitation
+    /// noted on this type) — and with `EAGAIN` when the receive buffer is full.
+    /// Re-encoding smaller cannot help either of those, so retrying them would
+    /// add an allocation and a second syscall to the audit path exactly when
+    /// journald is dead or saturated, and would drive the AU-5 degraded counter
+    /// continuously for a size condition that never occurred.
+    ///
+    /// Transport failures therefore keep this sink's documented best-effort
+    /// silence. Oversize no longer does: it degrades, and it is counted.
     pub(crate) fn mirror(&self, rec: &AuditRecord, primary: PrimaryOutcome) {
         let Ok(bytes) = encode(rec, primary) else {
             return;
         };
-        let _ = self.sock.send(&bytes);
+        if let Err(e) = self.sock.send(&bytes) {
+            if e.raw_os_error() == Some(nix::libc::EMSGSIZE) {
+                crate::syslog_fmt::note_degraded_mirror();
+                let _ = self
+                    .sock
+                    .send(&crate::journal::encode_degraded(rec, primary));
+            }
+        }
     }
 }
 
@@ -85,6 +104,7 @@ mod tests {
             },
             subject: Subject {
                 user: Some("alice".into()),
+                role: None,
                 plane_uri_san: None,
             },
             action: "fs.read".into(),
@@ -151,21 +171,33 @@ mod tests {
         m.mirror(&rec(), PrimaryOutcome::WriteFailed); // must not panic
     }
 
+    /// #275: an oversize datagram now DEGRADES rather than vanishing.
+    ///
+    /// The assertions key on CONTENT, not on `is_err()` or on length: an
+    /// AF_UNIX datagram larger than the read buffer is TRUNCATED rather than
+    /// errored, so a length check cannot distinguish "the full record arrived
+    /// clipped" from "the degraded one arrived". What must be true is that the
+    /// payload anchor never appears and the degraded marker does.
     #[test]
-    fn an_oversize_datagram_is_dropped_without_panicking() {
-        // Spec negative control 3. macOS pins net.local.dgram.maxdgram at 2048;
-        // Linux is larger but finite. Either way the send fails and MUST be
-        // swallowed -- and nothing must arrive.
+    fn an_oversize_datagram_degrades_instead_of_vanishing() {
         let dir = tempfile::tempdir().unwrap();
         let (rx, path) = receiver(dir.path());
         let m = JournalMirror::open(&path).unwrap();
         let mut r = rec();
         r.au3_1 = serde_json::json!({ "pad": "x".repeat(512 * 1024) });
         m.mirror(&r, PrimaryOutcome::Ok);
-        let mut buf = vec![0u8; 1024];
+        let mut buf = vec![0u8; 8192];
+        let n = rx
+            .recv(&mut buf)
+            .expect("the degraded datagram must arrive");
+        let got = String::from_utf8_lossy(&buf[..n]).to_string();
         assert!(
-            rx.recv(&mut buf).is_err(),
-            "an oversize datagram must be dropped, not delivered"
+            got.contains("MAKNAE_DEGRADED"),
+            "the degraded marker must be present: {got}"
+        );
+        assert!(
+            !got.contains("MAKNAE_RECORD"),
+            "a degraded datagram must not carry the payload: {got}"
         );
     }
 
