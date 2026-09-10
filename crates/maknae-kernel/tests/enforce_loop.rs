@@ -1286,6 +1286,9 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // (`delegated.rs`, the `a_file` helper) and fixed here by inspection. Corrected
     // 2026-09-04 (#216): this suite is outside `DARWIN_CRATES` and has never run on
     // that job; the sentence as first written attributed the sibling's catch to it.
+    // (Corrected 2026-09-11, #198: `DARWIN_CRATES` is gone and `darwin-native` now
+    // runs `cargo test --locked --workspace` on macos-26, so this suite DOES run
+    // there on every Rust change. The sentence above is kept as history.)
     let outside_dir =
         std::env::temp_dir().join(format!("enforce_offhome_obj_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside_dir);

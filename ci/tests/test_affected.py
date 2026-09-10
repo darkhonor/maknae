@@ -43,8 +43,8 @@ class AffectedTests(unittest.TestCase):
 
     def select(self, base=None, event='pull_request'):
         proc = subprocess.run([sys.executable, str(SELECTOR), '--root', str(self.root),
-                               '--base=' + (base or self.base), '--head', 'HEAD', '--event', event,
-                               '--darwin', 'a', 'b'], capture_output=True, text=True)
+                               '--base=' + (base or self.base), '--head', 'HEAD', '--event', event],
+                              capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout)
 
@@ -67,7 +67,6 @@ class AffectedTests(unittest.TestCase):
                     result = self.select(event=event)
                     self.assertFalse(result['build'], result)
                     self.assertEqual(result['mutants'], [])
-                    self.assertEqual(result['darwin'], [])
 
     def test_operational_docs_do_not_hide_code_or_unknown_inputs(self):
         for path in ('packaging/common/authz.yaml', 'packaging/fixture.md',
@@ -123,7 +122,6 @@ class AffectedTests(unittest.TestCase):
             result = self.select()
             self.assertTrue(result['build'])
             self.assertEqual(result['mutants'], ['a', 'b'])
-            self.assertEqual(result['darwin'], ['a', 'b'])
 
     def test_shared_and_unknown_changes_select_all(self):
         for path in ('Cargo.lock', 'rust-toolchain.toml', '.cargo/mutants.toml',

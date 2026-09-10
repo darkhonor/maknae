@@ -1960,7 +1960,7 @@ expect_reject_because "clippy-all/conflicting-mode-flags-are-refused" \
 tmpQ5="$(mktemp -d)"; mkdir -p "$tmpQ5/inner"; chmod 000 "$tmpQ5/inner"
 if [ "$(id -u)" -ne 0 ]; then   # root ignores the mode bits
   expect_reject_because "clippy-all/unenterable-root-is-refused" \
-    "cannot enter" \
+    "cannot enter --root '$tmpQ5/inner'" \
     "$here/clippy-all.sh" --root "$tmpQ5/inner" --check-inputs
 else
   skipped=$((skipped+1)); echo "skip: [clippy-all/unenterable-root-is-refused] running as root"
@@ -1974,8 +1974,7 @@ chmod 755 "$tmpQ5/inner" 2>/dev/null || true
 # that printed `ok` first still passed this probe. The ordering claim is
 # carried by `a-failing-lint-never-prints-the-ok-line` in the lint block below.
 tmpQ6="$(mktemp -d)"; mkdir -p "$tmpQ6/bin"
-cat > "$tmpQ6/bin/cargo" <<'SHIM'
-#!/usr/bin/env bash
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ6/bin/cargo" <<'SHIM'
 # `metadata` and `--version` pass through so the gate reaches its clippy
 # invocation; everything else fails.
 case "${1:-}" in metadata|--version) exec "$REAL_CARGO" "$@" ;; esac
@@ -1995,8 +1994,7 @@ expect_reject_because "clippy-all/failing-clippy-prints-FAIL" \
 # shim that reports a fake version is hermetic: it needs no second toolchain
 # installed, so this probe runs identically on every host and in CI.
 tmpQ7="$(mktemp -d)"; mkdir -p "$tmpQ7/bin"
-cat > "$tmpQ7/bin/cargo" <<'SHIM'
-#!/usr/bin/env bash
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ7/bin/cargo" <<'SHIM'
 if [ "${1:-}" = --version ]; then echo "cargo 1.0.0 (fake 2000-01-01)"; exit 0; fi
 exec "$REAL_CARGO" "$@"
 SHIM
@@ -2006,13 +2004,60 @@ expect_reject_because "clippy-all/toolchain-mismatch-is-refused" \
   env REAL_CARGO="$(command -v cargo)" PATH="$tmpQ7/bin:$PATH" \
   "$here/clippy-all.sh" --root "$here/../.." --check-inputs
 
+# The pin is enforced against a SUBSTITUTED compiler too (found on the darwin
+# gate: cargo 1.98.1 drove a 1.94.1 rustc and printed the pin). Same guard in
+# both gates, so the same two probes in both blocks.
+expect_reject_because "clippy-all/rustc-override-is-refused" \
+  "RUSTC is set" \
+  env RUSTC=/usr/bin/false \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+expect_reject_because "clippy-all/rustc-wrapper-is-refused" \
+  "RUSTC_WRAPPER is set" \
+  env RUSTC_WRAPPER=/usr/bin/env \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+for v in RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
+  expect_reject_because "clippy-all/$v-is-refused" \
+    "$v is set" \
+    env "$v=/usr/bin/env" \
+    "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+done
+
+# And the seventh door, a file: `.cargo/config.toml` `[build] rustc-wrapper` in
+# the linted root. Env beats config; the gate exports an empty RUSTC_WRAPPER,
+# so the file-configured wrapper must never run. Clean two-crate fixture; the
+# wrapper logs every invocation.
+tmpQ9="$(mktemp -d)"; mkdir -p "$tmpQ9/crates/a/src" "$tmpQ9/.cargo" "$tmpQ9/bin"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/a"]\n' > "$tmpQ9/Cargo.toml"
+cp "$here/../../rust-toolchain.toml" "$tmpQ9/rust-toolchain.toml"
+printf '[package]\nname = "a"\nversion = "0.0.0"\nedition = "2021"\n' > "$tmpQ9/crates/a/Cargo.toml"; printf 'pub fn a() -> u8 { 1 }\n' > "$tmpQ9/crates/a/src/lib.rs"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/wrapper.log"\nexec "$@"\n' "$tmpQ9" > "$tmpQ9/bin/wrap"; chmod +x "$tmpQ9/bin/wrap"
+( cd "$tmpQ9" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+# Config written AFTER the lockfile (the fixture's own generate-lockfile runs
+# `rustc -vV`, which an earlier version recorded as a gate residue -- it was
+# the fixture's). Liveness first: a plain cargo check must go through it.
+printf '[build]\nrustc-wrapper = "%s/bin/wrap"\n' "$tmpQ9" > "$tmpQ9/.cargo/config.toml"
+total=$((total+1))
+( cd "$tmpQ9" && cargo check --locked >/dev/null 2>&1 || true )
+if grep -q -- '--crate-name' "$tmpQ9/wrapper.log" 2>/dev/null; then
+  echo "neg-ok: [clippy-all/config-file-wrapper-fixture-is-live] a plain cargo check went through the config wrapper"; pass=$((pass+1))
+else
+  echo "NEG-FAIL: [clippy-all/config-file-wrapper-fixture-is-live] the config wrapper was never invoked by a plain cargo check — the fixture is inert"
+fi
+rm -f "$tmpQ9/wrapper.log"; rm -rf "$tmpQ9/target"
+expect_accept "clippy-all/config-file-rustc-wrapper-is-neutralised" "clippy-all: ok" "$here/clippy-all.sh" --root "$tmpQ9"
+total=$((total+1))
+if [ ! -e "$tmpQ9/wrapper.log" ]; then
+  echo "neg-ok: [clippy-all/config-file-rustc-wrapper-never-ran-under-the-gate] no wrapper.log after the gate run"; pass=$((pass+1))
+else
+  echo "NEG-FAIL: [clippy-all/config-file-rustc-wrapper-never-ran-under-the-gate] the config-file wrapper ran under the gate: $(tr '\n' ';' < "$tmpQ9/wrapper.log" | cut -c1-120)"
+fi
+
 # REJECT, NOT MUTE: a cargo that cannot answer `--version` must produce a FAIL
 # line. Under `pipefail` the version capture used to exit 101 with nothing on
 # either stream -- found by the failing-clippy probe above, whose shim at the
 # time answered only `metadata`.
 tmpQ8="$(mktemp -d)"; mkdir -p "$tmpQ8/bin"
-cat > "$tmpQ8/bin/cargo" <<'SHIM'
-#!/usr/bin/env bash
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ8/bin/cargo" <<'SHIM'
 if [ "${1:-}" = metadata ]; then exec "$REAL_CARGO" "$@"; fi
 exit 101
 SHIM
@@ -2089,7 +2134,7 @@ expect_reject_without() { # <label> <expected-FAIL-substring> <forbidden-substri
   fi
 }
 
-lint_fixture() { # <clean|test-sentinel|feature-sentinel> -> prints the fixture root
+lint_fixture() { # <clean|test-sentinel|feature-sentinel|dep-profile|bootstrap> -> prints the fixture root
   # `root` depends on `leaf`. Under `-p root --all-targets`, leaf's LIB is
   # linted (path dep, RUSTC_WORKSPACE_WRAPPER) but leaf's TEST targets are not,
   # and under `--workspace` without `--all-targets` no test target is. So a
@@ -2099,7 +2144,12 @@ lint_fixture() { # <clean|test-sentinel|feature-sentinel> -> prints the fixture 
   local variant="$1" d
   d="$(mktemp -d)"
   mkdir -p "$d/crates/root/src" "$d/crates/leaf/src"
-  printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf"]\n' > "$d/Cargo.toml"
+  # dep-profile: `leaf` is a path dependency EXCLUDED from the workspace, so a
+  # member-named profile pin never reaches it (codex r8).
+  case "$variant" in
+    dep-profile) printf '[workspace]\nresolver = "3"\nmembers = ["crates/root"]\nexclude = ["crates/leaf"]\n' > "$d/Cargo.toml" ;;
+    *) printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf"]\n' > "$d/Cargo.toml" ;;
+  esac
   # The REAL pin, so the gate's toolchain check agrees with the toolchain that
   # actually runs, and the fixture never rots when the pin is bumped.
   cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
@@ -2107,6 +2157,8 @@ lint_fixture() { # <clean|test-sentinel|feature-sentinel> -> prints the fixture 
   printf 'pub fn r() -> u8 { leaf::l() }\n' > "$d/crates/root/src/lib.rs"
   printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[features]\ndark = []\n' > "$d/crates/leaf/Cargo.toml"
   {
+    # An inner attribute must come first.
+    case "$variant" in bootstrap) printf '#![feature(never_type)]\n' ;; esac
     printf 'pub fn l() -> u8 { 7 }\n'
     # `v.len() == 0` is `clippy::len_zero`: WARN by default, an error only
     # under `-D warnings` -- so dropping `-D warnings` lets it through.
@@ -2115,6 +2167,12 @@ lint_fixture() { # <clean|test-sentinel|feature-sentinel> -> prints the fixture 
         printf '#[cfg(test)]\nmod t { #[test] fn s() { let v: Vec<u8> = Vec::new(); assert!(v.len() == 0); } }\n' ;;
       feature-sentinel)
         printf '#[cfg(all(feature = "dark", test))]\nmod t { #[test] fn s() { let v: Vec<u8> = Vec::new(); assert!(v.len() == 0); } }\n' ;;
+      bootstrap)
+        printf 'pub fn x() -> Option<!> { None }\n' ;;
+      dep-profile)
+        # A rustc error, not a lint: a non-member dependency is compiled by
+        # rustc, never clippy-driver, so a lint there would not fire anyway.
+        printf '#[cfg(debug_assertions)]\ncompile_error!("REAL_ERROR_BEHIND_DEBUG_ASSERTIONS");\n' ;;
       clean) : ;;
       *) echo "lint_fixture: unknown variant '$variant'" >&2; return 1 ;;
     esac
@@ -2144,6 +2202,65 @@ expect_reject_because "clippy-all/unselected-crate-test-target-lint-is-caught-by
   "clippy failed on the base" \
   "$here/clippy-all.sh" --root "$fx_test"
 
+# REJECT ×2: rustflags must not silence the lints. `--cap-lints=allow` turns
+# every lint into a no-op regardless of `-D warnings`; it reaches the build
+# through RUSTFLAGS or a config file. The gate's explicit empty
+# CARGO_ENCODED_RUSTFLAGS outranks both.
+expect_reject_because "clippy-all/RUSTFLAGS-cap-lints-cannot-silence-the-lint" \
+  "clippy failed on the base" \
+  env RUSTFLAGS='--cap-lints=allow' \
+  "$here/clippy-all.sh" --root "$fx_test"
+fx_capcfg="$(lint_fixture test-sentinel)"; mkdir -p "$fx_capcfg/.cargo"
+printf '[build]\nrustflags = ["--cap-lints=allow"]\n' > "$fx_capcfg/.cargo/config.toml"
+expect_reject_because "clippy-all/config-file-rustflags-cannot-silence-the-lint" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_capcfg"
+
+# REJECT ×2: `[env] CLIPPY_ARGS = { value = "", force = true }` in the linted
+# root's config REPLACED clippy's generated arguments -- the gate printed `ok`
+# over the sentinel. `--config env.CLIPPY_ARGS.force=false` outranks the file.
+# And the profile door: `[profile.dev] debug-assertions = false` hides a lint
+# behind cfg(debug_assertions); the profile is pinned the same way.
+fx_cargs="$(lint_fixture test-sentinel)"; mkdir -p "$fx_cargs/.cargo"
+printf '[env]\nCLIPPY_ARGS = { value = "", force = true }\n' > "$fx_cargs/.cargo/config.toml"
+expect_reject_because "clippy-all/forced-CLIPPY_ARGS-cannot-remove-the-lint-enforcement" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_cargs"
+fx_dalint="$(lint_fixture clean)"; mkdir -p "$fx_dalint/.cargo"
+printf '#[cfg(debug_assertions)]\npub fn da() -> bool { let v: Vec<u8> = Vec::new(); v.len() == 0 }\n' >> "$fx_dalint/crates/leaf/src/lib.rs"
+printf '[profile.dev]\ndebug-assertions = false\n' > "$fx_dalint/.cargo/config.toml"
+expect_reject_because "clippy-all/profile-config-cannot-hide-a-lint-behind-debug-assertions" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_dalint"
+# ...and the per-package form in the ROOT MANIFEST, which the `"*"` glob does
+# not reach; and RUSTC_BOOTSTRAP from the environment.
+fx_dapkg="$(lint_fixture clean)"
+printf '#[cfg(debug_assertions)]\npub fn da() -> bool { let v: Vec<u8> = Vec::new(); v.len() == 0 }\n' >> "$fx_dapkg/crates/leaf/src/lib.rs"
+printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' >> "$fx_dapkg/Cargo.toml"
+expect_reject_because "clippy-all/per-package-profile-in-the-manifest-cannot-hide-a-lint" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_dapkg"
+expect_reject_because "clippy-all/RUSTC_BOOTSTRAP-is-refused" \
+  "RUSTC_BOOTSTRAP is set" \
+  env RUSTC_BOOTSTRAP=1 "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+# ...and cargo's OTHER nightly switch, which unlocks `[unstable]` (and with it
+# `[profile.<p>] rustflags`, a fourth rustflags source) on the pinned stable.
+expect_reject_because "clippy-all/cargo-channel-override-is-refused" \
+  "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS is set" \
+  env __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+# ...and the panic strategy: a lint behind cfg(panic = "unwind") hidden by
+# `[profile.dev] panic = "abort"` in config. On THIS gate the pin is defence
+# in depth: `--all-targets` also lints the TEST target, where cargo ignores
+# `panic = "abort"`, so the lint surfaces there and the mutation "drop the
+# clippy panic pin" survives (measured: 74/76 with only the darwin probes
+# red). Kept because the lib target is what ships; recorded as unobserved.
+fx_panlint="$(lint_fixture clean)"; mkdir -p "$fx_panlint/.cargo"
+printf '#[cfg(panic = "unwind")]\npub fn pu() -> bool { let v: Vec<u8> = Vec::new(); v.len() == 0 }\n' >> "$fx_panlint/crates/leaf/src/lib.rs"
+printf '[profile.dev]\npanic = "abort"\n' > "$fx_panlint/.cargo/config.toml"
+expect_reject_because "clippy-all/profile-config-cannot-hide-a-lint-behind-the-panic-strategy" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_panlint"
+
 # REJECT: a lint behind a declared feature that NOTHING enables must be caught
 # by that feature's own pass, and the FAIL must NAME the feature. Kills an
 # empty or skipped feature loop -- on the real repo the loop's two passes are
@@ -2154,6 +2271,103 @@ expect_reject_because "clippy-all/dark-feature-lint-is-caught-by-its-own-pass" \
   "clippy failed on feature pass 'leaf/dark'" \
   "$here/clippy-all.sh" --root "$fx_feat"
 
+# REJECT: `[alias] clippy = ["test", "--no-run"]` in the linted root. An alias
+# cannot shadow a BUILT-IN, but `clippy` is an external subcommand, so `cargo
+# clippy` ran `cargo test --no-run`, linted nothing and printed `ok`
+# (measured). The gate invokes the resolved `cargo-clippy` binary by path;
+# aliases never enter.
+fx_alias="$(lint_fixture test-sentinel)"; mkdir -p "$fx_alias/.cargo"
+printf '[alias]\nclippy = ["test", "--no-run"]\n' > "$fx_alias/.cargo/config.toml"
+expect_reject_because "clippy-all/a-config-alias-cannot-replace-clippy" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_alias"
+
+# REJECT (codex r9): invoking `cargo-clippy` by path made it obey an inherited
+# `CARGO` -- `/usr/bin/true` linted nothing and printed `ok`. Under the
+# allowlist the variable is absent; the sentinel is caught.
+expect_reject_because "clippy-all/an-inherited-CARGO-is-inert-under-the-allowlist" \
+  "clippy failed on the base" \
+  env CARGO=/usr/bin/true "$here/clippy-all.sh" --root "$fx_test"
+
+# REJECT (both reviewers, round 9): WARM REPLAY on this gate too. A workspace
+# primed under RUSTC_BOOTSTRAP=1 linted `ok` warm and failed E0554 cold; the
+# gate now wipes its own cache before every pass. The primer must succeed
+# first, or the FAIL below proves nothing.
+fx_wrc="$(lint_fixture bootstrap)"
+wrc_rc=0
+# The primer mirrors the gate's own compiler selection (`RUSTC` by path):
+# with the proxy `rustc` instead, cargo's fingerprint differs and the
+# "replay" never happens -- the no-wipe mutant then FAILs for the wrong reason.
+( cd "$fx_wrc" && RUSTC_BOOTSTRAP=1 RUSTC="$(rustup which rustc)" CARGO_TARGET_DIR="$fx_wrc/target/clippy-all" CARGO_BUILD_BUILD_DIR="$fx_wrc/target/clippy-all" CARGO_ENCODED_RUSTFLAGS='' \
+    "$(rustup which cargo-clippy)" clippy --locked --workspace --all-targets -- -D warnings >/dev/null 2>&1 \
+  && RUSTC_BOOTSTRAP=1 RUSTC="$(rustup which rustc)" CARGO_TARGET_DIR="$fx_wrc/target/clippy-all" CARGO_BUILD_BUILD_DIR="$fx_wrc/target/clippy-all" CARGO_ENCODED_RUSTFLAGS='' \
+    "$(rustup which cargo-clippy)" clippy --locked --workspace --all-targets --features leaf/dark -- -D warnings >/dev/null 2>&1 ) || wrc_rc=$?
+total=$((total+1))
+if [ "$wrc_rc" -eq 0 ] && ls "$fx_wrc"/target/clippy-all/debug/deps/libleaf-*.rmeta >/dev/null 2>&1; then
+  echo "pos-ok: [clippy-all/the-replay-primer-produced-a-unit] bootstrap-on primer succeeded and left leaf's rmeta"; pass=$((pass+1))
+else
+  echo "POS-FAIL: [clippy-all/the-replay-primer-produced-a-unit] primer rc=$wrc_rc or no leaf rmeta — the replay probe below would prove nothing"
+fi
+expect_reject_because "clippy-all/a-primed-target-dir-is-not-replayed" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_wrc"
+
+# REJECT (codex r10): TMPDIR pointing INSIDE the linted tree used to put the
+# gate's "outside" cwd back under the tree's `.cargo/`; the cwd now lives
+# under $HOME. The dep-profile config fixture is the tree-config door.
+fx_tmpin="$(lint_fixture dep-profile)"; mkdir -p "$fx_tmpin/.cargo" "$fx_tmpin/tmpinside"
+printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' > "$fx_tmpin/.cargo/config.toml"
+expect_reject_because "clippy-all/the-tree-config-is-not-read-even-with-TMPDIR-inside-the-tree" \
+  "clippy failed on the base" \
+  env TMPDIR="$fx_tmpin/tmpinside" "$here/clippy-all.sh" --root "$fx_tmpin"
+
+# REJECT (codex r10): the resolved rustc BINARY is version-checked, not the
+# PATH proxy (a directory override made them differ). Same shim as the darwin
+# block: `rustup which rustc` names a rustc that compiles with the real one but
+# reports 1.0.0.
+tmpQ12="$(mktemp -d)"; mkdir -p "$tmpQ12/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpQ12/bin/lying-rustc" <<'SHIM'
+case " $* " in *" --version "*|*" -vV "*|*" -V "*) exec "$REAL_RUSTC" "$@" | sed 's/^rustc [0-9.]*/rustc 1.0.0/' ;; esac
+exec "$REAL_RUSTC" "$@"
+SHIM
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\nLYING=%q\n' "$(command -v rustup)" "$tmpQ12/bin/lying-rustc"; cat; } > "$tmpQ12/bin/rustup" <<'SHIM'
+if [ "${1:-}" = which ] && [ "${2:-}" = rustc ]; then echo "$LYING"; exit 0; fi
+exec "$REAL_RUSTUP" "$@"
+SHIM
+chmod +x "$tmpQ12/bin/lying-rustc" "$tmpQ12/bin/rustup"
+expect_reject_because "clippy-all/the-resolved-rustc-binary-is-version-checked" \
+  "toolchain mismatch" \
+  env PATH="$tmpQ12/bin:$PATH" "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+
+# REJECT + PERSIST: one run per checkout; a refused contender leaves the
+# owner's lock (codex r10: an unconditional cleanup removed it).
+mkdir -p "$fx_clean/target/clippy-all.lock"
+expect_reject_because "clippy-all/a-held-lock-refuses-a-second-run" \
+  "another run holds" \
+  "$here/clippy-all.sh" --root "$fx_clean" --check-inputs
+total=$((total+1))
+if [ -d "$fx_clean/target/clippy-all.lock" ]; then
+  echo "pos-ok: [clippy-all/a-refused-contender-leaves-the-owners-lock] lock still held after the refusal"; pass=$((pass+1))
+else
+  echo "POS-FAIL: [clippy-all/a-refused-contender-leaves-the-owners-lock] the refused run removed a lock it never owned"
+fi
+rmdir "$fx_clean/target/clippy-all.lock"
+
+# REJECT ×2 (codex r8): a NAMED per-package override for a dependency that is
+# NOT a member outranks the `"*"` pin, and the member-named pins never
+# mentioned it (measured: `ok`, both spellings). Every resolved package is now
+# pinned by name through one `--config` file.
+fx_depc="$(lint_fixture dep-profile)"; mkdir -p "$fx_depc/.cargo"
+printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' > "$fx_depc/.cargo/config.toml"
+expect_reject_because "clippy-all/named-profile-override-for-a-non-member-dependency-in-config-cannot-hide-an-error" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_depc"
+fx_depm="$(lint_fixture dep-profile)"
+printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' >> "$fx_depm/Cargo.toml"
+expect_reject_because "clippy-all/named-profile-override-for-a-non-member-dependency-in-the-manifest-cannot-hide-an-error" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_depm"
+
 # REJECT, AND NEVER SAY OK: a failing lint's stdout must not carry the success
 # line. The first version of this gate printed `clippy-all: ok (...)` before
 # running clippy; the `failing-clippy-prints-FAIL` probe above cannot see that,
@@ -2162,6 +2376,1285 @@ expect_reject_without "clippy-all/a-failing-lint-never-prints-the-ok-line" \
   "clippy failed on the base" "clippy-all: ok" \
   "$here/clippy-all.sh" --root "$fx_test"
 
+
+# ---- darwin-cross-check (#198): every member checked for macOS, one at a time,
+# ---- cargo deciding what is SDK-blocked -- and the check observed catching a
+# ---- darwin-only compile failure ---------------------------------------------
+# The job existed since #199 but consumed `DARWIN_CRATES`, a hand-written 7
+# whose own comment said "NOT gate-verified against any manifest"; 17 members
+# check clean from Linux, so ten were compiled for macOS by nothing. The first
+# cut of the gate DERIVED the set from a metadata closure; two reviewers broke
+# the derivation in the bad direction (members silently excluded), so the gate
+# now runs cargo per member and READS the outcome. These probes need the
+# `aarch64-apple-darwin` target (CI's `build-and-gate` adds it; locally:
+# `rustup target add aarch64-apple-darwin`); the guard probes below the target
+# block do not.
+#
+# On the mutation harness: "drop `--target`" is observable on ANY host -- cargo
+# writes a target-triple build to `target/<triple>/`, a host build to
+# `target/debug/` -- and the clean-fixture probe asserts that directory. An
+# earlier comment here called the mutation "unobservable on a darwin host by
+# physics". Both reviewers showed it was an excuse.
+
+darwin_fixture() { # <variant> [sdk-name] -> prints the fixture root
+  # `root` depends on `leaf`. Variants:
+  #   clean                    -- both check.
+  #   linux-only-item          -- leaf uses an item that exists only under
+  #                               cfg(target_os = "linux") -- the #72/#275
+  #                               shape; E0425 on darwin, no dependency needed.
+  #   linux-only-item-in-tests -- same, reachable only from a test target.
+  #   sdk-blocked <name>       -- a path crate NAMED <name> (ring, aws-lc-sys,
+  #                               aws-lc-fips-sys) whose build.rs PANICS. Cargo
+  #                               reports "failed to run custom build command
+  #                               for `<name> v0.0.0`" -- exactly the shape the
+  #                               gate classifies as SDK-blocked -- so `root`
+  #                               (which depends on it) must be reported
+  #                               blocked and `leaf` checked. Hermetic: no
+  #                               network, no real SDK crate.
+  #   other-build-failure      -- the same panicking build.rs in a crate named
+  #                               `notsdk`, whose panic text QUOTES cargo's
+  #                               sentence naming `ring`: this MUST be a FAIL,
+  #                               proving the classification is keyed on the
+  #                               three names, ANCHORED at column 0, and fails
+  #                               closed for anything else.
+  #   stale-lock               -- Cargo.lock generated BEFORE a member was
+  #                               added, so `--locked` must refuse.
+  #   two-sdk                  -- `a` depends on a panicking `aws-lc-sys`,
+  #                               `b` on a panicking `ring`: each evidence
+  #                               line must name ITS crate (an accumulating
+  #                               log would attribute a's failure to b).
+  #   case-sdk                 -- the panicking crate is named `Ring`: crate
+  #                               names are case-sensitive, so this is NOT an
+  #                               SDK crate and must be a FAIL.
+  #   unbuilt-dep-after        -- like devdep-sdk-plus-real-error, but `root`
+  #                               ALSO normal-depends on `zdep`, a crate that
+  #                               sorts AFTER it and so is unbuilt when `root`
+  #                               is checked. Without `--keep-going` cargo
+  #                               cancels root's lib compile the moment ring's
+  #                               build script fails, the real error is never
+  #                               produced, and the gate said "blocked", `ok`.
+  #   warning-in-blocked       -- sdk-blocked, plus an unused variable in
+  #                               `leaf` (a spanned WARNING in root's log).
+  #                               Must still be "blocked", not a FAIL.
+  #   config-rustflags         -- linux-only-item, plus `.cargo/config.toml`
+  #                               with `[build] rustflags` forging
+  #                               `target_os="linux"`. Must still FAIL.
+  #   config-target-rustflags  -- the same, via `[target.aarch64-apple-darwin]
+  #                               rustflags`.
+  #   required-features-bin    -- `root` is a BIN-only member whose sole target
+  #                               carries `required-features = ["hidden"]`
+  #                               (default off) and a compile_error!. Cargo
+  #                               says "no targets matched; this is a no-op",
+  #                               exits 0, compiles NOTHING. Must be a FAIL:
+  #                               a member counts only if cargo emitted a
+  #                               compiler artifact OF it.
+  #   debug-assertions-gated   -- `leaf` fails only under
+  #                               cfg(all(target_os = "macos", debug_assertions)).
+  #                               `[profile.dev] debug-assertions = false` (or
+  #                               the env spelling) hid it; the profile is
+  #                               pinned on the command line.
+  #   debug-assertions-config  -- the same, with the config file present.
+  #   pkg-profile-config       -- debug-assertions-gated, plus `.cargo/config.toml`
+  #                               `[profile.dev.package.leaf] debug-assertions = false`.
+  #   pkg-profile-manifest     -- the same override in the workspace ROOT Cargo.toml.
+  #   bootstrap-gated          -- `leaf` needs a nightly feature gate on darwin:
+  #                               E0554 on stable; `ok` under RUSTC_BOOTSTRAP=1.
+  #   bootstrap-config         -- the same, with `[env] RUSTC_BOOTSTRAP` forced
+  #                               in `.cargo/config.toml`.
+  #   panic-gated              -- `leaf` fails only under
+  #                               cfg(all(not(test), panic = "unwind")) -- the
+  #                               default; `[profile.dev] panic = "abort"` or
+  #                               CARGO_PROFILE_DEV_PANIC=abort hid it.
+  #   panic-config             -- the same, with the config file present.
+  #   proc-macro-member        -- `leaf` is a proc-macro crate: cargo compiles
+  #                               it for the HOST; it must be reported host-only
+  #                               and counted neither checked nor blocked.
+  #   config-wrapper           -- clean, plus `.cargo/config.toml` with
+  #                               `[build] rustc-wrapper = <logging shim>`.
+  #                               The gate's exported empty RUSTC_WRAPPER must
+  #                               beat it: the shim's log must NOT exist after.
+  #   lock-deleting-build      -- `leaf`'s build.rs deletes the workspace
+  #                               Cargo.lock; the member checked AFTER it must
+  #                               be refused by `--locked` on the CHECK (the
+  #                               resolving metadata call ran before the
+  #                               deletion), not silently regenerated.
+  #   devdep-sdk-plus-real-error -- `root` DEV-depends on a panicking `ring`
+  #                               AND calls an undeclared fn in its lib (an
+  #                               E-coded `error[E0425]`, so the `\[E…\]`
+  #                               alternative of the exclusivity regex is
+  #                               exercised). Under `--all-targets` both land
+  #                               in one log; the member must be a FAIL.
+  #   multiline-fake-line      -- `root` DEV-depends on a panicking `ring` (so
+  #                               (a) and (d) are honestly satisfied) and its
+  #                               lib carries a MULTI-LINE compile_error!
+  #                               whose first line is cargo's sentence; rustc
+  #                               renders a whitespace-only continuation line
+  #                               that a blank-terminated error block took as
+  #                               its end, hiding the ` --> ` span from (b).
+  #   fake-cargo-line          -- `root` has NO SDK crate in its graph and a
+  #                               `compile_error!` whose text is cargo's exact
+  #                               sentence naming `ring`. rustc renders it at
+  #                               column 0; a text-only classifier called that
+  #                               "blocked". Must be a FAIL: no ` --> ` span
+  #                               may accompany a blocked line, and `ring` is
+  #                               not in root's tree.
+  #   dep-profile-config       -- `leaf` is EXCLUDED from the workspace (a path
+  #                               dependency, not a member) and carries the
+  #                               debug-assertions-gated error; `.cargo/config.toml`
+  #                               `[profile.dev.package.leaf] debug-assertions =
+  #                               false`. The member-named pins never reached it
+  #                               (codex r8: `ok`, both gates). Must FAIL naming
+  #                               `root`, the member being checked.
+  #   dep-profile-manifest     -- the same override in the ROOT manifest.
+  #   channel-override         -- linux-only-item, plus `[unstable]
+  #                               profile-rustflags` and `[profile.dev] rustflags`
+  #                               forging `target_os="linux"` -- live only when
+  #                               cargo's channel is overridden, so the probe sets
+  #                               `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`
+  #                               and expects the refusal; with the token dropped
+  #                               from the refusal list this fixture prints `ok`.
+  #   progress-config          -- sdk-blocked, plus `[term] progress.when =
+  #                               "always"` / `progress.width = 80`: cargo then
+  #                               writes `\r` before `error:` (codex r8) and the
+  #                               column-0 anchor misses it. Must still be
+  #                               "blocked": env outranks config, and the gate
+  #                               exports CARGO_TERM_PROGRESS_WHEN=never.
+  #   feature-gated-linux-item -- `leaf` declares feature `dark`; the Linux-only
+  #                               use sits behind `cfg(feature = "dark")`. The
+  #                               base pass is clean; the feature pass must FAIL
+  #                               naming `leaf` and `dark`.
+  #   clean-with-feature       -- `leaf` declares `dark` and gates nothing: the
+  #                               OK line must count ONE feature pass.
+  #   feature-fake             -- `root` declares `dark`; behind it, a
+  #                               compile_error! QUOTING cargo's SDK sentence.
+  #                               The round-10 feature pass had a one-line grep
+  #                               classifier and printed `ok` (codex r9 and the
+  #                               fresh-context reviewer, independently).
+  #   feature-real             -- `dark = ["devshim/sdk"]`: a DEV-dependency's
+  #                               feature pulls an optional panicking `ring`,
+  #                               and root's own lib carries a real error
+  #                               behind `dark`. `--keep-going` emits both; the
+  #                               masking shape of round 3, on the new path.
+  #   feature-blocked          -- feature-real without the real error: a
+  #                               feature pass that is GENUINELY SDK-blocked is
+  #                               reported as such and NOT counted as a pass.
+  #   proc-macro-feature       -- proc-macro-member whose `dark` feature hides
+  #                               a compile error: host-only or not, a feature
+  #                               pass still runs and still FAILs.
+  #   env-build-script         -- `leaf` has a build.rs that emits
+  #                               `cargo:rustc-cfg=forged` when MAKNAE_FORGE is
+  #                               in ITS environment, and a Linux-only use behind
+  #                               `cfg(not(forged))`. The variable is on no
+  #                               refusal list and no pin names it: only the
+  #                               allowlist keeps it from the build script.
+  #   config-env-build-script  -- the same, with `[env] MAKNAE_FORGE = "1"` in
+  #                               the tree's config: only the outside cwd keeps
+  #                               it from the build script (cargo's `[env]`
+  #                               table is delivered to build scripts).
+  #   portable-feature         -- `root` depends on an EXCLUDED path crate
+  #                               `ring` whose build.rs needs an SDK unless its
+  #                               `portable` feature is on; root declares
+  #                               `portable = ["ring/portable"]` and hides an
+  #                               error behind it. The base pass is genuinely
+  #                               blocked; the feature pass is buildable and
+  #                               must still run and FAIL (codex r10).
+  #   build-dir-config         -- clean, plus `[build] build-dir` in the tree's
+  #                               config (codex r9: a false FAIL when it was
+  #                               read). From outside the tree it is not read.
+  local variant="$1" sdk="${2:-ring}" d ws_extra=""
+  d="$(mktemp -d)"
+  mkdir -p "$d/crates/root/src" "$d/crates/leaf/src"
+  local members='"crates/root", "crates/leaf"' extra_dep=""
+  case "$variant" in
+    two-sdk)
+      for nm in aws-lc-sys ring; do
+        mkdir -p "$d/crates/$nm/src"
+        printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' "$nm" > "$d/crates/$nm/Cargo.toml"
+        printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/$nm/build.rs"; : > "$d/crates/$nm/src/lib.rs"
+      done
+      mkdir -p "$d/crates/a/src" "$d/crates/b/src"
+      printf '[package]\nname = "a"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\naws-lc-sys = { path = "../aws-lc-sys" }\n' > "$d/crates/a/Cargo.toml"; : > "$d/crates/a/src/lib.rs"
+      printf '[package]\nname = "b"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nring = { path = "../ring" }\n' > "$d/crates/b/Cargo.toml"; : > "$d/crates/b/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/a", "crates/b", "crates/aws-lc-sys", "crates/ring"' ;;
+    case-sdk)
+      mkdir -p "$d/crates/Ring/src"
+      printf '[package]\nname = "Ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/Ring/Cargo.toml"
+      printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/Ring/build.rs"; : > "$d/crates/Ring/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/Ring"'
+      extra_dep='Ring = { path = "../Ring" }' ;;
+    lock-deleting-build)
+      printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/leaf/Cargo.toml"
+      printf 'fn main() { let _ = std::fs::remove_file(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")); }\n' > "$d/crates/leaf/build.rs" ;;
+    unbuilt-dep-after)
+      mkdir -p "$d/crates/ring/src" "$d/crates/zdep/src"
+      printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/ring/Cargo.toml"
+      printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/ring/build.rs"; : > "$d/crates/ring/src/lib.rs"
+      printf '[package]\nname = "zdep"\nversion = "0.0.0"\nedition = "2021"\n' > "$d/crates/zdep/Cargo.toml"
+      # Big enough that rustc has not finished it before ring's build script fails.
+      python3 -c 'print("".join(f"pub fn f{i}() -> u64 {{ {i} }}" + chr(10) for i in range(6000)))' > "$d/crates/zdep/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/ring", "crates/zdep"'
+      extra_dep='zdep = { path = "../zdep" }' ;;
+    warning-in-blocked)
+      mkdir -p "$d/crates/ring/src"
+      printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/ring/Cargo.toml"
+      printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/ring/build.rs"; : > "$d/crates/ring/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/ring"'
+      extra_dep='ring = { path = "../ring" }' ;;
+    pkg-profile-config)
+      mkdir -p "$d/.cargo"; printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' > "$d/.cargo/config.toml" ;;
+    dep-profile-config|dep-profile-manifest)
+      members='"crates/root"'; ws_extra=$'exclude = ["crates/leaf"]\n'
+      [ "$variant" = dep-profile-config ] && { mkdir -p "$d/.cargo"; printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' > "$d/.cargo/config.toml"; } ;;
+    bootstrap-config)
+      mkdir -p "$d/.cargo"; printf '[env]\nRUSTC_BOOTSTRAP = { value = "1", force = true }\n' > "$d/.cargo/config.toml" ;;
+    panic-config)
+      mkdir -p "$d/.cargo"; printf '[profile.dev]\npanic = "abort"\n' > "$d/.cargo/config.toml" ;;
+    proc-macro-member)
+      printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[lib]\nproc-macro = true\n' > "$d/crates/leaf/Cargo.toml" ;;
+    proc-macro-feature)
+      printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[lib]\nproc-macro = true\n[features]\ndark = []\n' > "$d/crates/leaf/Cargo.toml" ;;
+    portable-feature)
+      mkdir -p "$d/deps/ring/src"; ws_extra=$'exclude = ["deps/ring"]\n'
+      printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n[features]\nportable = []\n' > "$d/deps/ring/Cargo.toml"
+      printf 'fn main() { if !cfg!(feature = "portable") { panic!("needs SDK"); } }\n' > "$d/deps/ring/build.rs"; : > "$d/deps/ring/src/lib.rs"
+      extra_dep='ring = { path = "../../deps/ring" }' ;;
+    env-build-script|config-env-build-script)
+      printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/leaf/Cargo.toml"
+      printf 'fn main() { println!("cargo:rustc-check-cfg=cfg(forged)"); if std::env::var_os("MAKNAE_FORGE").is_some() { println!("cargo:rustc-cfg=forged"); } }\n' > "$d/crates/leaf/build.rs" ;;
+    feature-real|feature-blocked)
+      mkdir -p "$d/crates/ring/src" "$d/crates/devshim/src"
+      printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/ring/Cargo.toml"
+      printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/ring/build.rs"; : > "$d/crates/ring/src/lib.rs"
+      printf '[package]\nname = "devshim"\nversion = "0.0.0"\nedition = "2021"\n[features]\nsdk = ["dep:ring"]\n[dependencies]\nring = { path = "../ring", optional = true }\n' > "$d/crates/devshim/Cargo.toml"; : > "$d/crates/devshim/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/ring", "crates/devshim"' ;;
+    required-features-bin)
+      rm -rf "$d/crates/root/src"; mkdir -p "$d/crates/root/src"
+      printf 'compile_error!("HIDDEN_BIN_REAL_ERROR");\nfn main() {}\n' > "$d/crates/root/src/main.rs" ;;
+    debug-assertions-config)
+      mkdir -p "$d/.cargo"; printf '[profile.dev]\ndebug-assertions = false\n' > "$d/.cargo/config.toml" ;;
+    config-rustflags)
+      mkdir -p "$d/.cargo"
+      printf '[build]\nrustflags = ["--cfg", "target_os=\\"linux\\"", "-Aexplicit_builtin_cfgs_in_flags"]\n' > "$d/.cargo/config.toml" ;;
+    config-target-rustflags)
+      mkdir -p "$d/.cargo"
+      printf '[target.aarch64-apple-darwin]\nrustflags = ["--cfg", "target_os=\\"linux\\"", "-Aexplicit_builtin_cfgs_in_flags"]\n' > "$d/.cargo/config.toml" ;;
+    config-wrapper)
+      mkdir -p "$d/bin"
+      printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/wrapper.log"\nexec "$@"\n' "$d" > "$d/bin/wrap"; chmod +x "$d/bin/wrap" ;;
+    devdep-sdk-plus-real-error|silent-rustc-death|multiline-fake-line)
+      mkdir -p "$d/crates/ring/src"
+      printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$d/crates/ring/Cargo.toml"
+      printf 'fn main() { panic!("needs SDK"); }\n' > "$d/crates/ring/build.rs"
+      : > "$d/crates/ring/src/lib.rs"
+      members='"crates/root", "crates/leaf", "crates/ring"' ;;
+    sdk-blocked|other-build-failure|progress-config)
+      local nm="$sdk"; [ "$variant" = other-build-failure ] && nm="notsdk"
+      mkdir -p "$d/crates/$nm/src"
+      printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' "$nm" > "$d/crates/$nm/Cargo.toml"
+      # The panic text QUOTES cargo's own sentence, naming a real SDK crate. With
+      # an UNANCHORED classifier that quoted line (cargo prints build-script
+      # stderr indented, never at column 0) flipped a FAIL into a green
+      # "blocked"; the anchored `^error: ` form ignores it. This is what makes
+      # the `notsdk` probe below exercise the anchor. Codex showed the round-3
+      # "inert" claim was overstated: `compile_error!("error: failed to run
+      # custom build command for ...")` rendered `error: error: failed ...` --
+      # matched unanchored, not anchored -- and exclusivity alone let it
+      # through. Since round 4 the span-line and tree corroborations refuse
+      # that case with or without the anchor, so the anchor is now the FIRST
+      # filter of four rather than a control on its own.
+      printf 'fn main() { panic!("simulated SDK failure: failed to run custom build command for `ring v0.17.14` (quoted)"); }\n' > "$d/crates/$nm/build.rs"
+      : > "$d/crates/$nm/src/lib.rs"
+      members="\"crates/root\", \"crates/leaf\", \"crates/$nm\""
+      extra_dep="$(printf '%s = { path = "../%s" }\n' "$nm" "$nm")" ;;
+  esac
+  printf '[workspace]\nresolver = "3"\nmembers = [%s]\n%s' "$members" "$ws_extra" > "$d/Cargo.toml"
+  [ "$variant" = pkg-profile-manifest ] && printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' >> "$d/Cargo.toml"
+  cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
+  if [ "$variant" = required-features-bin ]; then
+    printf '[package]\nname = "root"\nversion = "0.0.0"\nedition = "2021"\n[features]\nhidden = []\n[dependencies]\nleaf = { path = "../leaf" }\n[[bin]]\nname = "root"\npath = "src/main.rs"\nrequired-features = ["hidden"]\n' > "$d/crates/root/Cargo.toml"
+  else
+  {
+    printf '[package]\nname = "root"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nleaf = { path = "../leaf" }\n'
+    [ -n "$extra_dep" ] && printf '%s\n' "$extra_dep"
+    case "$variant" in devdep-sdk-plus-real-error|silent-rustc-death|unbuilt-dep-after|multiline-fake-line) printf '[dev-dependencies]\nring = { path = "../ring" }\n' ;; esac
+    case "$variant" in
+      feature-fake) printf '[features]\ndark = []\n' ;;
+      portable-feature) printf '[features]\nportable = ["ring/portable"]\n' ;;
+      feature-real|feature-blocked) printf '[features]\ndark = ["devshim/sdk"]\n[dev-dependencies]\ndevshim = { path = "../devshim" }\n' ;;
+    esac
+  } > "$d/crates/root/Cargo.toml"
+  fi
+  case "$variant" in
+    required-features-bin) : ;;   # main.rs written above; no lib
+    devdep-sdk-plus-real-error)
+      printf 'pub fn r() -> u8 { leaf::l() }\npub fn boom() -> u8 { undeclared_fn_real_darwin_error() }\n' > "$d/crates/root/src/lib.rs" ;;
+    unbuilt-dep-after)
+      printf 'pub fn r() -> u64 { zdep::f1() + leaf::l() as u64 }\npub fn boom() -> u8 { undeclared_fn_real_darwin_error() }\n' > "$d/crates/root/src/lib.rs" ;;
+    fake-cargo-line)
+      printf 'pub fn r() -> u8 { leaf::l() }\ncompile_error!("failed to run custom build command for `ring v0.17.14`");\n' > "$d/crates/root/src/lib.rs" ;;
+    multiline-fake-line)
+      printf 'pub fn r() -> u8 { leaf::l() }\ncompile_error!("failed to run custom build command for `ring v0.0.0`\\n\\nthe real darwin error is hidden below");\n' > "$d/crates/root/src/lib.rs" ;;
+    proc-macro-member|proc-macro-feature)
+      printf 'pub fn r() -> u8 { 7 }\n' > "$d/crates/root/src/lib.rs" ;;
+    feature-fake)
+      printf 'pub fn r() -> u8 { leaf::l() }\n#[cfg(feature = "dark")]\ncompile_error!("failed to run custom build command for `ring v0.0.0`");\n' > "$d/crates/root/src/lib.rs" ;;
+    feature-real)
+      printf 'pub fn r() -> u8 { leaf::l() }\n#[cfg(feature = "dark")]\ncompile_error!("REAL_DARWIN_ERROR_BEHIND_DARK");\n' > "$d/crates/root/src/lib.rs" ;;
+    portable-feature)
+      printf 'pub fn r() -> u8 { leaf::l() }\n#[cfg(feature = "portable")]\ncompile_error!("PORTABLE_DARWIN_SENTINEL");\n' > "$d/crates/root/src/lib.rs" ;;
+    *)
+      printf 'pub fn r() -> u8 { leaf::l() }\n' > "$d/crates/root/src/lib.rs" ;;
+  esac
+  case "$variant" in
+    lock-deleting-build|proc-macro-member|proc-macro-feature|env-build-script|config-env-build-script) : ;;
+    feature-gated-linux-item|clean-with-feature) printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[features]\ndark = []\n' > "$d/crates/leaf/Cargo.toml" ;;
+    *) printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n' > "$d/crates/leaf/Cargo.toml" ;;
+  esac
+  {
+    # An inner attribute must come FIRST: printed after an item it is a syntax
+    # error, and the bootstrap probes were then green for the wrong reason
+    # (measured: the neutraliser mutation survived).
+    case "$variant" in bootstrap-gated|bootstrap-config) printf '#![cfg_attr(target_os = "macos", feature(never_type))]\n' ;; esac
+    case "$variant" in proc-macro-member|proc-macro-feature) : ;; *) printf 'pub fn l() -> u8 { 7 }\n' ;; esac
+    [ "$variant" = warning-in-blocked ] && printf 'pub fn w() { let unused_var_makes_a_spanned_warning = 3; }\n'
+    case "$variant" in
+      proc-macro-member)
+        printf 'use proc_macro::TokenStream;\n#[proc_macro]\npub fn noop(i: TokenStream) -> TokenStream { i }\n' ;;
+      proc-macro-feature)
+        printf 'use proc_macro::TokenStream;\n#[proc_macro]\npub fn noop(i: TokenStream) -> TokenStream { i }\n#[cfg(feature = "dark")]\ncompile_error!("PROC_MACRO_FEATURE_ERROR");\n' ;;
+      panic-gated|panic-config)
+        printf '#[cfg(all(not(test), panic = "unwind"))]\ncompile_error!("REAL_DARWIN_ERROR_BEHIND_PANIC_UNWIND");\n' ;;
+      debug-assertions-gated|debug-assertions-config|pkg-profile-config|pkg-profile-manifest|dep-profile-config|dep-profile-manifest)
+        printf '#[cfg(all(target_os = "macos", debug_assertions))]\ncompile_error!("REAL_DARWIN_ERROR_BEHIND_DEBUG_ASSERTIONS");\n' ;;
+      linux-only-item|config-rustflags|config-target-rustflags|channel-override)
+        printf '#[cfg(target_os = "linux")]\nfn linux_only() -> u8 { 1 }\npub fn uses_it() -> u8 { linux_only() }\n' ;;
+      feature-gated-linux-item)
+        printf '#[cfg(target_os = "linux")]\nfn linux_only() -> u8 { 1 }\n#[cfg(feature = "dark")]\npub fn uses_it() -> u8 { linux_only() }\n' ;;
+      env-build-script|config-env-build-script)
+        printf '#[cfg(target_os = "linux")]\nfn linux_only() -> u8 { 1 }\n#[cfg(not(forged))]\npub fn uses_it() -> u8 { linux_only() }\n' ;;
+      linux-only-item-in-tests)
+        printf '#[cfg(target_os = "linux")]\nfn linux_only() -> u8 { 1 }\n#[cfg(test)]\nmod t { #[test] fn s() { assert_eq!(super::linux_only(), 1); } }\n' ;;
+    esac
+  } > "$d/crates/leaf/src/lib.rs"
+  ( cd "$d" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+  # Also written AFTER the lockfile: `[unstable]` / `[profile.dev] rustflags`
+  # (stable cargo warns on them; the fixture's own generate-lockfile need not
+  # see them), the progress bar, and the root-manifest profile override.
+  case "$variant" in
+    channel-override) mkdir -p "$d/.cargo"; printf '[unstable]\nprofile-rustflags = true\n[profile.dev]\nrustflags = ["--cfg", "target_os=\\"linux\\"", "-Aexplicit_builtin_cfgs_in_flags"]\n' > "$d/.cargo/config.toml" ;;
+    progress-config) mkdir -p "$d/.cargo"; printf '[term]\nprogress.when = "always"\nprogress.width = 80\n' > "$d/.cargo/config.toml" ;;
+    dep-profile-manifest) printf '[profile.dev.package.leaf]\ndebug-assertions = false\n' >> "$d/Cargo.toml" ;;
+    build-dir-config) mkdir -p "$d/.cargo"; printf '[build]\nbuild-dir = "target/separate"\n' > "$d/.cargo/config.toml" ;;
+    config-env-build-script) mkdir -p "$d/.cargo"; printf '[env]\nMAKNAE_FORGE = "1"\n' > "$d/.cargo/config.toml" ;;
+  esac
+  # Written AFTER the lockfile: the fixture's own `generate-lockfile` runs
+  # `rustc -vV` and, with the config already present, that call landed in the
+  # wrapper log and was recorded as a gate residue. It was the fixture's.
+  if [ "$variant" = config-wrapper ]; then
+    mkdir -p "$d/.cargo"; printf '[build]\nrustc-wrapper = "%s/bin/wrap"\n' "$d" > "$d/.cargo/config.toml"
+  fi
+  if [ "$variant" = stale-lock ]; then
+    # Add a member AFTER the lock was written; `--locked` must now refuse.
+    mkdir -p "$d/crates/late/src"
+    printf '[package]\nname = "late"\nversion = "0.0.0"\nedition = "2021"\n' > "$d/crates/late/Cargo.toml"; : > "$d/crates/late/src/lib.rs"
+    printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf", "crates/late"]\n' > "$d/Cargo.toml"
+  fi
+  printf '%s' "$d"
+}
+
+# ---------------------------------------------------------------- guard probes
+# The gate carries the same guards as clippy-all.sh. Each has a probe there
+# and, until this block, none here -- so the toolchain pin, for one, was
+# enforced and unproven. Same fixtures, same FAIL strings, darwin labels.
+tmpD0="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD0/Cargo.toml"
+cp "$here/../../rust-toolchain.toml" "$tmpD0/rust-toolchain.toml"
+expect_reject_because "darwin-cross-check/zero-members-is-refused" \
+  "resolved ZERO" \
+  "$here/darwin-cross-check.sh" --root "$tmpD0" --check-inputs
+
+tmpD1="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpD1/Cargo.toml"
+cp "$here/../../rust-toolchain.toml" "$tmpD1/rust-toolchain.toml"
+expect_reject_because "darwin-cross-check/metadata-failure-is-not-silent" \
+  "cargo metadata failed" \
+  "$here/darwin-cross-check.sh" --root "$tmpD1" --check-inputs
+
+tmpD2="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD2/Cargo.toml"
+expect_reject_because "darwin-cross-check/missing-toolchain-file-is-refused" \
+  "missing" \
+  "$here/darwin-cross-check.sh" --root "$tmpD2" --check-inputs
+
+tmpD3="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD3/Cargo.toml"
+printf '[toolchain]\ncomponents = ["clippy"]\n' > "$tmpD3/rust-toolchain.toml"
+expect_reject_because "darwin-cross-check/no-channel-is-refused" \
+  "no [toolchain] channel" \
+  "$here/darwin-cross-check.sh" --root "$tmpD3" --check-inputs
+
+for ch in stable nightly-2026-01-01 1garbage.2whatever; do
+  tmpD4="$(mktemp -d)"
+  printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD4/Cargo.toml"
+  printf '[toolchain]\nchannel = "%s"\n' "$ch" > "$tmpD4/rust-toolchain.toml"
+  expect_reject_because "darwin-cross-check/unpinned-channel-$ch-is-refused" \
+    "is not a pinned release" \
+    "$here/darwin-cross-check.sh" --root "$tmpD4" --check-inputs
+done
+
+expect_reject_because "darwin-cross-check/unknown-argument-is-refused" \
+  "unknown argument" \
+  "$here/darwin-cross-check.sh" --chek-inputs
+
+expect_reject_because "darwin-cross-check/conflicting-mode-flags-are-refused" \
+  "conflicting mode flags" \
+  "$here/darwin-cross-check.sh" --check-inputs --check-inputs
+
+expect_reject_because "darwin-cross-check/unenterable-root-is-refused" \
+  "cannot enter --root '/nonexistent-198'" \
+  "$here/darwin-cross-check.sh" --root /nonexistent-198 --check-inputs
+
+# The pin is ENFORCED against BOTH tools. A cargo shim reporting a fake version
+# is hermetic (no second toolchain needed); the RUSTC override is the case
+# codex found: cargo 1.98.1 happily drives a 1.94.1 rustc and reports the pin.
+tmpD5="$(mktemp -d)"; mkdir -p "$tmpD5/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpD5/bin/cargo" <<'SHIM'
+if [ "${1:-}" = --version ]; then echo "cargo 1.0.0 (fake 2000-01-01)"; exit 0; fi
+exec "$REAL_CARGO" "$@"
+SHIM
+chmod +x "$tmpD5/bin/cargo"
+# ...and the rustc half of the pin, independently: a `rustc` shim that answers
+# `--version` with a fake and passes everything else through. Deleting the
+# rustc query survived every other probe.
+tmpD5r="$(mktemp -d)"; mkdir -p "$tmpD5r/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD5r/bin/rustc" <<'SHIM'
+if [ "${1:-}" = --version ]; then echo "rustc 1.0.0 (fake 2000-01-01)"; exit 0; fi
+exec "$REAL_RUSTC" "$@"
+SHIM
+chmod +x "$tmpD5r/bin/rustc"
+# ACCEPT: a `rustc` shim on PATH never reaches the check. The compiler is
+# resolved by PATH under the pin (`rustup which rustc`) and the resolved BINARY
+# is version-checked (rounds 11-12); the PATH `rustc` itself is never run.
+# (Until round 11 this probe expected a mismatch FAIL from the proxy check;
+# the proxy is no longer what runs, and the live route -- `rustup which` --
+# is probed by the-resolved-rustc-binary-is-version-checked.)
+expect_accept "darwin-cross-check/a-PATH-rustc-shim-never-reaches-the-check" \
+  "ran NO check" \
+  env PATH="$tmpD5r/bin:$PATH" \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+expect_reject_because "darwin-cross-check/toolchain-mismatch-is-refused" \
+  "toolchain mismatch" \
+  env REAL_CARGO="$(command -v cargo)" PATH="$tmpD5/bin:$PATH" \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+expect_reject_because "darwin-cross-check/rustc-override-is-refused" \
+  "RUSTC is set" \
+  env RUSTC=/usr/bin/false \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+expect_reject_because "darwin-cross-check/rustc-wrapper-is-refused" \
+  "RUSTC_WRAPPER is set" \
+  env RUSTC_WRAPPER=/usr/bin/env \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+# ...and the four other spellings cargo honours. Measured with a logging
+# wrapper: each drove every compile while the gate printed the pin.
+for v in RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
+  expect_reject_because "darwin-cross-check/$v-is-refused" \
+    "$v is set" \
+    env "$v=/usr/bin/env" \
+    "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+done
+
+tmpD6="$(mktemp -d)"; mkdir -p "$tmpD6/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpD6/bin/cargo" <<'SHIM'
+if [ "${1:-}" = metadata ]; then exec "$REAL_CARGO" "$@"; fi
+exit 101
+SHIM
+chmod +x "$tmpD6/bin/cargo"
+expect_reject_because "darwin-cross-check/unanswerable-cargo-version-is-not-mute" \
+  "cannot determine the active cargo version" \
+  env REAL_CARGO="$(command -v cargo)" PATH="$tmpD6/bin:$PATH" \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]' 2>/dev/null; then
+  expect_reject_because "darwin-cross-check/system-bash-3.2-is-refused" \
+    "bash >= 4 required" \
+    /bin/bash "$here/darwin-cross-check.sh" --check-inputs
+else
+  skipped=$((skipped+1)); echo "skip: [darwin-cross-check/system-bash-3.2-is-refused] no bash < 4 at /bin/bash"
+fi
+
+# A missing darwin target is a FAIL naming the fix, never a skip. (Placed
+# BEFORE the target-gated block so it runs everywhere.)
+tmpD7="$(mktemp -d)"; mkdir -p "$tmpD7/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\n' "$(command -v rustup)"; cat; } > "$tmpD7/bin/rustup" <<'SHIM'
+if [ "${1:-}" = target ]; then exit 0; fi
+exec "$REAL_RUSTUP" "$@"
+SHIM
+chmod +x "$tmpD7/bin/rustup"
+expect_reject_because "darwin-cross-check/missing-target-is-a-FAIL-not-a-skip" \
+  "rustup target add aarch64-apple-darwin" \
+  env REAL_RUSTUP="$(command -v rustup)" PATH="$tmpD7/bin:$PATH" \
+  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+# ACCEPT: the target check is scoped to `$root`, not the caller's cwd. A rustup
+# shim that reports the target ONLY when RUSTUP_TOOLCHAIN equals the pin --
+# the gate runs every toolchain call from a cwd OUTSIDE the tree and carries
+# the pin in its allowlisted environment; "drop the pin" is caught here
+# `cd "$root" &&`. No second toolchain needed -- an earlier comment claimed
+# this could not be probed hermetically; it can.
+tmpD10="$(mktemp -d)"; mkdir -p "$tmpD10/bin"
+{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\n' "$(command -v rustup)"; printf 'EXPECT_CHANNEL=%q\n' "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$here/../../rust-toolchain.toml")"; cat; } > "$tmpD10/bin/rustup" <<'SHIM'
+if [ "${1:-}" = target ]; then [ "${RUSTUP_TOOLCHAIN:-}" = "$EXPECT_CHANNEL" ] && echo aarch64-apple-darwin; exit 0; fi
+exec "$REAL_RUSTUP" "$@"
+SHIM
+chmod +x "$tmpD10/bin/rustup"
+expect_accept "darwin-cross-check/target-check-is-scoped-to-root-not-cwd" \
+  "ran NO check" \
+  env REAL_RUSTUP="$(command -v rustup)" EXPECT_CHANNEL="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$here/../../rust-toolchain.toml")" PATH="$tmpD10/bin:$PATH" \
+  bash -c 'cd /tmp && exec "$0" "$@"' "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+# ------------------------------------------------- the check itself, observed
+# The number of probes inside the target-gated block. Hand-counted, and then
+# CHECKED: when the block runs, the probes it added to `$total` must equal this
+# constant, so a probe added without bumping it is a harness failure on every
+# host that has the target -- rather than a silently wrong skip count on every
+# host that does not (which is how 17 stood for 20 after round 3 added three
+# -- and how 24 stood for 23 the first time this check ran, and 38 for 39
+# the third).
+darwin_block_probes=76
+# The oracle walk, shared by the real-repo probe and the proc-macro fixture
+# probe below. Members, minus host-only (proc-macro-only) ones; from each,
+# normal+dev edges, then normal only; a member reaching an SDK crate is
+# expected blocked unless the host is darwin.
+darwin_oracle_py=$(cat <<'PYO'
+import json, sys
+host_is_darwin = sys.argv[1] == "aarch64-apple-darwin"
+m = json.load(sys.stdin)
+def host_only(p):
+    # proc-macro-only members compile for the HOST; the gate reports them
+    # host-only and counts them as neither (codex r8: the oracle said 2 where
+    # the gate correctly said 1).
+    kinds = {k for t in p["targets"] for k in t["kind"]}
+    return bool(kinds) and kinds <= {"proc-macro", "custom-build"}
+members = set(m["workspace_members"])
+ws = {p["id"] for p in m["packages"] if p["id"] in members and not host_only(p)}
+name = {p["id"]: p["name"] for p in m["packages"]}
+edges = {}
+for n in m["resolve"]["nodes"]:
+    for d in n["deps"]:
+        kinds = {(k.get("kind") or "normal") for k in d["dep_kinds"]}
+        edges.setdefault(n["id"], []).append((d["pkg"], kinds))
+SDK = {"aws-lc-sys", "aws-lc-fips-sys", "ring"}
+def reaches_sdk(start):
+    seen = set(); frontier = [(start, True)]
+    while frontier:
+        node, is_root = frontier.pop()
+        if node in seen: continue
+        seen.add(node)
+        if name[node] in SDK: return True
+        for dep, kinds in edges.get(node, []):
+            if "normal" in kinds or (is_root and "dev" in kinds):
+                frontier.append((dep, False))
+    return False
+checked_ids = [pid for pid in ws if host_is_darwin or not reaches_sdk(pid)]
+feats = {p["id"]: sorted(f for f in p.get("features", {}) if f != "default") for p in m["packages"]}
+# "<checked> <feature passes>": one darwin pass per declared feature of a checked member.
+print(len(checked_ids), sum(len(feats[pid]) for pid in checked_ids))
+PYO
+)
+if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'; then
+  darwin_block_total_before=$total
+  # Since round 11 the gates run cargo hermetically (env -i + an outside cwd),
+  # so the env-spelling and tree-config fixtures below observe THOSE TWO
+  # MECHANISMS, not the individual pins their comments name; the `--config`
+  # pins are observed only by the root-MANIFEST fixtures (pkg-profile-manifest,
+  # dep-profile-manifest). Recorded (critical-review r10), not re-litigated.
+  #
+  # On a host whose triple IS the target the gate refuses any SDK block (the
+  # SDK is present; a build-script failure there is real) while still echoing
+  # the classification. These two helpers assert the classification on BOTH
+  # hosts and the verdict per host: rc 0 elsewhere, the host-rule FAIL here.
+  darwin_host=0; [ "$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')" = aarch64-apple-darwin ] && darwin_host=1
+  expect_blocked() { # <label> <must-contain> <cmd...>
+    local label="$1" want="$2"; shift 2; total=$((total+1)); local out rc
+    if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+    if [ "$darwin_host" = 1 ]; then
+      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && printf '%s' "$out" | grep -q -- "$want"; then
+        echo "neg-ok: [$label] classified, refused on a darwin host, and reported '$want'"; pass=$((pass+1))
+      else
+        echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL plus '$want' (rc=$rc): $out"
+      fi
+    elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q -- "$want"; then
+      echo "pos-ok: [$label] gate accepted and reported '$want'"; pass=$((pass+1))
+    else
+      echo "POS-FAIL: [$label] (rc=$rc) wanted '$want': $out"
+    fi
+  }
+  expect_blocked_count() { # <label> <prefix> <expected> <cmd...>
+    local label="$1" prefix="$2" expected="$3"; shift 3; total=$((total+1)); local out rc n
+    if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+    n="$(printf '%s' "$out" | sed -n "s/.*${prefix}\([0-9][0-9]*\).*/\1/p" | head -1)"
+    if [ "$darwin_host" = 1 ]; then
+      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && [ "$n" = "$expected" ]; then
+        echo "neg-ok: [$label] classified ($prefix$n), then refused on a darwin host"; pass=$((pass+1))
+      else
+        echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL with $prefix$expected, got rc=$rc, '$n': $out"
+      fi
+    elif [ "$rc" -eq 0 ] && [ "$n" = "$expected" ]; then
+      echo "pos-ok: [$label] gate accepted, examined $n (expected $expected)"; pass=$((pass+1))
+    else
+      echo "POS-FAIL: [$label] (rc=$rc) examined '$n' but expected $expected: $out"
+    fi
+  }
+  expect_accept "darwin-cross-check/check-inputs-does-not-claim-a-check" \
+    "ran NO check" \
+    "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+  # ACCEPT, AND THE TARGET DIR EXISTS: the clean fixture checks both members,
+  # and the GATE-OWNED `target/darwin-cross-check/aarch64-apple-darwin/` is
+  # present afterwards -- which is what a
+  # `--target` build leaves and a host build does not, on ANY host. Kills
+  # "drop --target" everywhere, and "check only the first member" (count).
+  fx_dc="$(darwin_fixture clean)"
+  expect_reported_count "darwin-cross-check/clean-fixture-checks-every-member" \
+    "cross-checked " 2 \
+    "$here/darwin-cross-check.sh" --root "$fx_dc"
+  total=$((total+1))
+  if [ -d "$fx_dc/target/darwin-cross-check/aarch64-apple-darwin" ]; then
+    echo "pos-ok: [darwin-cross-check/the-check-really-targets-darwin] target/darwin-cross-check/aarch64-apple-darwin/ exists after the run"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/the-check-really-targets-darwin] no target/darwin-cross-check/aarch64-apple-darwin/ after the run — the check built for the HOST or into an unowned dir: $(ls -R "$fx_dc/target" 2>/dev/null | head -5 | tr '\n' ' ')"
+  fi
+
+  # REJECT: a Linux-only item used unconditionally fails the darwin check, and
+  # the FAIL names the member and says it was NOT an SDK failure.
+  fx_dl="$(darwin_fixture linux-only-item)"
+  expect_reject_because "darwin-cross-check/linux-only-item-fails-the-darwin-check" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_dl"
+
+  # REJECT ×3: rustflags must not forge the target. `--cfg target_os="linux"`
+  # (with the builtin-cfg lint allowed) made this same fixture PASS the darwin
+  # check through every source cargo honours -- RUSTFLAGS, the encoded form,
+  # and `[build] rustflags` in a config file. The gate's explicit empty
+  # CARGO_ENCODED_RUSTFLAGS outranks all three.
+  expect_reject_because "darwin-cross-check/RUSTFLAGS-cannot-forge-the-target" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env RUSTFLAGS='--cfg target_os="linux" -Aexplicit_builtin_cfgs_in_flags' \
+    "$here/darwin-cross-check.sh" --root "$fx_dl"
+  expect_reject_because "darwin-cross-check/CARGO_ENCODED_RUSTFLAGS-cannot-forge-the-target" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env CARGO_ENCODED_RUSTFLAGS="$(printf -- '--cfg\x1ftarget_os="linux"\x1f-Aexplicit_builtin_cfgs_in_flags')" \
+    "$here/darwin-cross-check.sh" --root "$fx_dl"
+  expect_reject_because "darwin-cross-check/target-specific-RUSTFLAGS-cannot-forge-the-target" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS='--cfg target_os="linux" -Aexplicit_builtin_cfgs_in_flags' \
+    "$here/darwin-cross-check.sh" --root "$fx_dl"
+  fx_cr="$(darwin_fixture config-rustflags)"
+  expect_reject_because "darwin-cross-check/config-file-rustflags-cannot-forge-the-target" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_cr"
+  fx_ctr="$(darwin_fixture config-target-rustflags)"
+  expect_reject_because "darwin-cross-check/config-file-target-rustflags-cannot-forge-the-target" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ctr"
+
+  # REJECT: the same item reachable only from a TEST target -- kills dropping
+  # `--all-targets`.
+  fx_dt="$(darwin_fixture linux-only-item-in-tests)"
+  expect_reject_because "darwin-cross-check/linux-only-item-in-a-test-target-fails-the-darwin-check" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_dt"
+
+  # REJECT, AND NEVER SAY OK.
+  expect_reject_without "darwin-cross-check/a-failing-check-never-prints-the-ok-line" \
+    "cross-check failed for aarch64-apple-darwin" "darwin-cross-check: ok" \
+    "$here/darwin-cross-check.sh" --root "$fx_dl"
+
+  # ACCEPT, WITH THE CLASSIFICATION OBSERVED, FOR EACH OF THE THREE NAMES: a
+  # build script that fails inside a crate named <sdk> makes its dependant
+  # `root` SDK-blocked -- reported, named, and NOT a FAIL -- while `leaf` is
+  # checked. Kills narrowing the name set (an earlier suite let `{"ring"}`
+  # alone survive) and kills dropping the package selection (a `-p`-less run
+  # would build the panicking crate and FAIL the whole fixture).
+  for sdk in ring aws-lc-sys aws-lc-fips-sys; do
+    fx_ds="$(darwin_fixture sdk-blocked "$sdk")"
+    expect_blocked_count "darwin-cross-check/$sdk-build-failure-is-classified-blocked-not-failed" \
+      "cross-checked " 1 \
+      "$here/darwin-cross-check.sh" --root "$fx_ds"
+    expect_blocked "darwin-cross-check/$sdk-blocked-member-is-named" \
+      "SDK-blocked from .*: $sdk root" \
+      "$here/darwin-cross-check.sh" --root "$fx_ds"
+    # ...and the WHY is echoed per blocked crate, so a CI reader sees the
+    # cargo line that produced the classification, not just a name.
+    # (No closing backtick in the pattern: for a PATH dependency cargo prints
+    # `ring v0.0.0 (/abs/path/crates/ring)` before it closes the quote.)
+    expect_blocked "darwin-cross-check/$sdk-blocked-member-shows-its-evidence" \
+      "blocked: root — error: failed to run custom build command for \`$sdk v0.0.0" \
+      "$here/darwin-cross-check.sh" --root "$fx_ds"
+  done
+
+  # REJECT: the SAME failing build script in a crate NOT named as an SDK crate
+  # is a real failure. This is the fail-closed half of the classification.
+  fx_do="$(darwin_fixture other-build-failure)"
+  expect_reject_because "darwin-cross-check/non-sdk-build-failure-is-a-FAIL" \
+    "not solely an SDK build-script failure" \
+    "$here/darwin-cross-check.sh" --root "$fx_do"
+
+  # REJECT: an SDK build-script failure must not MASK a real error. `root`
+  # dev-depends on a panicking `ring` and carries a compile_error! in its lib;
+  # under --all-targets both land in the same log. Presence-of-one-line called
+  # this "blocked" and printed nothing.
+  fx_dm="$(darwin_fixture devdep-sdk-plus-real-error)"
+  expect_reject_because "darwin-cross-check/sdk-failure-does-not-mask-a-real-error" \
+    "not solely an SDK build-script failure" \
+    "$here/darwin-cross-check.sh" --root "$fx_dm"
+  # (The `\[E…\]` alternative in the exclusivity regex is, like the tree
+  # check, shadowed by the span-line check on this fixture: `error[E0425]`
+  # always carries ` --> `, so removing the alternative survives (measured:
+  # 45/45). Kept for the same reason; recorded as unobserved.)
+  # ...and the co-occurrence is ASSERTED, not assumed: the printed log must
+  # carry BOTH the real error and the SDK line, else this probe has quietly
+  # become a duplicate of the plain compile-failure one (measured: on a fresh
+  # target dir cargo cancels the pending build script once the lib fails; the
+  # lines co-occur here only because `ring` sorts before `root` and its build
+  # script is already compiled by the time `root` is checked).
+  total=$((total+1))
+  dm_out="$("$here/darwin-cross-check.sh" --root "$fx_dm" 2>&1 || true)"
+  if printf '%s' "$dm_out" | grep -q 'undeclared_fn_real_darwin_error' && printf '%s' "$dm_out" | grep -Eq 'failed to run custom build command for `ring v'; then
+    echo "neg-ok: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] both the real error and the SDK line are in the log"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] the two errors did not co-occur — the masking probe proves nothing: $dm_out"
+  fi
+
+  # REJECT: a member with NO SDK crate in its graph whose own source renders
+  # cargo's sentence at column 0 (`compile_error!`) is a FAIL. Three of the
+  # gate's corroborations refuse it INDEPENDENTLY -- the span line, the
+  # exclusivity check (its `could not compile` line), the tree check -- so
+  # dropping any one survives the suite (measured: 50/50 each) and dropping
+  # all three is caught. Recorded rather than claimed one-by-one.
+  fx_fk="$(darwin_fixture fake-cargo-line)"
+  expect_reject_because "darwin-cross-check/a-rendered-diagnostic-quoting-cargo-is-not-blocked" \
+    "not solely an SDK build-script failure" \
+    "$here/darwin-cross-check.sh" --root "$fx_fk"
+
+  # REJECT: a multi-line rendered diagnostic whose first line is cargo's
+  # sentence, in a member that DOES have `ring` in its tree. (a) and (d) are
+  # honestly satisfied; (c) refuses via `could not compile`; and (b) must
+  # refuse too now that an error block runs to the next header rather than to
+  # the whitespace-only continuation line rustc renders.
+  fx_ml="$(darwin_fixture multiline-fake-line)"
+  expect_reject_because "darwin-cross-check/a-multiline-rendered-diagnostic-is-not-blocked" \
+    "not solely an SDK build-script failure" \
+    "$here/darwin-cross-check.sh" --root "$fx_ml"
+
+  # REJECT: a rustc that dies with NO diagnostic (the SIGKILL / OOM / ENOSPC
+  # shape) leaves only `error: could not compile` beside the SDK line. An
+  # exemption for that summary line called this "blocked". A `rustc` shim on
+  # PATH that passes `--version`/`-vV` through and exits 1 silently for root's
+  # lib reproduces it hermetically; must be a FAIL.
+  fx_sr="$(darwin_fixture silent-rustc-death)"
+  # The gate exports RUSTC from `rustup which rustc` (so a PATH rustc shim no
+  # longer reaches cargo -- that is the config-door fix working). The hermetic
+  # route is therefore a `rustup` shim whose `which rustc` names the fake:
+  # `--version`/`-vV`/`--print` pass through; root's lib exits 1 silently.
+  tmpD9="$(mktemp -d)"; mkdir -p "$tmpD9/bin"
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD9/bin/fake-rustc" <<'SHIM'
+case " $* " in *" --version "*|*" -vV "*|*" -V "*|*" --print "*) exec "$REAL_RUSTC" "$@" ;; esac
+case " $* " in *" --crate-name root "*) exit 1 ;; esac
+exec "$REAL_RUSTC" "$@"
+SHIM
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\n' "$(command -v rustup)"; printf 'FAKE_RUSTC=%q\n' "$tmpD9/bin/fake-rustc"; cat; } > "$tmpD9/bin/rustup" <<'SHIM'
+if [ "${1:-}" = which ] && [ "${2:-}" = rustc ]; then echo "$FAKE_RUSTC"; exit 0; fi
+exec "$REAL_RUSTUP" "$@"
+SHIM
+  chmod +x "$tmpD9/bin/fake-rustc" "$tmpD9/bin/rustup"
+  expect_reject_because "darwin-cross-check/silent-rustc-death-is-not-blocked" \
+    "not solely an SDK build-script failure" \
+    env REAL_RUSTC="$(cd "$here/../.." && rustup which rustc || { echo "harness: rustup which rustc failed" >&2; exit 1; })" REAL_RUSTUP="$(command -v rustup)" FAKE_RUSTC="$tmpD9/bin/fake-rustc" PATH="$tmpD9/bin:$PATH" \
+    "$here/darwin-cross-check.sh" --root "$fx_sr"
+
+  # REJECT: `--locked` is really passed. A lock file that predates a member
+  # must be refused by cargo, and the gate must surface that as a FAIL. This is
+  # caught by the gate's RESOLVING `cargo metadata --locked`, which runs in
+  # every mode before any check. The per-member `cargo check --locked` behind
+  # it is NOT inert (round 3 said it was): a build script can rewrite the lock
+  # AFTER metadata resolved it, and only the check's own `--locked` refuses
+  # that -- see `a-build-script-that-rewrites-the-lock...` below.
+  fx_sl="$(darwin_fixture stale-lock)"
+  expect_reject_because "darwin-cross-check/stale-lock-is-refused-by---locked" \
+    "--locked was passed" \
+    "$here/darwin-cross-check.sh" --root "$fx_sl" --check-inputs
+
+  # ACCEPT, EVIDENCE PER CRATE: two members blocked by DIFFERENT SDK crates
+  # must each be attributed to their own — an accumulating log (`>>`) would
+  # carry a's `aws-lc-sys` line into b's classification.
+  fx_2s="$(darwin_fixture two-sdk)"
+  expect_blocked "darwin-cross-check/evidence-names-each-members-own-sdk-crate-a" \
+    "blocked: a — error: failed to run custom build command for \`aws-lc-sys v0.0.0" \
+    "$here/darwin-cross-check.sh" --root "$fx_2s"
+  expect_blocked "darwin-cross-check/evidence-names-each-members-own-sdk-crate-b" \
+    "blocked: b — error: failed to run custom build command for \`ring v0.0.0" \
+    "$here/darwin-cross-check.sh" --root "$fx_2s"
+
+  # REJECT: crate names are case-sensitive. A panicking build script in a
+  # crate named `Ring` is not an SDK failure; a case-insensitive classifier
+  # would call it one.
+  fx_cs="$(darwin_fixture case-sdk)"
+  expect_reject_because "darwin-cross-check/Ring-is-not-ring" \
+    "not solely an SDK build-script failure" \
+    "$here/darwin-cross-check.sh" --root "$fx_cs"
+
+  # REJECT: cargo's SCHEDULER must not decide whether a real error exists.
+  # `root` has a real error in its lib AND a dependency (`zdep`) that is still
+  # unbuilt when `root` is checked; `ring`'s build script fails first. Without
+  # `--keep-going` cargo cancels root's lib and the log holds only the SDK
+  # line -- "blocked", `ok`, rc 0 (reviewer-measured, default parallelism and
+  # again with CARGO_BUILD_JOBS=1 on the plain masking fixture).
+  fx_ub="$(darwin_fixture unbuilt-dep-after)"
+  # Under CARGO_BUILD_JOBS=1 as well, so the mutation kill is deterministic:
+  # at default parallelism the scheduler sometimes compiles root's lib before
+  # ring's build script fails, and the mutant survives (measured 3 of 5).
+  expect_reject_because "darwin-cross-check/a-cancelled-lib-compile-does-not-hide-a-real-error" \
+    "not solely an SDK build-script failure" \
+    env CARGO_BUILD_JOBS=1 "$here/darwin-cross-check.sh" --root "$fx_ub"
+  expect_reject_because "darwin-cross-check/a-cancelled-lib-compile-does-not-hide-a-real-error-jobs1" \
+    "not solely an SDK build-script failure" \
+    env CARGO_BUILD_JOBS=1 "$here/darwin-cross-check.sh" --root "$fx_dm"
+
+  # ACCEPT: a spanned WARNING in a blocked member's graph is not an error.
+  # The span test is scoped to error blocks; whole-log it turned this into a
+  # FAIL that invited loosening the classifier.
+  fx_wb="$(darwin_fixture warning-in-blocked)"
+  expect_blocked_count "darwin-cross-check/a-warning-in-a-blocked-members-graph-is-still-blocked" \
+    "cross-checked " 1 \
+    "$here/darwin-cross-check.sh" --root "$fx_wb"
+
+  # ACCEPT, AND THE FILE-CONFIGURED WRAPPER WAS NEVER INVOKED: `.cargo/
+  # config.toml` `[build] rustc-wrapper` is the seventh compiler-substitution
+  # door; env beats config, and the gate exports an empty RUSTC_WRAPPER. The
+  # shim logs every invocation; the log must not exist afterwards.
+  fx_cw="$(darwin_fixture config-wrapper)"
+  expect_accept "darwin-cross-check/config-file-rustc-wrapper-is-neutralised" \
+    "cross-checked 2 crates" \
+    "$here/darwin-cross-check.sh" --root "$fx_cw"
+  # LIVENESS first: a plain `cargo check` in the fixture (no exports) MUST go
+  # through the config wrapper, else a green below would only mean the config
+  # never took. Then the log is cleared and the gate must leave it absent --
+  # not "no compiles", ABSENT: with the config written after the fixture's own
+  # lockfile generation, the gate is the only thing that could write it.
+  total=$((total+1))
+  ( cd "$fx_cw" && cargo check --locked >/dev/null 2>&1 || true )
+  if grep -q -- '--crate-name' "$fx_cw/wrapper.log" 2>/dev/null; then
+    echo "neg-ok: [darwin-cross-check/config-file-wrapper-fixture-is-live] a plain cargo check went through the config wrapper ($(grep -c -- '--crate-name' "$fx_cw/wrapper.log") compiles)"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [darwin-cross-check/config-file-wrapper-fixture-is-live] the config wrapper was never invoked by a plain cargo check — the fixture is inert and the probe below proves nothing"
+  fi
+  rm -f "$fx_cw/wrapper.log"; rm -rf "$fx_cw/target"
+  "$here/darwin-cross-check.sh" --root "$fx_cw" >/dev/null 2>&1 || true
+  total=$((total+1))
+  if [ ! -e "$fx_cw/wrapper.log" ]; then
+    echo "neg-ok: [darwin-cross-check/config-file-rustc-wrapper-never-ran-under-the-gate] no wrapper.log after the gate run"; pass=$((pass+1))
+  else
+    echo "NEG-FAIL: [darwin-cross-check/config-file-rustc-wrapper-never-ran-under-the-gate] the config-file wrapper ran under the gate: $(tr '\n' ';' < "$fx_cw/wrapper.log" | cut -c1-120)"
+  fi
+
+  # REJECT: a member whose every target is gated by `required-features` is
+  # a cargo NO-OP ("no targets matched"), exit 0, nothing compiled. It was
+  # counted as checked. Now a member counts only if cargo emitted a
+  # compiler artifact attributed to its manifest.
+  fx_rf="$(darwin_fixture required-features-bin)"
+  expect_reject_because "darwin-cross-check/a-member-with-no-matched-target-is-not-counted-as-checked" \
+    "compiled NO aarch64-apple-darwin target of it" \
+    "$here/darwin-cross-check.sh" --root "$fx_rf"
+
+  # REJECT ×2: the PROFILE must not forge conditional compilation. An error
+  # behind cfg(debug_assertions) vanished under `[profile.dev]
+  # debug-assertions = false` and under CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false;
+  # the gate pins the profile with `--config`, which outranks both.
+  fx_da="$(darwin_fixture debug-assertions-gated)"
+  expect_reject_because "darwin-cross-check/profile-env-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false "$here/darwin-cross-check.sh" --root "$fx_da"
+  fx_dac="$(darwin_fixture debug-assertions-config)"
+  expect_reject_because "darwin-cross-check/profile-config-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_dac"
+
+  # REJECT ×2: per-package profile overrides -- in config and in the ROOT
+  # MANIFEST -- reach workspace members that cargo's `"*"` glob does not; a
+  # named pin per member closes both.
+  fx_ppc="$(darwin_fixture pkg-profile-config)"
+  expect_reject_because "darwin-cross-check/per-package-profile-in-config-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ppc"
+  fx_ppm="$(darwin_fixture pkg-profile-manifest)"
+  expect_reject_because "darwin-cross-check/per-package-profile-in-the-manifest-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ppm"
+
+  # REJECT ×2: RUSTC_BOOTSTRAP unlocks nightly gates on the pinned stable
+  # compiler; refused from the environment, neutralised from `[env]`.
+  fx_bs="$(darwin_fixture bootstrap-gated)"
+  expect_reject_because "darwin-cross-check/RUSTC_BOOTSTRAP-is-refused" \
+    "RUSTC_BOOTSTRAP is set" \
+    env RUSTC_BOOTSTRAP=1 "$here/darwin-cross-check.sh" --root "$fx_bs"
+  fx_bsc="$(darwin_fixture bootstrap-config)"
+  expect_reject_because "darwin-cross-check/config-env-RUSTC_BOOTSTRAP-cannot-unlock-nightly-gates" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_bsc"
+
+  # REJECT ×2: the PANIC STRATEGY is conditional compilation. An error behind
+  # cfg(panic = "unwind") vanished under `[profile.dev] panic = "abort"` and
+  # under CARGO_PROFILE_DEV_PANIC=abort; the gate pins unwind.
+  fx_pg="$(darwin_fixture panic-gated)"
+  expect_reject_because "darwin-cross-check/profile-env-cannot-forge-the-panic-strategy" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env CARGO_PROFILE_DEV_PANIC=abort "$here/darwin-cross-check.sh" --root "$fx_pg"
+  fx_pc="$(darwin_fixture panic-config)"
+  expect_reject_because "darwin-cross-check/profile-config-cannot-forge-the-panic-strategy" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_pc"
+
+  # ACCEPT, host-only reported: a proc-macro member is compiled for the HOST;
+  # it must be neither counted as darwin-checked nor blocked, and named. The
+  # kind check classifies it before the counter runs, so the counter's own
+  # `/<triple>/` filename filter is defence in depth behind it -- the
+  # mutation "drop the filename filter" survives (measured: 75/75). Recorded,
+  # not claimed; the filter stays because it is independent of how the kind
+  # is declared.
+  fx_pm="$(darwin_fixture proc-macro-member)"
+  expect_reported_count "darwin-cross-check/a-proc-macro-member-is-not-counted-as-darwin-checked" \
+    "cross-checked " 1 \
+    "$here/darwin-cross-check.sh" --root "$fx_pm"
+  expect_accept "darwin-cross-check/a-proc-macro-member-is-reported-host-only" \
+    "host-only (proc-macro): leaf" \
+    "$here/darwin-cross-check.sh" --root "$fx_pm"
+
+  # The ORACLE must not count a host-only member either (codex r8: it predicted
+  # two checked on this fixture; the gate correctly says one).
+  total=$((total+1))
+  pm_oracle="$( (cd "$fx_pm" && cargo metadata --format-version 1 --locked --filter-platform aarch64-apple-darwin 2>/dev/null) | python3 -c "$darwin_oracle_py" "$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')" 2>/dev/null)" || pm_oracle="walk failed"
+  if [ "${pm_oracle%% *}" = 1 ]; then
+    echo "pos-ok: [darwin-cross-check/the-oracle-excludes-host-only-members] oracle predicts 1 on the proc-macro fixture, as the gate reports"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/the-oracle-excludes-host-only-members] oracle predicts '$pm_oracle' on the proc-macro fixture; the gate reports 1"
+  fi
+
+  # REJECT ×2 (codex r8): a NAMED per-package override for a dependency that is
+  # NOT a workspace member outranks the `"*"` pin, and the member-named pins
+  # never mentioned it -- measured `ok` on both gates, both spellings. Every
+  # resolved package is now pinned by name through one `--config` file.
+  fx_dpc="$(darwin_fixture dep-profile-config)"
+  expect_reject_because "darwin-cross-check/named-profile-override-for-a-non-member-dependency-in-config-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'root'" \
+    "$here/darwin-cross-check.sh" --root "$fx_dpc"
+  fx_dpm="$(darwin_fixture dep-profile-manifest)"
+  expect_reject_because "darwin-cross-check/named-profile-override-for-a-non-member-dependency-in-the-manifest-cannot-forge-debug-assertions" \
+    "cross-check failed for aarch64-apple-darwin: member 'root'" \
+    "$here/darwin-cross-check.sh" --root "$fx_dpm"
+
+  # REJECT: cargo's OTHER nightly switch. `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_
+  # USE_THIS=nightly` unlocks `[unstable] profile-rustflags`, and `[profile.dev]
+  # rustflags` is a fourth rustflags source that outranks the pinned encoded
+  # value (measured: this fixture printed `ok`). Refused like RUSTC_BOOTSTRAP.
+  # The fixture carries the live config, so "drop the token" turns this probe
+  # into a green `ok` rather than a refusal for some other reason.
+  fx_co="$(darwin_fixture channel-override)"
+  expect_reject_because "darwin-cross-check/cargo-channel-override-is-refused" \
+    "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS is set" \
+    env __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly "$here/darwin-cross-check.sh" --root "$fx_co"
+
+  # ACCEPT, STILL BLOCKED (codex r8): `[term] progress.when = "always"` in the
+  # checked root's config makes cargo write a carriage return before `error:`,
+  # which the column-0 anchor misses -- a correctly blocked member became a
+  # FAIL. Env outranks config; the gate exports CARGO_TERM_PROGRESS_WHEN=never.
+  fx_prg="$(darwin_fixture progress-config)"
+  expect_blocked_count "darwin-cross-check/config-progress-bar-does-not-break-classification" \
+    "cross-checked " 1 \
+    "$here/darwin-cross-check.sh" --root "$fx_prg"
+
+  # REJECT: one extra pass per feature the member declares. `-p leaf` from
+  # Linux resolves `maknae-authz-basic` with NO features (its only enabler is
+  # kernel's dev-dep, and kernel is SDK-blocked there), so feature-gated code
+  # was cross-checked by nothing. The FAIL must NAME the feature; the clean
+  # variant proves the pass is COUNTED (kills an empty loop, and a loop that
+  # runs but never reports).
+  fx_fg="$(darwin_fixture feature-gated-linux-item)"
+  expect_reject_because "darwin-cross-check/a-linux-only-item-behind-a-declared-feature-is-caught-by-the-feature-pass" \
+    "member 'leaf' with feature 'dark'" \
+    "$here/darwin-cross-check.sh" --root "$fx_fg"
+  fx_cf="$(darwin_fixture clean-with-feature)"
+  expect_reported_count "darwin-cross-check/declared-features-are-counted-as-passes" \
+    "aarch64-apple-darwin + " 1 \
+    "$here/darwin-cross-check.sh" --root "$fx_cf"
+
+  # REJECT: WARM-DIR REPLAY. The pins bind only what cargo RECOMPILES. Prime
+  # the gate-owned target dir with the bootstrap fixture compiled under
+  # RUSTC_BOOTSTRAP=1 -- same target, same (default) profile, so the
+  # fingerprint matches -- and a gate that does not wipe replays the unit as
+  # fresh and prints `ok` (measured: the no-wipe mutant does exactly that).
+  # The gate wipes `target/darwin-cross-check` at start, so this must FAIL.
+  # The priming is checked first: an unprimed dir would make the FAIL below
+  # prove nothing about the wipe.
+  fx_wr="$(darwin_fixture bootstrap-gated)"
+  primer_rc=0
+  ( cd "$fx_wr" && for pm in leaf root; do
+      CARGO_TARGET_DIR="$fx_wr/target/darwin-cross-check" RUSTC_BOOTSTRAP=1 RUSTC="$(rustup which rustc)" RUSTC_WRAPPER='' RUSTC_WORKSPACE_WRAPPER='' CARGO_ENCODED_RUSTFLAGS='' CARGO_TERM_COLOR=never \
+        cargo check --locked --keep-going -p "$pm" --target aarch64-apple-darwin --all-targets --color never >/dev/null 2>&1 || exit 1
+    done ) || primer_rc=$?
+  total=$((total+1))
+  # The priming must have SUCCEEDED and left leaf's darwin rmeta: cargo creates
+  # the directory layout before compiling, so "the dir exists" passed on a
+  # failed primer too (both reviewers, round 9).
+  if [ "$primer_rc" -eq 0 ] && ls "$fx_wr"/target/darwin-cross-check/aarch64-apple-darwin/debug/deps/libleaf-*.rmeta >/dev/null 2>&1; then
+    echo "pos-ok: [darwin-cross-check/the-replay-primer-produced-a-darwin-unit] bootstrap-on primer succeeded and left leaf's darwin rmeta"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/the-replay-primer-produced-a-darwin-unit] primer rc=$primer_rc or no leaf rmeta — the replay probe below would prove nothing"
+  fi
+  expect_reject_because "darwin-cross-check/a-primed-target-dir-is-not-replayed" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_wr"
+
+  # REJECT ×2 (codex r9 and the fresh-context reviewer, independently): the
+  # round-10 feature pass classified "blocked" from ONE grep -- none of
+  # (b)/(c)/(d) -- and the round-3 impersonation and masking shapes came back
+  # on that path. One classifier now serves every pass, with (d) corroborated
+  # under the pass's own feature selection.
+  fx_ff="$(darwin_fixture feature-fake)"
+  expect_reject_because "darwin-cross-check/an-impersonated-sdk-line-behind-a-feature-is-a-FAIL" \
+    "member 'root' with feature 'dark'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ff"
+  fx_fr="$(darwin_fixture feature-real)"
+  expect_reject_because "darwin-cross-check/a-real-error-beside-an-sdk-block-on-a-feature-pass-is-a-FAIL" \
+    "member 'root' with feature 'dark'" \
+    "$here/darwin-cross-check.sh" --root "$fx_fr"
+  # ACCEPT, REPORTED, NOT COUNTED: a feature pass that is genuinely SDK-blocked
+  # is named on the OK line and is not a pass -- a member whose feature code
+  # was never compiled is not fully checked.
+  fx_fb="$(darwin_fixture feature-blocked)"
+  expect_blocked "darwin-cross-check/a-blocked-feature-pass-is-reported" \
+    "feature pass(es) SDK-blocked: devshim/sdk root/dark" \
+    "$here/darwin-cross-check.sh" --root "$fx_fb"
+  expect_blocked_count "darwin-cross-check/a-blocked-feature-pass-is-not-counted-as-a-pass" \
+    "aarch64-apple-darwin + " 0 \
+    "$here/darwin-cross-check.sh" --root "$fx_fb"
+  # REJECT: a proc-macro member's feature passes still run (for the host) and
+  # still FAIL; only their SUCCESS is kept out of the darwin count.
+  fx_pf="$(darwin_fixture proc-macro-feature)"
+  expect_reject_because "darwin-cross-check/a-proc-macro-member-feature-error-is-a-FAIL" \
+    "member 'leaf' with feature 'dark'" \
+    "$here/darwin-cross-check.sh" --root "$fx_pf"
+  # ACCEPT: `[build] build-dir` in the tree's config split cargo's artifacts
+  # away from the exact-prefix filter and made a clean member a FAIL (codex
+  # r9). The gate runs from OUTSIDE the tree, so the tree's config is not read.
+  fx_bd="$(darwin_fixture build-dir-config)"
+  expect_reported_count "darwin-cross-check/tree-config-build-dir-is-not-read" \
+    "cross-checked " 2 \
+    "$here/darwin-cross-check.sh" --root "$fx_bd"
+  # REJECT ×2: THE TWO MECHANISMS, each observed by a knob nothing else pins.
+  # (1) A caller's variable that a BUILD SCRIPT reads (`MAKNAE_FORGE=1` makes
+  # leaf's build.rs forge `cfg(forged)`, which removes the Linux-only use) is
+  # on no refusal list -- the class the refusals cannot enumerate. Only the
+  # allowlist keeps it out; "run cargo in the caller's environment" turns
+  # this into a green `ok` (measured). (2) The same variable from the tree's
+  # `[env]` table: cargo delivers `[env]` to build scripts, no `--config` pin
+  # names it, and only the outside cwd keeps the file unread -- "run from
+  # inside the tree" turns this into `ok` (measured). (An earlier version of
+  # these probes used `CARGO_BUILD_RUSTFLAGS` and `[build] build-dir`, both
+  # ALSO covered by an explicit pin, so both survived removal of the
+  # mechanism they claimed to observe.)
+  fx_ue="$(darwin_fixture env-build-script)"
+  expect_reject_because "darwin-cross-check/a-caller-variable-does-not-reach-a-build-script" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env MAKNAE_FORGE=1 "$here/darwin-cross-check.sh" --root "$fx_ue"
+  fx_ce="$(darwin_fixture config-env-build-script)"
+  expect_reject_because "darwin-cross-check/the-tree-config-env-table-does-not-reach-a-build-script" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ce"
+  # ...and with TMPDIR pointing INSIDE the tree (codex r10: the "outside" cwd
+  # was a mktemp under TMPDIR, so this fixture went `ok`). The cwd now lives
+  # under $HOME and is canonicalised against the root.
+  mkdir -p "$fx_ce/tmpinside"
+  expect_reject_because "darwin-cross-check/the-tree-config-is-not-read-even-with-TMPDIR-inside-the-tree" \
+    "cross-check failed for aarch64-apple-darwin: member 'leaf'" \
+    env TMPDIR="$fx_ce/tmpinside" "$here/darwin-cross-check.sh" --root "$fx_ce"
+
+  # REJECT (codex r10): the compiler used to be resolved from the ROOT under
+  # the CALLER's environment, before the pin existed -- a rustup directory
+  # override selected 1.94.1 while the proxy, asked under the pin, said 1.98.1.
+  # Now resolved under the pinned environment, and the resolved BINARY is
+  # version-checked. A `rustup` shim whose `which rustc` names a rustc that
+  # compiles with the real one but REPORTS 1.0.0 must be a mismatch FAIL.
+  tmpD12="$(mktemp -d)"; mkdir -p "$tmpD12/bin"
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD12/bin/lying-rustc" <<'SHIM'
+case " $* " in *" --version "*|*" -vV "*|*" -V "*) exec "$REAL_RUSTC" "$@" | sed 's/^rustc [0-9.]*/rustc 1.0.0/' ;; esac
+exec "$REAL_RUSTC" "$@"
+SHIM
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\nLYING=%q\n' "$(command -v rustup)" "$tmpD12/bin/lying-rustc"; cat; } > "$tmpD12/bin/rustup" <<'SHIM'
+if [ "${1:-}" = which ] && [ "${2:-}" = rustc ]; then echo "$LYING"; exit 0; fi
+exec "$REAL_RUSTUP" "$@"
+SHIM
+  chmod +x "$tmpD12/bin/lying-rustc" "$tmpD12/bin/rustup"
+  expect_reject_because "darwin-cross-check/the-resolved-rustc-binary-is-version-checked" \
+    "toolchain mismatch" \
+    env PATH="$tmpD12/bin:$PATH" "$here/darwin-cross-check.sh" --root "$fx_dc" --check-inputs
+
+  # REJECT (codex r10): a feature can REMOVE the SDK dependency; a blocked
+  # base pass used to `continue` past every feature pass.
+  fx_pt="$(darwin_fixture portable-feature)"
+  expect_reject_because "darwin-cross-check/a-feature-that-removes-the-sdk-dependency-is-still-checked" \
+    "member 'root' with feature 'portable'" \
+    "$here/darwin-cross-check.sh" --root "$fx_pt"
+
+  # REJECT + PERSIST: one run per checkout. A pre-existing lock refuses the
+  # run -- and the refused contender must NOT remove the owner's lock (codex
+  # r10: an unconditional cleanup did, and the next contender walked in).
+  mkdir -p "$fx_dc/target/darwin-cross-check.lock"
+  expect_reject_because "darwin-cross-check/a-held-lock-refuses-a-second-run" \
+    "another run holds" \
+    "$here/darwin-cross-check.sh" --root "$fx_dc" --check-inputs
+  total=$((total+1))
+  if [ -d "$fx_dc/target/darwin-cross-check.lock" ]; then
+    echo "pos-ok: [darwin-cross-check/a-refused-contender-leaves-the-owners-lock] lock still held after the refusal"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/a-refused-contender-leaves-the-owners-lock] the refused run removed a lock it never owned"
+  fi
+  rmdir "$fx_dc/target/darwin-cross-check.lock"
+  # REJECT, INTRA-RUN (codex r9): an EARLIER member's build script re-plants
+  # bootstrap-primed units for a LATER member after the start-of-run wipe.
+  # `a-builder`'s build.rs untars z-victim's primed darwin units into the
+  # gate-owned dir; the gate wipes before EVERY pass, so z-victim recompiles
+  # cold and fails E0554. (A wipe at start only: `ok`, two checked -- measured.)
+  fx_ir="$(mktemp -d)"; mkdir -p "$fx_ir/crates/a-builder/src" "$fx_ir/crates/z-victim/src"
+  cp "$here/../../rust-toolchain.toml" "$fx_ir/rust-toolchain.toml"
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/a-builder", "crates/z-victim"]\n' > "$fx_ir/Cargo.toml"
+  printf '[package]\nname = "a-builder"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$fx_ir/crates/a-builder/Cargo.toml"; : > "$fx_ir/crates/a-builder/src/lib.rs"
+  printf '[package]\nname = "z-victim"\nversion = "0.0.0"\nedition = "2021"\n' > "$fx_ir/crates/z-victim/Cargo.toml"
+  printf '#![cfg_attr(target_os = "macos", feature(never_type))]\npub fn x() {}\n' > "$fx_ir/crates/z-victim/src/lib.rs"
+  printf 'fn main() {}\n' > "$fx_ir/crates/a-builder/build.rs"
+  ( cd "$fx_ir" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+  ir_rc=0
+  ( cd "$fx_ir" && CARGO_TARGET_DIR="$fx_ir/target/darwin-cross-check" RUSTC_BOOTSTRAP=1 RUSTC="$(rustup which rustc)" RUSTC_WRAPPER='' RUSTC_WORKSPACE_WRAPPER='' CARGO_ENCODED_RUSTFLAGS='' CARGO_TERM_COLOR=never \
+      cargo check --locked --keep-going -p z-victim --target aarch64-apple-darwin --all-targets --color never >/dev/null 2>&1 \
+    && tar -cf units.tar -C target/darwin-cross-check aarch64-apple-darwin && rm -rf target ) || ir_rc=$?
+  total=$((total+1))
+  if [ "$ir_rc" -eq 0 ] && [ -s "$fx_ir/units.tar" ]; then
+    echo "pos-ok: [darwin-cross-check/the-intra-run-primer-produced-a-darwin-unit] bootstrap-on units archived"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/the-intra-run-primer-produced-a-darwin-unit] primer rc=$ir_rc — the injection probe below would prove nothing"
+  fi
+  cat > "$fx_ir/crates/a-builder/build.rs" <<'RS'
+fn main() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let dir = root.join("target/darwin-cross-check");
+    let _ = std::fs::create_dir_all(&dir);
+    let st = std::process::Command::new("tar").args(["-xf"]).arg(root.join("units.tar")).arg("-C").arg(&dir).status().unwrap();
+    assert!(st.success());
+}
+RS
+  expect_reject_because "darwin-cross-check/a-build-script-cannot-replant-cached-units-for-a-later-member" \
+    "cross-check failed for aarch64-apple-darwin: member 'z-victim'" \
+    "$here/darwin-cross-check.sh" --root "$fx_ir"
+
+  # REJECT, NOT MUTE: an artifact counter that dies must produce a FAIL. A
+  # `python3` shim that fails only when invoked as `python3 -` (the counter's
+  # shape) and passes every other call through.
+  tmpD11="$(mktemp -d)"; mkdir -p "$tmpD11/bin"
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_PY=%q\n' "$(command -v python3)"; cat; } > "$tmpD11/bin/python3" <<'SHIM'
+if [ "${1:-}" = - ]; then echo "simulated counter crash" >&2; exit 3; fi
+exec "$REAL_PY" "$@"
+SHIM
+  chmod +x "$tmpD11/bin/python3"
+  expect_reject_because "darwin-cross-check/a-dying-artifact-counter-is-not-mute" \
+    "the artifact counter failed" \
+    env REAL_PY="$(command -v python3)" PATH="$tmpD11/bin:$PATH" "$here/darwin-cross-check.sh" --root "$fx_dc"
+
+  # ACCEPT: inherited colour must not break the classifier. With
+  # CARGO_TERM_COLOR=always the ANSI escapes made a correctly blocked member a
+  # FAIL; the gate pins colour off.
+  fx_col="$(darwin_fixture sdk-blocked ring)"
+  expect_blocked_count "darwin-cross-check/inherited-colour-does-not-break-classification" \
+    "cross-checked " 1 \
+    env CARGO_TERM_COLOR=always "$here/darwin-cross-check.sh" --root "$fx_col"
+
+  # REJECT: `--locked` on the CHECK itself is observable after all. `leaf`'s
+  # build script deletes the workspace Cargo.lock; the resolving metadata call
+  # already ran, so only the per-member `cargo check --locked` can refuse the
+  # member checked after `leaf` — without it cargo would regenerate the lock
+  # and pass. (Round-3 called this mutation inert; codex built this fixture.)
+  fx_ld="$(darwin_fixture lock-deleting-build)"
+  expect_reject_because "darwin-cross-check/a-build-script-that-rewrites-the-lock-is-caught-by-the-checks-own---locked" \
+    "--locked was passed" \
+    "$here/darwin-cross-check.sh" --root "$fx_ld"
+
+  # REJECT: every member blocked -> refuse. (Only member depends on a
+  # panicking `ring`; `ring` itself fails its own build script.)
+  tmpD8="$(mktemp -d)"; mkdir -p "$tmpD8/crates/only/src" "$tmpD8/crates/ring/src"
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/only", "crates/ring"]\n' > "$tmpD8/Cargo.toml"
+  cp "$here/../../rust-toolchain.toml" "$tmpD8/rust-toolchain.toml"
+  printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$tmpD8/crates/ring/Cargo.toml"
+  printf 'fn main() { panic!("needs SDK"); }\n' > "$tmpD8/crates/ring/build.rs"; : > "$tmpD8/crates/ring/src/lib.rs"
+  printf '[package]\nname = "only"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nring = { path = "../ring" }\n' > "$tmpD8/crates/only/Cargo.toml"; : > "$tmpD8/crates/only/src/lib.rs"
+  ( cd "$tmpD8" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+  expect_reject_because "darwin-cross-check/all-members-blocked-is-refused" \
+    "every member is SDK-blocked" \
+    "$here/darwin-cross-check.sh" --root "$tmpD8"
+
+  # ACCEPT, CROSS-CHECKED ON THE REAL REPO, BY A DIFFERENT MECHANISM. The gate
+  # lets cargo decide per member. The oracle is a metadata walk: from each
+  # member follow its own normal+dev edges, then normal edges only (a
+  # dependency's dev-deps are not inherited; build-deps compile for the HOST),
+  # over `--filter-platform aarch64-apple-darwin`; a member reaching an SDK
+  # crate is expected blocked. It FAILS CLOSED: a metadata error is a
+  # POS-FAIL, never "no SDK found". On a darwin host the gate blocks nothing,
+  # so the oracle's expected count is all members there and members-minus-
+  # blocked elsewhere. The two disagree exactly where the derivation was wrong
+  # (a build-dep on ring; a dep's dev-dep on ring; a sibling-enabled feature;
+  # a proc-macro dep on ring, which cargo compiles for the HOST)
+  # -- none of which the repo has today; if one appears, this probe surfaces
+  # the disagreement for a human instead of either side quietly winning.
+  oracle_out="$(cd "$here/../.." && cargo metadata --format-version 1 --locked --filter-platform aarch64-apple-darwin 2>/dev/null)" || oracle_out=""
+  if [ -z "$oracle_out" ]; then
+    total=$((total+1)); echo "POS-FAIL: [darwin-cross-check/real-repo-count-matches-the-oracle] the oracle's cargo metadata failed — refusing to guess"
+  else
+    host_triple="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+    if ! darwin_expected="$(printf '%s' "$oracle_out" | python3 -c "$darwin_oracle_py" "$host_triple")"; then
+      # The walk itself failed: a POS-FAIL, never a mute death of the suite.
+      total=$((total+1)); echo "POS-FAIL: [darwin-cross-check/real-repo-count-matches-the-oracle] the oracle walk failed — refusing to guess"
+    else
+      # ONE cold run of the real repo (~2.5 min on Apple Silicon), BOTH fields
+      # checked against the oracle: `cross-checked N` and `+ M feature pass(es)`.
+      # (Two expect_reported_count calls would run the gate twice for nothing.)
+      total=$((total+1))
+      if oracle_run="$("$here/darwin-cross-check.sh" --root "$here/../.." 2>&1)"; then
+        got_n="$(printf '%s' "$oracle_run" | sed -n 's/.*cross-checked \([0-9][0-9]*\).*/\1/p' | head -1)"
+        got_f="$(printf '%s' "$oracle_run" | sed -n 's/.*aarch64-apple-darwin + \([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ "$got_n" = "${darwin_expected%% *}" ] && [ "$got_f" = "${darwin_expected##* }" ]; then
+          echo "pos-ok: [darwin-cross-check/real-repo-counts-match-the-oracle] gate reports $got_n checked + $got_f feature passes (independently derived: ${darwin_expected%% *} + ${darwin_expected##* })"; pass=$((pass+1))
+        else
+          echo "POS-FAIL: [darwin-cross-check/real-repo-counts-match-the-oracle] gate reports '$got_n' checked + '$got_f' feature passes but the oracle derives ${darwin_expected%% *} + ${darwin_expected##* } — the gate is walking a different set than it should: $oracle_run"
+        fi
+      else
+        echo "POS-FAIL: [darwin-cross-check/real-repo-counts-match-the-oracle] gate rejected the real repo: $(printf '%s' "$oracle_run" | tail -3)"
+      fi
+    fi
+  fi
+  darwin_block_ran=$((total - darwin_block_total_before))
+  total=$((total+1))
+  if [ "$darwin_block_ran" -eq "$darwin_block_probes" ]; then
+    echo "pos-ok: [darwin-cross-check/skip-count-matches-the-block] $darwin_block_ran probes ran, constant says $darwin_block_probes"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [darwin-cross-check/skip-count-matches-the-block] $darwin_block_ran probes ran but darwin_block_probes=$darwin_block_probes — fix the constant (it is what the skip line reports on hosts without the target)"
+  fi
+else
+  # The skip count feeds the summary line CONTRIBUTING tells readers to
+  # compare; `darwin_block_probes` above is checked against reality on every
+  # host that runs the block.
+  # +1: the self-check probe itself is counted into $total when the block runs
+  # and is therefore also skipped here.
+  skipped=$((skipped+darwin_block_probes+1)); echo "skip: [darwin-cross-check/<$((darwin_block_probes+1)) check probes>] aarch64-apple-darwin target not installed (rustup target add aarch64-apple-darwin)"
+fi
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
