@@ -108,7 +108,7 @@ cargo test --locked --workspace
 
 `--locked` is not optional here: CI refuses a manifest that drifts from `Cargo.lock`, and so should your shell.
 
-The pre-push gate (formatting, clippy as errors, the coverage-tier and drift gates) is described in [`CONTRIBUTING.md`](CONTRIBUTING.md#the-pre-push-gate). Packaging for deb, rpm and macOS lives under [`packaging/`](packaging/).
+By default the pre-push hook runs the coverage-tier and drift gates; formatting and clippy are checks [`CONTRIBUTING.md`](CONTRIBUTING.md#the-pre-push-gate) asks you to run yourself before pushing, and CI enforces for everyone. Opt in with `MAKNAE_PRE_PUSH_LINUX_CLIPPY=1` and the hook additionally runs the Linux clippy lane in a container. *(Corrected 2026-09-11: this said the pre-push gate covers "formatting, clippy as errors". Before this change `ci/hooks/pre-push` ran neither and had never contained a clippy invocation in any revision — a reader who enabled the hook on the strength of this sentence got neither check. It still runs no `fmt`, and runs clippy only on that opt-in.)* Packaging for deb, rpm and macOS lives under [`packaging/`](packaging/).
 
 ## Contributing, security, conduct
 

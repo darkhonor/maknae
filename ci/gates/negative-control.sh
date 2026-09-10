@@ -1887,6 +1887,281 @@ expect_accept "authz-composition-drift/commented-or-test-construction-is-not-a-s
 expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" "$here/authz-composition-drift.sh" "$here/../.."
 
 
+# ---- clippy-all (#74): a DERIVED input set is not a scanned one --------------
+# This gate discovers BOTH its package set and its feature passes from `cargo
+# metadata`, which is the discover-vs-constant class CONTRIBUTING.md:126 names.
+# Everything below probes the DISCOVERY and the REPORTING, because a lint of
+# nothing exits 0 and would otherwise print a confident success line.
+
+# REJECT: a workspace that resolves to ZERO packages. Same defect as
+# p1-manifest-lint's, same cause: the loop just doesn't iterate.
+tmpQ0="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ0/Cargo.toml"
+printf '[toolchain]\nchannel = "1.98.1"\n' > "$tmpQ0/rust-toolchain.toml"
+expect_reject_because "clippy-all/zero-packages-is-refused" \
+  "resolved ZERO packages" \
+  "$here/clippy-all.sh" --root "$tmpQ0" --check-inputs
+
+# REJECT: `cargo metadata` itself fails. Its stderr is captured separately for
+# exactly this -- a gate that dies mute is unprobeable by `expect_reject`.
+tmpQ1="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpQ1/Cargo.toml"
+printf '[toolchain]\nchannel = "1.98.1"\n' > "$tmpQ1/rust-toolchain.toml"
+expect_reject_because "clippy-all/metadata-failure-is-not-silent" \
+  "cargo metadata failed" \
+  "$here/clippy-all.sh" --root "$tmpQ1" --check-inputs
+
+# REJECT: no rust-toolchain.toml. The channel is BOTH the container tag and the
+# lint compiler; absent it, the lane would lint whatever rustc happened to be on
+# PATH and call it the pinned toolchain.
+tmpQ2="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ2/Cargo.toml"
+expect_reject_because "clippy-all/missing-toolchain-file-is-refused" \
+  "missing" \
+  "$here/clippy-all.sh" --root "$tmpQ2" --check-inputs
+
+# REJECT: a toolchain file with no channel key.
+tmpQ3="$(mktemp -d)"
+printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ3/Cargo.toml"
+printf '[toolchain]\ncomponents = ["clippy"]\n' > "$tmpQ3/rust-toolchain.toml"
+expect_reject_because "clippy-all/no-channel-is-refused" \
+  "no [toolchain] channel" \
+  "$here/clippy-all.sh" --root "$tmpQ3" --check-inputs
+
+# REJECT: an UNPINNED channel. `stable` and `nightly-<date>` are rustup
+# spellings, not Docker Official Images tags -- guessing one would lint a
+# compiler the project does not pin, on a lane whose whole value is that it
+# matches CI's.
+for ch in stable nightly nightly-2026-01-01 beta; do
+  tmpQ4="$(mktemp -d)"
+  printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ4/Cargo.toml"
+  printf '[toolchain]\nchannel = "%s"\n' "$ch" > "$tmpQ4/rust-toolchain.toml"
+  expect_reject_because "clippy-all/unpinned-channel-$ch-is-refused" \
+    "is not a pinned release" \
+    "$here/clippy-all.sh" --root "$tmpQ4" --check-inputs
+done
+
+# REJECT: an unknown flag. `clippy-all.sh --linux` must never be read as a root
+# path, and a typo'd flag must not silently degrade to a narrower run.
+expect_reject_because "clippy-all/unknown-argument-is-refused" \
+  "unknown argument" \
+  "$here/clippy-all.sh" --lnux
+
+# REJECT: two mode flags. Last-wins would let `--linux --check-inputs` report a
+# Linux lane that never ran -- and the PR template asks the author to ATTEST
+# that lane ran and passed.
+expect_reject_because "clippy-all/conflicting-mode-flags-are-refused" \
+  "conflicting mode flags" \
+  "$here/clippy-all.sh" --linux --check-inputs
+
+# REJECT: a --root that cannot be entered. `[ -d ]` passes on a mode-000
+# directory; `cd "$root" && run_lints` then skipped the lints and the script
+# exited 0, because `cd` is not the last command of an AND-OR list.
+tmpQ5="$(mktemp -d)"; mkdir -p "$tmpQ5/inner"; chmod 000 "$tmpQ5/inner"
+if [ "$(id -u)" -ne 0 ]; then   # root ignores the mode bits
+  expect_reject_because "clippy-all/unenterable-root-is-refused" \
+    "cannot enter" \
+    "$here/clippy-all.sh" --root "$tmpQ5/inner" --check-inputs
+else
+  skipped=$((skipped+1)); echo "skip: [clippy-all/unenterable-root-is-refused] running as root"
+fi
+chmod 755 "$tmpQ5/inner" 2>/dev/null || true
+
+# REJECT: a FAILING clippy must print a FAIL line, not just exit non-zero.
+# `expect_reject` scores a rejection only on a printed FAIL. This probe proves
+# the FAIL line EXISTS -- and only that. An earlier comment here claimed it
+# proved the success line is not printed before the work; codex showed a gate
+# that printed `ok` first still passed this probe. The ordering claim is
+# carried by `a-failing-lint-never-prints-the-ok-line` in the lint block below.
+tmpQ6="$(mktemp -d)"; mkdir -p "$tmpQ6/bin"
+cat > "$tmpQ6/bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+# `metadata` and `--version` pass through so the gate reaches its clippy
+# invocation; everything else fails.
+case "${1:-}" in metadata|--version) exec "$REAL_CARGO" "$@" ;; esac
+echo "error: simulated clippy failure" >&2
+exit 101
+SHIM
+chmod +x "$tmpQ6/bin/cargo"
+expect_reject_because "clippy-all/failing-clippy-prints-FAIL" \
+  "clippy failed on the base" \
+  env REAL_CARGO="$(command -v cargo)" PATH="$tmpQ6/bin:$PATH" \
+  "$here/clippy-all.sh" --root "$here/../.."
+
+# REJECT: the pin must be ENFORCED, not merely printed. `RUSTUP_TOOLCHAIN` in
+# the environment overrides `rust-toolchain.toml`; the gate used to read the
+# file, print its channel, and let rustup run whatever the env said -- measured
+# as `toolchain 1.98.1` on the OK line while `clippy 0.1.94` linted. A cargo
+# shim that reports a fake version is hermetic: it needs no second toolchain
+# installed, so this probe runs identically on every host and in CI.
+tmpQ7="$(mktemp -d)"; mkdir -p "$tmpQ7/bin"
+cat > "$tmpQ7/bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then echo "cargo 1.0.0 (fake 2000-01-01)"; exit 0; fi
+exec "$REAL_CARGO" "$@"
+SHIM
+chmod +x "$tmpQ7/bin/cargo"
+expect_reject_because "clippy-all/toolchain-mismatch-is-refused" \
+  "toolchain mismatch" \
+  env REAL_CARGO="$(command -v cargo)" PATH="$tmpQ7/bin:$PATH" \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+
+# REJECT, NOT MUTE: a cargo that cannot answer `--version` must produce a FAIL
+# line. Under `pipefail` the version capture used to exit 101 with nothing on
+# either stream -- found by the failing-clippy probe above, whose shim at the
+# time answered only `metadata`.
+tmpQ8="$(mktemp -d)"; mkdir -p "$tmpQ8/bin"
+cat > "$tmpQ8/bin/cargo" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = metadata ]; then exec "$REAL_CARGO" "$@"; fi
+exit 101
+SHIM
+chmod +x "$tmpQ8/bin/cargo"
+expect_reject_because "clippy-all/unanswerable-cargo-version-is-not-mute" \
+  "cannot determine the active cargo version" \
+  env REAL_CARGO="$(command -v cargo)" PATH="$tmpQ8/bin:$PATH" \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+
+# REJECT: macOS system bash (3.2) must be refused, not silently obeyed. Two
+# bash-3.2 behaviours stacked into the worst possible outcome: `"${arr[@]}"` on
+# an EMPTY array is fatal under `set -u` before bash 4.4, and 3.2 lets an EXIT
+# trap's last command overwrite the shell's status -- so `--linux` printed a
+# success line and exited 0 having started no container, on the one platform
+# this lane exists for, while PULL_REQUEST_TEMPLATE.md asks the author to
+# attest it "ran and PASSED".
+if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]' 2>/dev/null; then
+  expect_reject_because "clippy-all/system-bash-3.2-is-refused" \
+    "bash >= 4 required" \
+    /bin/bash "$here/clippy-all.sh" --linux
+else
+  skipped=$((skipped+1)); echo "skip: [clippy-all/system-bash-3.2-is-refused] no bash < 4 at /bin/bash"
+fi
+
+# ACCEPT: --check-inputs must NOT claim to have linted. It reports the derived
+# inputs and then says, in words, that it ran nothing.
+expect_accept "clippy-all/check-inputs-does-not-claim-a-lint" \
+  "ran NO lints" \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+
+# ACCEPT, WITH THE COUNT CROSS-CHECKED. The gate derives its package set from
+# `cargo metadata`; this derives the SAME number by a different mechanism --
+# parsing `[package] name` out of the manifests on disk -- so it is a
+# cross-check, not a restatement. A crate added to `members` but unlinted, or a
+# filter that silently narrows what the gate walks, both fail here. The virtual
+# root manifest carries no `[package]`, so it drops out on its own.
+clippy_expected_pkgs="$(
+  find "$here/../.." -maxdepth 3 -name Cargo.toml \
+    -not -path '*/target/*' -not -path '*/.git/*' -not -path '*/.claude/*' 2>/dev/null \
+  | sort | while read -r m; do
+      sed -n '/^\[package\]/,/^\[/{s/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p;}' "$m" | head -1
+    done | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+expect_reported_count "clippy-all/real-repo-package-count" \
+  "clippy-all: inputs (" "$clippy_expected_pkgs" \
+  "$here/clippy-all.sh" --root "$here/../.." --check-inputs
+
+# ---- clippy-all (#74): LINT sentinels -- the gate must CATCH a planted lint ---
+# Every probe above stops at `--check-inputs`, BEFORE any lint runs, so none of
+# them observes the clippy invocation itself -- the thing the gate exists to
+# do. Codex proved the consequence with a mutation harness: replacing
+# `--workspace` with `-p maknae`, dropping `--all-targets`, dropping
+# `-D warnings`, feeding the feature loop an empty string, and printing `ok`
+# BEFORE `run_lints` each survived all seventeen probes at 17/17 green. The
+# probes proved the GUARDS fire and their comments claimed they proved lint
+# COVERAGE. They did not. These do: a two-crate workspace small enough to lint
+# in about a second, with a real `clippy::len_zero` planted where each mutation
+# would stop looking.
+expect_reject_without() { # <label> <expected-FAIL-substring> <forbidden-substring> <cmd...>
+  # `expect_reject_because` PLUS a string that must NOT appear. A success line
+  # printed before the work is the exact defect: the gate fails, and its stdout
+  # still says `ok`.
+  local label="$1" why="$2" forbid="$3"; shift 3; total=$((total+1))
+  local out rc
+  if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why" \
+     && ! printf '%s' "$out" | grep -qF -- "$forbid"; then
+    echo "neg-ok: [$label] gate rejected for '$why' and never said '$forbid'"; pass=$((pass+1))
+  elif [ "$rc" -eq 0 ]; then
+    echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
+  elif printf '%s' "$out" | grep -qF -- "$forbid"; then
+    echo "NEG-FAIL: [$label] gate rejected but its output ALSO carries '$forbid': $out"
+  else
+    echo "NEG-FAIL: [$label] gate exited $rc without the expected rejection (wanted '$why'): $out"
+  fi
+}
+
+lint_fixture() { # <clean|test-sentinel|feature-sentinel> -> prints the fixture root
+  # `root` depends on `leaf`. Under `-p root --all-targets`, leaf's LIB is
+  # linted (path dep, RUSTC_WORKSPACE_WRAPPER) but leaf's TEST targets are not,
+  # and under `--workspace` without `--all-targets` no test target is. So a
+  # sentinel inside leaf's `#[cfg(test)]` is visible ONLY to the exact
+  # invocation the gate claims to run. The feature variant hides it further,
+  # behind a feature nothing in the workspace enables.
+  local variant="$1" d
+  d="$(mktemp -d)"
+  mkdir -p "$d/crates/root/src" "$d/crates/leaf/src"
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf"]\n' > "$d/Cargo.toml"
+  # The REAL pin, so the gate's toolchain check agrees with the toolchain that
+  # actually runs, and the fixture never rots when the pin is bumped.
+  cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
+  printf '[package]\nname = "root"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nleaf = { path = "../leaf" }\n' > "$d/crates/root/Cargo.toml"
+  printf 'pub fn r() -> u8 { leaf::l() }\n' > "$d/crates/root/src/lib.rs"
+  printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[features]\ndark = []\n' > "$d/crates/leaf/Cargo.toml"
+  {
+    printf 'pub fn l() -> u8 { 7 }\n'
+    # `v.len() == 0` is `clippy::len_zero`: WARN by default, an error only
+    # under `-D warnings` -- so dropping `-D warnings` lets it through.
+    case "$variant" in
+      test-sentinel)
+        printf '#[cfg(test)]\nmod t { #[test] fn s() { let v: Vec<u8> = Vec::new(); assert!(v.len() == 0); } }\n' ;;
+      feature-sentinel)
+        printf '#[cfg(all(feature = "dark", test))]\nmod t { #[test] fn s() { let v: Vec<u8> = Vec::new(); assert!(v.len() == 0); } }\n' ;;
+      clean) : ;;
+      *) echo "lint_fixture: unknown variant '$variant'" >&2; return 1 ;;
+    esac
+  } > "$d/crates/leaf/src/lib.rs"
+  # The gate passes `--locked`, which refuses to CREATE a lock file. Path-only
+  # deps resolve offline.
+  ( cd "$d" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+  printf '%s' "$d"
+}
+
+# ACCEPT: the clean fixture lints, and the OK line counts the passes actually
+# RUN -- one base pass plus one per declared feature (`leaf/dark`). Kills
+# `-p <nonexistent>` (cargo errors, the gate FAILs a clean tree), bare `cargo
+# clippy` at a virtual root (same), and any regression that stops counting.
+fx_clean="$(lint_fixture clean)"
+expect_reported_count "clippy-all/clean-fixture-runs-base-plus-one-per-declared-feature" \
+  "packages linted, " 2 \
+  "$here/clippy-all.sh" --root "$fx_clean"
+
+# REJECT: a lint in an UNSELECTED crate's TEST target must be caught by the
+# base pass. Kills `--workspace` -> `-p root` (leaf's tests unlinted),
+# dropping `--all-targets` (no tests linted), and dropping `-D warnings`
+# (`len_zero` stays a warning). The reason is pinned to the BASE pass so a
+# gate that only catches it on a later feature pass does not score.
+fx_test="$(lint_fixture test-sentinel)"
+expect_reject_because "clippy-all/unselected-crate-test-target-lint-is-caught-by-the-base-pass" \
+  "clippy failed on the base" \
+  "$here/clippy-all.sh" --root "$fx_test"
+
+# REJECT: a lint behind a declared feature that NOTHING enables must be caught
+# by that feature's own pass, and the FAIL must NAME the feature. Kills an
+# empty or skipped feature loop -- on the real repo the loop's two passes are
+# redundant with the base pass, so this fixture is the only place the loop is
+# ever observed doing work.
+fx_feat="$(lint_fixture feature-sentinel)"
+expect_reject_because "clippy-all/dark-feature-lint-is-caught-by-its-own-pass" \
+  "clippy failed on feature pass 'leaf/dark'" \
+  "$here/clippy-all.sh" --root "$fx_feat"
+
+# REJECT, AND NEVER SAY OK: a failing lint's stdout must not carry the success
+# line. The first version of this gate printed `clippy-all: ok (...)` before
+# running clippy; the `failing-clippy-prints-FAIL` probe above cannot see that,
+# because it only checks that a FAIL line exists somewhere.
+expect_reject_without "clippy-all/a-failing-lint-never-prints-the-ok-line" \
+  "clippy failed on the base" "clippy-all: ok" \
+  "$here/clippy-all.sh" --root "$fx_test"
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to

@@ -130,11 +130,17 @@ jobs:
           if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
             echo "ERROR: a manifest sets panic = \"abort\"; maknae-config's fail-closed parse boundary requires unwind"; exit 1
           fi
-      - name: clippy (per-package, bins + lib crates, all targets incl. tests)
-        run: |
-          for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic maknae-classification-aus; do cargo clippy --locked -p "$p" --all-targets -- -D warnings; done
-          # The feature-gated seam code is invisible to the default pass; lint it too (-D warnings).
-          cargo clippy --locked -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
+      # #74: the package set is DERIVED from `cargo metadata`, not listed here.
+      # The old hand-written loop named 13 of 21 workspace members, and a copy of
+      # the same list lived in CONTRIBUTING.md. MEASURED, because the first
+      # version of this comment overstated it: `cargo clippy -p X` DOES lint X's
+      # workspace path dependencies under `-D warnings`, so the eight unnamed
+      # members' libs were reached incidentally. What went unlinted is their TEST
+      # TARGETS -- `--all-targets` applies only to SELECTED packages -- and of the
+      # eight only `maknae-plane` has any test code. Deriving the set means a new
+      # crate, and its tests, are linted automatically.
+      - name: clippy (every workspace crate, all targets, one pass per declared feature)
+        run: bash ci/gates/clippy-all.sh
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
           for p in maknaed maknae maknae-spifc; do cargo auditable build --locked -p "$p" --release; done
