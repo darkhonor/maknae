@@ -13,11 +13,11 @@ use crate::binding::{Resolution, ResolvedBindings};
 use crate::role::Role;
 use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 
-/// Subject attribute keys (spec §6, pinned for #77): `uid` is the
-/// authenticated datum (ADR-0018); `name` carries the reserved runtime token,
-/// stamped by the daemon door, never client-settable.
+/// Subject attribute key (spec §6, pinned for #77): `uid`, the authenticated
+/// datum (ADR-0018), and since #276 the ONLY one. A sibling `name` key
+/// carried a reserved runtime token; ADR-0024 decision 3 struck it, so there
+/// is no second identity datum and no fall-back between them.
 pub(crate) const SUBJECT_UID: &str = "uid";
-pub(crate) const SUBJECT_NAME: &str = "name";
 /// Resource attribute key for `fs.*` (spec §4.4).
 pub(crate) const RESOURCE_PATH: &str = "path";
 /// Resource attribute carrying the resolved egress destination of a
@@ -384,12 +384,9 @@ pub(crate) fn decide_loaded_with_role(
     req: &SecRequest,
 ) -> (Verdict, Option<&'static str>) {
     // Step 2 — subject resolution, matcher invariant first: a PRESENT but
-    // wrong-typed `name` or `uid` is failed-to-evaluate, never a fall-through.
-    let name = match req.subject.0.get(SUBJECT_NAME) {
-        None => None,
-        Some(AttrValue::Str(s)) => Some(s.as_str()),
-        Some(_) => return (Verdict::Indeterminate, None),
-    };
+    // wrong-typed `uid` is failed-to-evaluate, never a fall-through. Since
+    // #276 struck the reserved subject name, `uid` is the ONLY identity datum
+    // and this is the only gate.
     let uid: Option<u32> = match req.subject.0.get(SUBJECT_UID) {
         None => None,
         Some(AttrValue::Int(i)) => match u32::try_from(*i) {
@@ -398,11 +395,14 @@ pub(crate) fn decide_loaded_with_role(
         },
         Some(_) => return (Verdict::Indeterminate, None),
     };
-    if name.is_none() && uid.is_none() {
-        // Neither identity datum present: the subject cannot be evaluated.
+    // No uid: the subject cannot be evaluated. Since #276 struck the reserved
+    // subject-name token there is no second identity datum to fall back to, so
+    // this is the ONLY identity gate -- and it must stay a return, never a
+    // fall-through.
+    let Some(uid) = uid else {
         return (Verdict::Indeterminate, None);
-    }
-    let role = match lp.roles.role_for(name, uid, principal.uid) {
+    };
+    let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
         // composes as an absence -- an extension may yet grant.
@@ -631,7 +631,7 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binding::{resolve, UidMap, AGENT_SUBJECT};
+    use crate::binding::{resolve, UidMap};
     use maknae_security::{Action, Context, Resource, Subject};
     use std::collections::BTreeMap;
 
@@ -655,7 +655,8 @@ mod tests {
     }
 
     /// Fixture bindings over host-independent identities only (issue #138
-    /// lesson): the reserved `agent` token plus uids supplied via the map.
+    /// lesson): uids supplied via the map. The reserved `agent` token used to
+    /// be the other half of that; #276 struck it, so the map is all of it.
     fn lp_with(bindings: Option<&[(&str, &[&str])]>, uid_map: &[(&str, u32)]) -> LoadedPolicy {
         let b: Option<BTreeMap<String, Vec<String>>> = bindings.map(|pairs| {
             pairs
@@ -675,16 +676,8 @@ mod tests {
         }
     }
 
-    fn request(
-        name: Option<&str>,
-        uid: Option<i64>,
-        action: &str,
-        path: Option<&str>,
-    ) -> SecRequest {
+    fn request(uid: Option<i64>, action: &str, path: Option<&str>) -> SecRequest {
         let mut s = Attributes::new();
-        if let Some(n) = name {
-            s.insert(SUBJECT_NAME, AttrValue::Str(n.into()));
-        }
         if let Some(u) = uid {
             s.insert(SUBJECT_UID, AttrValue::Int(u));
         }
@@ -874,7 +867,7 @@ mod tests {
 
     /// Build a read request with an explicit lane and OS-DAC answer.
     fn read_req(lane: Option<&str>, accessible: Option<AttrValue>) -> SecRequest {
-        let mut r = request(None, Some(501), "fs.read", Some("/home/operator/x"));
+        let mut r = request(Some(501), "fs.read", Some("/home/operator/x"));
         // request() stamps a satisfied gate for the grammar vectors; these tests own
         // the gate's inputs outright, so start from a clean slate.
         r.resource.0 = {
@@ -996,7 +989,7 @@ mod tests {
             let v = decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(OTHER_UID as i64), action, Some("/etc/hosts")),
+                &request(Some(OTHER_UID as i64), action, Some("/etc/hosts")),
             );
             assert!(
                 matches!(v, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
@@ -1013,7 +1006,7 @@ mod tests {
                 let v = decide_loaded(
                     &lp,
                     &principal(),
-                    &request(None, Some(uid as i64), action, Some("/home/operator/x")),
+                    &request(Some(uid as i64), action, Some("/home/operator/x")),
                 );
                 if *action == "liveness.ping" || (role_key == "user" && *action == "fs.read") {
                     assert!(
@@ -1043,7 +1036,6 @@ mod tests {
         );
         for uid in [OPERATOR_UID, 701] {
             let mut req = request(
-                None,
                 Some(uid as i64),
                 "fs.read",
                 Some("/home/operator/notes.txt"),
@@ -1083,7 +1075,6 @@ mod tests {
             &lp,
             &principal(),
             &request(
-                None,
                 Some(OPERATOR_UID as i64),
                 "fs.read",
                 Some("/home/operator/.ssh/id_rsa"),
@@ -1104,7 +1095,6 @@ mod tests {
             &lp,
             &principal(),
             &request(
-                None,
                 Some(OPERATOR_UID as i64),
                 "fs.read",
                 Some("/home/operator/docs/../.ssh/id_rsa"),
@@ -1123,7 +1113,7 @@ mod tests {
             let v = decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(OPERATOR_UID as i64), "fs.read", Some(path)),
+                &request(Some(OPERATOR_UID as i64), "fs.read", Some(path)),
             );
             // Case-5 note: role and term only — the PATH stays out (D9).
             assert_eq!(
@@ -1145,7 +1135,7 @@ mod tests {
             let v = decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(OPERATOR_UID as i64), action, None),
+                &request(Some(OPERATOR_UID as i64), action, None),
             );
             // Case-3 note, including `unknown.thing` (class None): build-state
             // is the true fact either way; the D5 unknown-vocabulary Deny is a
@@ -1165,18 +1155,15 @@ mod tests {
     #[test]
     fn missing_identity_is_indeterminate_distinct_from_unbound() {
         let lp = lp_with(None, &[]);
-        // Missing BOTH identity attrs → failed-to-evaluate.
-        let v = decide_loaded(
-            &lp,
-            &principal(),
-            &request(None, None, "liveness.ping", None),
-        );
+        // No uid → failed-to-evaluate. (Was "missing BOTH identity attrs";
+        // #276 struck the reserved subject name, so uid is the only one.)
+        let v = decide_loaded(&lp, &principal(), &request(None, "liveness.ping", None));
         assert_eq!(v, Verdict::Indeterminate);
         // Present-but-unbound uid → NotApplicable (defaults: not the principal).
         let v = decide_loaded(
             &lp,
             &principal(),
-            &request(None, Some(999), "liveness.ping", None),
+            &request(Some(999), "liveness.ping", None),
         );
         assert_eq!(
             v,
@@ -1187,33 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn wrong_typed_subject_name_is_indeterminate_never_uid_fallthrough() {
-        // Spec §3b: a wrong-typed `name` must NOT fall through to uid — on a
-        // single-user host that fall-through would resolve the agent to admin.
-        let lp = lp_with(None, &[]);
-        let mut s = Attributes::new();
-        s.insert(SUBJECT_NAME, AttrValue::Int(1));
-        s.insert(SUBJECT_UID, AttrValue::Int(OPERATOR_UID as i64));
-        let req = SecRequest {
-            subject: Subject(s),
-            resource: Resource(Attributes::new()),
-            action: Action("liveness.ping".into()),
-            context: Context(Attributes::new()),
-        };
-        assert_eq!(
-            decide_loaded(&lp, &principal(), &req),
-            Verdict::Indeterminate
-        );
-    }
-
-    #[test]
     fn wrong_typed_or_out_of_range_uid_is_indeterminate() {
         let lp = lp_with(None, &[]);
-        let v = decide_loaded(
-            &lp,
-            &principal(),
-            &request(None, Some(-1), "liveness.ping", None),
-        );
+        let v = decide_loaded(&lp, &principal(), &request(Some(-1), "liveness.ping", None));
         assert_eq!(
             v,
             Verdict::Indeterminate,
@@ -1239,18 +1202,14 @@ mod tests {
         let v = decide_loaded(
             &lp,
             &principal(),
-            &request(None, Some(OPERATOR_UID as i64), "fs.read", None),
+            &request(Some(OPERATOR_UID as i64), "fs.read", None),
         );
         assert_eq!(v, Verdict::Indeterminate);
         // But for a role that never reaches the grammar, absent path is
         // NotApplicable at step 3 (spec R3 should-fix: the invariant fires at
         // the point of use, not globally).
         let lp2 = lp_with(Some(&[("guest", &["g"])]), &[("g", 700)]);
-        let v2 = decide_loaded(
-            &lp2,
-            &principal(),
-            &request(None, Some(700), "fs.read", None),
-        );
+        let v2 = decide_loaded(&lp2, &principal(), &request(Some(700), "fs.read", None));
         assert_eq!(
             v2,
             Verdict::NotApplicable {
@@ -1267,7 +1226,7 @@ mod tests {
     #[test]
     fn admin_class_permits_only_whoami() {
         let lp = lp_with(None, &[]); // shipped default: enrolled uid → admin
-        let req = |a: &str| request(None, Some(OPERATOR_UID as i64), a, None);
+        let req = |a: &str| request(Some(OPERATOR_UID as i64), a, None);
         assert!(
             matches!(
                 decide_loaded(&lp, &principal(), &req("admin.whoami")),
@@ -1350,7 +1309,7 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(1001), "admin.contain", None)
+                &request(Some(1001), "admin.contain", None)
             ),
             Verdict::NotApplicable {
                 note: Some("term enumerated, not implemented: admin.contain".into())
@@ -1388,7 +1347,7 @@ mod tests {
             let req = if t == "session.prompt" {
                 prompt_req(1001, Some("provider:openai"))
             } else {
-                request(None, Some(1001), t, None)
+                request(Some(1001), t, None)
             };
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req),
@@ -1399,7 +1358,7 @@ mod tests {
     }
 
     fn prompt_req(uid: u32, destination: Option<&str>) -> SecRequest {
-        let mut r = request(None, Some(uid as i64), "session.prompt", None);
+        let mut r = request(Some(uid as i64), "session.prompt", None);
         if let Some(d) = destination {
             r.resource
                 .0
@@ -1573,13 +1532,13 @@ mod tests {
         let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
         for term in ["session.cancel", "session.update"] {
             assert_eq!(
-                decide_loaded(&lp, &principal(), &request(None, Some(1001), term, None)),
+                decide_loaded(&lp, &principal(), &request(Some(1001), term, None)),
                 Verdict::NotApplicable {
                     note: Some(format!("term enumerated, not implemented: {term}"))
                 }
             );
             assert!(matches!(
-                decide_loaded(&lp, &principal(), &request(None, Some(1002), term, None)),
+                decide_loaded(&lp, &principal(), &request(Some(1002), term, None)),
                 Verdict::NotApplicable { .. }
             ));
         }
@@ -1636,7 +1595,7 @@ mod tests {
             "roles:\n  admin:\n    allow: [\"admin.status\"]\n",
             GRANT_UIDS,
         );
-        let req = |a: &str| request(None, Some(1001), a, None);
+        let req = |a: &str| request(Some(1001), a, None);
         assert_eq!(
             decide_loaded(&lp, &principal(), &req("admin.status")),
             Verdict::Permit {
@@ -1675,7 +1634,7 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(1001), "admin.status", None)
+                &request(Some(1001), "admin.status", None)
             ),
             Verdict::Deny {
                 reason: "denied by role grant admin.status".into()
@@ -1686,7 +1645,7 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(1001), "admin.config.show", None)
+                &request(Some(1001), "admin.config.show", None)
             ),
             Verdict::Permit {
                 obligations: vec![audit_obligation()]
@@ -1756,7 +1715,7 @@ mod tests {
                 decide_loaded(
                     &lp,
                     &principal(),
-                    &request(None, Some(uid as i64), "admin.status", None)
+                    &request(Some(uid as i64), "admin.status", None)
                 ),
                 Verdict::NotApplicable {
                     note: Some(format!("role {role}: no rule for admin.status"))
@@ -1769,7 +1728,7 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(1004), "admin.status", None)
+                &request(Some(1004), "admin.status", None)
             ),
             Verdict::Deny {
                 reason: "subject contained: role=adversary".into()
@@ -1789,7 +1748,7 @@ mod tests {
             let lp = lp_with_grants(block, GRANT_UIDS);
             for t in GRANTABLE_ACTIONS {
                 assert_eq!(
-                    decide_loaded(&lp, &principal(), &request(None, Some(1001), t, None)),
+                    decide_loaded(&lp, &principal(), &request(Some(1001), t, None)),
                     Verdict::NotApplicable {
                         note: Some(format!("role admin: no rule for {t}"))
                     },
@@ -1921,7 +1880,7 @@ mod tests {
                 (1003, "guest", gst),
                 (1004, "adversary", adv),
             ] {
-                let req = request(None, Some(uid), action, *path);
+                let req = request(Some(uid), action, *path);
                 assert_eq!(
                     &decide_loaded(&lp, &principal(), &req),
                     expected,
@@ -1949,12 +1908,7 @@ mod tests {
                 decide_loaded(
                     &lp,
                     &principal(),
-                    &request(
-                        None,
-                        Some(OPERATOR_UID as i64),
-                        action,
-                        Some("/home/operator/x")
-                    ),
+                    &request(Some(OPERATOR_UID as i64), action, Some("/home/operator/x")),
                 ),
                 Verdict::NotApplicable {
                     note: Some(format!("term enumerated, not implemented: {action}"))
@@ -2001,7 +1955,7 @@ mod tests {
             let v = decide_loaded(
                 &lp,
                 &principal(),
-                &request(None, Some(OPERATOR_UID as i64), action, path),
+                &request(Some(OPERATOR_UID as i64), action, path),
             );
             match v {
                 Verdict::Permit { obligations } => {
@@ -2010,29 +1964,6 @@ mod tests {
                 other => panic!("{action} expected Permit, got {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn agent_under_operator_uid_is_user_never_admin() {
-        // Single-user-host hole, closed (spec §3b) — end to end through decide.
-        let lp = lp_with(None, &[]);
-        let v = decide_loaded(
-            &lp,
-            &principal(),
-            &request(
-                Some(AGENT_SUBJECT),
-                Some(OPERATOR_UID as i64),
-                "admin.whoami",
-                None,
-            ),
-        );
-        assert_eq!(
-            v,
-            Verdict::NotApplicable {
-                note: Some("role user: no rule for admin.whoami".into())
-            },
-            "agent must not inherit admin management authority"
-        );
     }
 
     #[test]

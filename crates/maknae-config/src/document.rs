@@ -296,9 +296,16 @@ const DISCLOSABLE: &[&str] = &[
     //
     // The reason is NOT "the operator is reading their own record" -- that was
     // the recorded rationale and it names the wrong audience. The reader is
-    // whoever holds an `admin` binding, and `bindings:` maps any resolvable
-    // local identity into that role, the reserved `agent` token included. So
-    // the audience can be the untrusted agent runtime.
+    // whoever holds an `admin` binding, and `bindings:` maps ANY resolvable
+    // local identity into that role -- so the audience is every such identity,
+    // not just the enrolled operator.
+    //
+    // (Corrected 2026-09-10, #276: this said "the reserved `agent` token
+    // included, so the audience can be the untrusted agent runtime." ADR-0024
+    // struck that token. The CONCLUSION is unchanged and so is the audience's
+    // breadth -- an operator may still bind an account they run agent work
+    // under, which is their call to make -- but the mechanism named here no
+    // longer exists.)
     //
     // Disclosed anyway, deliberately: a uid, a login name and a home path are
     // facts any local process can read from `/etc/passwd`. Withholding them

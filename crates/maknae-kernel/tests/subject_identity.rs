@@ -130,37 +130,3 @@ fn an_over_long_username_is_refused_and_the_boundary_is_exact() {
     );
     assert_eq!(maknae_kernel::admitted_user_for_test(None), None);
 }
-
-/// #276: `SUBJECT_NAME` must never be inserted into a PDP request, for ANY
-/// verb. `RoleMap::role_for` resolves the reserved name FIRST, never through
-/// uid, and `AGENT_SUBJECT` is the bare string "agent" -- so inserting an OS
-/// username would let a local account named `agent` take the runtime's reserved
-/// subject identity and bypass the uid map. The branch is safe today for
-/// exactly one reason: nothing on the request path inserts a name.
-///
-/// Exhaustive over the `Verb` enum by construction: a new variant fails to
-/// COMPILE here rather than silently escaping the pin.
-#[test]
-fn build_authz_request_never_inserts_subject_name_for_any_verb() {
-    use maknae_proto::Verb;
-    let every: Vec<(&str, Verb)> = maknae_kernel::every_verb_for_test();
-    assert!(every.len() >= 8, "the vocabulary shrank unexpectedly");
-    for (label, verb) in every {
-        for provider in [None, Some("openai")] {
-            let req = maknae_kernel::build_authz_request(
-                &verb,
-                1000,
-                maknae_security::Lane::Local,
-                None,
-                provider,
-            );
-            assert!(
-                req.subject
-                    .0
-                    .get(maknae_authz_basic::SUBJECT_NAME_KEY)
-                    .is_none(),
-                "{label}: SUBJECT_NAME must not be inserted -- see #276"
-            );
-        }
-    }
-}
