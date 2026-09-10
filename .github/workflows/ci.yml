@@ -309,6 +309,18 @@ jobs:
           fetch-depth: 0
       - name: Install toolchain (pinned)
         run: rustup show
+      # aws-lc-fips-sys builds the FIPS module with cmake AND Go (its build
+      # script runs aws-lc's `cmake/go.cmake`); the macos-26 image ships cmake
+      # but no Go on PATH, and the first whole-workspace run died on exactly
+      # that: "CMake Error at aws-lc/cmake/go.cmake:6: Could not find Go".
+      # The seven SDK-free crates this lane used to test never needed it. Go
+      # here only drives aws-lc's build-time tooling (delocate), so `stable`
+      # is acceptable; the FIPS module version is pinned by the crate.
+      - name: Install Go (aws-lc-fips-sys builds the FIPS module with cmake + go)
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: stable
+          cache: false
       - name: Test the whole workspace natively (SDK crates included)
         run: |
           set -euo pipefail
