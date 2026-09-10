@@ -34,9 +34,6 @@ use std::path::{Path, PathBuf};
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
 /// the per-request authorization principal is the uid, from peer-cred).
 pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
-/// Subject attribute key for the reserved runtime-subject token `agent` —
-/// stamped by the daemon door on runtime-originated requests, never
-/// client-settable (spec §3b/§6).
 /// Resource attribute key carrying the (already-resolved) filesystem path for
 /// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
@@ -648,7 +645,12 @@ mod tests {
         // And a garbage file mid-flight → Indeterminate (fail-closed).
         std::fs::write(&p, "not: [valid").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let garbage = auth.decide_with_loader(&liveness_req(None), seam_loader);
+        // `Some(0)`, NOT `None`: a subject with no uid yields Indeterminate on
+        // its own, so `liveness_req(None)` here would pass whether or not the
+        // GARBAGE POLICY was refused -- proven by substituting a valid policy
+        // and watching it still pass (codex). The identity must be good so the
+        // only thing under test is the policy.
+        let garbage = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
         assert_eq!(garbage, Verdict::Indeterminate);
         // A brand-new username edited in after construction: Indeterminate
         // until restart (spec §3 resolution model).
@@ -658,7 +660,9 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let new_name = auth.decide_with_loader(&liveness_req(None), seam_loader);
+        // Same reason: a resolvable identity, so the refusal under test is the
+        // unresolvable BINDING and nothing else.
+        let new_name = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
         assert_eq!(new_name, Verdict::Indeterminate);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -893,14 +897,20 @@ mod tests {
         let auth = BasicAuthorizer {
             policy_path: "/nonexistent".into(),
             principal: principal(),
-            uid_map: [("root".to_string(), 0u32), ("nobody".to_string(), 99u32)]
+            // uids 2 and 10, deliberately: `BTreeMap` iterates them NUMERICALLY
+            // (2, 10) while `members.sort()` orders the rendered strings
+            // LEXICALLY ("uid:10", "uid:2"). uids 0 and 99 -- the first choice
+            // here -- agree in both orders, so the assertion passed with
+            // `sort()` deleted (codex proved it). The two orders must disagree
+            // or this proves nothing.
+            uid_map: [("two".to_string(), 2u32), ("ten".to_string(), 10u32)]
                 .into_iter()
                 .collect(),
         };
         let got = auth
             .subjects_with_loader(|_| {
                 maknae_config::parse_authz(
-                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"nobody\", \"root\"]\n"),
+                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"ten\", \"two\"]\n"),
                     None,
                 )
             })
@@ -908,8 +918,8 @@ mod tests {
         let admin = got.iter().find(|b| b.role == "admin").expect("admin");
         assert_eq!(
             admin.members,
-            vec!["uid:0".to_string(), "uid:99".to_string()],
-            "both members, sorted"
+            vec!["uid:10".to_string(), "uid:2".to_string()],
+            "both members, LEXICALLY sorted -- not BTreeMap's numeric order"
         );
     }
 

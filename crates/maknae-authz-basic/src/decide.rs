@@ -383,7 +383,9 @@ pub(crate) fn decide_loaded_with_role(
     req: &SecRequest,
 ) -> (Verdict, Option<&'static str>) {
     // Step 2 — subject resolution, matcher invariant first: a PRESENT but
-    // wrong-typed `name` or `uid` is failed-to-evaluate, never a fall-through.
+    // wrong-typed `uid` is failed-to-evaluate, never a fall-through. Since
+    // #276 struck the reserved subject name, `uid` is the ONLY identity datum
+    // and this is the only gate.
     let uid: Option<u32> = match req.subject.0.get(SUBJECT_UID) {
         None => None,
         Some(AttrValue::Int(i)) => match u32::try_from(*i) {
