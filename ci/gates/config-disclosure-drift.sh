@@ -68,8 +68,10 @@ SURFACE=(
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
   # count, needs no row, and reaches every `admin.subject.list` grant-holder --
-  # who may be the untrusted agent runtime, since `bindings: {admin:["agent"]}`
-  # is now correctly reported.
+  # which is every subject the operator has bound to a role that carries the
+  # grant. (This note used to cite the reserved `agent` binding; ADR-0024
+  # struck that token, #276. The argument is unchanged: bindings are disclosed
+  # policy state, and a field added to their view ships unreviewed.)
   "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2|wire"
   # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
   # facts rather than deployment config, which is a defensible reason to scope

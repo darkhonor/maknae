@@ -37,7 +37,6 @@ pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
 /// Subject attribute key for the reserved runtime-subject token `agent` —
 /// stamped by the daemon door on runtime-originated requests, never
 /// client-settable (spec §3b/§6).
-pub const SUBJECT_NAME_KEY: &str = decide::SUBJECT_NAME;
 /// Resource attribute key carrying the (already-resolved) filesystem path for
 /// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
@@ -269,7 +268,7 @@ fn validate_grants(
     Ok(decide::ActionGrants::from_validated(out))
 }
 
-/// getpwnam every bound username once (the reserved `agent` token excluded).
+/// getpwnam every bound username once. No name is excluded since #276.
 /// Unresolvable → construction refused. `cfg(unix)` is the only lane — the
 /// workspace's non-unix story is fail-closed refusal upstream in
 /// `maknae-config` (`load_authz` refuses off-unix before we are reached).
@@ -280,7 +279,7 @@ fn resolve_uid_map(policy: &maknae_config::AuthzPolicy) -> Result<UidMap, AuthzB
     };
     for members in bindings.values() {
         for name in members {
-            if name == binding::AGENT_SUBJECT || map.contains_key(name) {
+            if map.contains_key(name) {
                 continue;
             }
             let uid = lookup_uid(name).ok_or_else(|| {
@@ -531,11 +530,8 @@ mod tests {
         }
     }
 
-    fn liveness_req(name: Option<&str>, uid: Option<i64>) -> maknae_security::Request {
+    fn liveness_req(uid: Option<i64>) -> maknae_security::Request {
         let mut s = Attributes::new();
-        if let Some(n) = name {
-            s.insert(SUBJECT_NAME_KEY, AttrValue::Str(n.into()));
-        }
         if let Some(u) = uid {
             s.insert(SUBJECT_UID_KEY, AttrValue::Int(u));
         }
@@ -568,12 +564,12 @@ mod tests {
         };
         // Enrolled uid → admin: admin verb permitted; deny-list still denies.
         let admin_whoami = decide::decide_loaded(&lp, &principal(), &{
-            let mut r = liveness_req(None, Some(501));
+            let mut r = liveness_req(Some(501));
             r.action = Action("admin.whoami".into());
             r
         });
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
-        let mut fs_req = liveness_req(None, Some(501));
+        let mut fs_req = liveness_req(Some(501));
         fs_req.action = Action("fs.read".into());
         fs_req.resource.0.insert(
             RESOURCE_PATH_KEY,
@@ -583,17 +579,12 @@ mod tests {
             decide::decide_loaded(&lp, &principal(), &fs_req),
             Verdict::Deny { .. }
         ));
-        // Agent name → user: liveness yes, admin verb no.
-        assert!(matches!(
-            decide::decide_loaded(&lp, &principal(), &liveness_req(Some("agent"), None)),
-            Verdict::Permit { .. }
-        ));
-        let mut agent_admin = liveness_req(Some("agent"), None);
-        agent_admin.action = Action("admin.whoami".into());
+        // An UNBOUND uid gets no role under the shipped defaults -- the half
+        // that used to be asserted through the reserved `agent` name (#276).
         assert_eq!(
-            decide::decide_loaded(&lp, &principal(), &agent_admin),
+            decide::decide_loaded(&lp, &principal(), &liveness_req(Some(4242))),
             Verdict::NotApplicable {
-                note: Some("role user: no rule for admin.whoami".into())
+                note: Some("subject resolves to no role".into())
             }
         );
     }
@@ -614,7 +605,10 @@ mod tests {
             std::fs::write(
                 &p,
                 format!(
-                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"agent\"]\n"
+                    // `root` rather than the struck reserved token (#276): this
+                    // proof's subject is CONTAINMENT -- that a binding edit bites
+                    // on the next request -- not the identity it is written over.
+                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
                 ),
             )
             .unwrap();
@@ -624,7 +618,7 @@ mod tests {
         let auth = BasicAuthorizer {
             policy_path: p.clone(),
             principal: principal(),
-            uid_map: UidMap::new(),
+            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
         };
         let seam_loader = |path: &Path| {
             maknae_config::load_authz_with_requirement(
@@ -639,13 +633,13 @@ mod tests {
                 Some(std::path::Path::new("/home/operator")),
             )
         };
-        let before = auth.decide_with_loader(&liveness_req(Some("agent"), None), seam_loader);
+        let before = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
         assert!(matches!(before, Verdict::Permit { .. }), "{before:?}");
 
         // Containment: root (here: the test) rewrites the binding. No
         // restart, no new authorizer — the very next request must deny.
         write("adversary");
-        let after = auth.decide_with_loader(&liveness_req(Some("agent"), None), seam_loader);
+        let after = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
         assert!(
             matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
             "{after:?}"
@@ -654,7 +648,7 @@ mod tests {
         // And a garbage file mid-flight → Indeterminate (fail-closed).
         std::fs::write(&p, "not: [valid").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let garbage = auth.decide_with_loader(&liveness_req(Some("agent"), None), seam_loader);
+        let garbage = auth.decide_with_loader(&liveness_req(None), seam_loader);
         assert_eq!(garbage, Verdict::Indeterminate);
         // A brand-new username edited in after construction: Indeterminate
         // until restart (spec §3 resolution model).
@@ -664,27 +658,34 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let new_name = auth.decide_with_loader(&liveness_req(Some("agent"), None), seam_loader);
+        let new_name = auth.decide_with_loader(&liveness_req(None), seam_loader);
         assert_eq!(new_name, Verdict::Indeterminate);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// finish_new (the post-load half of `new`) hermetically: eager
-    /// validation + uid resolution over host-independent identities
-    /// (`root` — uid 0 exists everywhere; the reserved `agent` token).
+    /// validation + uid resolution over a host-independent identity
+    /// (`root` — uid 0 exists everywhere).
+    ///
+    /// #276: this used to bind `user: ["agent"]` and assert the reserved token
+    /// was never looked up. With the token struck, `agent` is an ordinary name:
+    /// the binding would break DIFFERENTLY on the two mutation lanes -- a
+    /// `getpwnam` panic on a host without such an account, an assertion failure
+    /// on a host with one. Bound to `root` alone, which resolves everywhere.
     #[test]
     fn finish_new_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
         let ok_policy = maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n  user: [\"agent\"]\n",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n",
             None,
         )
         .unwrap();
         let auth =
             BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ok_policy).unwrap();
         assert_eq!(auth.uid_map.get("root"), Some(&0), "root resolves to uid 0");
-        assert!(
-            !auth.uid_map.contains_key("agent"),
-            "reserved token never looked up"
+        assert_eq!(
+            auth.uid_map.len(),
+            1,
+            "every bound name resolves, no exception"
         );
 
         // The advesary-typo rule fails CONSTRUCTION, not just requests.
@@ -879,27 +880,37 @@ mod tests {
     /// agent runtime on that same binding. An operator auditing "is the agent
     /// bound to admin?" was told nobody was.
     #[test]
-    fn subjects_reports_the_agent_binding() {
+    /// TWO members under one role, asserted BY EQUALITY on the sorted vector.
+    ///
+    /// Replaces `subjects_reports_the_agent_binding` (#276). That test was the
+    /// only one in the crate putting two members under a single role, so it was
+    /// also the only exercise of `as_subject_bindings`'s `or_default().push()`
+    /// accumulation and its `members.sort()`. Retiring it with the reserved
+    /// token would have left `sort()` a newly-unkillable mutant in a `[t1]`
+    /// zero-missed file -- the accumulation is the real subject, and it
+    /// survives the token.
+    fn subjects_reports_every_member_of_a_role_sorted() {
         let auth = BasicAuthorizer {
             policy_path: "/nonexistent".into(),
             principal: principal(),
-            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
+            uid_map: [("root".to_string(), 0u32), ("nobody".to_string(), 99u32)]
+                .into_iter()
+                .collect(),
         };
         let got = auth
             .subjects_with_loader(|_| {
                 maknae_config::parse_authz(
-                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"agent\", \"root\"]\n"),
+                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"nobody\", \"root\"]\n"),
                     None,
                 )
             })
             .expect("readable policy with an explicit block");
         let admin = got.iter().find(|b| b.role == "admin").expect("admin");
-        assert!(
-            admin.members.contains(&"agent".to_string()),
-            "the agent binding must be reported, not silently dropped: {:?}",
-            admin.members
+        assert_eq!(
+            admin.members,
+            vec!["uid:0".to_string(), "uid:99".to_string()],
+            "both members, sorted"
         );
-        assert!(admin.members.contains(&"uid:0".to_string()));
     }
 
     /// NO `bindings:` key -> `None`, never `Some(vec![])`.
@@ -983,7 +994,7 @@ mod tests {
         };
         // The injected loader IS the per-request re-read; only the source of
         // the bytes is hermetic. Nothing about the validation is stubbed.
-        let v = auth.decide_with_loader(&liveness_req(None, Some(501)), |_| {
+        let v = auth.decide_with_loader(&liveness_req(Some(501)), |_| {
             maknae_config::parse_authz(
                 &format!("{GRANT_PREAMBLE}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
                 None,
@@ -1081,7 +1092,7 @@ mod tests {
             principal: principal(),
             uid_map: UidMap::new(),
         };
-        let v = auth.decide(&liveness_req(None, Some(501)));
+        let v = auth.decide(&liveness_req(Some(501)));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(v, Verdict::Indeterminate);
     }

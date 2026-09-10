@@ -3,7 +3,7 @@
 - **Status:** Accepted (operator-ratified 2026-09-10)
 - **Date:** 2026-09-10
 - **Deciders:** Alex Ackerman (operator)
-- **Supersedes one clause of [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md)** — decision 1's *"multi-user hardening collapses into the Kubernetes/gateway case."* Its anti-friction rationale stands; see Consequences.
+- **Supersedes, in [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md), decision 1's *"multi-user hardening collapses into the Kubernetes/gateway case"* AND the Context fact it rests on (*"multi-user only arises on shared infrastructure…"*, ADR-0018 §Context 1).** *(Corrected 2026-09-10, #276: this said "one clause"; there are two statements of the same assumption.)* Its anti-friction rationale stands; see Consequences.
 
 ## Context
 
@@ -51,7 +51,9 @@ Collapsing them makes an agent-originated action indistinguishable from a direct
 
 **Keeping personas out of the PDP does not require deleting provenance from the trail.** Decision 4 forbids persona from reaching the *decision*; it says nothing about the *record*, and provenance in the record is the same inform-but-not-authorize shape the kernel already applies to injected content.
 
-**The mechanism does not exist yet, and this ADR does not claim it.** `source.plane_uri_san` is the natural carrier — it is on every record already — but the `Plane` vocabulary is `Kernel | Cli` (`crates/maknae-vault/src/plane.rs`), with no value meaning "runtime". A runtime connecting today would be indistinguishable from the CLI. **Recorded as an auditability gap, owned by [#241](https://github.com/darkhonor/maknae/issues/241)** — the issue that first creates a second origin, and therefore the first point at which the gap is reachable rather than theoretical. Until it closes, AU-3(d) coverage for *origin* is not claimed here.
+**The mechanism does not exist yet, and this ADR does not claim it.** `source.plane_uri_san` is the natural carrier — it is on every record already — but the `Plane` vocabulary is `Kernel | Cli` (`crates/maknae-vault/src/plane.rs`), with no value meaning "runtime". A runtime connecting today would be indistinguishable from the CLI. **Recorded as an auditability gap, owned by [#241](https://github.com/darkhonor/maknae/issues/241)** — the issue that first creates a second origin, and therefore the first point at which the gap is reachable rather than theoretical.
+
+*(Refined 2026-09-10, #276: the carrier is not un-designed. [ADR-0006](ADR-0006-client-authentication-model.md) §Out-of-scope (b) already names it — "the runtime's own uid is **not** an operator identity, and per-operator attribution through the runtime needs **the subject-context envelope**" — which agrees with decision 2 above. `maknae-subject-ctx` and `maknae-subject-ctx-mint` exist as scaffold stubs gated on ADR-0014. So the mechanism has a name and a home; what it does not have is a body.)* Until it closes, AU-3(d) coverage for *origin* is not claimed here.
 
 ### 3. The reserved `agent` subject token is STRUCK
 
@@ -73,7 +75,7 @@ This is Home Assistant's household model and NanoClaw's admin-card model, held a
 
 ## Consequences
 
-- **ADR-0018 decision 1 is superseded only in its second clause** — *"multi-user hardening collapses into the Kubernetes/gateway case."* The local plane owns that case now. Its **first** clause stands and is reinforced: a per-uid allowlist remains unadopted, and nothing here reintroduces one. Its *mechanism* is unchanged and already sufficient — the `maknae` group is the outer fence, the per-request uid is the principal that distinguishes two members of it, and `bindings:` already maps uids to roles. **No new mechanism is required by this ADR**, which is what makes dormancy possible.
+- **ADR-0018 is superseded in two places** *(corrected 2026-09-10, #276 — this previously said "only in its second clause")*: decision 1's second clause, and the §Context "Deployment reality" fact it rests on. The clause in question is — *"multi-user hardening collapses into the Kubernetes/gateway case."* The local plane owns that case now. Its **first** clause stands and is reinforced: a per-uid allowlist remains unadopted, and nothing here reintroduces one. Its *mechanism* is unchanged and already sufficient — the `maknae` group is the outer fence, the per-request uid is the principal that distinguishes two members of it, and `bindings:` already maps uids to roles. **No new mechanism is required by this ADR**, which is what makes dormancy possible.
 - **[#276](https://github.com/darkhonor/maknae/issues/276) resolves to deletion, not hardening.** The reserved token, the `agent`-excluded branch in `resolve_uid_map`, the reserved-name arm of `role_for`, and the `SUBJECT_NAME` request attribute all go. #275's compile-time `Verb` regression pin retires with them, since the hazard it guards ceases to exist.
 - **[#241](https://github.com/darkhonor/maknae/issues/241)'s runtime identity is settled before it is built:** the loop authenticates as the human who started it and carries no identity of its own.
 - **[#117](https://github.com/darkhonor/maknae/issues/117) (gateway) and [#195](https://github.com/darkhonor/maknae/issues/195) (remote-lane DAC) are the multi-user *remote* half** and are unaffected in direction; this ADR settles the *local* half they were deferring to.

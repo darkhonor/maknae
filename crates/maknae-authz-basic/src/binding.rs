@@ -3,9 +3,16 @@
 //! Identity semantics (ADR-0018: the per-request authorization principal is
 //! the **uid**): `bindings:` entries are operator-facing usernames, resolved
 //! to uids ONCE at [`crate::BasicAuthorizer`] construction (the `UidMap`);
-//! matching is uid vs uid. The reserved token `agent` always means the
-//! runtime subject — it is never looked up and a host account literally named
-//! `agent` cannot be bound by username (single meaning, spec §3).
+//! **matching is uid vs uid, with no exception.**
+//!
+//! A reserved `agent` token used to sit beside the uid map, meaning the runtime
+//! subject and never looked up. [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
+//! decision 3 struck it: Maknae is multi-tenant, and one reserved runtime token
+//! cannot express two agent personas. An agent holds no identity of its own —
+//! it acts within a delegation from the human who invoked it — so ADR-0018's
+//! uid principal now applies uniformly. `agent` is an ordinary username: if a
+//! deployer creates such an account and binds it, it resolves through NSS like
+//! any other, which is their call to make and not this crate's (#276).
 //!
 //! Fail-closed everywhere: unknown role key, dual membership, a duplicate
 //! name, or a name absent from the `UidMap` (a brand-new username edited into
@@ -15,18 +22,13 @@
 use crate::role::Role;
 use std::collections::BTreeMap;
 
-/// The reserved runtime-subject token (spec §3/§6): stamped by the daemon
-/// door on runtime-originated requests, never resolved through NSS.
-pub(crate) const AGENT_SUBJECT: &str = "agent";
-
-/// username → uid, built once at construction via getpwnam (`agent` excluded).
+/// username → uid, built once at construction via getpwnam.
 pub(crate) type UidMap = BTreeMap<String, u32>;
 
 /// Validated, uid-keyed bindings for one loaded policy snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedBindings {
     by_uid: BTreeMap<u32, Role>,
-    agent: Option<Role>,
     /// The `bindings:` key was PRESENT in the file → defaults suppressed
     /// entirely (spec §3 precedence; what makes `admin: []` mean "no admin").
     explicit: bool,
@@ -76,12 +78,10 @@ pub(crate) fn resolve(
     let Some(map) = bindings else {
         return Ok(ResolvedBindings {
             by_uid: BTreeMap::new(),
-            agent: None,
             explicit: false,
         });
     };
     let mut by_uid: BTreeMap<u32, Role> = BTreeMap::new();
-    let mut agent: Option<Role> = None;
     let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
     for (key, members) in map {
         let role = Role::from_key(key).ok_or_else(|| BindingError::UnknownRole(key.clone()))?;
@@ -101,10 +101,6 @@ pub(crate) fn resolve(
                     BindingError::DualMembership(name.clone())
                 });
             }
-            if name == AGENT_SUBJECT {
-                agent = Some(role);
-                continue;
-            }
             let uid = lookup
                 .get(name)
                 .copied()
@@ -114,7 +110,6 @@ pub(crate) fn resolve(
     }
     Ok(ResolvedBindings {
         by_uid,
-        agent,
         explicit: true,
     })
 }
@@ -127,7 +122,7 @@ impl ResolvedBindings {
     /// to admin when no bindings key is present) is a decision rule, not a
     /// binding, and listing it as one would tell an operator a binding exists
     /// that they could then look for in the file and not find.
-    /// MEMBERS ARE REPORTED BY UID; the reserved `agent` token by its name.
+    /// MEMBERS ARE REPORTED BY UID -- every binding has one since #276.
     ///
     /// Worth naming, because the sibling rationale on `Role::key` argues the
     /// opposite direction for roles ("the token an operator would grep for in
@@ -135,7 +130,6 @@ impl ResolvedBindings {
     /// file. The uid IS the authenticated datum (ADR-0018) and the thing
     /// `role_for` keys on, so it is the honest answer to "who is bound"; a
     /// name is an input resolved once at construction that may since have been
-    /// re-pointed. `agent` has no uid by construction, so it reports as itself.
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         // NO `bindings:` KEY -> `None`, not an empty list.
         //
@@ -143,8 +137,8 @@ impl ResolvedBindings {
         // the default deployment took this path and rendered `Some(vec![])` --
         // "these are the bindings, and there are none" -- while the DEFAULT
         // ROLE FALLBACK was live and the enrolled uid was resolving to admin.
-        // Three materially different states (agent-only bindings, `bindings:
-        // {}`, and no-key-with-fallback-active) all read identically as
+        // Materially different states (`bindings: {}` and
+        // no-key-with-fallback-active) would otherwise read identically as
         // "nobody is bound", which is exactly the claim the `Option` on this
         // seam exists to refuse. Only an EXPLICIT block can report a set.
         if !self.explicit {
@@ -156,19 +150,6 @@ impl ResolvedBindings {
                 .or_default()
                 .push(format!("uid:{uid}"));
         }
-        // The AGENT binding is a real binding and is reported.
-        //
-        // It lives in its own field because the reserved token has no uid by
-        // construction, and reading only `by_uid` dropped it: a policy with
-        // `bindings: { admin: ["agent"] }` reported an empty list while
-        // `role_for` granted admin to the UNTRUSTED AGENT RUNTIME on that same
-        // binding. An operator auditing "is the agent bound to admin?" was
-        // told nobody was.
-        if let Some(role) = self.agent {
-            out.entry(role.key().to_string())
-                .or_default()
-                .push(AGENT_SUBJECT.to_string());
-        }
         Some(
             out.into_iter()
                 .map(|(role, mut members)| {
@@ -179,36 +160,30 @@ impl ResolvedBindings {
         )
     }
 
-    /// Subject → role, in the FIXED order of spec §3b: reserved subject name
-    /// first (never through uid), then uid; defaults only when the file had
-    /// no `bindings:` key.
-    pub(crate) fn role_for(
-        &self,
-        subject_name: Option<&str>,
-        uid: Option<u32>,
-        principal_uid: u32,
-    ) -> Resolution {
-        if subject_name == Some(AGENT_SUBJECT) {
-            return match (self.explicit, self.agent) {
-                (true, Some(r)) => Resolution::Role(r),
-                (true, None) => Resolution::NoRole,
-                (false, _) => Resolution::Role(Role::User),
-            };
-        }
-        match uid {
-            Some(u) => {
-                if self.explicit {
-                    match self.by_uid.get(&u) {
-                        Some(r) => Resolution::Role(*r),
-                        None => Resolution::NoRole,
-                    }
-                } else if u == principal_uid {
-                    Resolution::Role(Role::Admin)
-                } else {
-                    Resolution::NoRole
-                }
+    /// Subject → role, on the uid alone.
+    ///
+    /// A reserved-subject-name arm used to run FIRST, never through uid
+    /// (spec §3b's fixed order). [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
+    /// decision 3 struck the reserved token, so there is no longer an ordering
+    /// to state: there is one lookup (#276).
+    ///
+    /// `uid` is `u32`, not `Option<u32>`: the caller
+    /// ([`crate::decide::decide_loaded_with_role`]) returns `Indeterminate`
+    /// before reaching here when the subject carries no uid. An arm for the
+    /// absent case would be production-unreachable, and in a `[t1]`
+    /// zero-missed-mutant file an unreachable arm's mutants are unkillable.
+    ///
+    /// Defaults apply only when the file had no `bindings:` key.
+    pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
+        if self.explicit {
+            match self.by_uid.get(&uid) {
+                Some(r) => Resolution::Role(*r),
+                None => Resolution::NoRole,
             }
-            None => Resolution::NoRole,
+        } else if uid == principal_uid {
+            Resolution::Role(Role::Admin)
+        } else {
+            Resolution::NoRole
         }
     }
 }
@@ -261,12 +236,19 @@ mod tests {
         assert_eq!(got, Err(BindingError::Unresolvable("nobody-new".into())));
     }
 
+    /// #276: `agent` is an ordinary username now. It resolves through NSS like
+    /// any other bound name and fails closed when no such account exists --
+    /// which is the behaviour change an operator could actually notice, so it
+    /// gets a test. Replaces `agent_token_is_never_looked_up`, whose subject
+    /// (a name that bypasses the uid map) no longer exists.
     #[test]
-    fn agent_token_is_never_looked_up() {
-        // Empty UidMap proves no lookup happens for the reserved token.
-        let r = resolve(&b(&[("adversary", &[AGENT_SUBJECT])]), &UidMap::new()).unwrap();
+    fn agent_is_an_ordinary_name_and_fails_closed_when_unresolvable() {
+        let got = resolve(&b(&[("adversary", &["agent"])]), &UidMap::new());
+        assert_eq!(got, Err(BindingError::Unresolvable("agent".into())));
+        // And when it DOES resolve, it binds like any other name.
+        let r = resolve(&b(&[("adversary", &["agent"])]), &uids(&[("agent", 4242)])).unwrap();
         assert_eq!(
-            r.role_for(Some(AGENT_SUBJECT), None, PRINCIPAL_UID),
+            r.role_for(4242, PRINCIPAL_UID),
             Resolution::Role(Role::Adversary)
         );
     }
@@ -276,42 +258,17 @@ mod tests {
         // The no-discretionary-admin posture (spec §3): with an explicit
         // empty map, even the enrolled principal has NO role.
         let r = resolve(&Some(BTreeMap::new()), &UidMap::new()).unwrap();
-        assert_eq!(
-            r.role_for(None, Some(PRINCIPAL_UID), PRINCIPAL_UID),
-            Resolution::NoRole
-        );
-        assert_eq!(
-            r.role_for(Some(AGENT_SUBJECT), None, PRINCIPAL_UID),
-            Resolution::NoRole
-        );
+        assert_eq!(r.role_for(PRINCIPAL_UID, PRINCIPAL_UID), Resolution::NoRole);
     }
 
     #[test]
     fn absent_bindings_apply_defaults() {
         let r = resolve(&None, &UidMap::new()).unwrap();
         assert_eq!(
-            r.role_for(None, Some(PRINCIPAL_UID), PRINCIPAL_UID),
+            r.role_for(PRINCIPAL_UID, PRINCIPAL_UID),
             Resolution::Role(Role::Admin)
         );
-        assert_eq!(
-            r.role_for(Some(AGENT_SUBJECT), None, PRINCIPAL_UID),
-            Resolution::Role(Role::User)
-        );
-        assert_eq!(
-            r.role_for(None, Some(999), PRINCIPAL_UID),
-            Resolution::NoRole
-        );
-    }
-
-    #[test]
-    fn reserved_name_resolves_before_uid_closing_the_single_user_host_hole() {
-        // Agent under the OPERATOR'S uid still lands in user, never admin
-        // (spec §3b): the reserved name short-circuits uid resolution.
-        let r = resolve(&None, &UidMap::new()).unwrap();
-        assert_eq!(
-            r.role_for(Some(AGENT_SUBJECT), Some(PRINCIPAL_UID), PRINCIPAL_UID),
-            Resolution::Role(Role::User)
-        );
+        assert_eq!(r.role_for(999, PRINCIPAL_UID), Resolution::NoRole);
     }
 
     #[test]
@@ -321,20 +278,14 @@ mod tests {
             &uids(&[("alex", 501), ("mallory", 666)]),
         )
         .unwrap();
-        assert_eq!(
-            r.role_for(None, Some(501), 501),
-            Resolution::Role(Role::Admin)
-        );
-        assert_eq!(
-            r.role_for(None, Some(666), 501),
-            Resolution::Role(Role::Adversary)
-        );
-        assert_eq!(r.role_for(None, Some(1000), 501), Resolution::NoRole);
+        assert_eq!(r.role_for(501, 501), Resolution::Role(Role::Admin));
+        assert_eq!(r.role_for(666, 501), Resolution::Role(Role::Adversary));
+        assert_eq!(r.role_for(1000, 501), Resolution::NoRole);
     }
 
-    #[test]
-    fn missing_uid_with_no_reserved_name_is_no_role() {
-        let r = resolve(&None, &UidMap::new()).unwrap();
-        assert_eq!(r.role_for(None, None, PRINCIPAL_UID), Resolution::NoRole);
-    }
+    // `missing_uid_with_no_reserved_name_is_no_role` retired with its subject
+    // (#276): `role_for` now takes `u32`, so "no uid" is not expressible here.
+    // The property moved UP to `decide_loaded_with_role`'s guard, which returns
+    // Indeterminate before reaching this function -- see
+    // `decide::tests::missing_identity_is_indeterminate_distinct_from_unbound`.
 }
