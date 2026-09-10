@@ -17,6 +17,8 @@ The maintainer's worked example (2026-09-10):
 
 Two models. Two trust bases. Two supply-chain risk levels. **One user**, and one set of agent personas acting on that user's behalf. The differentiating attribute is not *who is asking* — it is *what the request is about to flow through*.
 
+*(Extended 2026-09-11: two further cases — a trusted small model with bounded network reach, and an orchestrating model over task models — are recorded under [The use cases the policy suite must carry](#the-use-cases-the-policy-suite-must-carry--three-conduits-one-mechanism) below, together with the criterion the maintainer set for all of them.)*
+
 ## What is already true in the code
 
 This is not a green field. Four load-bearing pieces exist:
@@ -75,19 +77,124 @@ Where it does hold, the consequence for supply-chain risk management is the inte
 
 **Stated as a claim, not a finding.** It has not been evaluated, and it is the first thing an adversarial review should attack — as the first one did.
 
+## A candidate answer to question 8: own the process boundary, never the execution
+
+*(Added 2026-09-11. The maintainer's question, once the [#280](https://github.com/darkhonor/maknae/pull/280) review had drawn the boundary: "we don't control LLM execution. What if we did? What if the model execution engine was part of Maknae?" Recorded as a candidate, not a decision.)*
+
+"Execution engine inside Maknae" can mean three different things, and only one of them is right.
+
+**(a) Maknae *supervises* the inference process.** `maknaed` spawns the inference server as a child under a dedicated uid, in a confined context: no network route except a unix socket back to the kernel; exactly the fds it needs — the weight file, opened read-only through `maknae-io` and delegated; the GPU device; the socket — and nothing else. Maknae does not run the weights. **It runs the jailer.**
+
+**(b) Maknae *is* the inference engine.** The forward pass executes inside the TCB.
+
+**(c) Maknae *verifies* an external engine's confinement.** Attestation: the engine runs elsewhere and proves its jail. This is question 9's territory and is not developed here.
+
+**(b) is rejected, and the rejection is recorded so that it is not proposed again.** Five reasons, any one sufficient:
+
+1. **[ADR-0002](adr/ADR-0002-kernel-is-rust.md), on a shipping platform.** Inference is C++/CUDA/Metal at the bottom. Rust runtimes exist, but GPU acceleration binds to cuBLAS or Metal Performance Shaders — and macOS is a production target under ADR-0002's full force. (b) puts GPU drivers and BLAS kernels inside the TCB with no dev-box exemption to appeal to.
+2. **It inverts the trust boundary.** The weights are the single most untrusted object in the system — that is the entire Threat B premise. Moving the forward pass into the TCB moves the prisoner into the guardhouse.
+3. **Weight files are attack surface.** GGUF and safetensors parsers have shipped real CVEs. Today a malicious weight file compromises at most an out-of-TCB process; under (b) it is a direct attack on `maknaed`.
+4. **It does not solve the problem.** A forward pass does not reach the network; the *process hosting it* does. The thing to control is the process, not the arithmetic.
+5. **Every new model architecture becomes a TCB change** carrying T1 coverage and mutation gates ([ADR-0016](adr/ADR-0016-risk-tiered-test-coverage.md)). The maintenance load would displace the project.
+
+**(a) is the candidate, and it is not a new idea — it is the existing pattern applied once more:**
+
+- [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) decision 3 already places `maknae-egress` in a separate Rust process under `_maknae-egress`. An inference service is the same shape: a supervised process under a dedicated uid, confined.
+- [ADR-0009](adr/ADR-0009-subject-side-os-dac-evaluation.md) already reasons in **fd delegation** — *"confinement from the daemon's own fd table."* The jailed process holds no network fd, and cannot open one where no interface exists.
+- [ADR-0024](adr/ADR-0024-tenancy-model-and-agent-identity.md)'s dormancy test holds: a hosted-API deployment never spawns the supervisor. Zero ceremony for the one-model user.
+- [ADR-0002](adr/ADR-0002-kernel-is-rust.md) holds: the *jailer* is Rust and inside the TCB; the *jailed thing* is outside it by construction, exactly as the agent runtime is. The TCB grows by a supervisor, not by an inference engine.
+
+**What (a) would do to this document, if adopted:**
+
+- **Question 8 flips** from *should we* to *how*.
+- **Question 9 dissolves for supervised conduits.** The `locus` attribute stops being a self-label because `maknaed` itself established the locus — it created the confinement and spawned the process into it. The attribute is **kernel-witnessed, not config-asserted**: inform-but-never-authorize satisfied structurally. It remains open for conduits Maknae does not supervise.
+- **The audit gap narrows.** With no network fd, a host-originated exfiltration fails at the syscall — and can be logged there. *"Exposure, not leakage"* becomes *"exposure, and leakage is structurally impossible on this conduit."*
+- **The inversion becomes architectural — for supervised conduits only.** The [#280](https://github.com/darkhonor/maknae/pull/280) objection answered by mechanism rather than by prose.
+
+**Platform reality.** Confinement primitives are not portable, and macOS is production:
+
+| | Linux (amd64/arm64) | macOS (arm64) |
+|---|---|---|
+| No network | network namespace — structural; no interface exists to open | no namespaces; `pf` rule keyed on uid (`block out … user _maknae-infer`) — kernel-enforced, root-changeable |
+| Syscall filter | seccomp-bpf | Seatbelt (`sandbox_init`) — functional, officially undocumented |
+| Supervisor | direct spawn / systemd | launchd — [#227](https://github.com/darkhonor/maknae/issues/227), already in Cooky's sequence |
+| Filesystem | `openat2` `RESOLVE_BENEATH` (in use) | `O_NOFOLLOW` portable lane (in use) |
+| GPU | device fd, delegatable | in-process Metal; not a network path |
+
+One design, two enforcement lanes — [ADR-0009](adr/ADR-0009-subject-side-os-dac-evaluation.md)'s lane-conditional applicability again. Linux gets structural isolation; macOS gets a uid-keyed kernel firewall plus Seatbelt: weaker, real, and to be stated as weaker rather than papered over.
+
+**What (a) still does not move:**
+
+- **Output-channel exfiltration.** The reply returns to the agent runtime and flows wherever the PDP permits. A backdoored model can steganographically encode a secret into a plausible answer that the user then pastes into a hosted service. Jailing the process does nothing here; *an allowed conduit is an allowed conduit* stands.
+- **Output correctness.** Unchanged and unbounded.
+- **Root.** A root inference process defeats all of it. The dedicated uid is mandatory, not a hardening option.
+
+**In one line: owning execution buys nothing; owning the process boundary buys almost everything, and the project already knows how to build that.**
+
 ## Where ABAC and the classification library expand it
 
 The [ADR-0022](adr/ADR-0022-classification-policy-as-data.md) ceiling/scalpel split extends here without modification. If the conduit carries a **hosting-locus** attribute, then releasability — a scalpel attribute the external classification library already knows how to evaluate — meets it directly: content marked `REL TO USA, FVEY` transiting a conduit hosted outside FVEY is a refusal derived from attributes both sides already carry, not a hand-written rule per model. That is the granularity expansion the maintainer describes, and it is the existing seam doing the work it was built for.
+
+## The use cases the policy suite must carry — three conduits, one mechanism
+
+*(Added 2026-09-11 from the maintainer's further use cases. Options and policies are not defined. The maintainer's stated criterion is **a policy suite mechanism robust enough to handle these use cases and still work**; this section records the cases and the one principle they all obey, not a design.)*
+
+The governing principle, forced into the open by the third case:
+
+> **Confinement is uniform. Trust is policy.**
+
+A trusted conduit is not a conduit that is handed a socket. It is a conduit on whose behalf the kernel is *willing to permit more*. The enforcement mechanism never varies with the trust level; only the allowlist does. A socket is a *capability*; an allowlist is a *policy* — and once a process holds the capability, the allowlist is enforced by something outside `maknaed` that must then be attested, which reintroduces question 9 for the conduit trusted most.
+
+**Case 1 — a hosted frontier model.** The prompt *is* the egress. This is [#172](https://github.com/darkhonor/maknae/issues/172) as shipped: the release decision is the whole control surface, and the conduit's containment is the provider's terms, not Maknae's.
+
+**Case 2 — a locally hosted, low-trust open-weight model.** Supervised under the candidate answer above; no network fd; no fetch grant. Broad local reach is a policy choice the operator may make *because* containment is real.
+
+**Case 3 — a locally hosted, trusted, small model with limited network reach.** The maintainer's example: a US-origin ~4B model refreshing the operator's knowledge lake — *"refresh the lake's documentation on Rancher Manager 2.15 and RKE2 1.35."* Frontier reasoning is unnecessary; a bounded fetch is. **This conduit gets exactly the same jail as case 2.** What differs is that the kernel is willing to grant `Fetch`, and the shape of that grant is the interesting part:
+
+1. The model **proposes** a resolution — "Rancher MCM" → a vendor/product/version — from the operator's task. *(Informs.)*
+2. The PDP **validates** the resolution against a vendor registry and, if the vendor is present, grants `Fetch` on `vendor:<slug>/<product>@<version>` for this conduit. *(Authorizes — or refuses.)*
+3. The model **proposes** specific pages within that product's authorized hosts. *(Informs.)*
+4. The **egress deputy** — `maknae-egress`, the only process with a route out — executes each fetch, enforcing that every URL (the *final resolved* URL, after DNS, with no redirect followed) is within the registry's host set for that product; HTTPS only, verified through the FIPS provider; response size capped. *(Enforces.)*
+5. Content returns **through `maknaed`**, receives a second decision (may *this* content flow to *this* conduit?), is stamped with provenance, and lands in the next prompt and eventually the lake.
+
+Three properties follow:
+
+- **The resource vocabulary is the lake's, not the network's.** The grant is at vendor/product granularity; the policy file carries no hostnames; the deputy joins vendor → hosts from the registry at execution time. When a vendor moves its documentation, the registry changes and the policy does not. Enforcement is nonetheless at final-URL granularity: coarse grant, exact check, the registry as the join, deny-overrides between them.
+- **The model resolves names; it never mints them.** *"If we even know about it"* (maintainer) is the load-bearing case: a task naming a vendor absent from the registry yields **no fetch at all** — not fetch-and-flag — and a report that the vendor must be minted by the operator first. The registry's own governance (in the lake, minting a vendor is an adjudicated act with its own decision records) is the human gate, and deny-by-default places it at exactly the right seam. Injection through fetched content is bounded the same way: a page that says *"also pull this other host"* proposes a URL outside the registry's set, and the deputy refuses it.
+- **Provenance closes a loop across two projects.** The lake's provenance axis takes its value from the Maknae audit record: subject, task, conduit, resource, final URL, decision, size, time. A fetched document traces to a decided, audited, append-only event.
+
+**A small model is more, not less, exposed to injection** — weaker instruction-following against adversarial content. That is the argument for deciding the fetch loop per hop in the kernel, never delegating a hop to the model's judgment.
+
+**The deputy is where the real work is.** "URL-restricted" is not an allowlist match. It is: refuse redirects, or re-decide each hop; resolve DNS and re-check; HTTPS only, verified through the FIPS provider; bounded response size and admitted content types; suspicion of open redirectors on allowlisted hosts. None of it is exotic; all of it is where a reader who sizes this as "add a URL allowlist" will be wrong by a factor of five.
+
+**The registry gap, found on inspection (2026-09-11).** The lake's vendor registry today carries an identity anchor per vendor (`urls: [https://www.suse.com]`) and versioned products (`rancher-manager`, release-train; `rke2`, semver) — but **not the hosts documentation is actually fetched from**, which for these products are the projects' GitHub release pages, not the corporate site. An identity URL is not a fetch authorization. The maintainer's ruling: this is the lake's to handle, and the registry will keep growing and being corrected as vendors arrive and URL sets prove inaccurate or incomplete — which is itself the argument for the registry being the single source rather than a copy held in Maknae's policy. Who owns the fetch-authorizing host list is open question 10.
+
+**Case 4 — an orchestrating model over task models.** The maintainer's sketch: a frontier model orchestrates the request — resolution and validation, *after* the PDP decides — so that a small task model stays focused on the task. Not developed; recorded because it stresses the mechanism in a new direction: a proposal made through one conduit on behalf of work executed on another. Open question 11.
+
+**Grammar, as a sketch only.** `destinations:` today is role → `provider:<name>`. The cases above want role × conduit → entries, and a second entry kind:
+
+```yaml
+destinations:
+  researcher:
+    provider:nemotron-local:
+      allow: ["vendor:suse/rancher-manager", "vendor:suse/rke2"]   # case 3
+    provider:qwen-local:
+      allow: []                                                     # case 2: jailed, no fetch
+    provider:openai:
+      allow: ["prompt"]                                             # case 1: the prompt is the egress
+```
+
+Three conduits, one grammar, one PDP, deny-overrides; absent means empty, as today. Whether the grant is `vendor:` (the lake's vocabulary) or `url:` (the network's) is part of question 10.
 
 ## What this would *not* do
 
 Recorded now so that no later reading overstates it:
 
 - **It bounds reach, not output correctness.** A backdoored model can still return poisoned code, slanted analysis, or a subtly wrong recommendation. No policy operand catches that. Human review and independent blind review (core principle 6) remain the only controls, and this is a residual risk to state in any eventual ADR's Consequences, not to minimise.
-- **It governs release, not containment.** Maknae decides whether content reaches a conduit. It does not confine the conduit's host, cannot observe that host's own network activity, and records nothing when that host acts on its own. **Containment of a locally hosted inference service is an external prerequisite this project neither supplies nor verifies** — see the trust-boundary paragraphs above, and open question 8.
+- **It governs release, not containment.** Maknae decides whether content reaches a conduit. It does not confine the conduit's host, cannot observe that host's own network activity, and records nothing when that host acts on its own. **Containment of a locally hosted inference service is an external prerequisite this project neither supplies nor verifies** — see the trust-boundary paragraphs above, and open question 8. The candidate answer to question 8 would change this for conduits Maknae supervises, and for those only.
 - **The audit trail records exposure, not leakage.** A release decision on the record establishes *what content was exposed to which conduit*. It does not establish what left, because an exfiltration originated by the conduit host never reaches `maknaed`. That still bounds an investigation, but it is a weaker claim than open question 5's framing might suggest.
 - **It is exactly as good as the seams beneath it.** The egress seam is new and, as of this writing, has no production backend (`impl Egress for Unavailable` — *"there is no egress process yet"*); the filesystem path runs through `maknae-io` and the PDP. Confinement claims are claims about those, and inherit their gaps.
-- **An allowed conduit is an allowed conduit.** Content flowing through a permitted destination is not thereby safe; bounding *what may be said* through an allowed channel is the classification scalpel's problem, or nobody's. Covert and side channels through permitted egress are unaddressed.
+- **An allowed conduit is an allowed conduit** — including output-channel exfiltration through a permitted reply. Content flowing through a permitted destination is not thereby safe; bounding *what may be said* through an allowed channel is the classification scalpel's problem, or nobody's. Covert and side channels through permitted egress are unaddressed.
 - **It says nothing about model quality, licensing, or export control.** Those are separate determinations.
 
 ## Open questions
@@ -101,11 +208,16 @@ Numbered for citation; none are answered.
 5. **Does model *selection* become a decided action in its own right?** If so, the kernel can refuse a model for a given body of data before a token is emitted, and the conduit lands on the audit record ([ADR-0019](adr/ADR-0019-audit-record-model.md)) — producing an auditable *"which model ever saw this content"* trail. That investigative property may matter more to an authorizing official than the prevention does.
 6. **Does the construct extend to MCP tools?** A tool is also a conduit with a trust basis and the same argument appears to apply. **Deliberately deferred** — one operand at a time.
 7. **What is the interaction with [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md)'s per-turn brokered model egress?** That is the mechanism this would decide over; the ADR is Proposed and expected to change. Note that brokering the *call to* a conduit does not contain the conduit — see question 8.
-8. **Should the kernel take any responsibility for containing a locally hosted conduit?** A network namespace, a supervised child process, a required SELinux domain — or is containment permanently the deployment's job, stated as a prerequisite and left there? This is the question the [#280](https://github.com/darkhonor/maknae/pull/280) review surfaced, and it decides whether the risk inversion above is something **Maknae can claim** or merely something a careful operator can achieve.
-9. **How would the operand learn whether the prerequisite holds?** A conduit attribute asserting `locus: local-enclave` is worth exactly what enforces it. An unverified locus is a **self-label**, and core principle 2 is explicit that self-labeling may inform a decision but never authorize one — the same trap, one layer out. Is the attribute operator-asserted configuration (honest, and no worse than the rest of the policy file), attested by something outside the kernel, or a gap that can only be stated?
+8. **Should the kernel take any responsibility for containing a locally hosted conduit?** A network namespace, a supervised child process, a required SELinux domain — or is containment permanently the deployment's job, stated as a prerequisite and left there? This is the question the [#280](https://github.com/darkhonor/maknae/pull/280) review surfaced, and it decides whether the risk inversion above is something **Maknae can claim** or merely something a careful operator can achieve. **A candidate answer is recorded above** (supervise the process, never the execution); it is not decided.
+9. **How would the operand learn whether the prerequisite holds?** A conduit attribute asserting `locus: local-enclave` is worth exactly what enforces it. An unverified locus is a **self-label**, and core principle 2 is explicit that self-labeling may inform a decision but never authorize one — the same trap, one layer out. Is the attribute operator-asserted configuration (honest, and no worse than the rest of the policy file), attested by something outside the kernel, or a gap that can only be stated? **Dissolves under the candidate answer for supervised conduits** — the locus is kernel-witnessed — and remains open for conduits Maknae does not supervise.
+10. **Who owns the fetch-authorizing host list?** *(A)* The lake's vendor registry grows a per-product fetch-host field, curated once under the lake's own minting governance, and Maknae consumes it as data — loaded as `authz.yaml` is, through `maknae-config` over `maknae-io`'s anchored fds, fail-closed on ownership and permissions: the [ADR-0022](adr/ADR-0022-classification-policy-as-data.md) policy-as-data pattern, at the cost of a cross-repository dependency. *(B)* Maknae carries its own conduit-reach registry keyed to lake vendor slugs, at the cost of vendor identity maintained in two places. The assistant's recommendation is (A), because the lake already governs vendor minting and two registries drift; the maintainer has not ruled, and has stated that the registry will keep changing.
+11. **Orchestrator over task model.** When a proposal is made through one conduit on behalf of work executed on another, which conduit attribute does the PDP decide on — and does the orchestrator's grant bound the task model's, or the reverse? Not developed.
+12. **The deputy contract.** Redirects, DNS, TLS, size, content types: is the egress deputy's behaviour its own decision record, and is it the same deputy for `prompt` egress (case 1) and `Fetch` egress (case 3)?
 
 ## Provenance
 
 Originating discussion: maintainer and assistant, 2026-09-10, during the Cooky milestone and unrelated to the work in flight. The maintainer's contributions are the core idea, the two-model use case, the resource-not-subject framing, and the scoping ruling that excludes weight attestation. Drafted the same day and recorded here in the repository, deliberately and publicly.
 
 **Corrected before merge, 2026-09-11**, on review of [#280](https://github.com/darkhonor/maknae/pull/280): the trust boundary between Maknae's release decision and containment of the conduit host was not drawn, which overstated the confinement guarantee and left the risk-inversion claim resting on an unstated external prerequisite. The boundary is now explicit in three places (the threat-B section, the inversion section, and the limits), and questions 8 and 9 exist because of it.
+
+**Extended 2026-09-11**, from discussion after the review. The maintainer's contributions: the question *"what if the model execution engine was part of Maknae?"* (answered above as the candidate for question 8); the trusted-small-model use case with bounded network reach; the knowledge-lake refresh use case and its vendor registry; the observation that the registry's identity URLs are not the GitHub hosts documentation is actually fetched from, and the ruling that this is the lake's to handle; the orchestrator-over-task-model sketch; and the governing criterion — **a policy suite mechanism robust enough to handle these use cases and still work.** The maintainer also noted that the lake's knowledge-management lessons will enter Maknae in many forms once the initial vocabulary set is in place; this document is one early landing point for them.
