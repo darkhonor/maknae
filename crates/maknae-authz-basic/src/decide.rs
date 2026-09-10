@@ -13,9 +13,10 @@ use crate::binding::{Resolution, ResolvedBindings};
 use crate::role::Role;
 use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 
-/// Subject attribute keys (spec §6, pinned for #77): `uid` is the
-/// authenticated datum (ADR-0018); `name` carries the reserved runtime token,
-/// stamped by the daemon door, never client-settable.
+/// Subject attribute key (spec §6, pinned for #77): `uid`, the authenticated
+/// datum (ADR-0018), and since #276 the ONLY one. A sibling `name` key
+/// carried a reserved runtime token; ADR-0024 decision 3 struck it, so there
+/// is no second identity datum and no fall-back between them.
 pub(crate) const SUBJECT_UID: &str = "uid";
 /// Resource attribute key for `fs.*` (spec §4.4).
 pub(crate) const RESOURCE_PATH: &str = "path";
@@ -654,7 +655,8 @@ mod tests {
     }
 
     /// Fixture bindings over host-independent identities only (issue #138
-    /// lesson): the reserved `agent` token plus uids supplied via the map.
+    /// lesson): uids supplied via the map. The reserved `agent` token used to
+    /// be the other half of that; #276 struck it, so the map is all of it.
     fn lp_with(bindings: Option<&[(&str, &[&str])]>, uid_map: &[(&str, u32)]) -> LoadedPolicy {
         let b: Option<BTreeMap<String, Vec<String>>> = bindings.map(|pairs| {
             pairs

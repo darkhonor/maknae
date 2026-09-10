@@ -877,13 +877,6 @@ mod tests {
         assert!(auth.subjects().is_none(), "unreadable must fail closed");
     }
 
-    /// The AGENT binding is reported. It lives in its own field on
-    /// `ResolvedBindings` because the reserved token has no uid, and reading
-    /// only `by_uid` dropped it -- so `bindings: { admin: ["agent"] }`
-    /// reported an EMPTY list while `role_for` granted admin to the untrusted
-    /// agent runtime on that same binding. An operator auditing "is the agent
-    /// bound to admin?" was told nobody was.
-    #[test]
     /// TWO members under one role, asserted BY EQUALITY on the sorted vector.
     ///
     /// Replaces `subjects_reports_the_agent_binding` (#276). That test was the
@@ -893,6 +886,7 @@ mod tests {
     /// token would have left `sort()` a newly-unkillable mutant in a `[t1]`
     /// zero-missed file -- the accumulation is the real subject, and it
     /// survives the token.
+    #[test]
     fn subjects_reports_every_member_of_a_role_sorted() {
         let auth = BasicAuthorizer {
             policy_path: "/nonexistent".into(),
