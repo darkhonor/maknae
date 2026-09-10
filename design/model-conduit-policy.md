@@ -169,7 +169,7 @@ Three properties follow:
 
 **The registry gap, found on inspection (2026-09-11).** The lake's vendor registry today carries an identity anchor per vendor (`urls: [https://www.suse.com]`) and versioned products (`rancher-manager`, release-train; `rke2`, semver) — but **not the hosts documentation is actually fetched from**, which for these products are the projects' GitHub release pages, not the corporate site. An identity URL is not a fetch authorization. The maintainer's ruling: this is the lake's to handle, and the registry will keep growing and being corrected as vendors arrive and URL sets prove inaccurate or incomplete — which is itself the argument for the registry being the single source rather than a copy held in Maknae's policy. Who owns the fetch-authorizing host list is open question 10.
 
-**Case 4 — an orchestrating model over task models.** The maintainer's sketch: a frontier model orchestrates the request — resolution and validation, *after* the PDP decides — so that a small task model stays focused on the task. Not developed; recorded because it stresses the mechanism in a new direction: a proposal made through one conduit on behalf of work executed on another. Open question 11.
+**Case 4 — an orchestrating model over task models.** The maintainer's sketch: a frontier model orchestrates the request — resolution and validation, *after* the PDP decides — so that a small task model stays focused on the task. It stresses the mechanism in a new direction — a proposal made through one conduit on behalf of work executed on another — and has a candidate answer in the next section.
 
 **Grammar, as a sketch only.** `destinations:` today is role → `provider:<name>`. The cases above want role × conduit → entries, and a second entry kind:
 
@@ -185,6 +185,53 @@ destinations:
 ```
 
 Three conduits, one grammar, one PDP, deny-overrides; absent means empty, as today. Whether the grant is `vendor:` (the lake's vocabulary) or `url:` (the network's) is part of question 10.
+
+## A candidate answer to question 11: delegation transmits intent, never authority
+
+*(Added 2026-09-11 at the maintainer's direction. The maintainer's framing: this is the use case tools such as Agent Deck specialise in — "really smart orchestrators with multiple sub-agents handling focused tasks: research, planning, coding, assessment, documentation, testing" — and, in the maintainer's words, "a use case that hits all three markets." Recorded as a candidate, not a decision.)*
+
+**Where the field stands.** The project's own [Agent Deck assessment](references/2026-08-21-agent-deck-assessment.md) records the inversion precisely: *"Agent Deck orchestrates trusted-to-it agents from a trusted host; Maknae governs an untrusted-by-design agent from a trusted kernel. They sit back-to-back."* That is the general case, not a property of one tool: the orchestration frameworks in common use run a child agent with the parent's full credentials, and delegation is a prompt. Inject the orchestrator and it delegates exfiltration to a child with total reach — the confused deputy, at scale. Any candidate here has to be the *other* side of that inversion.
+
+**The principle.**
+
+> **Delegation transmits intent, never authority.**
+
+The orchestrator's instruction to a sub-agent is content. From the sub-agent's side it is *retrieved* content, and the KLC already rules that retrieved content may inform but never authorize. A sub-agent's requests are therefore decided **exactly as if the user had typed the task**: subject = uid, role = the user's role, conduit = the sub-agent's own provider. Nothing the orchestrator says can widen that. Under [ADR-0024](adr/ADR-0024-tenancy-model-and-agent-identity.md) there is no one to delegate *as* — both models are conduits, and the human is the only subject.
+
+**What the policy looks like — one entry kind, nothing else new.**
+
+```yaml
+roles:
+  researcher:
+    grants: [session.prompt, Fetch, Read]
+
+destinations:
+  researcher:
+    provider:openai:                                    # the orchestrator's conduit
+      allow: ["prompt", "delegate:provider:nemotron-local"]
+    provider:nemotron-local:                            # the task model's conduit
+      allow: ["vendor:suse/rke2", "vendor:suse/rancher-manager"]
+```
+
+`delegate:provider:X` means: *from this conduit, the user may spawn work on conduit X.* Deny-by-default supplies the rest. No `delegate:` entry, no orchestration; a sub-agent may delegate onward only if *its* conduit carries one; depth and fan-out are properties of the policy file, not a separate mechanism. Delegation itself is a decided verb — the resource is the target conduit — and it lands on the audit record like any other.
+
+**The orchestrator's reach does not bound the sub-agent's reach.** The orchestrator above has no `Fetch`; the task model does. That is the point of case 4: the orchestrating model directs work it cannot perform itself. They are different conduits with different grants, and each is decided on its own.
+
+**The return hop is a release decision.** Results flow back, and *may this content flow to the orchestrator's conduit?* is decided like any other flow: the classification ceiling applies, the conduit's reach applies, deny-overrides applies. The orchestrator is therefore bounded on what it **sees**, not on what it may **ask for**. A hosted frontier model can orchestrate work whose results it is refused at the return hop; a local, high-clearance orchestrator handing a task that contains marked content to a hosted sub-agent is refused at the *outbound* hop, because the task text is content flowing into a conduit. Every edge in the orchestration graph is a flow; every flow is decided; nothing is node-to-node. This is [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md)'s placement — the kernel is the Client and sits between every pair — carried to the multi-agent case.
+
+**Attenuation — the one thing an orchestrator may do that a user typing directly does not.** The orchestrator may *request* a narrower session for the child: *spawn on `nemotron-local` with `Fetch` ⊆ `vendor:suse/rke2` only.* The PDP computes `effective = policy ∩ requested`; a request can only subtract. Least privilege carved per task, decided by the kernel, on the record. Flagged as later work — a first cut needs only the `delegate:` entry — but it is the property that makes orchestration under a reference monitor *safer* than direct use rather than merely as safe.
+
+**What an orchestrator must never be able to do:**
+
+- select a conduit absent from its `delegate:` list;
+- assert a role, clearance, or `locus` for the child — self-labeling, principle 2;
+- receive results its own conduit is not permitted to see;
+- delegate as a different uid — [ADR-0024](adr/ADR-0024-tenancy-model-and-agent-identity.md);
+- widen anything, in any direction.
+
+**Audit.** Each delegation is a record: subject, orchestrator conduit, target conduit, requested narrowing, *effective* grants, task digest. Each sub-agent action carries a `delegated_from` chain — **provenance, never authority.** The trail answers *who asked whom for what, and what did each actually receive*, which none of the surveyed frameworks produce.
+
+**A consequence for principle 6.** The Agent Deck assessment (§3.7) records the deck's own argument that review must run *"as a separate agent in a fresh context, ideally a different model family."* Under this candidate that is a policy statement rather than a convention: an assessment sub-agent runs on its own conduit with its own trust basis, and the orchestrator that produced the work can neither widen what the reviewer sees nor narrow what the reviewer is permitted to report. Blind review becomes something the kernel can enforce.
 
 ## What this would *not* do
 
@@ -211,7 +258,7 @@ Numbered for citation; none are answered.
 8. **Should the kernel take any responsibility for containing a locally hosted conduit?** A network namespace, a supervised child process, a required SELinux domain — or is containment permanently the deployment's job, stated as a prerequisite and left there? This is the question the [#280](https://github.com/darkhonor/maknae/pull/280) review surfaced, and it decides whether the risk inversion above is something **Maknae can claim** or merely something a careful operator can achieve. **A candidate answer is recorded above** (supervise the process, never the execution); it is not decided.
 9. **How would the operand learn whether the prerequisite holds?** A conduit attribute asserting `locus: local-enclave` is worth exactly what enforces it. An unverified locus is a **self-label**, and core principle 2 is explicit that self-labeling may inform a decision but never authorize one — the same trap, one layer out. Is the attribute operator-asserted configuration (honest, and no worse than the rest of the policy file), attested by something outside the kernel, or a gap that can only be stated? **Dissolves under the candidate answer for supervised conduits** — the locus is kernel-witnessed — and remains open for conduits Maknae does not supervise.
 10. **Who owns the fetch-authorizing host list?** *(A)* The lake's vendor registry grows a per-product fetch-host field, curated once under the lake's own minting governance, and Maknae consumes it as data — loaded as `authz.yaml` is, through `maknae-config` over `maknae-io`'s anchored fds, fail-closed on ownership and permissions: the [ADR-0022](adr/ADR-0022-classification-policy-as-data.md) policy-as-data pattern, at the cost of a cross-repository dependency. *(B)* Maknae carries its own conduit-reach registry keyed to lake vendor slugs, at the cost of vendor identity maintained in two places. The assistant's recommendation is (A), because the lake already governs vendor minting and two registries drift; the maintainer has not ruled, and has stated that the registry will keep changing.
-11. **Orchestrator over task model.** When a proposal is made through one conduit on behalf of work executed on another, which conduit attribute does the PDP decide on — and does the orchestrator's grant bound the task model's, or the reverse? Not developed.
+11. **Orchestrator over task model.** When a proposal is made through one conduit on behalf of work executed on another, which conduit attribute does the PDP decide on — and does the orchestrator's grant bound the task model's, or the reverse? **A candidate answer is recorded above** (delegation transmits intent, never authority; neither bounds the other's reach, and every hop — including the return — is a decided flow); it is not decided.
 12. **The deputy contract.** Redirects, DNS, TLS, size, content types: is the egress deputy's behaviour its own decision record, and is it the same deputy for `prompt` egress (case 1) and `Fetch` egress (case 3)?
 
 ## Provenance
@@ -221,3 +268,5 @@ Originating discussion: maintainer and assistant, 2026-09-10, during the Cooky m
 **Corrected before merge, 2026-09-11**, on review of [#280](https://github.com/darkhonor/maknae/pull/280): the trust boundary between Maknae's release decision and containment of the conduit host was not drawn, which overstated the confinement guarantee and left the risk-inversion claim resting on an unstated external prerequisite. The boundary is now explicit in three places (the threat-B section, the inversion section, and the limits), and questions 8 and 9 exist because of it.
 
 **Extended 2026-09-11**, from discussion after the review. The maintainer's contributions: the question *"what if the model execution engine was part of Maknae?"* (answered above as the candidate for question 8); the trusted-small-model use case with bounded network reach; the knowledge-lake refresh use case and its vendor registry; the observation that the registry's identity URLs are not the GitHub hosts documentation is actually fetched from, and the ruling that this is the lake's to handle; the orchestrator-over-task-model sketch; and the governing criterion — **a policy suite mechanism robust enough to handle these use cases and still work.** The maintainer also noted that the lake's knowledge-management lessons will enter Maknae in many forms once the initial vocabulary set is in place; this document is one early landing point for them.
+
+**Extended again 2026-09-11**, at the maintainer's direction: the candidate answer to question 11, with the maintainer's framing that orchestrator-over-focused-sub-agents is the use case tools such as Agent Deck specialise in and one that reaches every market the project is aimed at. The principle, the `delegate:` entry, the return-hop rule, attenuation, and the must-never list are the assistant's proposal in discussion; the direction to record them is the maintainer's.
