@@ -69,16 +69,32 @@ CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affec
 
 For Rust changes, before committing:
 
-Every dependency-resolving Cargo command below carries `--locked`, exactly as CI runs it: a manifest that drifts from `Cargo.lock` fails here the same way it fails in `build-and-gate`, instead of resolving a different graph and going green locally. The clippy package list is the workflow's; when `ci.yml` changes it, change it here in the same commit.
+Every dependency-resolving Cargo command below carries `--locked`, exactly as CI runs it: a manifest that drifts from `Cargo.lock` fails here the same way it fails in `build-and-gate`, instead of resolving a different graph and going green locally. **The clippy package set is no longer written down anywhere** — `ci/gates/clippy-all.sh` derives it from `cargo metadata` and CI runs the same script (#74), so a new crate is linted automatically and there is no list to keep in step.
 
 ```bash
 cargo fmt --all --check
-for p in maknaed maknae maknae-spifc maknae-security maknae-config maknae-io maknae-kernel maknae-vault maknae-proto maknae-audit-append maknae-msgs maknae-authz-basic maknae-classification-aus; do
-  cargo clippy --locked -p "$p" --all-targets -- -D warnings
-done
-cargo clippy --locked -p maknae-authz-basic --all-targets --features hermetic-test-seam -- -D warnings
+bash ci/gates/clippy-all.sh          # every workspace crate + every declared feature
 cargo test --locked --workspace
 ```
+
+### The Linux lane — required for `cfg(target_os = …)` changes
+
+**Clippy on your dev OS cannot validate a different OS's `-D warnings` gate.** That is not a gap in diligence; it is structural. [#72](https://github.com/darkhonor/maknae/issues/72) failed CI on a Linux-only `dead_code`, and [#275](https://github.com/darkhonor/maknae/issues/275) shipped a `#[cfg(target_os = "macos")]` helper that landed between the attribute and the function it guarded — macOS built clean, Linux failed to compile.
+
+```bash
+bash ci/gates/clippy-all.sh --linux  # same script, inside the pinned rust:<channel> container
+```
+
+**This needs bash ≥ 4, so on macOS install one** (`brew install bash`) — the system `/bin/bash` is 3.2 and the gate refuses to run under it. That refusal is deliberate and it is recent: under 3.2 the `--linux` path printed a success line and exited **0 having started no container**, because an empty array expansion is fatal under `set -u` before bash 4.4 and 3.2 lets an `EXIT` trap overwrite the shell's status. The PR checklist asks you to attest this lane ran and passed, so a silent green here is a false attestation.
+
+Requirements and limits, so the lane is not trusted for more than it does:
+
+- Needs a reachable **podman or docker**. Without one it prints a **SKIP naming itself a lane gap, not a pass**; set `MAKNAE_REQUIRE_LINUX_CLIPPY=1` to make that a hard failure.
+- Needs **outbound network on a cold container** — rustup installs the `rust-toolchain.toml` components (the official image ships neither clippy nor rustfmt), and `cmake`/`go` are installed for `aws-lc-fips-sys`. Warm runs reuse named volumes for `CARGO_HOME`, `RUSTUP_HOME` and the target dir. *(Corrected 2026-09-11: `RUSTUP_HOME` was not among them, so the components were re-downloaded on **every** run, not only a cold one.)*
+- **Architecture matters.** On an Apple-Silicon host the container is `linux/arm64`; CI is `linux/amd64`. `nlink_t` is `u64` on x86_64-linux and `u32` on aarch64-linux (locked libc 0.2.189) — so this lane is **not** equivalent to CI for cast-family lints. *(Corrected 2026-09-11: this cited `crates/maknae-io/src/syscall.rs:27-38` as recording the split. It does not — that block is `mode_bits`/`mode_t`, which is `u32` on all Linux and therefore arch-invariant. `nlink_count` at `:41-47` is the arch-dependent one, and its doc records only the Linux-vs-darwin difference, not the Linux-arch split.)* `MAKNAE_LINUX_CLIPPY_PLATFORM=linux/amd64` runs it under emulation.
+- **A native x86_64 Linux host is stronger evidence** than the container, because it is CI's actual architecture. Run `bash ci/gates/clippy-all.sh` there directly.
+- The repo is mounted **read-only** and, under podman, with the **shared** SELinux relabel `:ro,z` — never `:ro,Z`. `Z` applies a container-*private* label (an MCS category pair) recursively to your checkout, which on an SELinux-enforcing host locks other containers, and potentially host services, out of your own working tree. Be aware that `z` still relabels: measured on Rocky 9 after a run, the checkout is `system_u:object_r:container_file_t:s0` — the shared container type, **no** MCS categories. That is the intended outcome and it is reversible with `restorecon -R`, but it is a change to your tree, not a no-op.
+- To run it as part of your push rather than by hand: `MAKNAE_PRE_PUSH_LINUX_CLIPPY=1 git push`. That sets `MAKNAE_REQUIRE_LINUX_CLIPPY=1`, so an unreachable engine fails the push instead of printing `SKIP`.
 
 For documentation-only changes, run these checks without compiling Rust:
 

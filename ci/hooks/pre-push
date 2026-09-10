@@ -37,6 +37,15 @@ while read -r local_ref local_oid _remote_ref remote_oid; do
 done
 if [ "$build" = 1 ]; then
   bash "$root/ci/gates/coverage-tiers.sh" --root "$root"
+  # MAKNAE_PRE_PUSH_LINUX_CLIPPY=1 additionally runs the Linux clippy lane in a
+  # container (#74). Opt-in and OFF by default, like MAKNAE_PRE_PUSH_MUTANTS:
+  # a cold run pulls an image and installs cmake+go, which is not a cost to put
+  # on every push. REQUIRE is set with it so a missing container engine is a
+  # hard failure here rather than a SKIP -- an opt-in that silently skips is
+  # worse than no opt-in, because the contributor believes the lane ran.
+  if [ "${MAKNAE_PRE_PUSH_LINUX_CLIPPY:-0}" = 1 ]; then
+    MAKNAE_REQUIRE_LINUX_CLIPPY=1 bash "$root/ci/gates/clippy-all.sh" --root "$root" --linux
+  fi
   if [ "${MAKNAE_PRE_PUSH_MUTANTS:-0}" = 1 ]; then
     # Names are validated by the selector; deduplicate across ref updates.
     mutants="$(printf '%s\n' "$mutants" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
