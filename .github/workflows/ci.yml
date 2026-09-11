@@ -321,7 +321,7 @@ jobs:
       # have downloaded whatever release that name meant on the day, so cold
       # and cached runs could attest different tooling). Bump deliberately.
       - name: Install Go (aws-lc-fips-sys builds the FIPS module with cmake + go)
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.1'
           check-latest: false
