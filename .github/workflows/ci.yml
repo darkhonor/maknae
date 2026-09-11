@@ -38,18 +38,14 @@ concurrency:
 # second MUTANTS_PATHS: line anywhere in this file (multi-match = hard FAIL).
 # The authorization seam (maknae-security) is the in-tree security-critical crate
 # carrying the mutation obligation (ADR-0016 T1, zero missed).
-# DARWIN_CRATES: the crates that build for macOS WITHOUT a macOS SDK — i.e. no
-# aws-lc-fips-sys and no ring. Consumed by both darwin jobs: the cross-check
-# passes selected members as `-p` flags, as does the native job. maknae-vault and everything above it are deliberately absent —
-# their build scripts need an SDK, so they can be neither cross-checked from
-# Linux nor (yet) built on a hosted runner. That exclusion is the honest scope
-# of macOS CI coverage, and packaging/macos/README.md says so.
-#
-# NOT gate-verified against any manifest, unlike MUTANTS_PATHS. Adding a crate
-# to the workspace does not automatically extend macOS coverage; extend this
-# list deliberately when a crate becomes SDK-free.
+# There is no macOS crate list here (#198). `ci/gates/darwin-cross-check.sh`
+# checks EVERY workspace member for aarch64-apple-darwin, one at a time, and
+# reports which ones the runner cannot build (an SDK crate's build script).
+# It used to be `DARWIN_CRATES`, a hand-written seven whose own comment
+# admitted it was "NOT gate-verified against any manifest"; seventeen check
+# clean, so ten crates -- `maknae-authz-basic` among them -- were compiled for
+# macOS by nothing. Same defect class as #74's clippy list, same cure.
 env:
-  DARWIN_CRATES: "maknae-io maknae-plane maknae-security maknae-proto maknae-config maknae-audit-append maknae-classification-aus"
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus"
 
 jobs:
@@ -62,7 +58,6 @@ jobs:
     outputs:
       build: ${{ steps.select.outputs.build }}
       mutants: ${{ steps.select.outputs.mutants }}
-      darwin: ${{ steps.select.outputs.darwin }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,8 +75,10 @@ jobs:
           HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           EVENT: ${{ github.event_name }}
         run: |
-          read -r -a darwin <<< "$DARWIN_CRATES"
-          python3 ci/affected.py --base="$BASE" --head="$HEAD" --event="$EVENT" --darwin "${darwin[@]}" --github-output "$GITHUB_OUTPUT"
+          # #198: no `--darwin` list any more. Both darwin jobs run whenever
+          # Rust is affected (`build`); the cross-check gate checks every member
+          # itself and lets cargo say which are SDK-blocked from the runner.
+          python3 ci/affected.py --base="$BASE" --head="$HEAD" --event="$EVENT" --github-output "$GITHUB_OUTPUT"
 
   build-and-gate:
     needs: affected
@@ -91,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
     # this a regression burns the 360-minute default and emits no diagnostic.
-    timeout-minutes: 30
+    timeout-minutes: 40  # negative-control's real-repo darwin probe runs one per-pass cold cross-check (#198): 116 s measured on Rocky 9 x86_64, ~2.5 min on Apple Silicon; plus ~75 fixture probes
     env:
       # Exact versions from the passing #235 merge run. Floating installs made
       # cold and cached runs use different tools; every pin participates in its
@@ -108,6 +105,8 @@ jobs:
         run: test "$SELECTOR_RESULT" = success
       - name: Install toolchain (pinned)
         run: rustup show   # honors rust-toolchain.toml
+      - name: Add the darwin target (negative-control probes the darwin cross-check gate, #198)
+        run: rustup target add aarch64-apple-darwin
       - name: Cache gate-tool executables
         id: gate-tools-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -257,41 +256,42 @@ jobs:
 
   darwin-cross:
     needs: affected
-    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
-    env:
-      PACKAGES: ${{ needs.affected.outputs.darwin }}
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
     # Free, no Mac required, and it pays for itself: adding this locally caught
     # `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant
     # maknae-io::recv_delegated did not compile there AT ALL. Off Linux a received
     # descriptor arrives without close-on-exec and FD_CLOEXEC must be set
     # explicitly — a security-relevant delta a Linux-only CI cannot see.
+    #
+    # #198: the gate checks EVERY member, one at a time, and lets cargo say
+    # which are SDK-blocked from a Linux runner (a build-script failure inside
+    # aws-lc-sys / aws-lc-fips-sys / ring — and only that). Seventeen check,
+    # four are reported blocked by name. `negative-control` proves it fires.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30  # per-pass cold cache: 116 s measured on Rocky 9 x86_64 (17 members + 2 feature passes), ~2.5 min on Apple Silicon (#198)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require a trustworthy selection
-        run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
         run: rustup show
       - name: Add supported darwin target
         run: rustup target add aarch64-apple-darwin
-      - name: Cross-compile check (Apple Silicon)
-        run: |
-          set -euo pipefail
-          pkgs=()
-          test -n "$PACKAGES"
-          read -r -a packages <<< "$PACKAGES"
-          for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
-          # Apple Silicon is the supported macOS architecture (AGENTS.md).
-          cargo check --locked "${pkgs[@]}" --target aarch64-apple-darwin --all-targets
+      - name: Cross-compile check (Apple Silicon) — every member, cargo decides what the runner can build
+        run: bash ci/gates/darwin-cross-check.sh
 
   darwin-native:
     needs: affected
-    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.darwin != '') }}
-    env:
-      PACKAGES: ${{ needs.affected.outputs.darwin }}
-    # Both PR and main pushes use dependency-aware selection. Docs-only changes
-    # skip this job before allocating a macOS runner (private-repo minute budget).
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
+    # Runs whenever Rust is affected; docs-only changes skip it. Keyed on
+    # `build`, not `darwin`: this job tests the WHOLE workspace, so a change to
+    # an SDK-blocked crate (maknae-vault, maknae-kernel, the bins) must trigger
+    # it even though those crates are outside the cross-check set.
+    #
+    # Corrected 2026-09-11 (#198): this said "private-repo minute budget". The
+    # repo is public, and GitHub's billing doc is explicit that standard hosted
+    # runners — macOS included — are free on public repositories (only "larger
+    # runners" are always charged; macos-26 is standard). So the SDK crates are
+    # tested here too: the runner has the SDK, and nothing else verifies the
+    # FIPS crates for macOS.
     #
     # A cross-compile check proves the code BUILDS for macOS. This proves it
     # WORKS there — the difference that turns ADR-0009's F_GETPATH lane from
@@ -307,25 +307,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Require a trustworthy selection
-        run: test -n "$PACKAGES"
       - name: Install toolchain (pinned)
         run: rustup show
-      - name: Test the SDK-free crates natively
+      # aws-lc-fips-sys builds the FIPS module with cmake AND Go (its build
+      # script runs aws-lc's `cmake/go.cmake`); the macos-26 image ships cmake
+      # but no Go on PATH, and the first whole-workspace run died on exactly
+      # that: "CMake Error at aws-lc/cmake/go.cmake:6: Could not find Go".
+      # The seven SDK-free crates this lane used to test never needed it. Go
+      # here only drives aws-lc's build-time tooling (delocate), but this is a
+      # FIPS build lane and everything else on it is pinned, so the Go payload
+      # is pinned to an exact release too: go1.27.1, the latest stable on
+      # go.dev/dl on 2026-09-11 (review finding on PR #282: `stable` would
+      # have downloaded whatever release that name meant on the day, so cold
+      # and cached runs could attest different tooling). Bump deliberately.
+      - name: Install Go (aws-lc-fips-sys builds the FIPS module with cmake + go)
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          check-latest: false
+          cache: false
+      - name: Test the whole workspace natively (SDK crates included)
         run: |
           set -euo pipefail
-          pkgs=()
-          test -n "$PACKAGES"
-          read -r -a packages <<< "$PACKAGES"
-          for c in "${packages[@]}"; do pkgs+=(-p "$c"); done
           # #222: make the unified-log round-trip a HARD FAILURE here rather
           # than a skip. The macos runner user is admin and can read
           # /var/db/diagnostics, so the skip branch is dead on CI -- which means
           # a soft default would let this lane go green with zero round-trip
           # evidence (the #219 ok-on-nothing class one level up).
-          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test --locked "${pkgs[@]}"
+          MAKNAE_AUDIT_REQUIRE_UNIFIED_LOG=1 cargo test --locked --workspace
       - name: Confirm the F_GETPATH lane actually ran
-        if: contains(format(' {0} ', needs.affected.outputs.darwin), ' maknae-io ')
         # The delegated suite is the macOS control for ADR-0009: on Linux it
         # exercises /proc/self/fd, here it exercises fcntl(F_GETPATH). A green
         # workspace that silently skipped it would prove nothing, so assert the

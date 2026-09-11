@@ -100,7 +100,10 @@ fi
 # container linted an empty /work and died `No such file or directory` at rc
 # 127 with no FAIL line -- the same mute death the metadata branch below was
 # built to avoid.
-root="$(cd "$root" 2>/dev/null && pwd -P)" || fail "cannot enter --root '$root'"
+# Resolved into a NEW name: assigning back to `root` clobbered it with the empty
+# substitution before `fail` ran, so the diagnostic read `--root ''`.
+root_abs="$(cd "$root" 2>/dev/null && pwd -P)" || fail "cannot enter --root '$root'"
+root="$root_abs"
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to read cargo metadata"
 
@@ -132,12 +135,173 @@ fi
 # `|| true` inside the substitution: under `pipefail` a cargo that cannot even
 # answer `--version` made this assignment exit 101 MUTE -- caught by the
 # `failing-clippy-prints-FAIL` probe, whose shim answered only `metadata`.
-actual_tc="$( (cd "$root" && cargo --version 2>/dev/null || true) | awk '{print $2}')"
+# `RUSTC` / `RUSTC_WRAPPER` swap the compiler under a cargo that still reports
+# the pinned version (found on the darwin gate: cargo 1.98.1 drove a 1.94.1
+# rustc and printed the pin). Refused, not accommodated -- all six spellings
+# cargo honours. `cargo clippy` sets RUSTC_WORKSPACE_WRAPPER itself in the
+# CHILD it spawns; one already present in THIS environment is a substitution
+# and is refused like the others.
+for v in RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER RUSTC_BOOTSTRAP __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS; do
+  [ -z "${!v:-}" ] || fail "$v is set (${!v}); this gate attests the pinned compiler and refuses a substituted one — unset it and re-run"
+done
+# And the config-file door (`.cargo/config.toml` `[build] rustc` /
+# `rustc-wrapper`): env beats config, so export the pinned rustc by path and
+# an empty `RUSTC_WRAPPER`. `RUSTC_WORKSPACE_WRAPPER` is left to `cargo
+# clippy`, which sets it to clippy-driver in the child it spawns -- that child
+# env beats any config `rustc-workspace-wrapper` too.
+# RUSTC is resolved UNDER the pinned environment (hermetic execution, below).
+# The EIGHTH door: rustflags. `RUSTFLAGS='--cfg target_os="linux"
+# -Aexplicit_builtin_cfgs_in_flags'` forged the target's conditional
+# compilation -- the Linux-only-item fixture PASSED the darwin check -- and
+# `CARGO_ENCODED_RUSTFLAGS` and `[build] rustflags` did the same (codex,
+# measured). `--cap-lints=allow` is the same door for a lint gate. Cargo's
+# precedence is CARGO_ENCODED_RUSTFLAGS > RUSTFLAGS > build.rustflags, so an
+# explicit EMPTY encoded value is a reviewed baseline that beats all three
+# sources at once. Nothing in CI, the hooks or the gates relies on inherited
+# rustflags (coverage passes its own to llvm-cov, not to this).
+# (set in GATE_ENV below)
+# Same trust boundary as darwin-cross-check.sh (see its header): the linted
+# root's config and manifests are untrusted for this attestation. Measured
+# open, then pinned: `[env] CLIPPY_ARGS = { value = "", force = true }` in
+# `.cargo/config.toml` REPLACED clippy's generated arguments -- the lint gate
+# printed `ok` over a `len_zero` sentinel; `[profile.dev] debug-assertions =
+# false` hides `cfg(debug_assertions)`-gated code from the lint; ANSI colour in
+# the output breaks the FAIL-line contract. `--config` outranks env and file.
+# `cargo clippy` is an EXTERNAL subcommand, and cargo resolves `[alias]`
+# BEFORE external subcommands: `[alias] clippy = ["test", "--no-run"]` in any
+# config cargo reads -- the repo, a parent directory, $CARGO_HOME -- made this
+# gate print `ok` having run zero lints (measured). Built-ins (`check`,
+# `metadata`, `tree`) cannot be aliased away; so the subcommand binary is
+# resolved by path and invoked directly.
+# Both fields of the env entry are set: `--config env.CLIPPY_ARGS.force=false`
+# ALONE fails to load when no `[env] CLIPPY_ARGS` table exists (measured:
+# "could not load config key"), and `--config` refuses inline tables. With
+# `force=false` cargo-clippy's own CLIPPY_ARGS in the environment wins over
+# the config value, so the empty value is never what clippy sees.
+CLIPPY_PIN=(--config 'env.CLIPPY_ARGS.value=""' --config 'env.CLIPPY_ARGS.force=false'
+            --config 'env.RUSTC_BOOTSTRAP.value="-1"' --config 'env.RUSTC_BOOTSTRAP.force=true'
+            --config 'profile.dev.panic="unwind"'
+            --config 'profile.dev.debug-assertions=true' --config 'profile.test.debug-assertions=true'
+            --config 'profile.dev.package."*".debug-assertions=true' --config 'profile.test.package."*".debug-assertions=true'
+            --color never)
+# NOT closed here, named: `[lints.clippy] <lint> = "allow"` in a member
+# manifest -- the sanctioned spelling of `#![allow]`, i.e. source-level
+# suppression, which a lint gate cannot and should not override.
+meta_err="$(mktemp)"
+cleanup() {
+  rm -f "$meta_err"
+  [ -n "${pin_dir:-}" ] && rm -rf "$pin_dir"
+  [ -n "${gate_cwd:-}" ] && rm -rf "$gate_cwd"
+  [ -n "${gate_lock:-}" ] && rmdir "$gate_lock" 2>/dev/null
+  return 0
+}
+trap cleanup EXIT
+# A GATE-OWNED lint cache, WIPED BEFORE EVERY PASS -- the same replay both
+# reviewers measured on this gate after the darwin gate closed it: a workspace
+# primed under RUSTC_BOOTSTRAP=1 linted `ok` warm and failed E0554 cold. The
+# location may be relocated (the container lane mounts the repo read-only and
+# points this at a container-local dir); the CONTENT never survives into a
+# pass. Measured cost: 90s for base + two feature passes on Apple Silicon.
+CARGO_TARGET_DIR="${CLIPPY_ALL_TARGET_DIR:-$root/target/clippy-all}"
+[ -n "${CLIPPY_ALL_TARGET_DIR:-}" ] || [ ! -L "$root/target" ] || fail "'$root/target' is a symlink; the gate-owned target dir must live under a real directory"
+[ ! -L "$CARGO_TARGET_DIR" ] || fail "'$CARGO_TARGET_DIR' is a symlink; the gate-owned target dir must be a real directory"
+fresh_target() { rm -rf "$CARGO_TARGET_DIR" || fail "cannot wipe the gate-owned target dir '$CARGO_TARGET_DIR'"; }
+# ONE run per checkout at a time. Two concurrent runs share the owned dir and
+# wipe each other's units mid-pass; measured on macOS: a trashed
+# aws-lc-fips-sys build was then read as "SDK-blocked: maknaed" -- not a false
+# green (the classifier held), but a false report. `mkdir` is the atomic
+# test-and-set; a stale lock after a crash names its own remedy.
+lock_path="$CARGO_TARGET_DIR.lock"
+mkdir -p "$(dirname "$lock_path")" || fail "cannot create '$(dirname "$lock_path")'"
+mkdir "$lock_path" 2>/dev/null || fail "another run holds '$lock_path' (a concurrent gate run in this checkout, or a stale lock after a crash: remove it and re-run)"
+gate_lock="$lock_path"   # set only once OWNED: cleanup() releases OUR lock, never a contender's (codex r10)
+# --- HERMETIC EXECUTION: an allowlist, not a blocklist --------------------
+# Nine review rounds closed cargo knobs one name at a time -- RUSTC, six
+# wrapper spellings, RUSTFLAGS, RUSTC_BOOTSTRAP, the channel override, the
+# terminal settings, the target dir -- and every round found the next one
+# (`CARGO`, read by a directly-invoked cargo-clippy, was the tenth). That is a
+# blocklist over a surface nobody can enumerate; this project's rule is deny
+# by default. So every cargo / rustc / rustup call below runs
+#   (1) under `env -i` with the short allowlist here -- a caller's variable
+#       that is not named is simply absent; and
+#   (2) from a gate-owned EMPTY directory with `--manifest-path`, because
+#       cargo discovers `.cargo/config.toml` from the CURRENT DIRECTORY
+#       upward, never from the manifest's -- so the linted tree's config
+#       (`[alias]`, `[env]`, `[build]`, `[term]`, `[profile]`, `[unstable]`,
+#       rustflags, target-dir, build-dir ...) is never read at all.
+# Measured: a config that forged `target_os="linux"`, aliased `check`, forced
+# RUSTC_BOOTSTRAP and turned the progress bar on printed `ok` from inside the
+# tree and was inert from outside; a forged caller env (CARGO=/usr/bin/true,
+# RUSTC_BOOTSTRAP=1, RUSTFLAGS, CARGO_BUILD_TARGET_DIR) was inert under the
+# allowlist. The named refusals above stay: defence in depth, and the message
+# a caller sees. RUSTUP_TOOLCHAIN is set HERE, to the pin, because rustup
+# selects a toolchain from the cwd too and the cwd is now outside the tree.
+# The cwd is created under $HOME, never under $TMPDIR, and canonicalised: a
+# caller's TMPDIR pointing INSIDE the linted tree put the "outside" cwd back
+# under the tree's `.cargo/` (codex r10, measured: the config-env fixture went
+# from FAIL to `ok` on both gates). TMPDIR is not passed through either.
+mkdir -p "$HOME/.cache/maknae-gates" || fail "cannot create '$HOME/.cache/maknae-gates'"
+gate_cwd="$(mktemp -d "$HOME/.cache/maknae-gates/clippy-all.XXXXXX")" || fail "cannot create the gate cwd under '$HOME/.cache/maknae-gates'"   # cleanup() removes it
+root_real="$(cd "$root" && pwd -P)"; cwd_real="$(cd "$gate_cwd" && pwd -P)"
+case "$cwd_real/" in "$root_real/"*) fail "the gate cwd '$cwd_real' lies under the linted root '$root_real'; refusing to run" ;; esac
+# No `.cargo/config[.toml]` may sit on the cwd's ancestor chain other than
+# $HOME's own (that one IS $CARGO_HOME's config, read regardless): cargo walks
+# EVERY ancestor of the cwd, and `/tmp/.cargo/config.toml` on a shared host or
+# `$HOME/.cache/.cargo/` would be a config hierarchy nobody audited
+# (critical-review r10, measured with an ancestor config).
+home_real="$(cd "$HOME" && pwd -P)"; anc="$cwd_real"
+while :; do
+  anc="$(dirname "$anc")"
+  if [ "$anc" != "$home_real" ]; then
+    for cfg in "$anc/.cargo/config.toml" "$anc/.cargo/config"; do
+      [ -e "$cfg" ] && fail "'$cfg' sits on the gate cwd's ancestor chain and cargo would read it; move or remove it and re-run"
+    done
+  fi
+  [ "$anc" = / ] && break
+done
+# THE TRUSTED ROOTS. PATH, HOME, CARGO_HOME and RUSTUP_HOME define WHICH
+# MACHINE is attesting -- its toolchains, its registry, its native tools --
+# and a gate cannot bootstrap trust from nothing: a caller who controls them
+# controls the machine (codex r10 measured a `cc` shim on PATH steering a
+# build script's capability probe; that is the machine's C compiler, not the
+# tree's). Everything else in the caller's environment is dropped.
+BASE_ENV=(env -i "PATH=$PATH" "HOME=$HOME" "RUSTUP_TOOLCHAIN=$channel")
+# CARGO_BUILD_JOBS changes SCHEDULING, never a verdict; the harness sets it to
+# 1 so the `--keep-going` negative control is deterministic (dropping it made
+# that probe probabilistic -- critical-review r10).
+for v in CARGO_HOME RUSTUP_HOME LANG LC_ALL SSL_CERT_FILE SSL_CERT_DIR CARGO_BUILD_JOBS; do
+  [ -z "${!v:-}" ] || BASE_ENV+=("$v=${!v}")
+done
+benv() { (cd "$gate_cwd" && "${BASE_ENV[@]}" "$@"); }
+# The compiler is resolved UNDER that environment, and the resolved BINARY is
+# version-checked below -- not the PATH proxy. Resolved from the root under the
+# caller's environment, a rustup DIRECTORY OVERRIDE for the root selected an
+# installed 1.94.1 while the proxy, asked under the pin, answered 1.98.1 (codex
+# r10: `ok, toolchain 1.98.1` with a 1.94.1 rustc doing the work).
+which_err="$(mktemp)"
+if ! RUSTC="$(benv rustup which rustc 2>"$which_err")"; then
+  sed 's/^/  /' "$which_err" >&2; rm -f "$which_err"
+  fail "cannot resolve the pinned rustc (rustup which rustc failed — see above)"
+fi
+rm -f "$which_err"; [ -x "$RUSTC" ] || fail "resolved rustc '$RUSTC' is not executable"
+GATE_ENV=("${BASE_ENV[@]}" "RUSTC=$RUSTC" "RUSTC_WRAPPER=" "RUSTC_WORKSPACE_WRAPPER=" "CARGO_ENCODED_RUSTFLAGS="
+          "CARGO_TERM_COLOR=never" "CARGO_TERM_PROGRESS_WHEN=never"
+          "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" "CARGO_BUILD_BUILD_DIR=$CARGO_TARGET_DIR")
+genv() { (cd "$gate_cwd" && "${GATE_ENV[@]}" "$@"); }
+gcargo() { genv cargo "$@"; }
+[ -z "${RUSTUP_TOOLCHAIN:-}" ] || [ "$RUSTUP_TOOLCHAIN" = "$channel" ] || fail "toolchain mismatch: $tc pins '$channel' but RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN is overriding the pin — unset it and re-run"
+actual_tc="$( (gcargo --version 2>/dev/null || true) | awk '{print $2}')"
 [ -n "$actual_tc" ] || fail "cannot determine the active cargo version (cargo --version failed)"
-case "$actual_tc" in
-  "$channel"|"$channel".*) : ;;
-  *) fail "toolchain mismatch: $tc pins '$channel' but the active cargo is '$actual_tc'${RUSTUP_TOOLCHAIN:+ (RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN is overriding the pin)}" ;;
-esac
+# And the resolved rustc BINARY (the one cargo-clippy's driver sits beside),
+# not the PATH proxy: a directory override made them differ (codex r10).
+actual_rc="$( ("$RUSTC" --version 2>/dev/null || true) | awk '{print $2}')"
+[ -n "$actual_rc" ] || fail "cannot determine the resolved rustc version ($RUSTC --version failed)"
+for pair in "cargo:$actual_tc" "rustc:$actual_rc"; do
+  case "${pair#*:}" in
+    "$channel"|"$channel".*) : ;;
+    *) fail "toolchain mismatch: $tc pins '$channel' but the active ${pair%%:*} is '${pair#*:}'${RUSTUP_TOOLCHAIN:+ (RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN is overriding the pin)}" ;;
+  esac
+done
 
 # --- the input set, WITH A FLOOR -------------------------------------------
 # CONTRIBUTING.md:126: "a gate that DISCOVERS its input set needs a floor --
@@ -150,15 +314,42 @@ esac
 # zero packages, which is what keeps the floor below reachable by a fixture;
 # the full-resolve call errors on that same fixture and would have turned the
 # floor into dead code no negative control could fire.
-meta_err="$(mktemp)"
-cleanup() { rm -f "$meta_err"; }
-trap cleanup EXIT
-if ! meta="$(cd "$root" && cargo metadata --no-deps --format-version 1 --locked 2>"$meta_err")"; then
+if ! meta="$(gcargo metadata --manifest-path "$root/Cargo.toml" --no-deps --format-version 1 --locked 2>"$meta_err")"; then
   echo "FAIL: cargo metadata failed:" >&2; sed 's/^/  /' "$meta_err" >&2; exit 1
 fi
 
 count="$(printf '%s' "$meta" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["packages"]))')"
 [ "$count" -gt 0 ] || fail "cargo metadata resolved ZERO packages; refusing to report a lint of nothing"
+# The lint binary, the resolving call and the pin file are needed by the
+# host and check paths only; `--linux` re-runs this script INSIDE the
+# container, which builds its own (a host without clippy or a warm registry
+# must still be able to drive the container lane).
+if [ "$mode" != linux ]; then
+which_err="$(mktemp)"
+if ! CARGO_CLIPPY_BIN="$(benv rustup which cargo-clippy 2>"$which_err")"; then
+  sed 's/^/  /' "$which_err" >&2; rm -f "$which_err"
+  fail "cannot resolve the pinned cargo-clippy (rustup which cargo-clippy failed — see above)"
+fi
+rm -f "$which_err"; [ -x "$CARGO_CLIPPY_BIN" ] || fail "resolved cargo-clippy '$CARGO_CLIPPY_BIN' is not executable"
+# Per-package profile overrides -- `[profile.dev.package.<name>]` in the linted
+# root's config OR its root manifest -- outrank the `"*"` glob pin above for
+# members AND for every dependency (codex, round 8: a debug_assertions-gated
+# error in a path dependency EXCLUDED from the workspace went from FAIL to
+# `ok`; the earlier pins named only the members). Every RESOLVED package gets
+# a named pin, in ONE `--config <file>` (CLI precedence). The resolving call
+# sits AFTER the floor so `members = []` still reaches the floor, not this.
+if ! resolved_meta="$(gcargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 --locked 2>"$meta_err")"; then
+  echo "FAIL: cargo metadata (resolving, --locked) failed — the lock file is stale or the graph cannot resolve:" >&2; sed 's/^/  /' "$meta_err" >&2; exit 1
+fi
+pin_dir="$(mktemp -d)"   # cleanup() removes it
+pin_file="$pin_dir/profile-pins.toml"
+printf '%s' "$resolved_meta" | python3 -c 'import json, sys
+for n in sorted({p["name"] for p in json.load(sys.stdin)["packages"]}):
+    q = json.dumps(n)
+    print("[profile.dev.package." + q + "]\ndebug-assertions = true\n[profile.test.package." + q + "]\ndebug-assertions = true")' > "$pin_file"
+[ -s "$pin_file" ] || fail "the per-package profile pin file is empty; refusing to lint without it"
+CLIPPY_PIN+=(--config "$pin_file")
+fi
 
 # Feature passes: ONE PER DECLARED NON-DEFAULT FEATURE, redundant or not.
 #
@@ -185,12 +376,16 @@ count="$(printf '%s' "$meta" | python3 -c 'import json,sys; print(len(json.load(
 # cache hit; the clever derivation cost a missed lint. What changed from (1) is
 # only the REPORT: the OK line counts passes RUN and says they are per declared
 # feature -- it no longer implies each one added coverage.
-feats="$(printf '%s' "$meta" | python3 -c '
+# Post-condition: a python3 that dies here would otherwise mean "no feature
+# passes" and `ok` (the darwin gate fixed the same shape in round 9).
+if ! feats="$(printf '%s' "$meta" | python3 -c '
 import json, sys
 for p in json.load(sys.stdin)["packages"]:
     for f in sorted(p.get("features", {})):
         if f != "default":
-            print(p["name"] + "/" + f)' | sort)"
+            print(p["name"] + "/" + f)' 2>"$meta_err" | sort)"; then
+  sed 's/^/  /' "$meta_err" >&2; fail "cannot derive the declared features from cargo metadata (see above); refusing to report feature passes"
+fi
 featc="$(printf '%s\n' "$feats" | sed '/^$/d' | wc -l | tr -d ' ')"
 
 # The INPUTS line is not the OK line. The first version printed `clippy-all: ok
@@ -206,14 +401,16 @@ fi
 # rather than work intended.
 ran=0
 run_lints() {
-  cargo clippy --locked --workspace --all-targets -- -D warnings \
+  fresh_target
+  genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets "${CLIPPY_PIN[@]}" -- -D warnings \
     || fail "clippy failed on the base --workspace pass"
   ran=$((ran + 1))
   while IFS= read -r pf; do
     [ -n "$pf" ] || continue
     # One pass per declared feature, redundant where already unified -- see the
     # block above for why redundant beats derived.
-    cargo clippy --locked --workspace --all-targets --features "$pf" -- -D warnings \
+    fresh_target
+    genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets --features "$pf" "${CLIPPY_PIN[@]}" -- -D warnings \
       || fail "clippy failed on feature pass '$pf'"
     ran=$((ran + 1))
   done <<< "$feats"
@@ -266,7 +463,6 @@ run_args=(run --rm)
 # `container_file_t:s0`, shared type and NO categories. Reversible with
 # `restorecon -R`; not a no-op, but not exclusive either.
 mnt=":ro"; [ "$engine" = podman ] && mnt=":ro,z"
-"$engine" volume create maknae-clippy-target >/dev/null 2>&1 || true
 "$engine" volume create maknae-clippy-cargo  >/dev/null 2>&1 || true
 # RUSTUP_HOME too: the official image ships neither clippy nor rustfmt, so
 # without this volume rustup re-downloaded the components on EVERY run, not
@@ -274,7 +470,7 @@ mnt=":ro"; [ "$engine" = podman ] && mnt=":ro,z"
 "$engine" volume create maknae-clippy-rustup >/dev/null 2>&1 || true
 run_args+=(
   -v "$root:/work${mnt}" -w /work
-  -v maknae-clippy-target:/ctarget -e CARGO_TARGET_DIR=/ctarget
+  -e CLIPPY_ALL_TARGET_DIR=/ctarget
   -v maknae-clippy-cargo:/ccargo   -e CARGO_HOME=/ccargo
   -v maknae-clippy-rustup:/crustup -e RUSTUP_HOME=/crustup
   "rust:${channel}"

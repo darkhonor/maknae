@@ -73,17 +73,15 @@ def docs_only(path):
         path.startswith(('design/', 'docs/')) and path.endswith(('.md', '.png', '.svg')))
 
 
-def select(root, base, head, event, darwin):
+def select(root, base, head, event):
     packages, reverse, uncertain = workspace(root)
     mutants = read_toml(root / 'coverage-tiers.toml')['t1']['mutants_crates']
     if (not isinstance(mutants, list) or not mutants
-            or not all(isinstance(n, str) and n in packages for n in mutants)
-            or any(n not in packages for n in darwin)):
-        raise ValueError('empty or unknown mutation/Darwin package authority')
+            or not all(isinstance(n, str) and n in packages for n in mutants)):
+        raise ValueError('empty or unknown mutation package authority')
 
     def result(selected, reason, build=True):
-        return {'build': build, 'mutants': sorted(set(mutants) & selected),
-                'darwin': sorted(set(darwin) & selected), 'reason': reason}
+        return {'build': build, 'mutants': sorted(set(mutants) & selected), 'reason': reason}
 
     def full(reason):
         return result(set(packages), reason)
@@ -129,19 +127,17 @@ def main():
     parser.add_argument('--base', required=True)
     parser.add_argument('--head', default='HEAD')
     parser.add_argument('--event', choices=('pull_request', 'push'), required=True)
-    parser.add_argument('--darwin', nargs='*', default=[])
     parser.add_argument('--github-output', type=Path)
     args = parser.parse_args()
     try:
-        result = select(args.root.resolve(), args.base, args.head, args.event, args.darwin)
+        result = select(args.root.resolve(), args.base, args.head, args.event)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         parser.exit(1, f'FAIL: cannot establish affected-package authority: {exc}\n')
     print(json.dumps(result, sort_keys=True))
     if args.github_output:
         with args.github_output.open('a') as stream:
             stream.write(f"build={str(result['build']).lower()}\n")
-            for key in ('mutants', 'darwin'):
-                stream.write(f"{key}={' '.join(result[key])}\n")
+            stream.write(f"mutants={' '.join(result['mutants'])}\n")
 
 
 if __name__ == '__main__':
