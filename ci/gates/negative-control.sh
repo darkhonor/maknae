@@ -2826,22 +2826,6 @@ chmod +x "$tmpD5/bin/cargo"
 # ...and the rustc half of the pin, independently: a `rustc` shim that answers
 # `--version` with a fake and passes everything else through. Deleting the
 # rustc query survived every other probe.
-tmpD5r="$(mktemp -d)"; mkdir -p "$tmpD5r/bin"
-{ printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD5r/bin/rustc" <<'SHIM'
-if [ "${1:-}" = --version ]; then echo "rustc 1.0.0 (fake 2000-01-01)"; exit 0; fi
-exec "$REAL_RUSTC" "$@"
-SHIM
-chmod +x "$tmpD5r/bin/rustc"
-# ACCEPT: a `rustc` shim on PATH never reaches the check. The compiler is
-# resolved by PATH under the pin (`rustup which rustc`) and the resolved BINARY
-# is version-checked (rounds 11-12); the PATH `rustc` itself is never run.
-# (Until round 11 this probe expected a mismatch FAIL from the proxy check;
-# the proxy is no longer what runs, and the live route -- `rustup which` --
-# is probed by the-resolved-rustc-binary-is-version-checked.)
-expect_accept "darwin-cross-check/a-PATH-rustc-shim-never-reaches-the-check" \
-  "ran NO check" \
-  env PATH="$tmpD5r/bin:$PATH" \
-  "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
 
 expect_reject_because "darwin-cross-check/toolchain-mismatch-is-refused" \
   "toolchain mismatch" \
@@ -2921,7 +2905,7 @@ expect_accept "darwin-cross-check/target-check-is-scoped-to-root-not-cwd" \
 # host that does not (which is how 17 stood for 20 after round 3 added three
 # -- and how 24 stood for 23 the first time this check ran, and 38 for 39
 # the third).
-darwin_block_probes=76
+darwin_block_probes=77
 # The oracle walk, shared by the real-repo probe and the proc-macro fixture
 # probe below. Members, minus host-only (proc-macro-only) ones; from each,
 # normal+dev edges, then normal only; a member reaching an SDK crate is
@@ -3008,6 +2992,25 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
   }
   expect_accept "darwin-cross-check/check-inputs-does-not-claim-a-check" \
     "ran NO check" \
+    "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
+
+  tmpD5r="$(mktemp -d)"; mkdir -p "$tmpD5r/bin"
+  { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD5r/bin/rustc" <<'SHIM'
+  if [ "${1:-}" = --version ]; then echo "rustc 1.0.0 (fake 2000-01-01)"; exit 0; fi
+  exec "$REAL_RUSTC" "$@"
+SHIM
+  chmod +x "$tmpD5r/bin/rustc"
+  # ACCEPT: a `rustc` shim on PATH never reaches the check. (In the target-
+  # dependent block since round 13: `--check-inputs` needs the target too, and
+  # this probe used to leak past the skip on hosts without it — PR review.) The compiler is
+  # resolved by PATH under the pin (`rustup which rustc`) and the resolved BINARY
+  # is version-checked (rounds 11-12); the PATH `rustc` itself is never run.
+  # (Until round 11 this probe expected a mismatch FAIL from the proxy check;
+  # the proxy is no longer what runs, and the live route -- `rustup which` --
+  # is probed by the-resolved-rustc-binary-is-version-checked.)
+  expect_accept "darwin-cross-check/a-PATH-rustc-shim-never-reaches-the-check" \
+    "ran NO check" \
+    env PATH="$tmpD5r/bin:$PATH" \
     "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
 
   # ACCEPT, AND THE TARGET DIR EXISTS: the clean fixture checks both members,
