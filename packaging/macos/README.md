@@ -15,11 +15,57 @@ normative statement; this directory holds the packaging that follows from it.
 
 | Artifact | Tool | State |
 |---|---|---|
-| `maknaed` + `maknae` universal binaries | `cargo build --target {aarch64,x86_64}-apple-darwin` → `lipo` | not built |
+| `maknaed` + `maknae` **Apple Silicon** binaries | `cargo auditable build --release --target aarch64-apple-darwin` | not built |
 | launchd plist for `maknaed` | hand-authored; `plutil -lint` in smoke | not authored |
 | `_maknae` daemon user | `sysadminctl` / installer preinstall | not authored |
 | `.pkg` installer | `pkgbuild` → `productbuild` | not built |
 | Signature + notarization | Developer ID Installer cert → `notarytool` → `stapler` | not configured |
+| **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped beside the binaries; pinned by **absolute install name** | **not shipped — see below** |
+
+> **Corrected 2026-09-12 (#227).** The binaries row read *"`maknaed` + `maknae` universal binaries | `cargo build --target {aarch64,x86_64}-apple-darwin` → `lipo`"*. **There are no x86 macOS builds** (AGENTS.md; maintainer ruling 2026-09-05), so there is no universal binary and no `lipo` step. It now also names `cargo auditable`, matching how CI builds every shipped binary (`ci.yml:145`) — the embedded dependency SBOM is an SCRM control and the Apple-native artifact is the last place to drop it.
+
+## The FIPS module is a dylib on macOS, and the package must carry it
+
+This is the row most likely to be missed, because nothing about it is visible until a binary is
+run **outside** `cargo`. Measured on `main`, 2026-09-12:
+
+```
+$ otool -L target/debug/maknaed | grep aws
+    @rpath/libaws_lc_fips_0_13_17_crypto.dylib
+$ otool -l target/debug/maknaed | grep -c LC_RPATH
+0
+```
+
+`cargo run` and `cargo test` work only because cargo injects `DYLD_*`. **An installed binary has
+no such help.** This is not a Maknae defect and not a macOS deficiency — it is upstream's required
+configuration: `aws-lc-fips-sys/README.md:143` calls a shared `libcrypto` *"the required form for
+FIPS on macOS and Windows"*, and `aws-lc/CMakeLists.txt:842` refuses a static FIPS build outside
+Linux outright (confirmed by running `AWS_LC_FIPS_SYS_STATIC=1 cargo build --target
+aarch64-apple-darwin`, which dies on that exact line).
+
+**The hazard is fail-open, not fail-closed**, which is why it gets its own section. Upstream's own
+warning (`README.md:141-149`): a shared install's directory is not embedded in the consumer binary,
+so *"a different `libcrypto` may be loaded — on macOS the build-host's `@rpath` install name can
+resolve to an unrelated library."* An unresolved `@rpath` **searches**. The bad outcome is not a
+clean startup failure; it is Maknae running on a **non-validated** crypto module while the posture
+statement claims otherwise.
+
+**The packaging answer: an absolute install name, no rpath.** `install_name_tool -change
+@rpath/libaws_lc_fips_<ver>_crypto.dylib /usr/local/lib/maknae/libaws_lc_fips_<ver>_crypto.dylib`
+at build time, with the dylib shipped at that path. This is the established pattern for a
+`.pkg`-installed daemon on this platform — Cisco AnyConnect's `vpnagentd` references its own crypto
+the same way (`/opt/cisco/anyconnect/lib/libacciscocrypto.dylib`, **zero `LC_RPATH`**). One file,
+no search order, nothing for a hijack to exploit.
+
+**Signing interaction, measured 2026-09-12.** Hardened Runtime (`codesign --options runtime`)
+enables library validation, which requires the loaded dylib to carry the **same Team ID** as the
+process. Ad-hoc signatures carry *no* Team ID, so an ad-hoc binary refuses an ad-hoc dylib:
+`dyld: ... not valid for use in process: mapping process and mapped file (non-platform) have
+different Team IDs` (rc 134). A real **Developer ID** signs both with one Team ID and is expected to
+satisfy it with no entitlement — **unverified until the certificate exists, and it must be verified
+rather than assumed.** Until then, local builds either omit `--options runtime` or carry
+`com.apple.security.cs.disable-library-validation` on the **dev path only**; that entitlement must
+not reach a shipped artifact without its own recorded decision.
 
 ## The isolation delta, stated
 
@@ -80,7 +126,15 @@ whether `aws-lc-fips` is FIPS-140-3 **validated** on macOS arm64 — as opposed 
 compiling — is an open compliance question, and the answer may reshape what macOS deployment
 means for a FIPS-posture product.
 
-**RESOLVED 2026-09-11 (#200, maintainer ruling).** It is not. The AWS-LC FIPS 3.x line Maknae pins (`aws-lc-fips-sys` 0.13.x) is the line CMVP validated as **certificate #5314** (static; #5298 dynamic) — at module version **3.1.0**. *Narrowed 2026-09-11 (PR #284 review): the crate Maknae builds today (0.13.17) vendors source that identifies itself as **3.6.0**, and neither the crate, upstream's `FIPS.md` (which disclaims FIPS questions outright), nor the certificate states whether a later 3.x release is inside #5314's scope by change letter or revalidation. That mapping is **unresolved and tracked in #200**; until it closes, #5314 is NOT evidence that Maknae's built artifact is a validated module, and nothing in this repository may cite it as such.* What #5314 establishes independent of that mapping is the environment list: its security policy, Table 3 *Tested Operational Environments*, lists exactly: **Amazon Linux 2023 on Graviton4 (ARMv9, r8g.metal-24xl) and on Intel Xeon Platinum 8375C (c6i.metal), each with and without PAA** — vendor-affirmed environments: *N/A*. The policy's own words: *"CMVP makes no statement as to the correct operation of the module or the security strengths of the generated keys when so ported if the specific operational environment is not listed on the validation certificate."* macOS on Apple Silicon is therefore a **ported**, unvalidated operational environment: the module compiles and its self-tests and our suites pass there in CI (`darwin-native`, observed green 2026-09-11), and Maknae does **not** claim FIPS 140-3 validation on macOS. Note the same table for the Linux profile: RHEL/Rocky 9 on generic x86_64/aarch64 is not a listed environment either — the validated deployment is Amazon Linux 2023 on those two CPUs; everything else runs the module *line* that was validated, outside its tested *environments* — and, until the version mapping above closes, without a demonstrated claim to the validated *version* either. The honest form of the claim on every platform Maknae ships today is "built on the AWS-LC FIPS module line". The ruling: macOS stays a production target; a deployment with a FIPS compliance obligation will not be on macOS regardless (there is a macOS STIG, but a STIG'd host is still an unlisted environment for this module), so the posture statement is the fact above, not a plan to change it. The normative statement lives in `packaging/isolation-contract.md`; this paragraph mirrors it.
+**RESOLVED 2026-09-11 (#200, maintainer ruling).** It is not. The AWS-LC FIPS 3.x line Maknae pins (`aws-lc-fips-sys` 0.13.x) is the line CMVP validated as **certificate #5314** (static; #5298 dynamic — **on macOS the applicable line is #5298; see the 2026-09-12 correction below**) — at module version **3.1.0**. *Narrowed 2026-09-11 (PR #284 review): the crate Maknae builds today (0.13.17) vendors source that identifies itself as **3.6.0**, and neither the crate, upstream's `FIPS.md` (which disclaims FIPS questions outright), nor the certificate states whether a later 3.x release is inside #5314's scope by change letter or revalidation. That mapping is **unresolved and tracked in #200**; until it closes, #5314 is NOT evidence that Maknae's built artifact is a validated module, and nothing in this repository may cite it as such.* What #5314 establishes independent of that mapping is the environment list: its security policy, Table 3 *Tested Operational Environments*, lists exactly: **Amazon Linux 2023 on Graviton4 (ARMv9, r8g.metal-24xl) and on Intel Xeon Platinum 8375C (c6i.metal), each with and without PAA** — vendor-affirmed environments: *N/A*. The policy's own words: *"CMVP makes no statement as to the correct operation of the module or the security strengths of the generated keys when so ported if the specific operational environment is not listed on the validation certificate."* macOS on Apple Silicon is therefore a **ported**, unvalidated operational environment: the module compiles and its self-tests and our suites pass there in CI (`darwin-native`, observed green 2026-09-11), and Maknae does **not** claim FIPS 140-3 validation on macOS. Note the same table for the Linux profile: RHEL/Rocky 9 on generic x86_64/aarch64 is not a listed environment either — the validated deployment is Amazon Linux 2023 on those two CPUs; everything else runs the module *line* that was validated, outside its tested *environments* — and, until the version mapping above closes, without a demonstrated claim to the validated *version* either. The honest form of the claim on every platform Maknae ships today is "built on the AWS-LC FIPS module line". The ruling: macOS stays a production target; a deployment with a FIPS compliance obligation will not be on macOS regardless (there is a macOS STIG, but a STIG'd host is still an unlisted environment for this module), so the posture statement is the fact above, not a plan to change it.
+
+> **CORRECTED 2026-09-12 (#227, from upstream AWS-LC source — this is the macOS build's own linkage, not an inference).** The paragraph above cites **#5314** as the certificate Maknae's FIPS line maps to. **#5314 is the STATIC module, and macOS cannot use it.** Upstream forbids a static FIPS build outside Linux — `aws-lc/CMakeLists.txt:842`: `if(NOT BUILD_SHARED_LIBS AND NOT (UNIX AND NOT APPLE)) message(FATAL_ERROR "Static FIPS build of AWS-LC is suported only on Linux")` (verified by running `AWS_LC_FIPS_SYS_STATIC=1 cargo build --target aarch64-apple-darwin`, which fails on exactly that line) — and `aws-lc-fips-sys/README.md:143` states plainly that a shared `libcrypto` is *"the required form for FIPS on macOS and Windows"*. **So on macOS the applicable validation line is #5298 (dynamic), not #5314 (static).** Every Maknae document that cited #5314 in a macOS context named the wrong line of the wrong module; corrected here and in `packaging/macos/README.md`, `design/adr/ADR-0002-kernel-is-rust.md` and `design/adr/ADR-0009-subject-side-os-dac-evaluation.md` on the same date.
+>
+> **This is not a macOS deficiency.** Shared is a first-class upstream FIPS mode, not a fallback: `aws-lc/crypto/CMakeLists.txt:621-623` — *"Rewrite libcrypto.so, libcrypto.dylib, or crypto.dll to inject the correct module hash value. For now we support the FIPS build only on Linux, macOS, iOS, and Windows"* — with a dedicated `-apple` flag for `inject_hash.go`, and `aarch64_apple_darwin` carrying pregenerated bindings. The two modes differ only in how the module's self-integrity region is made hashable: shared treats the dylib itself as the module boundary, while static must synthesise one with **delocate**, which rewrites the module's assembly to lay text and rodata contiguously — ELF-specific machinery, which is exactly what the guard above encodes. Upstream's own README speaks of *"the static **or** dynamic AWS-LC Cryptographic Module"*: two separately validated modules, neither weaker.
+>
+> **What DOES change, and it is a packaging obligation with a fail-open edge.** `aws-lc-fips-sys/README.md:141-149` warns that a shared install's library directory is not embedded in the consumer binary, so *"a different `libcrypto` may be loaded — on macOS the build-host's `@rpath` install name can resolve to an unrelated library."* Measured on `main` 2026-09-12: `otool -L target/debug/maknaed` shows `@rpath/libaws_lc_fips_0_13_17_crypto.dylib` and `otool -l` shows **zero `LC_RPATH`**; the binaries run under `cargo` only because cargo injects `DYLD_*`. The hazard is therefore not merely "the installed binary fails to start" — it is that an unresolved `@rpath` **searches**, and can bind a *non-validated* `libcrypto` while the posture claims otherwise. #227 pins the module by **absolute install name** (the pattern Cisco AnyConnect uses for its own crypto dylibs on this platform: `/opt/cisco/anyconnect/lib/libacciscocrypto.dylib`, zero `LC_RPATH`), so the loader can resolve exactly one file and no search occurs.
+>
+> **The #200 version-mapping question is unchanged by this** and applies to #5298 exactly as it did to #5314: the crate builds a 3.6.0-identifying source tree against a certificate issued at 3.1.0, and that mapping is still unresolved. The honest claim on macOS remains *"built on the AWS-LC FIPS module line"* — now with the correct line named. The normative statement lives in `packaging/isolation-contract.md`; this paragraph mirrors it.
 
 ## References
 
