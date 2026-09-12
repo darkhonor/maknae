@@ -29,6 +29,7 @@ mod verify;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
 #[cfg(unix)]
+mod peer_identity;
 mod peercred;
 #[cfg(unix)]
 mod socket;
@@ -47,6 +48,7 @@ pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 pub use operator::OperatorClient;
 #[cfg(unix)]
+pub use peer_identity::{creds_match_uid, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use secret_source::{

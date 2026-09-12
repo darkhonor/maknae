@@ -361,7 +361,13 @@ impl Fixture {
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
-            Arc::new(provider.map(str::to_string)),
+            // #240a D1: the kernel carries the RESOLVED provider record.
+            Arc::new(provider.map(|n| maknae_config::ProviderConfig {
+                name: n.to_string(),
+                endpoint: "http://127.0.0.1:1/v1".into(),
+                model: "test-model".into(),
+                key_vault_path: "secret/data/maknae/providers/test".into(),
+            })),
             egress,
             Duration::from_secs(2),
             maknae_security::Lane::Local,

@@ -11,6 +11,7 @@ mod ceiling_authz;
 pub mod classification;
 mod composition;
 mod egress;
+mod egress_socket;
 mod groupres;
 mod handler;
 mod mutation;
@@ -26,6 +27,7 @@ pub use egress::{
     admitted_reply, production_egress, reply_capacity, reply_text_length, DurableEgressIntent,
     Egress, EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
 };
+pub use egress_socket::SocketEgress;
 pub use groupres::*;
 pub use handler::{
     admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, may_respond,

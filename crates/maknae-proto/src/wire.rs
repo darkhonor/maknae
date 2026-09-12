@@ -101,12 +101,58 @@ impl ContentBlock {
     }
 }
 
+/// Upper bound on a proposed tool call's argument payload (#240a). It rides
+/// the reply frame and is counted by `reply_capacity`, so it is part of the
+/// no-reallocation bound, not a style preference.
+pub const MAX_TOOL_CALL_ARGS_BYTES: usize = 4096;
+/// Upper bound on the tool name. It reaches audit records and terminals.
+pub const MAX_TOOL_CALL_NAME_BYTES: usize = 64;
+/// Upper bound on the provider's opaque correlation id for the call.
+pub const MAX_TOOL_CALL_ID_BYTES: usize = 64;
+
+/// A tool call the model PROPOSED. It is content, never an instruction: the
+/// model informs, the PDP authorizes (`design/model-conduit-policy.md`). There
+/// is deliberately no method here that executes anything — under case 4 a reply
+/// may say "now call provider:X", and the deputy must be structurally incapable
+/// of acting on it. `Proposed` is in the name so a later reader cannot mistake
+/// this for a command.
+///
+/// `arguments` is [`SecretText`], NOT `String`, and that is the load-bearing
+/// choice: `PromptReply` derives `Debug`, and `bins/maknae/src/cli.rs` renders
+/// a mismatched payload as `{p:?}` into an operator-visible error string. Tool
+/// arguments routinely echo prompt content, so a plain `String` would print
+/// them to the terminal and the operator's shell history — and would not
+/// zeroize on drop either.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedToolCall {
+    pub name: String,
+    pub call_id: String,
+    pub arguments: SecretText,
+}
+
+/// Shape-only admission for a proposed tool call. Every field is bounded: the
+/// payload rides the reply frame and is counted by `reply_capacity`.
+pub fn proposed_tool_call_is_acceptable(c: &ProposedToolCall) -> bool {
+    !c.name.is_empty()
+        && c.name.len() <= MAX_TOOL_CALL_NAME_BYTES
+        && !c.call_id.is_empty()
+        && c.call_id.len() <= MAX_TOOL_CALL_ID_BYTES
+        && c.arguments.0.len() <= MAX_TOOL_CALL_ARGS_BYTES
+}
+
 /// The response leg of `session.prompt`. In Cooky the release to the requesting
 /// loop is the prompt verdict itself (ADR-0023); the shape exists so #240 has
 /// something to fill. `Unavailable` never returns one.
+///
+/// `tool_calls` is a SIBLING of `blocks`, not a `ContentBlock` variant (#240a
+/// D5): a tool call is not *what the model said*, it is *what the model wants
+/// done*, which is exactly the inform/authorize line. Folding it into
+/// `ContentBlock` would force widening `admitted_reply`'s `NonText` refusal —
+/// loosening a security check to carry a new capability.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptReply {
     pub blocks: Vec<ContentBlock>,
+    pub tool_calls: Vec<ProposedToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +630,33 @@ pub fn encode_response_zeroizing(
     ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
 }
+/// Encode a request into a zeroizing buffer. The codec lives here, with the
+/// rest of the wire, so `maknae-kernel` needs no CBOR dependency of its own —
+/// a new dependency in the TCB is a security decision, not a convenience.
+pub fn encode_egress_frame_request(
+    r: &crate::EgressFrameRequest,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(buf)
+}
+
+pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest, ProtoCodecError> {
+    ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
+}
+
+pub fn encode_egress_frame_reply(
+    r: &crate::EgressFrameReply,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(buf)
+}
+
+pub fn decode_egress_frame_reply(b: &[u8]) -> Result<crate::EgressFrameReply, ProtoCodecError> {
+    ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
+}
+
 pub fn decode_request(b: &[u8]) -> Result<Request, ProtoCodecError> {
     let r: Request =
         ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))?;
@@ -714,6 +787,7 @@ mod tests {
         let resp = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                tool_calls: vec![],
                 blocks: vec![text("hi there")],
             })),
         };
@@ -1059,5 +1133,77 @@ mod tests {
                 other => panic!("wrong variant: {other:?}"),
             }
         }
+    }
+
+    // ---- #240a Task 1: tool-call proposals ------------------------------
+    // RED before ProposedToolCall exists: these do not compile, which is the
+    // correct RED for a type that must be introduced.
+
+    /// The disclosure guard. `PromptReply` derives `Debug`, and that is safe
+    /// today ONLY because `ContentBlock::Text.text` is `SecretText`.
+    /// `bins/maknae/src/cli.rs:493` formats a `Payload::PromptReply(_)` as
+    /// `{p:?}` into an operator-visible protocol-error string, so a derived
+    /// `Debug` over a plain `String` would print model-proposed tool-call
+    /// arguments — which routinely echo prompt content — to the terminal and
+    /// the operator's shell history.
+    #[test]
+    fn a_proposed_tool_call_debug_redacts_its_arguments() {
+        let c = ProposedToolCall {
+            name: "read_file".into(),
+            call_id: "call_1".into(),
+            arguments: SecretText(zeroize::Zeroizing::new(
+                "{\"path\":\"/etc/maknae/authz.yaml\"}".into(),
+            )),
+        };
+        let rendered = format!("{c:?}");
+        assert!(
+            !rendered.contains("authz.yaml"),
+            "tool-call arguments leaked into Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("bytes"),
+            "expected the <N bytes> redaction, got: {rendered}"
+        );
+        // The whole reply, as the CLI actually renders it.
+        let reply = PromptReply {
+            blocks: vec![],
+            tool_calls: vec![c],
+        };
+        assert!(!format!("{reply:?}").contains("authz.yaml"));
+    }
+
+    #[test]
+    fn a_tool_call_reply_round_trips() {
+        let reply = PromptReply {
+            blocks: vec![],
+            tool_calls: vec![ProposedToolCall {
+                name: "read_file".into(),
+                call_id: "call_1".into(),
+                arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            }],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&reply, &mut buf).unwrap();
+        let back: PromptReply = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn a_tool_call_over_the_arg_bound_is_refused() {
+        let c = ProposedToolCall {
+            name: "x".into(),
+            call_id: "c".into(),
+            arguments: SecretText(zeroize::Zeroizing::new(
+                "a".repeat(MAX_TOOL_CALL_ARGS_BYTES + 1),
+            )),
+        };
+        assert!(!proposed_tool_call_is_acceptable(&c));
+        let ok = ProposedToolCall {
+            arguments: SecretText(zeroize::Zeroizing::new(
+                "a".repeat(MAX_TOOL_CALL_ARGS_BYTES),
+            )),
+            ..c
+        };
+        assert!(proposed_tool_call_is_acceptable(&ok));
     }
 }

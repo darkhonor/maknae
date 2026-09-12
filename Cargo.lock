@@ -1089,6 +1089,7 @@ dependencies = [
  "maknae-vault",
  "nix",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -60,6 +60,7 @@ impl maknae_kernel::Egress for Recording {
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
+                tool_calls: vec![],
                 blocks: vec![text("ok")],
             },
         })
@@ -284,6 +285,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    tool_calls: vec![],
                     blocks: vec![
                         text("ok"),
                         ContentBlock::Image {
@@ -336,7 +338,10 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
             _: maknae_kernel::EgressRequest,
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
-                reply: maknae_proto::PromptReply { blocks: vec![] },
+                reply: maknae_proto::PromptReply {
+                    tool_calls: vec![],
+                    blocks: vec![],
+                },
             })
         }
     }
@@ -752,6 +757,7 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    tool_calls: vec![],
                     blocks: vec![text(&"x".repeat(1 << 20))],
                 },
             })

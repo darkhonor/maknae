@@ -126,6 +126,14 @@ files = [
   # ratchet_cohort — the ratchet is the security-seam + config-loading-core
   # cohort, ADR-0016 §4).
   "crates/maknae-proto/src/wire.rs",
+  # #240a: the maknaed<->egress frame. The request/response mapping is T1 by
+  # #240's own declaration; its Debug redaction is what keeps prompt content
+  # and the provider key path out of operator-visible error strings.
+  "crates/maknae-proto/src/egress_frame.rs",
+  # #240a D3-A: the PURE peer-identity decision. It is a separate file from
+  # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
+  # which would make a T1 tier there vacuous — zero mutants, zero missed.
+  "crates/maknae-vault/src/peer_identity.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
@@ -224,6 +232,18 @@ floor_production_region = 90
 # exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
 # CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
 files = [
+  # #240a: the kernel-side egress transport. T2, not T1, and by the repo's own
+  # line-drawing rather than by convenience: this file is socket I/O — connect,
+  # timeouts, framed read/write — and every other I/O file here is T3
+  # (secret_io, syslog_io, journal_io, supervisor_run at 79%). The SECURITY
+  # DECISION it carries is not in this file: peer identity is decided in
+  # `maknae-vault/src/peer_identity.rs`, which IS T1 and mutation-visible.
+  # What this file owns is the ORDERING — the check happens before the first
+  # write — and that is proven by a mutation probe, not by a coverage floor:
+  # moving the check below the write put 200 bytes of prompt content and a
+  # Vault key path on the wire to an unauthenticated peer, and the test failed
+  # on the byte count.
+  "crates/maknae-kernel/src/egress_socket.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
