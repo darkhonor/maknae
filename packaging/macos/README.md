@@ -15,13 +15,22 @@ normative statement; this directory holds the packaging that follows from it.
 
 | Artifact | Tool | State |
 |---|---|---|
-| `maknaed` + `maknae` **Apple Silicon** binaries | `cargo auditable build --release --target aarch64-apple-darwin` | not built |
-| launchd plist for `maknaed` | hand-authored; `plutil -lint` in smoke | not authored |
-| `_maknae` daemon user | `sysadminctl` / installer preinstall | not authored |
-| `.pkg` installer | `pkgbuild` → `productbuild` | not built |
-| Signature + notarization | Developer ID Installer cert → `notarytool` → `stapler` | not configured |
-| **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped beside the binaries; pinned by **absolute install name** | **not shipped — see below** |
+| `maknaed` + `maknae` **Apple Silicon** binaries | `cargo auditable build --release --target aarch64-apple-darwin` | **built** (`build-pkg.sh`) |
+| launchd plist for `maknaed` | hand-authored; `plutil -lint` in smoke | **authored** (`io.maknae.maknaed.plist`) |
+| `_maknae` + `_maknae-egress` daemon users | `dscl` in the installer `preinstall` | **authored** (`scripts/preinstall`) |
+| **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped to `/usr/local/lib/maknae`, pinned by **absolute install name** | **shipped** |
+| `.pkg` installer | `pkgbuild` → `productbuild` | **built** (`dist/Maknae-<version>-arm64.pkg`) |
+| Install/boot/uninstall verification | `smoke.sh phase1` (no root) / `phase2` (root) | phase 1 **green**; phase 2 **owed — needs console** |
+| Signature + notarization | Developer ID Installer cert → `notarytool` → `stapler` | not configured (#227 item 3) |
 
+> **`maknae-spifc` is deliberately not packaged.** CI builds three shipped binaries (`ci.yml:145`), but the Linux packages ship two (`build-deb.sh:63-64`, `maknae.spec:65-66`); macOS follows the packaging precedent, not the CI one.
+>
+> **`maknae-egress`'s launchd unit is NOT here.** ADR-0023 decision 3 names units for both daemons; the binary is #240's deliverable and does not exist yet, and a unit definition for an absent executable cannot be tested. Both *accounts* are created here — custody rests on the account, not the unit — and #240 adds the unit and the `io.maknae.egress` component together, which `distribution.xml` makes a one-row change.
+>
+> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `postinstall` runs `launchctl disable` on a fresh install. The flow is: install → `sudo maknae enroll` → `sudo launchctl enable system/io.maknae.maknaed` → `sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist`.
+>
+> **A fully enrolled macOS daemon is not yet possible.** `seal_daemon_secret_macos` (`bins/maknae/src/enroll/mod.rs:1028`) returns `MacosSepUnimplemented`, so enrollment needs `--insecure-plaintext-secret`. Acceptance therefore rests on the exit-4 fail-closed boot refusal, which runs before the credential step.
+>
 > **Corrected 2026-09-12 (#227).** The binaries row read *"`maknaed` + `maknae` universal binaries | `cargo build --target {aarch64,x86_64}-apple-darwin` → `lipo`"*. **There are no x86 macOS builds** (AGENTS.md; maintainer ruling 2026-09-05), so there is no universal binary and no `lipo` step. It now also names `cargo auditable`, matching how CI builds every shipped binary (`ci.yml:145`) — the embedded dependency SBOM is an SCRM control and the Apple-native artifact is the last place to drop it.
 
 ## The FIPS module is a dylib on macOS, and the package must carry it

@@ -1,4 +1,6 @@
-# Maknae Linux packaging — install & operations guide
+# Maknae packaging — install & operations guide
+
+> **Retitled 2026-09-12 (#227).** This read *"Maknae **Linux** packaging"*. It is no longer Linux-only: `packaging/macos/` now builds a `.pkg` for Apple Silicon, and macOS is a production target (AGENTS.md), so a Linux-only title would send the next reader to the wrong directory. See `packaging/macos/README.md` for the macOS lifecycle — in particular that config defaults are installed **first-install-only** (macOS has no `conffiles`/`%config(noreplace)`), and that install does **not** enable: `/Library/LaunchDaemons` is boot-scanned, so the job ships `launchctl disable`d and the operator runs `launchctl enable` + `bootstrap` after `maknae enroll`.
 
 This directory builds Linux packages (checksummed; optionally GPG-signed — the
 default build is UNSIGNED, see [Signing](#verifying-signatures)) that install the `maknaed` trust-plane
