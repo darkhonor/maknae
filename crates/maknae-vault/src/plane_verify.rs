@@ -179,10 +179,19 @@ mod tests {
             .ok();
     }
 
+    /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14
+    /// signs against an `Issuer`, which is built from the issuing params + key.
+    /// (`Issuer::from_ca_cert_der` would recover one from DER, but it needs
+    /// rcgen's `x509-parser` feature, which this crate does not enable.)
     struct Ca {
         der: Vec<u8>,
         kp: rcgen::KeyPair,
-        cert: rcgen::Certificate,
+        params: rcgen::CertificateParams,
+    }
+    impl Ca {
+        fn issuer(&self) -> rcgen::Issuer<'_, &rcgen::KeyPair> {
+            rcgen::Issuer::from_params(&self.params, &self.kp)
+        }
     }
     fn mk_ca() -> Ca {
         let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
@@ -192,7 +201,7 @@ mod tests {
         Ca {
             der: cert.der().to_vec(),
             kp,
-            cert,
+            params: p,
         }
     }
     fn mk_leaf(ca: &Ca, uri: &str) -> Vec<u8> {
@@ -200,7 +209,7 @@ mod tests {
         p.distinguished_name = rcgen::DistinguishedName::new();
         p.subject_alt_names = vec![rcgen::SanType::URI(uri.try_into().unwrap())];
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-        p.signed_by(&kp, &ca.cert, &ca.kp).unwrap().der().to_vec()
+        p.signed_by(&kp, &ca.issuer()).unwrap().der().to_vec()
     }
 
     #[test]

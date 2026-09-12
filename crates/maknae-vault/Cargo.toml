@@ -25,7 +25,34 @@ maknae-config = { path = "../maknae-config" }
 vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+# UPPER BOUND IS THE SAME COMPLIANCE CONTROL AS THE aws-lc-rs BOUND BELOW,
+# REACHED FROM THE OTHER SIDE — see that comment for the module-line facts;
+# they are not restated here so there is one place to correct. rcgen 0.14.10
+# raises its OWN aws-lc-rs requirement to ^1.18, which is precisely the range
+# that bound excludes. The two are unsatisfiable together, so 0.14.10 does not
+# resolve at all. MEASURED, not assumed — with the ceiling widened to <0.15,
+# `cargo update -p rcgen --precise 0.14.10` fails:
+#
+#   error: failed to select a version for `aws-lc-rs`.
+#       ... required by package `rcgen v0.14.10`
+#   versions that meet the requirements `^1.18` are: 1.18.1, 1.18.0
+#   all possible versions conflict with previously selected packages
+#     previously selected package `aws-lc-rs v1.17.3`
+#
+# So cargo already fails closed; the bound exists to say WHY in the manifest
+# instead of leaving the next reader to reverse-engineer a resolver error, and
+# the dependabot.yml ignore rule mirrors it (Dependabot does not honor an upper
+# bound — it proposes widening one). Lift it only WITH the aws-lc-rs bound; the
+# watch is #259.
+#
+# 0.13 -> 0.14 was an API break, not a routine bump: `CertificateParams::signed_by`
+# takes an `Issuer` instead of (issuer certificate, issuer key). Test issuers
+# therefore retain the CA's `CertificateParams` and build `Issuer::from_params`
+# — `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which
+# this crate deliberately does not enable (we parse with our own x509-parser).
+# The `aws_lc_rs` + `fips` feature definitions are byte-identical across the
+# break, so the FIPS backend selection is unchanged by the bump.
+rcgen = { version = ">=0.14.9, <0.14.10", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
 # UPPER BOUND IS A COMPLIANCE CONTROL, NOT DEPENDENCY HYGIENE. Do not relax it to
 # take a routine Dependabot bump (the dependabot.yml ignore rule mirrors it).
