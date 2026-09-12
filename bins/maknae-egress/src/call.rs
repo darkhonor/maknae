@@ -187,7 +187,7 @@ mod tests {
     fn fips() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let _ = maknae_vault::install_default_crypto_provider();
+            maknae_vault::install_default_crypto_provider();
         });
     }
 

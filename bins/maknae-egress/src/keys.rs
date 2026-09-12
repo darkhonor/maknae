@@ -18,6 +18,23 @@ pub trait KeySource {
     fn read(&self, key_vault_path: &str) -> Result<Zeroizing<String>, String>;
 }
 
+/// The source in use until a Vault client is constructed.
+///
+/// Deliberately a `KeySource` and not a special case upstream: the deputy runs
+/// its REAL path — admit, ask for the credential, refuse — so the refusal comes
+/// from the layer that owns credentials and names itself accordingly. A closure
+/// short-circuiting `fulfil` would have left the whole fulfilment path unbuilt
+/// and unexercised, which is what `dead_code` caught.
+pub struct NoCredentialSource;
+
+impl KeySource for NoCredentialSource {
+    fn read(&self, key_vault_path: &str) -> Result<Zeroizing<String>, String> {
+        Err(format!(
+            "no Vault client is configured; cannot read '{key_vault_path}'"
+        ))
+    }
+}
+
 /// First-use, per-destination cache.
 pub struct KeyCache<S> {
     source: S,
@@ -90,5 +107,18 @@ mod tests {
         let e = c.get("a/data/one").unwrap_err();
         assert!(e.contains("a/data/one"));
         assert!(c.get("a/data/one").is_err(), "a failure must not be cached");
+    }
+
+    /// The source the deputy runs on until a Vault client exists. It refuses,
+    /// names the PATH it was asked for, and is never cached as a success —
+    /// this is the deputy's real behaviour right now, not a placeholder.
+    #[test]
+    fn the_no_credential_source_refuses_and_names_the_path() {
+        let mut c = KeyCache::new(NoCredentialSource);
+        let e = c.get("secret/data/maknae/providers/openai").unwrap_err();
+        assert!(e.contains("no Vault client is configured"), "{e}");
+        assert!(e.contains("secret/data/maknae/providers/openai"), "{e}");
+        // Still refuses on a second ask — a refusal is not cached as a value.
+        assert!(c.get("secret/data/maknae/providers/openai").is_err());
     }
 }

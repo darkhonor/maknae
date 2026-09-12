@@ -67,6 +67,16 @@ fn main() {
         Err(e) => fail(e),
     };
 
+    // One current-thread runtime for the process: the provider call and the
+    // Vault read are futures, and the serving path is otherwise blocking.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => fail(format!("cannot start a runtime: {e}")),
+    };
+
     // Accept forever. A failed connection is refused and the loop continues:
     // one bad or hostile peer must not take the deputy down. This is wiring,
     // not logic — the decision is `handle::decide`, the per-connection I/O is
@@ -74,21 +84,22 @@ fn main() {
     for conn in listener.incoming() {
         match conn {
             Ok(s) => {
-                if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |_admitted| {
-                    // NO CREDENTIAL SOURCE IS CONSTRUCTED YET, and the deputy
-                    // says so rather than pretending. Building the Vault client
-                    // needs the AppRole login against the sealed SecretID in
-                    // $CREDENTIALS_DIRECTORY, and nothing about it can be
-                    // verified until the third plane is provisioned — so it is
-                    // the one piece deliberately left for the slice that can
-                    // prove it, rather than written blind at the end of a long
-                    // session.
-                    //
-                    // Fail-closed and NAMED: an admitted frame gets a refusal
-                    // the kernel can read, never a fabricated reply.
-                    Err(serve::ServeError::Fulfil(
-                        "no provider credential source is configured".into(),
+                if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
+                    // The REAL fulfilment path, on a credential source that has
+                    // nothing to give yet. Constructing the Vault client means
+                    // an AppRole login against the sealed SecretID, and none of
+                    // it can be verified until the third plane is provisioned —
+                    // so the source refuses and the deputy's own path runs
+                    // unchanged, rather than being short-circuited by a closure
+                    // that would leave it unexercised.
+                    let mut keys = keys::KeyCache::new(keys::NoCredentialSource);
+                    rt.block_on(call::fulfil(
+                        admitted,
+                        &mut keys,
+                        &[],
+                        call::CallBounds::default(),
                     ))
+                    .map_err(|e| serve::ServeError::Fulfil(e.to_string()))
                 }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }

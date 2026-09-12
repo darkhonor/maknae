@@ -8,6 +8,12 @@
 use crate::keys::KeySource;
 use zeroize::Zeroizing;
 
+// Not constructed until the Vault client is built (the AppRole login against
+// the sealed SecretID, which cannot be verified until the third plane is
+// provisioned). Kept and allowed rather than deleted: it is the production
+// source, its shape is reviewed here, and deleting it would mean writing it
+// again blind in the slice that finally wires it.
+#[allow(dead_code)]
 /// Reads through `maknae-vault`, which owns every Vault interaction.
 pub struct VaultKeys<C> {
     pub client: C,

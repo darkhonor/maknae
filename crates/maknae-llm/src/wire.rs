@@ -138,7 +138,7 @@ pub fn to_prompt_reply(
 
     let mut tool_calls = Vec::new();
     for c in msg.tool_calls {
-        if !offered.iter().any(|o| *o == c.function.name) {
+        if !offered.contains(&c.function.name) {
             return Err(ReplyError::UnknownTool(c.function.name));
         }
         let proposed = maknae_proto::ProposedToolCall {
