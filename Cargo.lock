@@ -1086,10 +1086,12 @@ version = "0.0.0"
 dependencies = [
  "listenfd",
  "maknae-config",
+ "maknae-llm",
  "maknae-proto",
  "maknae-vault",
  "nix",
  "tempfile",
+ "tokio",
  "zeroize",
 ]
 
@@ -1131,6 +1133,7 @@ name = "maknae-llm"
 version = "0.0.0"
 dependencies = [
  "maknae-proto",
+ "maknae-vault",
  "reqwest",
  "serde",
  "serde_json",

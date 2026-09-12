@@ -152,6 +152,13 @@ files = [
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
   "bins/maknae-egress/src/handle.rs",
+  # #240b: fulfilment is gated on `Admitted`, which has no public constructor —
+  # a provider call cannot be made on a frame whose bounds were never checked.
+  "bins/maknae-egress/src/call.rs",
+  # #240b: the credential is read on FIRST USE per destination and cached. "At
+  # boot" is single-provider thinking and fails with two. A failed read is not
+  # cached, so a transient Vault failure cannot poison a destination.
+  "bins/maknae-egress/src/keys.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
@@ -315,6 +322,14 @@ why = "module declarations and re-exports only; no production regions of its own
 [[t3]]
 path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
+
+[[t3]]
+path = "bins/maknae-egress/src/keys_vault.rs"
+why = "the Vault-backed key read; no Vault stub exists in this project by design, so the network path is operator-verified. The CACHE it plugs into is pure and T1 in keys.rs — the kv/kv_io split"
+
+[[t3]]
+path = "crates/maknae-llm/src/client.rs"
+why = "the provider HTTP call; exercised by the hermetic stub server #240 specifies (tests/stub_server.rs) and by the FIPS gate in its own test binary. The MAPPING it depends on is pure and T1 in wire.rs — the kv/kv_io, secret_source/secret_io split"
 
 [[t3]]
 path = "crates/maknae-vault/src/kv_io.rs"

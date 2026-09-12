@@ -5,7 +5,7 @@
 //! crate convention — `peercred`/`peer_identity`, `secret_io`/`secret_source`.
 
 use maknae_config::EgressBounds;
-use maknae_proto::{EgressFrameReply, EgressFrameRequest, PromptReply};
+use maknae_proto::EgressFrameRequest;
 
 /// Why the deputy refused a frame. Every variant is a refusal the kernel sees;
 /// there is no "carry on anyway".
@@ -19,32 +19,41 @@ pub enum Refusal {
     MalformedFrame,
 }
 
-/// Decide what to do with one decoded frame.
+/// Proof that a frame passed admission.
+///
+/// There is **no public constructor**: a value exists only because [`decide`]
+/// returned `Ok`. `call::fulfil` takes one, so a provider call cannot be made
+/// on a frame whose bounds were never checked — the property is in the type
+/// rather than in a comment someone has to keep reading.
+#[derive(Debug)]
+pub struct Admitted<'a> {
+    req: &'a EgressFrameRequest,
+}
+
+impl<'a> Admitted<'a> {
+    pub fn request(&self) -> &'a EgressFrameRequest {
+        self.req
+    }
+}
+
+/// Decide whether the deputy will act on one decoded frame.
 ///
 /// **The deputy never chains.** It does not read `content` for instructions,
 /// does not follow anything a reply might suggest, and has no way to originate
 /// a request of its own. Under the orchestrator case a model reply may say
 /// "now call provider:X"; the deputy must be structurally incapable of acting
 /// on it, and the absence of any such path here is that property.
-pub fn decide(
-    req: &EgressFrameRequest,
+pub fn decide<'a>(
+    req: &'a EgressFrameRequest,
     bounds: &EgressBounds,
-) -> Result<EgressFrameReply, Refusal> {
+) -> Result<Admitted<'a>, Refusal> {
     if !maknae_proto::egress_frame_request_is_acceptable(req) {
         return Err(Refusal::MalformedFrame);
     }
     if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
-    // #240a is the CONDUIT. The provider call, its TLS, and the reply
-    // validation are #240b; until then the deputy proves the whole path
-    // end-to-end with a canned reply and makes no network access at all.
-    Ok(EgressFrameReply {
-        reply: PromptReply {
-            blocks: vec![],
-            tool_calls: vec![],
-        },
-    })
+    Ok(Admitted { req })
 }
 
 #[cfg(test)]
@@ -80,20 +89,21 @@ mod tests {
     /// merely begins with the prefix is refused BY NAME.
     #[test]
     fn a_key_path_outside_the_prefix_is_refused_by_name() {
-        assert_eq!(
-            decide(&req("secret/data/maknae/providers-evil/key"), &bounds()),
-            Err(Refusal::KeyPathOutsideBounds)
-        );
-        assert_eq!(
-            decide(&req("secret/data/other/key"), &bounds()),
-            Err(Refusal::KeyPathOutsideBounds)
-        );
+        for bad in [
+            "secret/data/maknae/providers-evil/key",
+            "secret/data/other/key",
+        ] {
+            assert_eq!(
+                decide(&req(bad), &bounds()).unwrap_err(),
+                Refusal::KeyPathOutsideBounds
+            );
+        }
     }
 
     #[test]
     fn a_malformed_frame_is_refused_before_the_bounds_check() {
         let mut r = req("secret/data/maknae/providers/openai");
         r.content.clear();
-        assert_eq!(decide(&r, &bounds()), Err(Refusal::MalformedFrame));
+        assert_eq!(decide(&r, &bounds()).unwrap_err(), Refusal::MalformedFrame);
     }
 }

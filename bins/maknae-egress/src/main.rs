@@ -9,7 +9,10 @@
 //! Thin by design (T3, the `bins/maknaed` precedent): the decision is in
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
+mod call;
 mod handle;
+mod keys;
+mod keys_vault;
 mod listen;
 mod serve;
 
@@ -71,7 +74,22 @@ fn main() {
     for conn in listener.incoming() {
         match conn {
             Ok(s) => {
-                if let Err(e) = serve::serve_one(s, expected_uid, &bounds) {
+                if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |_admitted| {
+                    // NO CREDENTIAL SOURCE IS CONSTRUCTED YET, and the deputy
+                    // says so rather than pretending. Building the Vault client
+                    // needs the AppRole login against the sealed SecretID in
+                    // $CREDENTIALS_DIRECTORY, and nothing about it can be
+                    // verified until the third plane is provisioned — so it is
+                    // the one piece deliberately left for the slice that can
+                    // prove it, rather than written blind at the end of a long
+                    // session.
+                    //
+                    // Fail-closed and NAMED: an admitted frame gets a refusal
+                    // the kernel can read, never a fabricated reply.
+                    Err(serve::ServeError::Fulfil(
+                        "no provider credential source is configured".into(),
+                    ))
+                }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }
             }

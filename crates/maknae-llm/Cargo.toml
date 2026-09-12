@@ -13,6 +13,10 @@ workspace = true
 
 [dependencies]
 maknae-proto = { path = "../maknae-proto" }
+# For the FIPS assertion ONLY. maknae-vault owns `assert_fips_provider` and is
+# the single implementation of that control; re-deriving the three-line rustls
+# check here would be two sites for one property — the `maknae-io` failure.
+maknae-vault = { path = "../maknae-vault" }
 # FIPS POSTURE, MIRRORED FROM maknae-vault — the pinning is the control, not a
 # preference. `rustls-no-provider`, NEVER `rustls`: reqwest's `rustls` feature
 # is `["__rustls-aws-lc-rs", …]`, which installs the NON-FIPS aws-lc-rs provider
@@ -34,4 +38,5 @@ serde_json = "1"
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
+maknae-vault = { path = "../maknae-vault" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
