@@ -644,6 +644,18 @@ mod tests {
                 "reply over the frame cap",
                 "refused-oversize",
             ),
+            // #240a: the EXACT string `outcome_for` emits for a refused
+            // tool-call proposal. Added here rather than relying on the
+            // "widest of the vocabulary" note above, so the fixture is bound
+            // to the production string instead of merely being as wide as it.
+            (
+                "undelivered-toolcall",
+                EgressStatus::LandedUndelivered,
+                Some(999_999_999),
+                "permit",
+                "reply refused: tool call",
+                "unauthorized",
+            ),
         ] {
             let mut r = egress_record(status, reply, result, reason, posture);
             r.subject.user = Some("aackerman".into());

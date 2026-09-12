@@ -137,13 +137,20 @@ pub enum ReplyRefusal {
     Oversize,
     NonText,
     Empty,
+    /// A proposed tool call failed shape admission — an unbounded name, id or
+    /// argument payload. Distinct from `NonText`, which is about `blocks`: a
+    /// record must never call a bad tool call "non-text" (#240a D1-A).
+    ToolCallUnacceptable,
 }
 
 /// The reply-direction admission. `admitted_blocks` is the prompt direction
 /// and says "prompt" in its reason; a reply gets its own so the record never
 /// calls an empty reply "non-text". Text only, at least one block.
 pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
-    if reply.blocks.is_empty() {
+    // #240a D1-B: `Empty` means BOTH lists empty. A reply that is only tool
+    // calls is legitimate — the model proposed an action and said nothing.
+    // Reverting this to `blocks.is_empty()` refuses every tool-call reply.
+    if reply.blocks.is_empty() && reply.tool_calls.is_empty() {
         return Err(ReplyRefusal::Empty);
     }
     if reply
@@ -152,6 +159,16 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
         .any(|b| !matches!(b, ContentBlock::Text { .. }))
     {
         return Err(ReplyRefusal::NonText);
+    }
+    // Proposals are bounded here, BEFORE `reply_capacity` is consulted and
+    // before anything is encoded: the capacity bound below assumes every call
+    // is within `MAX_TOOL_CALL_ARGS_BYTES`.
+    if !reply
+        .tool_calls
+        .iter()
+        .all(maknae_proto::proposed_tool_call_is_acceptable)
+    {
+        return Err(ReplyRefusal::ToolCallUnacceptable);
     }
     Ok(())
 }
@@ -250,6 +267,21 @@ pub fn outcome_for(
             "reply refused: empty",
             "unauthorized",
         ),
+        // `permit` + `unauthorized`, the NonText pairing: the content left and
+        // the reply carries a proposal this deployment does not admit. No
+        // ADR-0019 amendment is owed — `unauthorized` is already in the pinned
+        // posture domain and this is the same refusal shape as NonText. The
+        // REASON STRING is new, so the syslog width fixture carries it.
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ToolCallUnacceptable,
+        } => (
+            EgressStatus::LandedUndelivered,
+            Some(reply_length),
+            "permit",
+            "reply refused: tool call",
+            "unauthorized",
+        ),
     };
     r.outcome.result = result.into();
     r.outcome.reason = reason.into();
@@ -265,6 +297,10 @@ pub fn outcome_for(
 /// name, text-string header): generous, and pinned by a test that encodes
 /// replies of many shapes and asserts the buffer never grew.
 pub const REPLY_BLOCK_ENVELOPE: usize = 32;
+
+/// Per-tool-call CBOR overhead (map header + three key strings + three value
+/// headers): generous, and pinned by the widest-legal-reply no-grow test.
+pub const TOOL_CALL_ENVELOPE: usize = 64;
 
 /// The reply's TEXT length: the audit `reply_length`.
 pub fn reply_text_length(reply: &PromptReply) -> u64 {
@@ -290,11 +326,96 @@ pub fn reply_text_length(reply: &PromptReply) -> u64 {
 pub fn reply_capacity(reply: &PromptReply) -> usize {
     reply_text_length(reply) as usize
         + reply.blocks.len() * REPLY_BLOCK_ENVELOPE
+        // #240a D1-A. Tool-call proposals ride the same frame and are NOT
+        // counted by `reply_text_length`. Omitting this term is a
+        // memory-disclosure defect, not a sizing nit: a reply with no blocks
+        // and a full-size call computes FRAME_ENVELOPE_MARGIN, passes the
+        // pre-encode oversize check, then reallocates inside
+        // `encode_response_zeroizing` — leaving the payload in freed heap.
+        + reply
+            .tool_calls
+            .iter()
+            .map(|c| c.name.len() + c.call_id.len() + c.arguments.0.len() + TOOL_CALL_ENVELOPE)
+            .sum::<usize>()
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
 #[cfg(test)]
 mod tests {
+    // ---- #240a Task 1: tool-call proposals in the reply -------------------
+
+    fn tc(args_len: usize) -> maknae_proto::ProposedToolCall {
+        maknae_proto::ProposedToolCall {
+            name: "read_file".into(),
+            call_id: "call_1".into(),
+            arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("a".repeat(args_len))),
+        }
+    }
+
+    /// THE memory-disclosure guard (#240a D1-A). `reply_capacity` counted TEXT
+    /// blocks only and its own doc said so ("the capacity for a TEXT-ONLY
+    /// reply ... #240 inherits this boundary"). A reply with no blocks and a
+    /// full-size tool call computed 512, passed the pre-encode oversize check,
+    /// then REALLOCATED inside `encode_response_zeroizing` — leaving the
+    /// payload in freed heap, un-zeroized. Caught in review, not in the field.
+    #[test]
+    fn a_widest_legal_tool_call_reply_encodes_without_growing() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
+        };
+        let cap = reply_capacity(&reply);
+        let r = maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+        };
+        let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
+        assert_eq!(
+            buf.capacity(),
+            cap,
+            "encode grew the buffer — realloc leaves an un-zeroized copy of the \
+             tool-call payload in freed heap"
+        );
+    }
+
+    /// `Empty` now means BOTH lists empty. A reply that is only tool calls is
+    /// legitimate and must not be refused as empty.
+    #[test]
+    fn a_tool_call_only_reply_is_not_empty() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![tc(16)],
+        };
+        assert_eq!(admitted_reply(&reply), Ok(()));
+        assert_eq!(
+            admitted_reply(&maknae_proto::PromptReply { blocks: vec![], tool_calls: vec![] }),
+            Err(ReplyRefusal::Empty),
+        );
+    }
+
+    /// The existing text-only rule on `blocks` is untouched by the new field.
+    #[test]
+    fn a_reply_whose_blocks_are_non_text_is_still_nontext() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![maknae_proto::ContentBlock::Image {
+                data: "x".into(),
+                mime_type: "image/png".into(),
+            }],
+            tool_calls: vec![tc(16)],
+        };
+        assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::NonText));
+    }
+
+    /// An over-bound tool call is refused BEFORE anything is encoded.
+    #[test]
+    fn a_tool_call_over_the_arg_bound_is_refused_before_encoding() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1)],
+        };
+        assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::ToolCallUnacceptable));
+    }
+
     use super::*;
     use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressAudit, EgressStatus};
     use maknae_proto::{ContentBlock, SecretText};
@@ -345,7 +466,7 @@ mod tests {
         ) -> Result<EgressReply, EgressFailure> {
             self.calls.lock().unwrap().push("send");
             Ok(EgressReply {
-                reply: maknae_proto::PromptReply {
+                reply: maknae_proto::PromptReply { tool_calls: vec![],
                     blocks: vec![text("ok")],
                 },
             })
@@ -537,7 +658,7 @@ mod tests {
             vec![text(&"y".repeat(70_000))],
             (0..50).map(|i| text(&"z".repeat(i * 100))).collect(),
         ] {
-            let reply = maknae_proto::PromptReply {
+            let reply = maknae_proto::PromptReply { tool_calls: vec![],
                 blocks: blocks.clone(),
             };
             let cap = reply_capacity(&reply);
@@ -568,7 +689,7 @@ mod tests {
         }
         // The non-text arm of reply_text_length is still a region: it contributes nothing.
         assert_eq!(
-            reply_text_length(&maknae_proto::PromptReply {
+            reply_text_length(&maknae_proto::PromptReply { tool_calls: vec![],
                 blocks: vec![
                     text("ab"),
                     ContentBlock::ResourceLink {
@@ -580,7 +701,7 @@ mod tests {
             2
         );
         assert_eq!(
-            reply_capacity(&maknae_proto::PromptReply { blocks: vec![] }),
+            reply_capacity(&maknae_proto::PromptReply { tool_calls: vec![], blocks: vec![] }),
             crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
         // EXACT arithmetic on a multi-block reply: `buf.capacity() == cap` above
@@ -590,7 +711,7 @@ mod tests {
         // re-kills the other operator mutants; an over-estimate is a real
         // defect, it refuses replies that fit.
         assert_eq!(
-            reply_capacity(&maknae_proto::PromptReply {
+            reply_capacity(&maknae_proto::PromptReply { tool_calls: vec![],
                 blocks: vec![text("abc"), text("de")],
             }),
             5 + 2 * REPLY_BLOCK_ENVELOPE + crate::handler::FRAME_ENVELOPE_MARGIN as usize
@@ -599,16 +720,16 @@ mod tests {
 
     #[test]
     fn a_reply_is_admitted_only_when_text_only_and_non_empty_and_the_refusal_is_named() {
-        let ok = maknae_proto::PromptReply {
+        let ok = maknae_proto::PromptReply { tool_calls: vec![],
             blocks: vec![text("a"), text("b")],
         };
         assert_eq!(admitted_reply(&ok), Ok(()));
         assert_eq!(
-            admitted_reply(&maknae_proto::PromptReply { blocks: vec![] }),
+            admitted_reply(&maknae_proto::PromptReply { tool_calls: vec![], blocks: vec![] }),
             Err(ReplyRefusal::Empty)
         );
         assert_eq!(
-            admitted_reply(&maknae_proto::PromptReply {
+            admitted_reply(&maknae_proto::PromptReply { tool_calls: vec![],
                 blocks: vec![
                     text("a"),
                     ContentBlock::Image {
