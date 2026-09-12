@@ -9,9 +9,10 @@
 //!
 //! **Why the parser lives here rather than in the binary.** Both processes
 //! read this file — `maknaed` validates every registered `key_vault_path`
-//! against the prefix at BOOT, `maknae-egress` validates the frame's path at
-//! USE — and two parsers over one file is the failure that created
-//! `maknae-io`. One parser, two callers.
+//! against the prefix at BOOT (`maknae-kernel`'s `egress_bounds_boot_gate`),
+//! `maknae-egress` validates the frame's path at USE (`handle::decide`) — and
+//! two parsers over one file is the failure that created `maknae-io`. One
+//! parser, two callers.
 //!
 //! The prefix is **not a secret**: `maknaed`'s Vault policy does not grant the
 //! read, so nothing is protected by hiding it. It lives beside the `provider:`

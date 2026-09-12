@@ -2973,6 +2973,19 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // Cooky's only backend is `Unavailable`; #240 supplies the real one.
     // #240a D1: the kernel carries the RESOLVED record, not just the name —
     // egress parses no registry and so cannot drift from this view of it.
+    // #240a D5-E: a registered provider whose Vault path sits outside the
+    // deputy's declared grant must not boot. The deputy re-checks the same
+    // thing per request, but this is the more valuable half — it catches the
+    // operator's typo before anything runs, instead of turning it into a
+    // confusing refusal on a live request.
+    let egress_bounds = boot.provider().and_then(|_| {
+        maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE)).ok()
+    });
+    if let Err(e) =
+        crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
+    {
+        return Err(RunError::Other(format!("refusing to start: {e}")));
+    }
     let provider = Arc::new(boot.provider().cloned());
     let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(

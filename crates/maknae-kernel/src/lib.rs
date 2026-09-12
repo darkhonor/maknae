@@ -20,7 +20,9 @@ mod posture;
 mod run;
 pub use authz::*;
 pub use boot::{boot, BootConfig};
-pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
+pub use boot_gate::{
+    authz_boot_gate, egress_bounds_boot_gate, AuthzBootRefusal, EgressBoundsRefusal,
+};
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
 pub use egress::{

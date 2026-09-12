@@ -105,6 +105,70 @@ impl std::fmt::Display for SiemOffloadUnsupported {
 /// `AuditConfig.siem == Some(_)` unreachable at runtime, stranding the
 /// `document.rs` disclosure-mask logic the key is retained for (operator ruling
 /// 2026-09-05: the key stays, reserved for #223). Parse normally; refuse here.
+/// Why a registered provider's Vault path is not startable.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EgressBoundsRefusal {
+    /// A provider is registered but the deputy's grant is not declared. The
+    /// content path exists with no stated bound on it, so the daemon refuses.
+    Undeclared(String),
+    /// The registered path sits outside the prefix the deputy's Vault policy
+    /// grants. Discovering this at BOOT is the point: the alternative is a
+    /// successful start and a refusal on the first live request, long after
+    /// the operator's typo.
+    OutsideBounds { path: String, prefix: String },
+}
+
+impl std::fmt::Display for EgressBoundsRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EgressBoundsRefusal::Undeclared(e) => write!(
+                f,
+                "a provider is registered but {} could not be read: {e}",
+                maknae_config::EGRESS_BOUNDS_FILE
+            ),
+            EgressBoundsRefusal::OutsideBounds { path, prefix } => write!(
+                f,
+                "registered provider key_vault_path '{path}' is outside the egress grant prefix '{prefix}'"
+            ),
+        }
+    }
+}
+
+/// Validate the registered provider against the deputy's declared bounds, at
+/// boot (#240a D5-E).
+///
+/// PURE: the caller loads. The bounds file is root-owned, so a loading gate
+/// could not be unit-tested at all — the same `secret_io`/`secret_source`
+/// split the crate uses elsewhere, applied to a boot decision.
+///
+/// No provider registered means no content can leave and nothing to check.
+/// With one registered, the bounds file MUST exist and MUST contain the
+/// provider's path: the deputy validates the same thing again at use, but the
+/// boot check is the more valuable half, because it catches the operator's
+/// typo before anything runs rather than turning it into a confusing refusal
+/// on a live request.
+pub fn egress_bounds_boot_gate(
+    provider: Option<&maknae_config::ProviderConfig>,
+    bounds: Option<&maknae_config::EgressBounds>,
+) -> Result<(), EgressBoundsRefusal> {
+    let Some(p) = provider else {
+        return Ok(());
+    };
+    let Some(b) = bounds else {
+        return Err(EgressBoundsRefusal::Undeclared(format!(
+            "{} is absent or unreadable",
+            maknae_config::EGRESS_BOUNDS_FILE
+        )));
+    };
+    if !maknae_config::path_is_within_prefix(&p.key_vault_path, &b.key_vault_path_prefix) {
+        return Err(EgressBoundsRefusal::OutsideBounds {
+            path: p.key_vault_path.clone(),
+            prefix: b.key_vault_path_prefix.clone(),
+        });
+    }
+    Ok(())
+}
+
 pub fn audit_offload_boot_gate(
     cfg: &maknae_config::AuditConfig,
 ) -> Result<(), SiemOffloadUnsupported> {
@@ -116,6 +180,99 @@ pub fn audit_offload_boot_gate(
 
 #[cfg(test)]
 mod tests {
+    // ---- #240a D5-E: the egress bounds boot gate -------------------------
+
+    fn provider(key_vault_path: &str) -> maknae_config::ProviderConfig {
+        maknae_config::ProviderConfig {
+            name: "openai".into(),
+            endpoint: "https://api.example.test/v1".into(),
+            model: "m".into(),
+            key_vault_path: key_vault_path.into(),
+        }
+    }
+
+    fn bounds(prefix: &str) -> maknae_config::EgressBounds {
+        maknae_config::EgressBounds {
+            key_vault_path_prefix: prefix.into(),
+        }
+    }
+
+    /// No provider means no content can leave: nothing to bound, nothing to
+    /// refuse. The gate must not invent a requirement where there is no
+    /// egress path at all.
+    #[test]
+    fn no_registered_provider_needs_no_bounds() {
+        assert_eq!(super::egress_bounds_boot_gate(None, None), Ok(()));
+        assert_eq!(
+            super::egress_bounds_boot_gate(None, Some(&bounds("secret/data/x"))),
+            Ok(())
+        );
+    }
+
+    /// A registered provider inside the declared grant starts.
+    #[test]
+    fn a_registered_provider_within_the_grant_boots() {
+        assert_eq!(
+            super::egress_bounds_boot_gate(
+                Some(&provider("secret/data/maknae/providers/openai")),
+                Some(&bounds("secret/data/maknae/providers")),
+            ),
+            Ok(())
+        );
+    }
+
+    /// THE gate. A path outside the grant refuses at BOOT rather than on the
+    /// first live request — and a sibling that merely begins with the prefix
+    /// is outside it.
+    #[test]
+    fn a_registered_provider_outside_the_grant_refuses_to_boot() {
+        for bad in [
+            "secret/data/other/openai",
+            "secret/data/maknae/providers-evil/openai",
+        ] {
+            match super::egress_bounds_boot_gate(
+                Some(&provider(bad)),
+                Some(&bounds("secret/data/maknae/providers")),
+            ) {
+                Err(super::EgressBoundsRefusal::OutsideBounds { path, prefix }) => {
+                    assert_eq!(path, bad);
+                    assert_eq!(prefix, "secret/data/maknae/providers");
+                }
+                other => panic!("expected a boot refusal for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    /// A registered provider with NO declared bounds refuses: a content path
+    /// exists with no stated bound on it. Fail closed, never fail open.
+    #[test]
+    fn a_registered_provider_with_undeclared_bounds_refuses_to_boot() {
+        match super::egress_bounds_boot_gate(
+            Some(&provider("secret/data/maknae/providers/openai")),
+            None,
+        ) {
+            Err(super::EgressBoundsRefusal::Undeclared(m)) => {
+                assert!(m.contains(maknae_config::EGRESS_BOUNDS_FILE) || !m.is_empty())
+            }
+            other => panic!("expected an undeclared-bounds refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_refusals_render_actionably() {
+        assert!(
+            super::EgressBoundsRefusal::Undeclared("no such file".into())
+                .to_string()
+                .contains("registered")
+        );
+        assert!(super::EgressBoundsRefusal::OutsideBounds {
+            path: "a/b".into(),
+            prefix: "c/d".into()
+        }
+        .to_string()
+        .contains("outside the egress grant prefix"));
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

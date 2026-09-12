@@ -38,6 +38,29 @@ fn io(e: impl std::fmt::Display) -> ServeError {
     ServeError::Io(e.to_string())
 }
 
+/// Read one length-prefixed body, ZEROIZING from allocation.
+///
+/// The return type is the property: this buffer holds the prompt in plaintext,
+/// and the `SecretText` fields decoded out of it wipe their OWN allocations
+/// without ever touching this original serialized copy. Wrapping at allocation
+/// — rather than after a successful decode — is what covers the error paths: a
+/// truncated read, an over-cap declaration, or a failed decode all drop it the
+/// same way. Matches `maknae_proto::read_frame_zeroizing`.
+///
+/// The length is checked BEFORE the allocation: a four-byte prefix must not be
+/// able to make the deputy reserve four gigabytes.
+fn read_body_zeroizing(stream: &mut UnixStream) -> Result<zeroize::Zeroizing<Vec<u8>>, ServeError> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).map_err(io)?;
+    let n = u32::from_be_bytes(len) as usize;
+    if n > MAX_REQUEST_FRAME_BYTES {
+        return Err(ServeError::OversizeFrame(n));
+    }
+    let mut body = zeroize::Zeroizing::new(vec![0u8; n]);
+    stream.read_exact(&mut body).map_err(io)?;
+    Ok(body)
+}
+
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
 pub fn serve_one(
     mut stream: UnixStream,
@@ -50,14 +73,7 @@ pub fn serve_one(
         return Err(ServeError::WrongPeer);
     }
 
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len).map_err(io)?;
-    let n = u32::from_be_bytes(len) as usize;
-    if n > MAX_REQUEST_FRAME_BYTES {
-        return Err(ServeError::OversizeFrame(n));
-    }
-    let mut body = vec![0u8; n];
-    stream.read_exact(&mut body).map_err(io)?;
+    let body = read_body_zeroizing(&mut stream)?;
 
     let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
     let reply = decide(&req, bounds).map_err(ServeError::Refused)?;
@@ -257,5 +273,28 @@ mod tests {
             }
         }
         h.join().unwrap();
+    }
+
+    /// The receive buffer is `Zeroizing` FROM ALLOCATION, not after decode.
+    /// This binding is the regression guard: if `read_body_zeroizing` is ever
+    /// changed to hand back a plain `Vec<u8>`, the prompt's serialized copy
+    /// would be left in freed heap and this stops compiling.
+    #[test]
+    fn the_receive_buffer_is_zeroizing_from_allocation() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let f = frame("secret/data/maknae/providers/openai");
+        let mut writer = a;
+        writer.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
+        writer.write_all(&f).unwrap();
+        let mut b = b;
+        let body: zeroize::Zeroizing<Vec<u8>> = read_body_zeroizing(&mut b).unwrap();
+        assert_eq!(&*body, &f[..]);
+        // And the over-cap refusal happens before any allocation on this path.
+        let (mut c, mut d) = UnixStream::pair().unwrap();
+        c.write_all(&u32::MAX.to_be_bytes()).unwrap();
+        assert_eq!(
+            read_body_zeroizing(&mut d),
+            Err(ServeError::OversizeFrame(u32::MAX as usize))
+        );
     }
 }
