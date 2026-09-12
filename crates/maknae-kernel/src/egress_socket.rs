@@ -122,7 +122,13 @@ impl Egress for SocketEgress {
                 self.max_frame_bytes
             )));
         }
-        let mut body = vec![0u8; n];
+        // ZEROIZING from allocation, not after decode. The decoded `SecretText`
+        // fields wipe their OWN allocations; they do not touch this original
+        // serialized copy, which holds the provider's reply in plaintext. The
+        // wrapper covers the error paths too — a truncated read or a failed
+        // decode drops this buffer just the same. Matches
+        // `maknae_proto::read_frame_zeroizing`.
+        let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
         s.read_exact(&mut body).map_err(Self::transport)?;
         let reply = decode_egress_frame_reply(&body).map_err(Self::transport)?;
         Ok(EgressReply { reply: reply.reply })

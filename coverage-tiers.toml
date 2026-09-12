@@ -134,6 +134,14 @@ files = [
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
+  # #240a: the shared bounds parser and its CONTAINMENT check. A bare
+  # `starts_with` admits `providers-evil/key` under a `providers` prefix — a
+  # malformed or hostile registry entry naming a Vault path outside the
+  # deputy's grant. Both maknaed (at boot) and the deputy (at use) decide on it.
+  "crates/maknae-config/src/bounds.rs",
+  # #240a: the deputy's decision — bounds containment and shape admission, and
+  # the absence of any path by which it could chain to another call.
+  "bins/maknae-egress/src/handle.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
@@ -244,6 +252,10 @@ files = [
   # Vault key path on the wire to an unauthenticated peer, and the test failed
   # on the byte count.
   "crates/maknae-kernel/src/egress_socket.rs",
+  # #240a: the deputy's side of the same transport, tiered for the same reason
+  # — socket I/O, with the DECISION in handle.rs (T1) and the peer-identity
+  # check in maknae-vault's peer_identity.rs (T1).
+  "bins/maknae-egress/src/serve.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -289,6 +301,18 @@ command = "bash ci/gates/coverage-tiers.sh --root .  # via .github/workflows/ci.
 [[t3]]
 path = "crates/maknae-plane/src/lib.rs"
 why = "module declarations and re-exports only; no production regions of its own — same treatment as maknae-io/src/lib.rs"
+
+[[t3]]
+path = "bins/maknae-egress/src/listen.rs"
+why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
+
+[[t3]]
+path = "crates/maknae-config/src/bounds_io.rs"
+why = "opens a ROOT-owned artifact through maknae-io; no unit test can create one. The parser and the containment check are pure and T1 in bounds.rs — the secret_io/secret_source split"
+
+[[t3]]
+path = "bins/maknae-egress/src/main.rs"
+why = "thin main: arg parse + bounds load + uid resolve + socket acquire; every decision it makes is fail-closed exit-1, and the behaviour lives in handle.rs (T1), serve.rs and listen.rs (T2) — same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

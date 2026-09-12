@@ -19,6 +19,7 @@ members = [
   "crates/maknae-subject-ctx",
   "crates/maknae-subject-ctx-mint",
   "crates/maknae-vault",
+  "bins/maknae-egress",
   "bins/maknaed",
   "bins/maknae",
   "bins/maknae-spifc",
