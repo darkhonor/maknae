@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.maknae.maknaed</string>
+
+  <!-- maknaed takes NO flags: bins/maknaed/src/main.rs:16 reads argv[1] as the
+       CONFIG DIRECTORY (default /etc/maknae). Passed explicitly so the unit is
+       self-describing. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/maknaed</string>
+    <string>/etc/maknae</string>
+  </array>
+
+  <!-- systemd User=_maknae. GroupName is the PRIMARY group only; launchd has no
+       supplementary-group key and macOS needs none — the runtime directory's
+       `maknae` group makes the socket born group-correct under BSD inheritance
+       (spec D1), so there is NO on-disk cross-membership here. That is tighter
+       than the Linux profile, which still needs SupplementaryGroups=maknae. -->
+  <key>UserName</key>
+  <string>_maknae</string>
+  <key>GroupName</key>
+  <string>_maknae</string>
+
+  <!-- systemd Restart=on-failure + RestartSec=5s.
+       DELTA: launchd has no StartLimitBurst equivalent, so a fail-closed refusal
+       retries indefinitely where Linux latches `failed`. That is why postinstall
+       runs `launchctl disable` on a fresh install: /Library/LaunchDaemons is
+       scanned at boot (man launchd), so an unenrolled install would otherwise
+       become a permanent 5-second respawn loop from the next reboot. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- No journald equivalent. AU-3 records reach the unified log via the #222
+       syslog(3) appender; this catches failures BEFORE the audit sink opens (a
+       config parse error), which would otherwise be visible only as an exit code.
+       Deliberately NOT inside the 0700 audit dir: launchd opens it as root and
+       then drops privileges, so the daemon writes through an inherited fd it can
+       neither truncate nor reopen. -->
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/maknae/maknaed.err</string>
+
+  <key>WorkingDirectory</key>
+  <string>/</string>
+
+  <!-- `Standard`, NOT `Adaptive`. launchd.plist(5) defines Adaptive in terms of
+       activity over XPC connections; maknaed serves a Unix domain socket, so
+       Adaptive would leave it classified Background and throttle CPU and I/O on
+       the PDP's hot path. Standard is documented as equivalent to no ProcessType. -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+</dict>
+</plist>

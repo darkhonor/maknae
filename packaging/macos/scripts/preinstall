@@ -1,0 +1,253 @@
+#!/bin/bash
+# maknae preinstall — accounts, groups, directories, modes.
+# Mirrors packaging/deb/postinst and the rpm %pre/%files lifecycle, adapted to
+# macOS: dscl instead of sysusers/useradd, and a receipt because macOS keeps no
+# record of what a pkg created.
+#
+# CRITICAL (spec D1): /usr/local/var/run/maknae MUST be group `maknae`. macOS uses
+# BSD group inheritance, so the daemon's socket is BORN group-correct there and the
+# daemon's chown is a same-gid no-op that succeeds WITHOUT membership. Measured at
+# the chown(2) syscall on macOS 26.6.2: same-gid succeeds for a non-member owner,
+# different-gid is EPERM. If this directory is ever created without the `maknae`
+# group, the socket is born _maknae:_maknae, the chown becomes a CHANGE, it EPERMs,
+# and the daemon cannot bind. Do NOT add _maknae to `maknae` instead (spec §5.3
+# forbids on-disk cross-membership and macOS has no unit-scope alternative).
+set -euo pipefail
+
+# BSD `install -d` applies -m/-o/-g to the FINAL component only; intermediate
+# directories take 0777 & ~umask. Without this, /usr/local/var and
+# /usr/local/var/run inherit whatever umask the installer ran with, and the
+# operator can lose traverse to the socket.
+umask 022
+
+RECEIPT_DIR="/usr/local/var/db/maknae"
+RECEIPT="$RECEIPT_DIR/install-receipt.plist"
+
+group_exists() { dscl . -read "/Groups/$1" >/dev/null 2>&1; }
+user_exists()  { dscl . -read "/Users/$1"  >/dev/null 2>&1; }
+
+# Did WE create this record, or was it already here? uninstall.sh must never delete
+# an account it did not create, and an id match alone cannot tell the difference:
+# ensure_* returns the EXISTING id when the record is already there, so the receipt
+# would record an id we merely OBSERVED and the guard would match.
+CREATED_MAKNAE_U=false; CREATED_MAKNAE_G=false
+CREATED_EGRESS_U=false; CREATED_EGRESS_G=false
+CREATED_GROUP=false;    CREATED_USER=false
+
+# FIRST INSTALL or UPGRADE? macOS gives pkg scripts no equivalent of the deb's
+# `$2 = prior version`, so derive it here — preinstall runs BEFORE the payload and
+# before the receipt is rewritten, so pkgutil still reflects the PRIOR state.
+if pkgutil --pkg-info io.maknae.daemon >/dev/null 2>&1; then
+    INSTALL_KIND=upgrade
+else
+    INSTALL_KIND=fresh
+fi
+WAS_LOADED=false
+launchctl print "system/io.maknae.maknaed" >/dev/null 2>&1 && WAS_LOADED=true
+
+# Read a numeric id and REFUSE anything else: `dscl -read` prints "No such key: X"
+# on a malformed record, and `awk '{print $2}'` would emit "such" into the receipt.
+read_numeric() {
+    local out
+    out="$(dscl . -read "$1" "$2" 2>/dev/null | awk '{print $2}')"
+    case "$out" in
+        ''|*[!0-9]*)
+            # Diagnose rather than die mute: under `set -e` a bare `return 1` from
+            # inside a capture aborts the whole install with no message.
+            echo "maknae: $1 has no numeric $2 (got '${out}')" >&2
+            return 1 ;;
+        *) echo "$out" ;;
+    esac
+}
+
+# The TAKEN test uses /Search, not the local node: on an AD/LDAP-bound Mac — the
+# normal case in the estates this product targets — a directory account can already
+# hold an id in 400-499 that `dscl .` cannot see. Creates still go to the local node.
+id_taken() {
+    local key out; [ "$1" = "Users" ] && key="UniqueID" || key="PrimaryGroupID"
+    # Capture BEFORE testing, and fail CLOSED. Piping dscl straight into awk makes a
+    # directory-service error (AD unreachable — the exact estate /Search was chosen
+    # for) indistinguishable from "no match", and a contested id would look free.
+    out="$(dscl /Search -list "/$1" "$key" 2>/dev/null)" || {
+        echo "maknae: dscl /Search -list /$1 failed; refusing to allocate blind" >&2
+        return 0   # "taken" — fail closed
+    }
+    printf '%s\n' "$out" | awk -v want="$2" '$2==want {found=1} END {exit !found}'
+}
+
+# Allocate downward from 499. Apple's `_` accounts are contiguous to 308 and already
+# claim 441 (measured 2026-09-12), so a hardcoded id — the way maknae.sysusers pins
+# 992/990 on Linux — stakes a claim in a range Apple actively expands into.
+alloc_id() {
+    local kind="$1" i
+    for (( i=499; i>=400; i-- )); do
+        if ! id_taken "$kind" "$i"; then echo "$i"; return 0; fi
+    done
+    echo "maknae: no free $kind id in 400-499" >&2
+    return 1
+}
+
+ensure_group() {
+    local name="$1" realname="$2" gid
+    if group_exists "$name"; then read_numeric "/Groups/$name" PrimaryGroupID; return 0; fi
+    CREATED_GROUP=true
+    gid="$(alloc_id Groups)"
+    dscl . -create "/Groups/$name"
+    dscl . -create "/Groups/$name" PrimaryGroupID "$gid"
+    dscl . -create "/Groups/$name" RealName "$realname"
+    echo "$gid"
+}
+
+ensure_service_user() {
+    local name="$1" realname="$2" gid="$3" uid
+    if user_exists "$name"; then read_numeric "/Users/$name" UniqueID; return 0; fi
+    CREATED_USER=true
+    uid="$(alloc_id Users)"
+    dscl . -create "/Users/$name"
+    dscl . -create "/Users/$name" UniqueID "$uid"
+    dscl . -create "/Users/$name" PrimaryGroupID "$gid"
+    dscl . -create "/Users/$name" RealName "$realname"
+    dscl . -create "/Users/$name" UserShell /usr/bin/false
+    dscl . -create "/Users/$name" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/$name" IsHidden 1
+    dscl . -create "/Users/$name" Password '*'
+    echo "$uid"
+}
+
+# CREATED_* is set inside the helpers, so a helper must run in THIS shell — a $( )
+# subshell would discard the flag. Capture through mktemp, NOT a predictable /tmp
+# path: this runs as ROOT under `installer` and `>` follows symlinks, so a guessable
+# name in a world-writable directory is a root file-clobber primitive. That is the
+# class maknae-io exists to eliminate everywhere else; the installer gets no exemption.
+ID_TMP="$(mktemp -t maknae-install-id)"
+trap 'rm -f "$ID_TMP"' EXIT
+run_capture() { CREATED_GROUP=false; CREATED_USER=false; "$@" > "$ID_TMP"; }
+
+run_capture ensure_group maknae "Maknae operator group";        OPERATOR_GID="$(cat "$ID_TMP")"
+run_capture ensure_group _maknae "Maknae trust-plane daemon";   MAKNAE_GID="$(cat "$ID_TMP")";  CREATED_MAKNAE_G=$CREATED_GROUP
+run_capture ensure_group _maknae-egress "Maknae egress daemon"; EGRESS_GID="$(cat "$ID_TMP")";  CREATED_EGRESS_G=$CREATED_GROUP
+run_capture ensure_service_user _maknae "Maknae trust-plane daemon" "$MAKNAE_GID";   MAKNAE_UID="$(cat "$ID_TMP")"; CREATED_MAKNAE_U=$CREATED_USER
+run_capture ensure_service_user _maknae-egress "Maknae egress daemon" "$EGRESS_GID"; EGRESS_UID="$(cat "$ID_TMP")"; CREATED_EGRESS_U=$CREATED_USER
+
+# RECOVERY, not just detection. alloc_id re-reads the directory immediately after the
+# previous create; if opendirectoryd has not settled, two accounts can be handed the
+# same id, and two custody-bearing principals sharing a uid is an identity failure.
+# Without the retry, a re-run hits user_exists -> the same colliding ids -> exit 1
+# forever, with the install permanently wedged.
+if [ "$MAKNAE_UID" = "$EGRESS_UID" ] && [ "$CREATED_EGRESS_U" = true ]; then
+    echo "maknae: uid collision at $MAKNAE_UID; recreating _maknae-egress" >&2
+    dscl . -delete /Users/_maknae-egress || :
+    run_capture ensure_service_user _maknae-egress "Maknae egress daemon" "$EGRESS_GID"
+    EGRESS_UID="$(cat "$ID_TMP")"; CREATED_EGRESS_U=$CREATED_USER
+fi
+[ "$MAKNAE_UID" != "$EGRESS_UID" ] || { echo "maknae: _maknae and _maknae-egress still share uid $MAKNAE_UID" >&2; exit 1; }
+
+if [ "$MAKNAE_GID" = "$EGRESS_GID" ] && [ "$CREATED_EGRESS_G" = true ]; then
+    dscl . -delete /Groups/_maknae-egress || :
+    run_capture ensure_group _maknae-egress "Maknae egress daemon"
+    EGRESS_GID="$(cat "$ID_TMP")"; CREATED_EGRESS_G=$CREATED_GROUP
+fi
+
+# ALL THREE gids must differ. If OPERATOR_GID == MAKNAE_GID then /etc/maknae and
+# /etc/maknae/private — the daemon-only tier holding the posture marker — become
+# readable by every member of the OPERATOR group, and a mode check CANNOT catch it:
+# both names map to one gid and `stat -f %Sg` prints whichever getgrgid returns
+# first. A wrong control would ship looking correct.
+check_distinct() {   # $1=name $2=value $3=name $4=value
+    [ "$2" != "$4" ] || {
+        echo "maknae: $1 and $3 both resolved to gid $2 — refusing to install" >&2
+        echo "  (a shared operator/daemon gid would expose /etc/maknae/private to the operator group)" >&2
+        exit 1
+    }
+}
+check_distinct OPERATOR_GID "$OPERATOR_GID" MAKNAE_GID "$MAKNAE_GID"
+check_distinct OPERATOR_GID "$OPERATOR_GID" EGRESS_GID "$EGRESS_GID"
+check_distinct MAKNAE_GID   "$MAKNAE_GID"   EGRESS_GID "$EGRESS_GID"
+
+# --- directories (spec D9) --------------------------------------------------
+# NUMERIC ids, not names. `install(1)` resolves names through getpwnam/getgrnam via
+# opendirectoryd seconds after `dscl -create` — the same settling window alloc_id
+# guards. A miss is `install: unknown group maknae`, which exits 1 under `set -e`.
+install -d -m 0750 -o 0             -g "$MAKNAE_GID"   /etc/maknae
+install -d -m 0750 -o 0             -g "$MAKNAE_GID"   /etc/maknae/private
+install -d -m 0700 -o "$MAKNAE_UID" -g "$MAKNAE_GID"   /var/log/maknae
+install -d -m 0750 -o 0             -g "$MAKNAE_GID"   /usr/local/var/log/maknae
+install -d -m 0755 -o 0             -g 0               /usr/local/lib/maknae
+# THE D1 ROW: owner _maknae, group `maknae` (the OPERATOR group), mode 0750. The
+# group makes the socket born group-correct under BSD inheritance; the owner and
+# mode satisfy verify_parent_dir (socket.rs:11-34), which refuses to bind unless the
+# parent is owned by the daemon's euid and is not group/other-writable.
+install -d -m 0750 -o "$MAKNAE_UID" -g "$OPERATOR_GID" /usr/local/var/run/maknae
+install -d -m 0755 -o 0             -g 0               "$RECEIPT_DIR"
+
+# VERIFY the D1 row landed. BSD `install -d` exits 0 even when its chown FAILS
+# (measured: `install -d -g 99999 ...` prints "Operation not permitted" and still
+# returns 0, leaving the dir group wheel), so `set -e` does NOT guard this and the
+# one line the whole design rests on could silently be wrong.
+rt_got="$(stat -f '%u %g %Lp' /usr/local/var/run/maknae)"
+rt_want="$MAKNAE_UID $OPERATOR_GID 750"
+[ "$rt_got" = "$rt_want" ] || {
+    echo "maknae: runtime dir is '$rt_got', expected '$rt_want' — the socket would be" >&2
+    echo "  born with the wrong group and the daemon could not be reached. Refusing." >&2
+    exit 1
+}
+
+# Hand the install kind to postinstall (pkg scripts share no environment).
+printf '%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" > "$RECEIPT_DIR/.install-kind"
+
+# PRESERVE PROVENANCE ACROSS UPGRADES, BUT ONLY FOR THE SAME RECORD.
+# (PR #287 review, blocking findings 1 and 3 — the second corrects the first.)
+#
+# Finding 1: ensure_* returns early for an ALREADY-EXISTING record without setting
+# CREATED_*, so on an upgrade every flag computed above is `false`. Overwriting the
+# receipt with those would make the installer FORGET that it created these
+# accounts, and uninstall.sh — which gates deletion on CreatedByUs — would print
+# KEEP and leave `_maknae` and `_maknae-egress` behind forever.
+#
+# Finding 3: a BARE `prior OR new` fixes that and introduces something worse. If an
+# installer-created account is deleted and an ADMINISTRATOR recreates the same name
+# with a different id, an upgrade would pair the old `true` with the replacement's
+# NEW id — and uninstall.sh's id-match guard, comparing against that rewritten id,
+# would then DELETE THE ADMINISTRATOR'S ACCOUNT. The guard cannot catch it because
+# the receipt itself was rewritten to agree with the impostor. Reproduced: old rule
+# -> uid=450 CreatedByUs=true -> deletes; id-matched rule -> CreatedByUs=false.
+#
+# So the flag is sticky ONLY when the prior receipt's id equals the id observed
+# now. Re-numbering — by any cause — silently drops our ownership claim, which is
+# the fail-safe direction: we decline to delete something we cannot prove is ours.
+prior_val() {
+    [ -f "$RECEIPT" ] || { echo ""; return 0; }
+    plutil -extract "$1" raw -o - "$RECEIPT" 2>/dev/null || echo ""
+}
+sticky() {   # $1=newly_created  $2=prior flag key  $3=prior id key  $4=id observed now
+    local pf pid
+    [ "$1" = true ] && { echo true; return 0; }
+    pf="$(prior_val "$2")"; pid="$(prior_val "$3")"
+    if [ "$pf" = true ] && [ -n "$pid" ] && [ "$pid" = "$4" ]; then echo true; else echo false; fi
+}
+CREATED_MAKNAE_U="$(sticky "$CREATED_MAKNAE_U" MaknaeUIDCreatedByUs       MaknaeUID       "$MAKNAE_UID")"
+CREATED_MAKNAE_G="$(sticky "$CREATED_MAKNAE_G" MaknaeGIDCreatedByUs       MaknaeGID       "$MAKNAE_GID")"
+CREATED_EGRESS_U="$(sticky "$CREATED_EGRESS_U" MaknaeEgressUIDCreatedByUs MaknaeEgressUID "$EGRESS_UID")"
+CREATED_EGRESS_G="$(sticky "$CREATED_EGRESS_G" MaknaeEgressGIDCreatedByUs MaknaeEgressGID "$EGRESS_GID")"
+
+cat > "$RECEIPT" <<RECEIPT_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>MaknaeUID</key>                  <integer>${MAKNAE_UID}</integer>
+  <key>MaknaeGID</key>                  <integer>${MAKNAE_GID}</integer>
+  <key>MaknaeEgressUID</key>            <integer>${EGRESS_UID}</integer>
+  <key>MaknaeEgressGID</key>            <integer>${EGRESS_GID}</integer>
+  <key>MaknaeOperatorGID</key>          <integer>${OPERATOR_GID}</integer>
+  <key>MaknaeUIDCreatedByUs</key>       <${CREATED_MAKNAE_U}/>
+  <key>MaknaeGIDCreatedByUs</key>       <${CREATED_MAKNAE_G}/>
+  <key>MaknaeEgressUIDCreatedByUs</key> <${CREATED_EGRESS_U}/>
+  <key>MaknaeEgressGIDCreatedByUs</key> <${CREATED_EGRESS_G}/>
+</dict>
+</plist>
+RECEIPT_EOF
+chmod 0644 "$RECEIPT"
+plutil -lint "$RECEIPT" >/dev/null
+
+exit 0

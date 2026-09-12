@@ -106,6 +106,14 @@ Notes on apparent matches:
 - `OPENSSL_memory_*` weak symbols and `/aws-lc/crypto/...` strings appear in `maknaed` and `maknae`. Those are from AWS-LC's BoringSSL/OpenSSL-derived internal naming, not from OS OpenSSL linkage.
 - `nix` is syscall binding surface for peer credentials, ownership, and filesystem operations. It is not crypto.
 - `security-framework = "3"` is a macOS-only CLI enrollment dependency. The current implementation documents Keychain/SEP stubs as fail-closed for SecretID storage; this record did not build or link a macOS artifact.
+
+> **ADDENDUM 2026-09-12 (#227) — the macOS artifact has now been built and linked, and it does NOT share this record's linkage finding.** The assessment above is Linux-only by its own statement, and its conclusion *"No production **Linux** release binary dynamically links…"* remains true as written. A reader must not generalise it to macOS, because the macOS artifact **dynamically links the AWS-LC FIPS module by design and by upstream requirement**. Measured on Wrathion (macOS 26.6.2, Apple Silicon): `otool -L target/debug/maknaed` reports `@rpath/libaws_lc_fips_0_13_17_crypto.dylib`, and `otool -l` reports **zero `LC_RPATH`**.
+>
+> This is upstream's mandated configuration, not drift: `aws-lc/CMakeLists.txt:842` refuses a static FIPS build outside Linux (verified — `AWS_LC_FIPS_SYS_STATIC=1 cargo build --target aarch64-apple-darwin` fails on that line), and `aws-lc-fips-sys/README.md:143` calls a shared `libcrypto` *"the required form for FIPS on macOS and Windows"*.
+>
+> **Two consequences for supply-chain visibility specifically, which is this record's subject:**
+> 1. **The validated module differs by platform.** Linux links the static module (CMVP **#5314**); macOS necessarily links the dynamic one (**#5298**). Any artifact inventory, SBOM narrative or SC-13 claim that names a single certificate across both platforms is wrong on one of them.
+> 2. **`ldd`-equivalent evidence does not transfer.** The Linux finding rests on `ldd` showing only libc/libm/libgcc/ld-linux. On macOS the correct instrument is `otool -L`, and a *clean* result there would mean the FIPS module is **missing**, not that it is absent by design. The macOS analogue of this record's finding is "the only non-system dylib is the AWS-LC FIPS module, resolved by absolute install name" — and establishing that is owed once #227's packaging lands.
 - `openssl req ...` appears only in comments describing how fixed test CA fixtures were generated once. It is not a production runtime dependency.
 
 Conclusion:

@@ -1,0 +1,131 @@
+#!/bin/bash
+# maknae postinstall — config lifecycle, the audit sink, and the disabled default.
+set -euo pipefail
+
+DEFAULTS="/usr/local/share/maknae/defaults"
+ETC="/etc/maknae"
+AUDIT="/var/log/maknae/audit.jsonl"
+LABEL="io.maknae.maknaed"
+RECEIPT="/usr/local/var/db/maknae/install-receipt.plist"
+
+# NUMERIC ids. `install: unknown group <name>` exits 1 and this script runs under
+# `set -e`, so a name lookup that misses the opendirectoryd cache seconds after
+# preinstall's dscl -create would abort the whole install.
+MUID="$(plutil -extract MaknaeUID raw -o - "$RECEIPT" 2>/dev/null || echo 0)"
+MGID="$(plutil -extract MaknaeGID raw -o - "$RECEIPT" 2>/dev/null || echo 0)"
+
+# --- config: FIRST-INSTALL-ONLY, the conffile equivalent ---------------------
+# macOS has no dpkg `conffiles` / rpm `%config(noreplace)`. A .pkg payload ALWAYS
+# overwrites, so the shipped defaults are staged OUTSIDE /etc and copied in only
+# when absent. `maknae enroll` rewrites maknae.yaml in place with the real
+# deployment id, vault addr, transport.socket_path and the principal block
+# (bins/maknae/src/enroll/mod.rs:1428-1436); authz.yaml carries the operator's DAC
+# policy. Overwriting either on upgrade would silently de-enroll the host.
+# FAIL CLOSED on the load-bearing controls (PR #287 review, blocking finding 2).
+# The original form wrapped every ownership/mode repair and both chflags calls in
+# `2>/dev/null || :` with NO verification, so a failed chown could leave the daemon
+# unable to read its config, and a failed `chflags uappnd` would silently remove
+# the append-only audit protection the isolation contract CLAIMS with a check —
+# while the installer still reported success. preinstall already verifies its
+# load-bearing runtime-directory row (BSD `install -d` returns 0 even when its
+# chown fails); this applies the same discipline here.
+verify() {   # $1=what  $2=expected  $3=actual
+    [ "$2" = "$3" ] || {
+        echo "maknae: $1 — expected '$2', got '$3'" >&2
+        echo "  Refusing to report a successful install with this control unestablished." >&2
+        exit 1
+    }
+}
+
+install -d -m 0750 -o 0 -g "$MGID" "$ETC"
+for f in authz.yaml maknae.yaml; do
+    if [ ! -e "$ETC/$f" ]; then
+        install -m 0640 -o 0 -g "$MGID" "$DEFAULTS/$f" "$ETC/$f"
+    fi
+done
+# Re-assert ownership on EVERY install: the loader fail-closes on any world bit,
+# and the daemon runs as _maknae and needs group-read (root:_maknae 0640, spec
+# §4.6 — the rpm gets this from %attr).
+chown "0:$MGID" "$ETC" "$ETC/private" 2>/dev/null || :
+chmod 0750      "$ETC" "$ETC/private" 2>/dev/null || :
+chown "0:$MGID" "$ETC/authz.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
+chmod 0640      "$ETC/authz.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
+# VERIFY the end state rather than trusting the calls. If the daemon cannot read
+# its own config it fails closed at boot with no useful diagnostic, so a wrong
+# mode here surfaces as a mysterious runtime refusal rather than an install error.
+for d in "$ETC" "$ETC/private"; do
+    verify "$d ownership/mode" "0 $MGID 750" "$(stat -f '%u %g %Lp' "$d")"
+done
+for f in "$ETC/authz.yaml" "$ETC/maknae.yaml"; do
+    verify "$f ownership/mode" "0 $MGID 640" "$(stat -f '%u %g %Lp' "$f")"
+done
+
+# --- audit sink -------------------------------------------------------------
+if [ ! -e "$AUDIT" ]; then
+    install -m 0640 -o "$MUID" -g "$MGID" /dev/null "$AUDIT"
+else
+    # A RETAINED trail from a previous install (uninstall.sh keeps /var/log/maknae
+    # deliberately) carries the OLD numeric owner, and ids are allocated
+    # dynamically (D8) so a reinstall can hand out different ones. Left alone, the
+    # daemon fails closed on audit open. Clear append-only, re-own, re-set.
+    chflags nouappnd "$AUDIT" 2>/dev/null || :
+    chown "$MUID:$MGID" "$AUDIT" 2>/dev/null || :
+    chmod 0640 "$AUDIT" 2>/dev/null || :
+fi
+# Append-only at the FILE level only — never the directory (a +a dir blocks the
+# installer from managing /var/log/maknae on upgrade, the same reason the Linux
+# packaging refuses it).
+#
+# uappnd, not sappnd: macOS runs securelevel 0, where the SYSTEM append-only flag
+# clears only in single-user mode — not survivable for an upgradeable package.
+# Whether sappnd is even settable here is PHASE 2's measurement; the isolation
+# contract records whichever holds.
+chflags uappnd "$AUDIT" 2>/dev/null || :
+
+# VERIFY ownership/mode AND that the append-only flag actually took. The isolation
+# contract's macOS "Audit protection" row claims `chflags uappnd` with a check; a
+# silently-failed chflags makes that claim false while the install reports success,
+# which is precisely the fail-open class this project refuses elsewhere.
+verify "$AUDIT ownership/mode" "$MUID $MGID 640" "$(stat -f '%u %g %Lp' "$AUDIT")"
+case "$(stat -f '%Sf' "$AUDIT")" in
+    *uappnd*) : ;;
+    *) echo "maknae: $AUDIT is not append-only (flags: '$(stat -f '%Sf' "$AUDIT")')" >&2
+       echo "  The isolation contract claims chflags uappnd as the macOS audit-protection" >&2
+       echo "  control. Refusing to report a successful install without it." >&2
+       exit 1 ;;
+esac
+
+# --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------
+# `man launchd` FILES: /Library/LaunchDaemons = "System-wide daemons provided by
+# the administrator" — it is SCANNED AT BOOT. Merely declining to `bootstrap` is
+# therefore NOT the macOS equivalent of the rpm's preset-disabled default: with
+# RunAtLoad + KeepAlive{SuccessfulExit:false} and no StartLimitBurst equivalent, a
+# fresh UNENROLLED install would become a permanent 5-second respawn loop from the
+# next reboot. `launchctl disable` writes the external disabled database
+# (launchd.plist(5) Disabled: "this state is kept externally"), which survives
+# reboot and is reversed by `launchctl enable`.
+#
+# FRESH ONLY. packaging/deb/postinst:64-80 draws exactly this line: "DO NOT
+# auto-enable or start on fresh install", then "On UPGRADE ... restart ONLY if the
+# daemon was running ... PRESERVING the operator's enabled/running state."
+# Disabling unconditionally would write a reboot-surviving disable on every
+# upgrade, so an enrolled, enabled, running host would keep serving until its next
+# reboot and then silently never start again.
+#
+# Operator flow: install -> `sudo maknae enroll` ->
+# `sudo launchctl enable system/io.maknae.maknaed` ->
+# `sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist`.
+KIND_FILE="/usr/local/var/db/maknae/.install-kind"
+KIND="$(sed -n 1p "$KIND_FILE" 2>/dev/null || echo fresh)"
+WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
+rm -f "$KIND_FILE"
+if [ "$KIND" = "fresh" ]; then
+    launchctl disable "system/$LABEL" 2>/dev/null || :
+elif [ "$WAS_LOADED" = "true" ]; then
+    # Upgrade of a running daemon: the payload replaced the file but the live
+    # process still holds the old inode. Restart it onto the new binary, exactly as
+    # the deb's `systemctl try-restart` does.
+    launchctl kickstart -k "system/$LABEL" 2>/dev/null || :
+fi
+
+exit 0

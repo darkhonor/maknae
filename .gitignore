@@ -32,3 +32,4 @@ __pycache__/
 # would override them.
 !AGENTS.md
 !CLAUDE.md
+/dist
