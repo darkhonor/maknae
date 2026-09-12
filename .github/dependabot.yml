@@ -64,6 +64,14 @@ updates:
       # 4.x certificate; the watch is #259.
       - dependency-name: "aws-lc-rs"
         versions: [">=1.18.0"]
+      # rcgen 0.14.10 raises its OWN aws-lc-rs requirement to ^1.18, so it is
+      # the same control reached from the other side: it cannot resolve against
+      # the bound above, and a Dependabot PR proposing it can only ever be a red
+      # build. crates/maknae-vault/Cargo.toml pins rcgen <0.14.10 and carries
+      # the measured resolver error. Lift both together when NIST issues the
+      # AWS-LC-FIPS 4.x certificate; the watch is #259.
+      - dependency-name: "rcgen"
+        versions: [">=0.14.10"]
 
   # ---------------------------------------------------------------------------
   # GitHub Actions
