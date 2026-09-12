@@ -201,12 +201,32 @@ pub trait PasswdLookup {
 /// rule: `getpwuid($SUDO_UID)`, never `$HOME`).
 pub struct RealPasswd;
 
+/// Resolve a passwd home directory to its canonical form (#216), falling back to
+/// the value passwd gave when it cannot be resolved.
+///
+/// **This is the ENROLL half of the 2026-09-12 ruling, and it is deliberately not
+/// load-bearing.** The daemon canonicalises `principal.home` itself, in
+/// `authz_boot_gate`, and never depends on this — `bins/maknae` is the untrusted
+/// binary (AGENTS.md core principle 1), so the trust plane resolving its own
+/// confinement root is the control. What this buys is agreement: enroll consumes
+/// the same value for its OWN writes — the `<home>/.maknae` CLI directory and
+/// `grant_read_path_access`'s `_maknae` read ACL / AppArmor local include — and
+/// resolving here keeps those grants on the same form the daemon will confine to.
+///
+/// The fallback is intentional. An unresolvable home is not enroll's to refuse:
+/// it writes what passwd said, and the daemon refuses at boot with
+/// `UnresolvableHome`, which is the enforcement point and reports it in one
+/// auditable place rather than two.
+fn canonical_home(dir: PathBuf) -> PathBuf {
+    maknae_io::resolve_dir(&dir).unwrap_or(dir)
+}
+
 impl PasswdLookup for RealPasswd {
     fn lookup(&self, uid: u32) -> Option<(String, PathBuf, u32)> {
         let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
             .ok()
             .flatten()?;
-        Some((user.name, user.dir, user.gid.as_raw()))
+        Some((user.name, canonical_home(user.dir), user.gid.as_raw()))
     }
 }
 
@@ -1604,6 +1624,42 @@ mod tests {
             !args.iter().any(|a| a == "has-tpm2"),
             "has-tpm2 verb is v253+, absent on el9 (#93)"
         );
+    }
+
+    // ---- canonical_home (#216) ---------------------------------------------
+
+    /// #216, the ENROLL half of the 2026-09-12 ruling. The daemon canonicalises
+    /// `principal.home` itself and never depends on this — `bins/maknae` is the
+    /// untrusted binary. But enroll consumes the same value for its OWN writes
+    /// (the `<home>/.maknae` CLI dir and the `_maknae` read-ACL / AppArmor
+    /// grant), so resolving here keeps those grants on the same form the daemon
+    /// will confine to, instead of one the passwd entry merely spelled.
+    #[test]
+    fn canonical_home_resolves_a_symlinked_passwd_dir() {
+        let base = std::env::temp_dir().join(format!("ch_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let got = canonical_home(link.clone());
+        let want = canonical_home(real.clone());
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(got, want, "the link and the real dir must agree");
+        assert_ne!(got, link, "the link's own form must not survive");
+    }
+
+    /// Enroll does NOT hard-fail on an unresolvable home: it writes what passwd
+    /// said, and the DAEMON refuses at boot with `UnresolvableHome`, which is the
+    /// enforcement point and says so in one auditable place. Falling back here
+    /// keeps enroll's existing behaviour for a home that does not exist yet.
+    #[test]
+    fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
+        let missing = std::env::temp_dir().join(format!("ch_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert_eq!(canonical_home(missing.clone()), missing);
     }
 
     // ---- preflight_check (Step 2 TDD) --------------------------------------

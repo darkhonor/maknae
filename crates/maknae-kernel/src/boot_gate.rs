@@ -31,6 +31,8 @@ pub enum AuthzBootRefusal {
     /// The PDP refused construction (hardened policy load or bindings
     /// semantics) — the inner rendering carries the reason.
     Construct(AuthzBasicError),
+    /// `principal.home` could not be resolved to its canonical form (#216).
+    UnresolvableHome(String),
 }
 
 impl std::fmt::Display for AuthzBootRefusal {
@@ -41,6 +43,10 @@ impl std::fmt::Display for AuthzBootRefusal {
                 "config has no `principal` section: the daemon cannot authorize anyone (enroll first)"
             ),
             AuthzBootRefusal::Construct(e) => write!(f, "{e}"),
+            AuthzBootRefusal::UnresolvableHome(m) => write!(
+                f,
+                "principal.home could not be resolved to its canonical form: {m}"
+            ),
         }
     }
 }
@@ -71,6 +77,31 @@ fn authz_boot_gate_with(
     construct: impl FnOnce(std::path::PathBuf, Principal) -> Result<BasicAuthorizer, AuthzBasicError>,
 ) -> Result<(BasicAuthorizer, Principal), AuthzBootRefusal> {
     let principal = principal.ok_or(AuthzBootRefusal::MissingPrincipal)?;
+    // #216 -- THE ONE PLACE THE CANONICAL FORM OF `principal.home` IS ESTABLISHED.
+    // It must land here, at or above `Principal`, and never at a call site: the
+    // value feeds FOUR consumers -- `handler::delegated_plan`'s confinement root
+    // (reached BOTH at decision time and again inside the read PEP), the `~`
+    // expansion every allow/deny glob is parsed against, and the boot anchor
+    // probe. Canonicalizing only some of them permits at decision and then dies
+    // in the PEP with a different record shape.
+    //
+    // Maintainer ruling 2026-09-12 (option B): BOOT canonicalizes, not enroll.
+    // `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so the
+    // trust plane must not depend on the CLI having written a canonical value --
+    // and enroll re-derives this from `getpwuid` VERBATIM on every run, so a
+    // hand-edit would not survive anyway. Enroll still canonicalizes for its own
+    // grant-writing; the daemon simply never relies on it.
+    //
+    // `resolve_dir` is the resolver `verify_delegated` uses to name a delegated
+    // descriptor, so the confinement root and the kernel-reported path agree by
+    // CONSTRUCTION rather than by assertion. `~` keeps working exactly as
+    // operators already write it -- it now expands from the resolved home, so a
+    // `/home -> /export/home`, autofs/NFS or macOS `/var`-rooted layout serves
+    // reads instead of denying every one of them fail-closed.
+    let home = maknae_io::resolve_dir(&principal.home).map_err(|e| {
+        AuthzBootRefusal::UnresolvableHome(format!("principal.home {:?}: {e}", principal.home))
+    })?;
+    let principal = Principal { home, ..principal };
     let authorizer = construct(config_dir.join("authz.yaml"), principal.clone())?;
     Ok((authorizer, principal))
 }
@@ -276,11 +307,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// #216: the gate now RESOLVES `principal.home` through the kernel, so the
+    /// home must exist — a fictional `/home/operator` is exactly the input the
+    /// gate is supposed to refuse. `temp_dir()` exists on every supported
+    /// platform (and on macOS is itself `/var`-rooted, so these tests run the
+    /// resolving path rather than skirting it).
     fn principal() -> Principal {
         Principal {
             name: "operator".into(),
             uid: 501,
-            home: "/home/operator".into(),
+            home: std::env::temp_dir(),
         }
     }
 
@@ -375,6 +411,129 @@ mod tests {
         let (_authorizer, pr) = got.expect("gate success arm");
         assert_eq!(pr.uid, 501, "the principal is returned alongside");
         assert_eq!(pr.name, "operator");
+    }
+
+    /// A config dir with a loadable hermetic policy, plus a real home and a
+    /// symlink pointing at it. Returns (config_dir, real_home, link_to_home).
+    fn symlinked_home_fixture(
+        tag: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("bg_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cfg = base.join("cfg");
+        let home = base.join("realhome");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            cfg.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            cfg.join("authz.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let link = base.join("linkhome");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        (cfg, home, link)
+    }
+
+    fn hermetic_seam(
+        path: std::path::PathBuf,
+        pr: Principal,
+    ) -> Result<maknae_authz_basic::BasicAuthorizer, AuthzBasicError> {
+        maknae_authz_basic::BasicAuthorizer::new_hermetic(
+            path,
+            pr,
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            },
+        )
+    }
+
+    /// #216 — the enrolled home is canonicalized ONCE, HERE, before the PDP is
+    /// built, so the `~` expansion in the policy (`authz.rs::PathGlob::parse`)
+    /// and the confinement root the PEP prefix-checks (`handler::delegated_plan`,
+    /// reached from BOTH `run.rs` decide and the read PEP) name the SAME form the
+    /// kernel reports for a delegated descriptor (`F_GETPATH` / `/proc/self/fd`).
+    ///
+    /// Maintainer ruling 2026-09-12, option B: **boot** canonicalizes, not enroll.
+    /// `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so the
+    /// trust plane must not depend on the CLI having written a canonical value —
+    /// and enroll re-derives `principal.home` from `getpwuid` verbatim on every run.
+    ///
+    /// The defect this pins: a home whose path traverses a symlink
+    /// (`/home -> /export/home`, autofs/NFS estates, any macOS `/var`-rooted
+    /// path) denies EVERY `fs.read` fail-closed, because the configured form
+    /// never prefix-matches the resolved one.
+    #[test]
+    fn a_symlinked_principal_home_is_canonicalized_before_the_pdp_is_built() {
+        let (cfg, home, link) = symlinked_home_fixture("canon");
+        // The test's own oracle for "resolved", independent of the production
+        // resolver: if the two ever disagree this assertion says so.
+        let resolved = home.canonicalize().expect("the real home canonicalizes");
+        assert_ne!(link, resolved, "the fixture must actually differ in form");
+
+        let seen: std::cell::RefCell<Option<Principal>> = std::cell::RefCell::new(None);
+        let got = authz_boot_gate_with(
+            &cfg,
+            Some(Principal {
+                home: link.clone(),
+                ..principal()
+            }),
+            |path, pr| {
+                *seen.borrow_mut() = Some(pr.clone());
+                hermetic_seam(path, pr)
+            },
+        );
+        let (_authorizer, returned) = got.expect("gate success arm");
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+
+        assert_eq!(
+            seen.borrow().as_ref().expect("construct ran").home,
+            resolved,
+            "the PDP must expand `~` against the RESOLVED home"
+        );
+        assert_eq!(
+            returned.home, resolved,
+            "the returned principal feeds delegated_plan and the anchor probe"
+        );
+    }
+
+    /// Fail-closed, and the third refusal trigger: a `principal.home` that
+    /// cannot be resolved (absent, or not reachable) refuses boot rather than
+    /// falling back to the configured string — a home the daemon cannot resolve
+    /// is one whose `~` policy it cannot honour.
+    #[test]
+    fn an_unresolvable_principal_home_refuses_boot() {
+        let (cfg, home, link) = symlinked_home_fixture("dangle");
+        // Break the link: the symlink survives, its target does not.
+        std::fs::remove_dir_all(&home).unwrap();
+
+        let got = authz_boot_gate_with(
+            &cfg,
+            Some(Principal {
+                home: link.clone(),
+                ..principal()
+            }),
+            hermetic_seam,
+        );
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+        match got {
+            Err(AuthzBootRefusal::UnresolvableHome(ref m)) => {
+                assert!(
+                    m.contains("home"),
+                    "the refusal must name what could not be resolved: {m}"
+                );
+            }
+            other => panic!("expected UnresolvableHome, got {other:?}"),
+        }
     }
 
     /// Trigger 2, bindings half — the filesystem-free mapping killer that
