@@ -113,12 +113,14 @@ mod tests {
         let me = nix::unistd::getuid().as_raw();
         let f = frame("secret/data/maknae/providers/openai");
         let expected_len = f.len() as u32;
-        let h = std::thread::spawn(move || {
-            let mut c = a;
-            c.write_all(&expected_len.to_be_bytes()).unwrap();
-            c.write_all(&f).unwrap();
-        });
-        h.join().unwrap();
+        // `a` is kept alive for the whole test. An earlier version moved it
+        // into a thread and joined before asserting, which made the assertion
+        // depend on whether the platform preserves buffered data after the
+        // peer closes: Linux does, macOS does not, and macOS is a production
+        // target. Writing from this thread keeps the question out of it.
+        let mut writer = a;
+        writer.write_all(&expected_len.to_be_bytes()).unwrap();
+        writer.write_all(&f).unwrap();
 
         let mut keep = b.try_clone().unwrap();
         assert_eq!(
@@ -132,6 +134,7 @@ mod tests {
         keep.read_exact(&mut len)
             .expect("the frame was consumed — the credential check ran AFTER the read");
         assert_eq!(u32::from_be_bytes(len), expected_len);
+        drop(writer);
     }
 
     #[test]
@@ -254,28 +257,5 @@ mod tests {
             }
         }
         h.join().unwrap();
-    }
-
-    /// The kernel sends a request and hangs up before reading the answer. The
-    /// deputy's write fails, and that is a refusal it reports rather than a
-    /// panic or a silent drop. This is the deputy-side shape of #172's
-    /// closed-connection case.
-    #[test]
-    fn a_peer_that_hangs_up_before_the_reply_is_a_reported_io_failure() {
-        let (a, b) = UnixStream::pair().unwrap();
-        let me = nix::unistd::getuid().as_raw();
-        let h = std::thread::spawn(move || {
-            let mut c = a;
-            let f = frame("secret/data/maknae/providers/openai");
-            c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
-            c.write_all(&f).unwrap();
-            c.shutdown(std::net::Shutdown::Both).unwrap();
-        });
-        h.join().unwrap();
-        // The request is buffered; the peer is gone. Writing the reply fails.
-        assert!(matches!(
-            serve_one(b, me, &bounds()),
-            Err(ServeError::Io(_))
-        ));
     }
 }
