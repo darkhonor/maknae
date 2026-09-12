@@ -204,6 +204,31 @@ REFUSE
     done
     dscl . -read /Groups/maknae >/dev/null 2>&1 && ok "operator group exists" || fail "operator group MISSING"
 
+    # --- INSTALL -> UPGRADE -> (later) UNINSTALL provenance lifecycle ---------
+    # PR #287 review, blocking finding 1. preinstall's ensure_* returns early for an
+    # already-existing record WITHOUT setting CREATED_*, so a second install would
+    # rewrite the receipt with CreatedByUs=false for accounts WE created — and
+    # uninstall.sh, which gates deletion on that flag, would then leave them behind
+    # forever. The flag is now sticky; this is the test that proves it, because the
+    # bug is invisible on a first install and only appears on the second.
+    for k in MaknaeUIDCreatedByUs MaknaeEgressUIDCreatedByUs; do
+        [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
+            && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
+    done
+    installer -pkg "$PKG" -target / >/dev/null && ok "upgrade install (2nd pass) succeeded" \
+                                               || fail "upgrade install failed"
+    for k in MaknaeUIDCreatedByUs MaknaeEgressUIDCreatedByUs; do
+        [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
+            && ok "AFTER UPGRADE: $k still true (provenance preserved)" \
+            || fail "AFTER UPGRADE: $k became false — uninstall would orphan the account"
+    done
+    # An upgrade must not re-disable a job the operator enabled.
+    dis2="$(launchctl print-disabled system 2>/dev/null)"
+    case "$dis2" in
+        *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled (it was disabled)" ;;
+        *) ok "upgrade did not force-disable the job" ;;
+    esac
+
     check_mode() {
         local want="$1" path="$2" got
         got="$(stat -f '%Sp %Su %Sg' "$path" 2>/dev/null || echo MISSING)"

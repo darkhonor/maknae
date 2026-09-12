@@ -195,6 +195,27 @@ rt_want="$MAKNAE_UID $OPERATOR_GID 750"
 # Hand the install kind to postinstall (pkg scripts share no environment).
 printf '%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" > "$RECEIPT_DIR/.install-kind"
 
+# PRESERVE PROVENANCE ACROSS UPGRADES (PR #287 review, blocking finding 1).
+# ensure_* returns early for an ALREADY-EXISTING record without setting CREATED_*,
+# so on an upgrade every flag computed above is `false` — and overwriting the
+# receipt with those would make the installer FORGET that it created these
+# accounts. uninstall.sh gates deletion on CreatedByUs, so after any upgrade it
+# would print KEEP and leave `_maknae` and `_maknae-egress` behind forever.
+# Reproduced before the fix: fresh -> true, upgrade -> false.
+#
+# The flag is therefore sticky: once WE created a record, that stays true for the
+# life of the install. The id-match guard in uninstall.sh is unchanged and still
+# independently required, so a re-numbered account is still left alone.
+prior_flag() {
+    [ -f "$RECEIPT" ] || { echo false; return 0; }
+    plutil -extract "$1" raw -o - "$RECEIPT" 2>/dev/null || echo false
+}
+sticky() { if [ "$1" = true ] || [ "$2" = true ]; then echo true; else echo false; fi; }
+CREATED_MAKNAE_U="$(sticky "$CREATED_MAKNAE_U" "$(prior_flag MaknaeUIDCreatedByUs)")"
+CREATED_MAKNAE_G="$(sticky "$CREATED_MAKNAE_G" "$(prior_flag MaknaeGIDCreatedByUs)")"
+CREATED_EGRESS_U="$(sticky "$CREATED_EGRESS_U" "$(prior_flag MaknaeEgressUIDCreatedByUs)")"
+CREATED_EGRESS_G="$(sticky "$CREATED_EGRESS_G" "$(prior_flag MaknaeEgressGIDCreatedByUs)")"
+
 cat > "$RECEIPT" <<RECEIPT_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
