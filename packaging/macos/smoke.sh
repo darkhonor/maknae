@@ -204,30 +204,56 @@ REFUSE
     done
     dscl . -read /Groups/maknae >/dev/null 2>&1 && ok "operator group exists" || fail "operator group MISSING"
 
-    # --- INSTALL -> UPGRADE -> (later) UNINSTALL provenance lifecycle ---------
-    # PR #287 review, blocking finding 1. preinstall's ensure_* returns early for an
-    # already-existing record WITHOUT setting CREATED_*, so a second install would
-    # rewrite the receipt with CreatedByUs=false for accounts WE created — and
-    # uninstall.sh, which gates deletion on that flag, would then leave them behind
-    # forever. The flag is now sticky; this is the test that proves it, because the
-    # bug is invisible on a first install and only appears on the second.
-    for k in MaknaeUIDCreatedByUs MaknaeEgressUIDCreatedByUs; do
+    # --- PROVENANCE LIFECYCLE: install -> upgrade -> REPLACEMENT -> uninstall --
+    # PR #287 review, blocking findings 1 and 3. Two distinct failures, opposite in
+    # direction, and both invisible on a first install:
+    #   (1) an ordinary upgrade must NOT forget that we created these records, or
+    #       uninstall orphans them forever;
+    #   (2) stickiness must NOT survive a re-numbering, or an administrator's
+    #       replacement account inherits our ownership claim and uninstall DELETES
+    #       IT. Fix (1) naively introduces (2), which is why both are tested.
+    # All FOUR flags are covered — two users and two groups — not just the users.
+    local FLAGS="MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressUIDCreatedByUs MaknaeEgressGIDCreatedByUs"
+    for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
             && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
     done
+
     installer -pkg "$PKG" -target / >/dev/null && ok "upgrade install (2nd pass) succeeded" \
                                                || fail "upgrade install failed"
-    for k in MaknaeUIDCreatedByUs MaknaeEgressUIDCreatedByUs; do
+    for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
-            && ok "AFTER UPGRADE: $k still true (provenance preserved)" \
-            || fail "AFTER UPGRADE: $k became false — uninstall would orphan the account"
+            && ok "after ordinary upgrade: $k still true (provenance preserved)" \
+            || fail "after ordinary upgrade: $k became false — uninstall would orphan the record"
     done
-    # An upgrade must not re-disable a job the operator enabled.
     dis2="$(launchctl print-disabled system 2>/dev/null)"
     case "$dis2" in
-        *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled (it was disabled)" ;;
+        *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled" ;;
         *) ok "upgrade did not force-disable the job" ;;
     esac
+
+    # REPLACEMENT: delete the installer-created _maknae-egress and recreate it under
+    # the same name with a DIFFERENT uid, exactly as an administrator might. The
+    # upgrade must then DECLINE the ownership claim, and uninstall must leave the
+    # replacement alone. 398 is deliberately outside the installer's 400-499 range.
+    local repl_uid=398 egid
+    egid="$(plutil -extract MaknaeEgressGID raw -o - "$R" 2>/dev/null)"
+    dscl . -delete /Users/_maknae-egress 2>/dev/null || :
+    dscl . -create /Users/_maknae-egress
+    dscl . -create /Users/_maknae-egress UniqueID "$repl_uid"
+    dscl . -create /Users/_maknae-egress PrimaryGroupID "$egid"
+    dscl . -create /Users/_maknae-egress RealName "Administrator replacement"
+    installer -pkg "$PKG" -target / >/dev/null && ok "upgrade over a replaced account succeeded" \
+                                               || fail "upgrade over a replaced account failed"
+    [ "$(plutil -extract MaknaeEgressUIDCreatedByUs raw -o - "$R" 2>/dev/null)" = "false" ] \
+        && ok "REPLACEMENT: ownership claim DECLINED (flag false) — admin account is safe" \
+        || fail "REPLACEMENT: flag stayed true — uninstall would delete the ADMIN's account"
+    # The three untouched records must keep their claim; declining must be per-record.
+    for k in MaknaeUIDCreatedByUs MaknaeGIDCreatedByUs MaknaeEgressGIDCreatedByUs; do
+        [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
+            && ok "REPLACEMENT: $k unaffected (still true)" \
+            || fail "REPLACEMENT: $k was collaterally dropped — declining must be per-record"
+    done
 
     check_mode() {
         local want="$1" path="$2" got
@@ -331,6 +357,14 @@ PROBE
     [ ! -e /usr/local/bin/maknaed ] && ok "binary removed" || fail "binary still present"
     [ ! -e "/Library/LaunchDaemons/${LABEL}.plist" ] && ok "plist removed" || fail "plist still present"
     [ ! -e /usr/local/lib/maknae ] && ok "FIPS dylib removed" || fail "FIPS dylib still present"
+    # The administrator's replacement must SURVIVE uninstall — that is the whole
+    # point of declining the ownership claim above.
+    if dscl . -read /Users/_maknae-egress >/dev/null 2>&1; then
+        ok "REPLACEMENT: admin-created _maknae-egress survived uninstall (correct)"
+        dscl . -delete /Users/_maknae-egress 2>/dev/null || :   # test cleanup
+    else
+        fail "REPLACEMENT: uninstall DELETED the administrator's account"
+    fi
     [ -d /var/log/maknae ] && ok "audit trail RETAINED (correct)" || fail "audit trail was destroyed"
 
     echo "== phase 2: $fails failure(s) =="

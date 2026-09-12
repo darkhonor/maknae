@@ -195,26 +195,40 @@ rt_want="$MAKNAE_UID $OPERATOR_GID 750"
 # Hand the install kind to postinstall (pkg scripts share no environment).
 printf '%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" > "$RECEIPT_DIR/.install-kind"
 
-# PRESERVE PROVENANCE ACROSS UPGRADES (PR #287 review, blocking finding 1).
-# ensure_* returns early for an ALREADY-EXISTING record without setting CREATED_*,
-# so on an upgrade every flag computed above is `false` — and overwriting the
-# receipt with those would make the installer FORGET that it created these
-# accounts. uninstall.sh gates deletion on CreatedByUs, so after any upgrade it
-# would print KEEP and leave `_maknae` and `_maknae-egress` behind forever.
-# Reproduced before the fix: fresh -> true, upgrade -> false.
+# PRESERVE PROVENANCE ACROSS UPGRADES, BUT ONLY FOR THE SAME RECORD.
+# (PR #287 review, blocking findings 1 and 3 — the second corrects the first.)
 #
-# The flag is therefore sticky: once WE created a record, that stays true for the
-# life of the install. The id-match guard in uninstall.sh is unchanged and still
-# independently required, so a re-numbered account is still left alone.
-prior_flag() {
-    [ -f "$RECEIPT" ] || { echo false; return 0; }
-    plutil -extract "$1" raw -o - "$RECEIPT" 2>/dev/null || echo false
+# Finding 1: ensure_* returns early for an ALREADY-EXISTING record without setting
+# CREATED_*, so on an upgrade every flag computed above is `false`. Overwriting the
+# receipt with those would make the installer FORGET that it created these
+# accounts, and uninstall.sh — which gates deletion on CreatedByUs — would print
+# KEEP and leave `_maknae` and `_maknae-egress` behind forever.
+#
+# Finding 3: a BARE `prior OR new` fixes that and introduces something worse. If an
+# installer-created account is deleted and an ADMINISTRATOR recreates the same name
+# with a different id, an upgrade would pair the old `true` with the replacement's
+# NEW id — and uninstall.sh's id-match guard, comparing against that rewritten id,
+# would then DELETE THE ADMINISTRATOR'S ACCOUNT. The guard cannot catch it because
+# the receipt itself was rewritten to agree with the impostor. Reproduced: old rule
+# -> uid=450 CreatedByUs=true -> deletes; id-matched rule -> CreatedByUs=false.
+#
+# So the flag is sticky ONLY when the prior receipt's id equals the id observed
+# now. Re-numbering — by any cause — silently drops our ownership claim, which is
+# the fail-safe direction: we decline to delete something we cannot prove is ours.
+prior_val() {
+    [ -f "$RECEIPT" ] || { echo ""; return 0; }
+    plutil -extract "$1" raw -o - "$RECEIPT" 2>/dev/null || echo ""
 }
-sticky() { if [ "$1" = true ] || [ "$2" = true ]; then echo true; else echo false; fi; }
-CREATED_MAKNAE_U="$(sticky "$CREATED_MAKNAE_U" "$(prior_flag MaknaeUIDCreatedByUs)")"
-CREATED_MAKNAE_G="$(sticky "$CREATED_MAKNAE_G" "$(prior_flag MaknaeGIDCreatedByUs)")"
-CREATED_EGRESS_U="$(sticky "$CREATED_EGRESS_U" "$(prior_flag MaknaeEgressUIDCreatedByUs)")"
-CREATED_EGRESS_G="$(sticky "$CREATED_EGRESS_G" "$(prior_flag MaknaeEgressGIDCreatedByUs)")"
+sticky() {   # $1=newly_created  $2=prior flag key  $3=prior id key  $4=id observed now
+    local pf pid
+    [ "$1" = true ] && { echo true; return 0; }
+    pf="$(prior_val "$2")"; pid="$(prior_val "$3")"
+    if [ "$pf" = true ] && [ -n "$pid" ] && [ "$pid" = "$4" ]; then echo true; else echo false; fi
+}
+CREATED_MAKNAE_U="$(sticky "$CREATED_MAKNAE_U" MaknaeUIDCreatedByUs       MaknaeUID       "$MAKNAE_UID")"
+CREATED_MAKNAE_G="$(sticky "$CREATED_MAKNAE_G" MaknaeGIDCreatedByUs       MaknaeGID       "$MAKNAE_GID")"
+CREATED_EGRESS_U="$(sticky "$CREATED_EGRESS_U" MaknaeEgressUIDCreatedByUs MaknaeEgressUID "$EGRESS_UID")"
+CREATED_EGRESS_G="$(sticky "$CREATED_EGRESS_G" MaknaeEgressGIDCreatedByUs MaknaeEgressGID "$EGRESS_GID")"
 
 cat > "$RECEIPT" <<RECEIPT_EOF
 <?xml version="1.0" encoding="UTF-8"?>
