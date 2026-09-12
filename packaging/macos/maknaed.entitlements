@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Deliberately EMPTY. Every Hardened Runtime exception is attack surface.
+       maknaed needs none today.
+
+       WATCH THIS SPACE - com.apple.security.cs.disable-library-validation.
+       Hardened Runtime enables library validation, which requires a loaded dylib
+       to carry the SAME Team ID as the process. Maknae loads the AWS-LC FIPS
+       module as a dylib on macOS (upstream requires shared linkage here), and
+       AD-HOC signatures carry no Team ID at all - so an ad-hoc binary refuses an
+       ad-hoc dylib with "different Team IDs" (measured 2026-09-12, rc 134).
+       A real Developer ID signs both with ONE Team ID and is EXPECTED to satisfy
+       library validation with no entitlement. That is NOT yet verified - verify it
+       the day the certificate exists rather than assuming it. Until then, local
+       dev builds may carry the entitlement on the DEV PATH ONLY; it must not reach
+       a shipped artifact without its own recorded decision. -->
+</dict>
+</plist>
