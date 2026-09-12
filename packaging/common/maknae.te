@@ -20,6 +20,32 @@ gen_require(`
 ')
 allow init_t maknaed_t:process2 { nnp_transition nosuid_transition };
 
+# #240a: the egress deputy. Its own domain, entered from its own entrypoint —
+# the process that holds the provider credential and the only route out must
+# not share maknaed_t.
+type maknae_egress_t;
+type maknae_egress_exec_t;
+init_daemon_domain(maknae_egress_t, maknae_egress_exec_t)
+# maknae-egress.service ALSO sets NoNewPrivileges=yes, so it needs the same
+# process2 permission for the same reason as maknaed above: without it the
+# transition is refused (SELINUX_ERR security_bounded_transition) and the
+# deputy runs in init_t. And the SAME prohibition applies — do NOT use
+# `typebounds` to express the containment relationship; it strips the domain's
+# entrypoint on its exec type and yields status=203/EXEC.
+allow init_t maknae_egress_t:process2 { nnp_transition nosuid_transition };
+
+# The deputy's operating bounds (/etc/maknae/egress-bounds.yaml) get their OWN
+# type, carved out of the maknae_etc_t wildcard by a more-specific .fc rule.
+#
+# COPY THE .cred RULE'S SHAPE, NEVER ITS GRANTS. That carve-out exists so
+# maknaed_t is granted NO access; this one exists so maknae_egress_t is granted
+# SOME. BOTH daemons read this file — maknaed validates every registered
+# key_vault_path against the prefix at boot, the deputy validates the frame's
+# at use — so both are allowed below. Omitting maknaed_t's grant would make the
+# daemon refuse to boot on an enforcing host, since its boot gate reads this.
+type maknae_egress_bounds_t;
+files_config_file(maknae_egress_bounds_t)
+
 # Config (/etc/maknae) + private (/etc/maknae/private) + audit (/var/log/maknae)
 # + runtime (/run/maknae) types.
 type maknae_etc_t;
@@ -65,6 +91,22 @@ allow maknaed_t maknaed_exec_t:file { read execute execute_no_trans open getattr
 # read by init_t, NOT here — this grants only the daemon-read artifacts).
 allow maknaed_t maknae_etc_t:dir { open read search getattr };
 allow maknaed_t maknae_etc_t:file { read open getattr };
+# #240a: both readers of the bounds file, by type.
+allow maknaed_t maknae_egress_bounds_t:file { read open getattr };
+allow maknae_egress_t maknae_egress_bounds_t:file { read open getattr };
+allow maknae_egress_t maknae_etc_t:dir { open read search getattr };
+# The deputy's own entrypoint.
+allow maknae_egress_t maknae_egress_exec_t:file { read execute execute_no_trans open getattr };
+# NO network rules yet, deliberately. In #240a the deputy answers with a canned
+# reply and opens no socket outward at all; provider egress and the Vault KV
+# read arrive with #240b. When they do they follow this file's existing idiom —
+# a dedicated labeled port type plus `name_connect`, as maknae_vault_port_t
+# does for maknaed — never a blanket corenet_tcp_connect_*_port, which would
+# grant every port of that class.
+# DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
+# never touches a user home.
+neverallow maknae_egress_t maknae_audit_t:file { read write open };
+neverallow maknae_egress_t maknae_secret_t:file { read open };
 allow maknaed_t maknae_private_t:dir { open read search getattr };
 allow maknaed_t maknae_private_t:file { read open getattr };
 

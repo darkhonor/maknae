@@ -2,7 +2,11 @@
 # Restore: restorecon -Rv /usr/bin/maknaed /etc/maknae /var/log/maknae
 
 /usr/bin/maknaed        --      gen_context(system_u:object_r:maknaed_exec_t,s0)
+/usr/bin/maknae-egress  --      gen_context(system_u:object_r:maknae_egress_exec_t,s0)
 /etc/maknae(/.*)?               gen_context(system_u:object_r:maknae_etc_t,s0)
+# #240a: more-specific than the /etc/maknae wildcard above, so the deputy's
+# bounds file carries its own type. Both daemons read it (see maknae.te).
+/etc/maknae/egress-bounds\.yaml  gen_context(system_u:object_r:maknae_egress_bounds_t,s0)
 /etc/maknae/private(/.*)?       gen_context(system_u:object_r:maknae_private_t,s0)
 # Root/systemd-only secrets (daemon has NO SELinux access) — more specific rules
 # win over the maknae_private_t wildcard above.
@@ -10,3 +14,4 @@
 /etc/maknae/private/enroll-state\.yaml  gen_context(system_u:object_r:maknae_secret_t,s0)
 /var/log/maknae(/.*)?           gen_context(system_u:object_r:maknae_audit_t,s0)
 /run/maknae(/.*)?               gen_context(system_u:object_r:maknae_runtime_t,s0)
+/run/maknae-egress(/.*)?        gen_context(system_u:object_r:maknae_runtime_t,s0)

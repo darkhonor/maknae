@@ -1,10 +1,16 @@
 # systemd-sysusers(8) config for Maknae.
-# Two identities by construction (Jackrabbit §4.6 / §9.1):
-#   _maknae : the daemon service account (primary group _maknae)
-#   maknae  : the OPERATOR group — members may connect to the 0660 UDS
+# THREE identities by construction (Jackrabbit §4.6 / §9.1; #240a added the third):
+#   _maknae        : the daemon service account (primary group _maknae)
+#   maknae         : the OPERATOR group — members may connect to the 0660 UDS
+#   _maknae-egress : the egress deputy — the ONLY process with a route out. A
+#                    separate account so the provider credential is readable by
+#                    neither the daemon nor the operator, and so the deputy's
+#                    Vault policy can be scoped to the provider-key prefix
+#                    alone (ADR-0023 decision 3).
 # Both must exist. NO on-disk cross-membership (spec §5.3): _maknae's membership
 # in `maknae` exists ONLY at unit scope via the unit's SupplementaryGroups=maknae.
 #
 # Type Name     ID   GECOS                       Home          Shell
 g      maknae   990
 u      _maknae  992  "Maknae trust-plane daemon" /nonexistent /usr/sbin/nologin
+u      _maknae-egress 991 "Maknae egress deputy"   /nonexistent /usr/sbin/nologin
