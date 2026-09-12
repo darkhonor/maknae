@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Maknae</title>
+  <organization>io.maknae</organization>
+
+  <!-- Apple Silicon only: there are no x86 macOS builds (AGENTS.md). This is what
+       makes the installer REFUSE an Intel host rather than half-install. -->
+  <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+
+  <!-- Floor: macOS 26 (maintainer ruling 2026-09-12). -->
+  <allowed-os-versions>
+    <os-version min="26.0"/>
+  </allowed-os-versions>
+
+  <!-- ONE product, N components. #240 adds a third pkg-ref/line/choice triple for
+       io.maknae.egress alongside its binary; that is the whole change, because the
+       components are already separate. -->
+  <choices-outline>
+    <line choice="default">
+      <line choice="io.maknae.daemon"/>
+      <line choice="io.maknae.cli"/>
+    </line>
+  </choices-outline>
+
+  <choice id="default"/>
+  <choice id="io.maknae.daemon" visible="false"><pkg-ref id="io.maknae.daemon"/></choice>
+  <choice id="io.maknae.cli" visible="false"><pkg-ref id="io.maknae.cli"/></choice>
+
+  <!-- version="0" is rewritten by productbuild from each component's real version,
+       and the emitted filename is prefixed with '#'. Verified; do not "fix" it. -->
+  <pkg-ref id="io.maknae.daemon" version="0" onConclusion="none">maknae-daemon.pkg</pkg-ref>
+  <pkg-ref id="io.maknae.cli" version="0" onConclusion="none">maknae-cli.pkg</pkg-ref>
+</installer-gui-script>
