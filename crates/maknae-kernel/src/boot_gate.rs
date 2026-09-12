@@ -439,4 +439,35 @@ mod tests {
         assert!(m.contains("audit.siem"), "must name the key: {m}");
         assert!(m.contains("223"), "must point at the tracking issue: {m}");
     }
+
+    /// The credential-lifecycle invariant, asserted on the source because the
+    /// type system cannot hold it.
+    ///
+    /// Every post-`mint()` startup failure must route through the
+    /// unconditional revoke, or the privileged kernel-plane Vault token leaks
+    /// until lease expiry. The egress-bounds gate needs no Vault — a config
+    /// read and a string comparison — so it belongs BEFORE the mint, where a
+    /// failure has nothing minted to revoke.
+    ///
+    /// A behavioural test cannot reach this: registering a provider requires a
+    /// root-owned config section, so the boot-binary harness can never get a
+    /// provider past `maknae-config` to exercise the gate. What CAN regress is
+    /// someone moving the call during a refactor, and that is exactly what
+    /// this catches.
+    #[test]
+    fn the_egress_bounds_gate_is_called_before_the_vault_mint() {
+        let run_rs = include_str!("run.rs");
+        let gate = run_rs
+            .find("egress_bounds_boot_gate(boot.provider()")
+            .expect("the egress-bounds gate call moved or was renamed");
+        let mint = run_rs
+            .find(".mint()")
+            .expect("the vault mint call moved or was renamed");
+        assert!(
+            gate < mint,
+            "the egress-bounds gate must run BEFORE mint(): a post-mint refusal \
+             leaves the privileged kernel-plane token live until lease expiry \
+             unless it routes through the unconditional revoke"
+        );
+    }
 }

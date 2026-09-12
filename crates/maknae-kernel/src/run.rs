@@ -2769,6 +2769,25 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             .await);
         }
     };
+    // #240a D5-E: a registered provider whose Vault path sits outside the
+    // deputy's declared grant must not boot.
+    //
+    // PRE-MINT, deliberately. Every post-`mint()` startup failure has to route
+    // through the unconditional revoke or the privileged kernel-plane token
+    // leaks until lease expiry — the invariant stated at the mint. This check
+    // needs no Vault at all (a config read and a string comparison), so the
+    // right answer is not to revoke afterwards but to never acquire the
+    // credential when the deployment is already unstartable. A pre-mint
+    // failure has nothing minted to revoke.
+    let egress_bounds = boot.provider().and_then(|_| {
+        maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE)).ok()
+    });
+    if let Err(e) =
+        crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
+    {
+        return Err(RunError::Other(format!("refusing to start: {e}")));
+    }
+
     let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
         Err(e) => {
@@ -2977,15 +2996,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // deputy's declared grant must not boot. The deputy re-checks the same
     // thing per request, but this is the more valuable half — it catches the
     // operator's typo before anything runs, instead of turning it into a
-    // confusing refusal on a live request.
-    let egress_bounds = boot.provider().and_then(|_| {
-        maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE)).ok()
-    });
-    if let Err(e) =
-        crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
-    {
-        return Err(RunError::Other(format!("refusing to start: {e}")));
-    }
+    // confusing refusal on a live request. The gate itself runs PRE-MINT; see
+    // the call site above the authz gate.
     let provider = Arc::new(boot.provider().cloned());
     let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(
