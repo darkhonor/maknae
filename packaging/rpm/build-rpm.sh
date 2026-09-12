@@ -5,7 +5,7 @@
 #
 #   build-rpm.sh <version> [<bindir>]
 #     <version>  e.g. 0.1.0  (required — becomes %{_pkgversion})
-#     <bindir>   dir holding the pre-built `maknaed` + `maknae` (default: ./target/release)
+#     <bindir>   dir holding the pre-built `maknaed`, `maknae` and `maknae-egress` (default: ./target/release)
 #
 # Output: dist/maknae-<version>-1.<dist>.x86_64.rpm
 set -euo pipefail
@@ -27,7 +27,7 @@ REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"
 DIST="$REPO/dist"
 
-for b in maknaed maknae; do
+for b in maknaed maknae maknae-egress; do
     [ -x "$BINDIR/$b" ] || { echo "ERROR: missing binary $BINDIR/$b" >&2; exit 1; }
 done
 
@@ -46,6 +46,11 @@ install -m 0644 "$COMMON/maknae.fapolicyd.trust"  "$TOP/SOURCES/"
 install -m 0755 "$COMMON/maknae-selinux-ports.sh" "$TOP/SOURCES/"
 install -m 0644 "$COMMON/authz.yaml"              "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae.yaml"             "$TOP/SOURCES/"
+# #240a — Source10..12. Staging must match Source0..N in the spec exactly, or
+# rpmbuild fails on a missing source rather than silently shipping without it.
+install -m 0755 "$BINDIR/maknae-egress"           "$TOP/SOURCES/maknae-egress"
+install -m 0644 "$COMMON/maknae-egress.service"   "$TOP/SOURCES/"
+install -m 0644 "$COMMON/maknae-egress.socket"    "$TOP/SOURCES/"
 
 cp "$HERE/maknae.spec" "$TOP/SPECS/maknae.spec"
 

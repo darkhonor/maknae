@@ -82,6 +82,19 @@ variable "approle_path" {
   default     = "maknae-approle"
 }
 
+variable "provider_key_prefix" {
+  description = <<-EOT
+    KV v2 path prefix, RELATIVE to kv_mount_path, under which provider API keys
+    live. #240a. MUST match `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml:
+    Terraform grants the deputy a read on this prefix, maknaed validates every
+    registered key_vault_path against the file at boot, and the deputy re-checks
+    the frame's path at use. A mismatch is a boot refusal, not a silent 403 at
+    request time — which is the point of validating at boot.
+  EOT
+  type        = string
+  default     = "maknae/providers"
+}
+
 variable "kv_mount_path" {
   description = "Mount path of the KV v2 engine holding platform secrets (the provider API key, #243)."
   type        = string

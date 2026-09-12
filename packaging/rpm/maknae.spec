@@ -20,6 +20,11 @@ Source6:        maknae.fapolicyd.trust
 Source7:        maknae-selinux-ports.sh
 Source8:        authz.yaml
 Source9:        maknae.yaml
+# #240a: the egress deputy — binary, unit, and the socket unit that lets the
+# init system own the socket (no chgrp, no CAP_CHOWN in the deputy).
+Source10:       maknae-egress
+Source11:       maknae-egress.service
+Source12:       maknae-egress.socket
 
 ExclusiveArch:  x86_64
 
@@ -64,9 +69,12 @@ make -f /usr/share/selinux/devel/Makefile maknae.pp
 # Binaries
 install -D -m 0755 %{SOURCE0} %{buildroot}%{_bindir}/maknaed
 install -D -m 0755 %{SOURCE1} %{buildroot}%{_bindir}/maknae
+install -D -m 0755 %{SOURCE10} %{buildroot}%{_bindir}/maknae-egress
 
 # systemd unit
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/maknaed.service
+install -D -m 0644 %{SOURCE11} %{buildroot}%{_unitdir}/maknae-egress.service
+install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/maknae-egress.socket
 
 # sysusers.d
 install -D -m 0644 %{SOURCE3} %{buildroot}%{_sysusersdir}/maknae.conf
@@ -94,10 +102,10 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 %sysusers_create_compat %{SOURCE3}
 
 %post
-%systemd_post maknaed.service
+%systemd_post maknaed.service maknae-egress.service maknae-egress.socket
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
-restorecon -Rv %{_bindir}/maknaed %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
+restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
@@ -111,7 +119,7 @@ fi
 chattr +a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
 
 %preun
-%systemd_preun maknaed.service
+%systemd_preun maknaed.service maknae-egress.service maknae-egress.socket
 if [ $1 -eq 0 ]; then
     # Full removal only: clear the file append-only, then unload the SELinux module.
     chattr -a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
@@ -122,7 +130,7 @@ if [ $1 -eq 0 ]; then
 fi
 
 %postun
-%systemd_postun_with_restart maknaed.service
+%systemd_postun_with_restart maknaed.service maknae-egress.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
 fi
@@ -130,7 +138,10 @@ fi
 %files
 %{_bindir}/maknaed
 %{_bindir}/maknae
+%{_bindir}/maknae-egress
 %{_unitdir}/maknaed.service
+%{_unitdir}/maknae-egress.service
+%{_unitdir}/maknae-egress.socket
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/maknae.pp
 %{_libexecdir}/maknae/maknae-selinux-ports.sh

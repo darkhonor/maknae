@@ -164,6 +164,27 @@ resource "vault_policy" "maknae_cli" {
   EOT
 }
 
+# ---- #240a: the egress deputy's policy -----------------------------------------
+# The THIRD plane. Deliberately the narrowest of the three: a read on the
+# provider-key prefix and its own token lifecycle, and nothing else. No
+# `pki/sign` role — the deputy's socket carries NO on-host mTLS (ADR-0023
+# decision 3's recorded delta); its peer is authenticated by peer credentials,
+# so there is no plane certificate for it to sign and no URI SAN to verify.
+#
+# The PREFIX, not a literal path: a second provider must not require a policy
+# change and a re-enrolment. The blast radius is stated and accepted — a
+# compromised deputy can read every provider key, which is the same reach it
+# already has by holding the only route out.
+resource "vault_policy" "maknae_egress" {
+  name   = "maknae-egress"
+  policy = <<-EOT
+    path "${vault_mount.maknae_kv.path}/data/${var.provider_key_prefix}/*" { capabilities = ["read"] }
+    path "auth/token/renew-self"  { capabilities = ["update"] }
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/revoke-self" { capabilities = ["update"] }
+  EOT
+}
+
 # ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
 # `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
 # AppRole token, so it needs its own least-privilege policy: read both RoleIDs,
@@ -184,6 +205,9 @@ resource "vault_policy" "maknae_enroll" {
     path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id"                    { capabilities = ["create","update"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id-accessor/destroy" { capabilities = ["update"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id-accessor/destroy"  { capabilities = ["update"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/role-id"                    { capabilities = ["read"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/secret-id"                  { capabilities = ["create","update"] }
+    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/secret-id-accessor/destroy" { capabilities = ["update"] }
     path "${vault_mount.maknae_int.path}/issuer/default/json"                               { capabilities = ["read"] }
   EOT
 }
@@ -216,6 +240,19 @@ resource "vault_approle_auth_backend_role" "maknaed" {
   secret_id_num_uses      = 0                                 # ADR-0018 invariant: unlimited logins (hands-free reboots)
   token_period            = var.token_period                  # PERIODIC token — renews indefinitely
   token_max_ttl           = 0                                 # no ceiling; only Vault failure/revoke fails closed
+  token_no_default_policy = true
+}
+
+# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018)
+# and a PERIODIC token — it is a long-lived service, not a per-invocation CLI.
+resource "vault_approle_auth_backend_role" "maknae_egress" {
+  backend                 = vault_auth_backend.approle.path
+  role_name               = "maknae-egress"
+  token_policies          = [vault_policy.maknae_egress.name]
+  secret_id_ttl           = 0                # ADR-0018 invariant: standing SecretID
+  secret_id_num_uses      = 0                # unlimited logins (hands-free reboots)
+  token_period            = var.token_period # PERIODIC token — renews indefinitely
+  token_max_ttl           = 0
   token_no_default_policy = true
 }
 

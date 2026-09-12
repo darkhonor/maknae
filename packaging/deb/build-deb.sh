@@ -31,7 +31,7 @@ REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"
 DIST="$REPO/dist"
 
-for b in maknaed maknae; do
+for b in maknaed maknae maknae-egress; do
     [ -x "$BINDIR/$b" ] || { echo "ERROR: missing binary $BINDIR/$b" >&2; exit 1; }
 done
 
@@ -57,17 +57,26 @@ cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 /etc/maknae/authz.yaml
 /etc/maknae/maknae.yaml
 /etc/apparmor.d/usr.bin.maknaed
+/etc/apparmor.d/usr.bin.maknae-egress
 CONF
 
 # --- Binaries -------------------------------------------------------------------
 install -D -m 0755 "$BINDIR/maknaed" "$PKG_ROOT/usr/bin/maknaed"
 install -D -m 0755 "$BINDIR/maknae"  "$PKG_ROOT/usr/bin/maknae"
+install -D -m 0755 "$BINDIR/maknae-egress" "$PKG_ROOT/usr/bin/maknae-egress"
 # Strip debug symbols (lintian: unstripped-binary-or-object) — best-effort.
-strip --strip-unneeded "$PKG_ROOT/usr/bin/maknaed" "$PKG_ROOT/usr/bin/maknae" 2>/dev/null || true
+strip --strip-unneeded "$PKG_ROOT/usr/bin/maknaed" "$PKG_ROOT/usr/bin/maknae" \
+    "$PKG_ROOT/usr/bin/maknae-egress" 2>/dev/null || true
 
 # --- systemd unit ---------------------------------------------------------------
 install -D -m 0644 "$COMMON/maknaed.service" \
     "$PKG_ROOT/usr/lib/systemd/system/maknaed.service"
+# #240a: the deputy's unit AND its socket. The socket unit is what lets the
+# init system own the socket, so the deputy needs no chgrp and no CAP_CHOWN.
+install -D -m 0644 "$COMMON/maknae-egress.service" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-egress.service"
+install -D -m 0644 "$COMMON/maknae-egress.socket" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-egress.socket"
 
 # --- sysusers.d -----------------------------------------------------------------
 install -D -m 0644 "$COMMON/maknae.sysusers" \
