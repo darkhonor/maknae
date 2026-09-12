@@ -14,7 +14,14 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressRequest {
+    /// `provider:<name>`, per request (#240a I1).
     pub destination: String,
+    /// #240a D1: the kernel resolves the provider and hands the backend the
+    /// RESOLVED record. The deputy parses no registry, so it cannot drift from
+    /// the kernel's view of it — one parser, the `maknae-io` lesson.
+    pub endpoint: String,
+    pub model: String,
+    pub key_vault_path: String,
     pub conversation: String,
     pub content: Vec<ContentBlock>,
 }
@@ -44,6 +51,20 @@ pub struct DurableEgressIntent {
 impl DurableEgressIntent {
     pub fn record(&self) -> &AuditRecord {
         &self.record
+    }
+    /// Test-only. Production still has NO public constructor: a value exists
+    /// only because `commit_intent` appended its record and the sink said Ok.
+    #[cfg(test)]
+    pub(crate) fn for_test(record: AuditRecord) -> Self {
+        Self { record }
+    }
+    /// Test-only canned intent, shared with `egress_socket`'s tests. An
+    /// associated fn rather than a free one so its `#[cfg(test)]` is not at
+    /// column 0 — the coverage gate requires a column-0 `#[cfg(test)]` to be
+    /// followed by `mod `, which keeps test code unambiguously excludable.
+    #[cfg(test)]
+    pub(crate) fn canned_for_test() -> Self {
+        Self::for_test(self::tests::intent_record())
     }
 }
 
@@ -473,7 +494,7 @@ mod tests {
         }
     }
 
-    fn intent_record() -> AuditRecord {
+    pub(crate) fn intent_record() -> AuditRecord {
         // record.rs's test module is private to its crate, so the literal is
         // written here from the exported types.
         use maknae_audit_append::{Integrity, Outcome, Source, Subject, Where};
@@ -525,6 +546,9 @@ mod tests {
     fn req() -> EgressRequest {
         EgressRequest {
             destination: "provider:x".into(),
+            endpoint: "https://api.example.test/v1".into(),
+            model: "m".into(),
+            key_vault_path: "secret/data/maknae/providers/x".into(),
             conversation: "c".into(),
             content: vec![text("a")],
         }

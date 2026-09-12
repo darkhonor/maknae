@@ -11,6 +11,7 @@ mod ceiling_authz;
 pub mod classification;
 mod composition;
 mod egress;
+mod egress_socket;
 mod groupres;
 mod handler;
 mod mutation;
@@ -22,6 +23,7 @@ pub use boot::{boot, BootConfig};
 pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
+pub use egress_socket::SocketEgress;
 pub use egress::{
     admitted_reply, production_egress, reply_capacity, reply_text_length, DurableEgressIntent,
     Egress, EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,

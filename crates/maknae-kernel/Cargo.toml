@@ -32,6 +32,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 serde_json = "1"
 
 [dev-dependencies]
+# #240a: the egress-socket tests bind a real UDS under a temp dir.
+tempfile = "3"
 # The Document test seam: the e2e config.show test must drive the REAL
 # disclosable_view over a REAL Document, not a hand-simulated view.
 maknae-config = { path = "../maknae-config", features = ["hermetic-test-seam"] }

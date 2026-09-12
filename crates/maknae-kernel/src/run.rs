@@ -68,6 +68,12 @@ use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authoriz
 static AUTHZ_DECIDE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 static READ_PEP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 static GROUP_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+// #240a: the egress send's own breaker. It is admitted BEFORE `spawn_blocking`,
+// like the four siblings — that ordering IS the control ("failing closed
+// WITHOUT spawning more blocking work"). A breaker consulted inside
+// `Egress::send` runs on a thread that is already spawned and, on deadline
+// expiry, already abandoned.
+static EGRESS_SEND_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 
 fn authz_decide_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(AUTHZ_DECIDE_BREAKER.get_or_init(|| Arc::new(Default::default())))
@@ -79,6 +85,10 @@ fn read_pep_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
 
 fn group_lookup_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(GROUP_LOOKUP_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+fn egress_send_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(EGRESS_SEND_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +399,7 @@ pub async fn handle<S, E, P>(
     // #172: the provider registered at boot (#243), by name, or none. The
     // PEP stamps `provider:<name>` as the egress destination; the client
     // never names it.
-    provider_name: Arc<Option<String>>,
+    provider: Arc<Option<maknae_config::ProviderConfig>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -721,7 +731,7 @@ pub async fn handle<S, E, P>(
         peer_uid,
         lane,
         verified_read.as_ref().map(|(_, p)| p.as_str()),
-        provider_name.as_deref(),
+        (*provider).as_ref().map(|p| p.name.as_str()),
     );
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
@@ -1226,7 +1236,7 @@ pub async fn handle<S, E, P>(
             else {
                 unreachable!("dispatch keyed on the verb")
             };
-            let Some(name) = provider_name.as_deref() else {
+            let Some(pcfg) = provider.as_ref().as_ref() else {
                 // Production-unreachable: the PDP denies this case first (no
                 // destination attribute → Deny), so a Permit never arrives here.
                 // Kept as a fail-closed second refusal that costs nothing and
@@ -1262,6 +1272,7 @@ pub async fn handle<S, E, P>(
                 close_bounded(&mut stream).await;
                 return;
             };
+            let name = pcfg.name.as_str();
             let destination = format!("provider:{name}");
             let m = crate::egress::content_measure(content);
             let egress_meta = |status| EgressAudit {
@@ -1356,11 +1367,26 @@ pub async fn handle<S, E, P>(
             //    held; the breaker belongs with #240's egress-specific deadline
             //    (#240 is handed this by name).
             let intent = Arc::new(intent);
-            let sent = {
+            // #240a: admitted BEFORE the spawn, matching the four siblings.
+            // `run.rs` handed #240 this obligation by name; the ordering is the
+            // whole control, not the presence of a breaker.
+            let egress_breaker = egress_send_breaker();
+            let egress_admission =
+                { egress_breaker.lock().await.begin_attempt_at(Instant::now()) };
+            let sent = if !matches!(egress_admission, BreakerAdmission::Admit) {
+                // Refused without spawning anything. Delivery did not happen,
+                // so this is a `Failed` — the content never left.
+                Ok(Ok(Err(crate::egress::EgressFailure::Transport(
+                    "egress blocking worker budget exhausted".into(),
+                ))))
+            } else {
                 let egress = Arc::clone(&egress);
                 let intent = Arc::clone(&intent);
                 let req = crate::egress::EgressRequest {
                     destination: destination.clone(),
+                    endpoint: pcfg.endpoint.clone(),
+                    model: pcfg.model.clone(),
+                    key_vault_path: pcfg.key_vault_path.clone(),
                     conversation: conversation.clone(),
                     content: content.clone(),
                 };
@@ -2085,7 +2111,7 @@ pub async fn accept_loop<A, E, P>(
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     // #172: captured at boot like the two names above.
-    provider_name: Arc<Option<String>>,
+    provider: Arc<Option<maknae_config::ProviderConfig>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
 where
@@ -2189,7 +2215,7 @@ where
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
-                                let provider_name = Arc::clone(&provider_name);
+                                let provider = Arc::clone(&provider);
                                 let egress = Arc::clone(&egress);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
@@ -2295,7 +2321,7 @@ where
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
-                                                provider_name,
+                                                provider,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
@@ -2946,7 +2972,9 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // #172: the registered provider's name (the egress destination the PEP
     // stamps) and the egress backend, both fixed for the life of the process.
     // Cooky's only backend is `Unavailable`; #240 supplies the real one.
-    let provider_name = Arc::new(boot.provider().map(|p| p.name.clone()));
+    // #240a D1: the kernel carries the RESOLVED record, not just the name —
+    // egress parses no registry and so cannot drift from this view of it.
+    let provider = Arc::new(boot.provider().cloned());
     let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(
         &client,
@@ -2963,7 +2991,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         config_view,
         authz_backend_name,
         classification_policy_name,
-        provider_name,
+        provider,
         egress,
     )
     .await;
@@ -3002,7 +3030,7 @@ async fn serve_after_mint<B>(
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    provider_name: Arc<Option<String>>,
+    provider: Arc<Option<maknae_config::ProviderConfig>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> Result<ServeOutcome, String>
 where
@@ -3045,7 +3073,7 @@ where
         config_view,
         authz_backend_name,
         classification_policy_name,
-        provider_name,
+        provider,
         egress,
     )
     .await;

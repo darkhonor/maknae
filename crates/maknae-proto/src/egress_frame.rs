@@ -72,6 +72,7 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.content.is_empty()
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +133,42 @@ mod tests {
     #[test]
     fn an_empty_content_frame_is_refused() {
         assert!(!egress_frame_request_is_acceptable(&req("conv1", vec![])));
+    }
+
+    #[test]
+    fn the_request_codec_round_trips_and_refuses_garbage() {
+        let r = req("conv1", vec![text("hello")]);
+        let buf = crate::encode_egress_frame_request(&r).unwrap();
+        assert_eq!(crate::decode_egress_frame_request(&buf).unwrap(), r);
+        assert!(crate::decode_egress_frame_request(&[0xffu8, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn the_reply_codec_round_trips_and_refuses_garbage() {
+        let r = EgressFrameReply {
+            reply: crate::PromptReply {
+                blocks: vec![text("ok")],
+                tool_calls: vec![],
+            },
+        };
+        let buf = crate::encode_egress_frame_reply(&r).unwrap();
+        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        assert!(crate::decode_egress_frame_reply(&[0xffu8, 0xff, 0xff]).is_err());
+    }
+
+    /// Every field of the shape check earns its place: drop any one and a
+    /// malformed frame reaches the deputy.
+    #[test]
+    fn every_required_field_is_checked() {
+        let base = req("conv1", vec![text("x")]);
+        for (label, bad) in [
+            ("destination", EgressFrameRequest { destination: String::new(), ..base.clone() }),
+            ("endpoint", EgressFrameRequest { endpoint: String::new(), ..base.clone() }),
+            ("model", EgressFrameRequest { model: String::new(), ..base.clone() }),
+            ("key_vault_path", EgressFrameRequest { key_vault_path: String::new(), ..base.clone() }),
+        ] {
+            assert!(!egress_frame_request_is_acceptable(&bad), "{label} unchecked");
+        }
+        assert!(egress_frame_request_is_acceptable(&base));
     }
 }

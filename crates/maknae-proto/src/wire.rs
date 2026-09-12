@@ -630,6 +630,35 @@ pub fn encode_response_zeroizing(
     ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
 }
+/// Encode a request into a zeroizing buffer. The codec lives here, with the
+/// rest of the wire, so `maknae-kernel` needs no CBOR dependency of its own —
+/// a new dependency in the TCB is a security decision, not a convenience.
+pub fn encode_egress_frame_request(
+    r: &crate::EgressFrameRequest,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    ciborium::into_writer(r, &mut *buf)
+        .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(buf)
+}
+
+pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest, ProtoCodecError> {
+    ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
+}
+
+pub fn encode_egress_frame_reply(
+    r: &crate::EgressFrameReply,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    ciborium::into_writer(r, &mut *buf)
+        .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(buf)
+}
+
+pub fn decode_egress_frame_reply(b: &[u8]) -> Result<crate::EgressFrameReply, ProtoCodecError> {
+    ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
+}
+
 pub fn decode_request(b: &[u8]) -> Result<Request, ProtoCodecError> {
     let r: Request =
         ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))?;
