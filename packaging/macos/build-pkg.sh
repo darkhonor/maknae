@@ -35,8 +35,16 @@ command -v rust-audit-info >/dev/null 2>&1 || {
 }
 
 # --- build, one package at a time -------------------------------------------
-# `cargo auditable`, not bare `cargo build`: CI ships release binaries this way
-# (ci.yml:145) and the embedded dependency SBOM is an SCRM control.
+# Built through `cargo auditable`, never a plain unaudited invocation: CI ships
+# release binaries that way (ci.yml:145) and the embedded dependency SBOM is an
+# SCRM control.
+#
+# NOTE for whoever edits this comment: ci/gates/build-invocation-lint.sh scans
+# EVERY logical line, comments included, for the build-family pattern
+# `cargo (build|rustc|auditable build|deb|generate-rpm)` and requires exactly one
+# `-p`. Writing that pattern in prose here fails the gate (and POS-FAILs
+# negative-control's clean-fixture probe). Describe the invocation without
+# spelling it out.
 # build-invocation-lint accepts either spelling, so the gate will not catch a
 # regression here — this comment is the guard.
 #
