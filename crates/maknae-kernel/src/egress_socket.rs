@@ -361,4 +361,74 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
+
+    /// A deputy that declares `declared` bytes and sends `declared` bytes of
+    /// junk. Used to probe the cap AT its boundary.
+    fn deputy_declaring(dir: &std::path::Path, declared: u32) -> PathBuf {
+        let path = dir.join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                if c.read_exact(&mut len).is_ok() {
+                    let n = u32::from_be_bytes(len) as usize;
+                    let mut body = vec![0u8; n];
+                    let _ = c.read_exact(&mut body);
+                    let _ = c.write_all(&declared.to_be_bytes());
+                    let _ = c.write_all(&vec![0u8; declared as usize]);
+                }
+            }
+        });
+        path
+    }
+
+    /// THE BOUNDARY. #295: `>` → `>=` at the cap survived mutation because the
+    /// only test ever declared `u32::MAX`, where both operators refuse alike. A
+    /// test that never approaches the limit cannot distinguish them — the
+    /// PRIORITIES lesson verbatim, *a test that validates a mechanism at a
+    /// value the production path never produces*.
+    ///
+    /// At EXACTLY the cap the frame must be ACCEPTED by the cap check (it then
+    /// fails to decode, because it is junk — a different error, which is the
+    /// discriminator). At cap+1 it must be refused as over-cap.
+    #[test]
+    fn the_frame_cap_refuses_above_it_and_admits_at_it() {
+        let cap = 4096usize;
+        let me = nix::unistd::getuid().as_raw();
+
+        // n == cap: past the cap check, so the failure is a DECODE failure.
+        let d1 = tempfile::tempdir().unwrap();
+        let e1 = SocketEgress::new(
+            deputy_declaring(d1.path(), cap as u32),
+            me,
+            Duration::from_secs(2),
+            cap,
+        );
+        match e1.send(&crate::egress::DurableEgressIntent::canned_for_test(), req()) {
+            Err(EgressFailure::Transport(m)) => assert!(
+                !m.contains("over the"),
+                "a frame EXACTLY at the cap was refused as over-cap — the check is `>=`, not `>`: {m}"
+            ),
+            other => panic!("expected a decode-stage transport failure, got {other:?}"),
+        }
+
+        // n == cap + 1: refused by the cap, before any allocation.
+        let d2 = tempfile::tempdir().unwrap();
+        let e2 = SocketEgress::new(
+            deputy_declaring(d2.path(), cap as u32 + 1),
+            me,
+            Duration::from_secs(2),
+            cap,
+        );
+        match e2.send(
+            &crate::egress::DurableEgressIntent::canned_for_test(),
+            req(),
+        ) {
+            Err(EgressFailure::Transport(m)) => assert!(
+                m.contains("over the"),
+                "a frame one byte over the cap was NOT refused as over-cap: {m}"
+            ),
+            other => panic!("expected an over-cap refusal, got {other:?}"),
+        }
+    }
 }

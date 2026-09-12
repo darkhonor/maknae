@@ -141,8 +141,23 @@ jobs:
       - name: clippy (every workspace crate, all targets, one pass per declared feature)
         run: bash ci/gates/clippy-all.sh
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
+        # DERIVED from `cargo metadata`, not a hand-written list. #74 already
+        # retired the hand-written package loop here for clippy — its old form
+        # named 13 of 21 members and the eight it missed went unlinted — and a
+        # hand-written list is exactly what #290/#291/#292 are retiring across
+        # the tree: a control that depends on somebody remembering to edit it.
+        #
+        # This loop had the same defect: adding `maknae-egress` in #240a meant
+        # editing a literal, and a binary that is never auditable-built ships
+        # WITHOUT the embedded dependency inventory the P2 witness reads — P2
+        # being the gate that proves a binary carries no privileged crate. A new
+        # binary is now covered the moment it exists.
         run: |
-          for p in maknaed maknae maknae-spifc; do cargo auditable build --locked -p "$p" --release; done
+          bins="$(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c "import json,sys; m=json.load(sys.stdin); print(' '.join(sorted(p['name'] for p in m['packages'] if any('bin' in t['kind'] for t in p['targets']))))")"
+          [ -n "$bins" ] || { echo "ERROR: derived an EMPTY binary set — refusing to report success"; exit 1; }
+          echo "auditable-building: $bins"
+          for p in $bins; do cargo auditable build --locked -p "$p" --release; done
       - name: Tests (workspace test IS permitted; does NOT establish isolation)
         run: cargo test --locked --workspace
       - name: cargo-deny

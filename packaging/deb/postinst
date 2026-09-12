@@ -62,6 +62,12 @@ case "$1" in
         # --- AppArmor profile ----------------------------------------------------
         if command -v apparmor_parser >/dev/null 2>&1; then
             apparmor_parser -r /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
+            # #240a: EVERY shipped profile must be parsed here. A profile that
+            # is installed and listed in conffiles but never parsed leaves its
+            # daemon UNCONFINED while the isolation contract claims AppArmor
+            # profiles load — which is exactly what a per-daemon literal here
+            # invites. Add a line whenever a daemon is added.
+            apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-egress 2>/dev/null || :
         fi
 
         # --- systemd unit --------------------------------------------------------
@@ -75,6 +81,7 @@ case "$1" in
         # onto the new binary — preserving the operator's enabled/running state.
         if [ -n "${2:-}" ]; then
             systemctl try-restart maknaed.service 2>/dev/null || :
+            systemctl try-restart maknae-egress.service 2>/dev/null || :
         fi
         ;;
 esac

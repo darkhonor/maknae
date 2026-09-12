@@ -12,6 +12,14 @@ pub enum VaultError {
     Config(maknae_config::ConfigError),
     /// A required config key was absent.
     MissingKey(&'static str),
+    /// A configured `key_vault_path` cannot be split unambiguously into the
+    /// KV v2 `(mount, path)` pair (#240a). Refused rather than guessed at: a
+    /// guess reads a different secret than the operator wrote and the boot
+    /// gate validated.
+    InvalidKeyVaultPath(String),
+    /// The KV secret exists but carries no such field. Names the FIELD, never
+    /// the secret's contents.
+    MissingKvField { path: String, field: String },
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
@@ -79,6 +87,10 @@ impl std::fmt::Display for VaultError {
                 "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
+            VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
+            VaultError::MissingKvField { path, field } => {
+                write!(f, "key_vault_path '{path}' has no field '{field}'")
+            }
             VaultError::MissingKey(k) => write!(f, "required config key absent: {k}"),
             VaultError::InvalidDeploymentId(id) => write!(
                 f,

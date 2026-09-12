@@ -134,6 +134,10 @@ files = [
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
+  # #240a: the KV v2 path split. Guessing here reads a DIFFERENT secret than the
+  # operator wrote and the boot gate validated — a rfind/find slip turns
+  # secret/data/maknae/data/openai into mount "secret/data/maknae".
+  "crates/maknae-vault/src/kv.rs",
   # #240a: the shared bounds parser and its CONTAINMENT check. A bare
   # `starts_with` admits `providers-evil/key` under a `providers` prefix — a
   # malformed or hostile registry entry naming a Vault path outside the
@@ -305,6 +309,10 @@ why = "module declarations and re-exports only; no production regions of its own
 [[t3]]
 path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
+
+[[t3]]
+path = "crates/maknae-vault/src/kv_io.rs"
+why = "the KV v2 network read; this project has no Vault stub and deliberately uses none — the network is exercised by #[ignore]d live tests against a real Vault. The PARSE it depends on is pure and T1 in kv.rs (the secret_io/secret_source split)"
 
 [[t3]]
 path = "crates/maknae-config/src/bounds_io.rs"

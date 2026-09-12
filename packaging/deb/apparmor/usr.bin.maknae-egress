@@ -1,0 +1,49 @@
+# AppArmor profile for maknae-egress (the maknae egress deputy, #240a).
+# Install to: /etc/apparmor.d/usr.bin.maknae-egress
+# Reload:     apparmor_parser -r /etc/apparmor.d/usr.bin.maknae-egress
+#
+# AppArmor 3.x syntax (Debian 13 Trixie / Ubuntu 24.04 Noble); 4.0 accepts 3.x.
+#
+# The Debian analog of maknae_egress_t in packaging/common/maknae.te. This is
+# the process that holds the provider credential and is the only one with a
+# route out, so its profile is DELIBERATELY NARROWER than maknaed's: no home
+# access at all, no audit tree, no policy files.
+
+#include <tunables/global>
+
+profile maknae-egress /usr/bin/maknae-egress {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Binary — map + read.
+  /usr/bin/maknae-egress                 mr,
+
+  # The deputy's operating bounds, and NOTHING else under /etc/maknae. It reads
+  # no policy, no provider registry and no identity map: the kernel decided all
+  # of that long before a frame reached this process. Contrast maknaed, which
+  # needs `/etc/maknae/** r` — the narrower grant here is the point.
+  /etc/maknae/                           r,
+  /etc/maknae/egress-bounds.yaml         r,
+
+  # The decrypted SecretID systemd places in $CREDENTIALS_DIRECTORY (memory
+  # backed, 0400, this account only). The SEALED .cred under /etc/maknae/private
+  # is deliberately NOT readable here — it is root/systemd's, exactly as the
+  # SELinux maknae_secret_t carve-out denies it to maknaed.
+  @{run}/credentials/maknae-egress.service/** r,
+
+  # Its own socket directory (systemd creates the socket and passes the fd).
+  @{run}/maknae-egress/                  r,
+  @{run}/maknae-egress/egress.sock       rw,
+
+  # NO network rules yet. In #240a the deputy answers with a canned reply and
+  # opens no socket outward; provider egress and the Vault KV read arrive with
+  # #240b, and get a network stanza then — narrowed, not blanket.
+
+  # Explicitly denied, so the intent is legible rather than merely absent:
+  # the deputy never reads user files and never touches the audit trail.
+  deny @{HOME}/** rwklx,
+  deny /home/** rwklx,
+  deny /var/log/maknae/** rwklx,
+  deny /etc/maknae/private/** rwklx,
+  deny /etc/maknae/authz.yaml rwklx,
+}

@@ -1,0 +1,46 @@
+[Unit]
+Description=maknae egress deputy (maknae-egress)
+Documentation=https://github.com/darkhonor/maknae
+Requires=maknae-egress.socket
+After=maknae-egress.socket network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=_maknae-egress
+# Socket-activated: the listening fd arrives via LISTEN_FDS. NO bind path is
+# passed — the --bind fallback exists for the hermetic harness and non-systemd
+# dev hosts only, and a test asserts this unit carries none.
+ExecStart=/usr/bin/maknae-egress
+# systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
+# (0400, _maknae-egress-only, memory-backed). Name pinned: enroll seals
+# --name=maknae-egress-secret-id.
+LoadCredentialEncrypted=maknae-egress-secret-id:/etc/maknae/private/maknae-egress-secret-id.cred
+RuntimeDirectory=maknae-egress
+RuntimeDirectoryMode=0750
+
+# STRICTLY MORE CONFINED THAN maknaed, deliberately (#240a §5). The deputy
+# holds a credential and a route out and nothing else: it reads no user files,
+# writes no audit (the kernel does), and parses no policy.
+#   ProtectHome=yes    — not `read-only`: unlike maknaed (#77's read path) the
+#                        deputy has no business in any home directory at all.
+#   no ReadWritePaths  — maknaed needs /var/log/maknae for the audit sink; the
+#                        deputy writes nothing to disk.
+ProtectHome=yes
+ProtectSystem=strict
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

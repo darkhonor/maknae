@@ -1,0 +1,18 @@
+[Unit]
+Description=maknae egress deputy socket
+Documentation=https://github.com/darkhonor/maknae
+
+[Socket]
+# The init system creates and owns the socket, so the deputy never chgrps it
+# and needs no CAP_CHOWN and no supplementary-group membership. `_maknae` is
+# the daemon's account: it is the ONLY peer the deputy will speak to, and the
+# deputy re-checks that per connection with peer credentials — the mode here
+# is defence in depth, not the boundary.
+ListenStream=/run/maknae-egress/egress.sock
+SocketUser=_maknae-egress
+SocketGroup=_maknae
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

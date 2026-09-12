@@ -1,0 +1,23 @@
+# The binaries the Linux packages SHIP. One list, driving both build lanes.
+#
+# This is a PACKAGING DECISION and is deliberately hand-maintained: it is not
+# derivable from `cargo metadata`, because the workspace builds a binary the
+# packages do not ship. The reviewed finding that produced this file (#293):
+# deriving the set from metadata yielded {maknae, maknae-egress, maknae-spifc,
+# maknaed} and then checked that all four existed — while the payload installed
+# three. That guard proved an unrelated executable was present in the input
+# directory, not that each selected binary was shipped, and it broke the build
+# when given exactly the intended three.
+#
+# NOT SHIPPED, on purpose:
+#   maknae-spifc — the SPIF compiler is a setup-only tool, built from this
+#                  workspace but not part of the installed runtime. It has its
+#                  own trust-plane treatment in the isolation contract.
+#
+# These are BINARY (target) names, which is what lands in %{_bindir} and
+# usr/bin. A Cargo package name need not equal its bin target name; this file
+# names the artefact, and `validate-packaged-binaries.sh` confirms each one is
+# a real bin target of this workspace.
+maknaed
+maknae
+maknae-egress

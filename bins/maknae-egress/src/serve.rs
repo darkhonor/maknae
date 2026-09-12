@@ -297,4 +297,41 @@ mod tests {
             Err(ServeError::OversizeFrame(u32::MAX as usize))
         );
     }
+
+    /// THE BOUNDARY, deputy side. Same class as #295 on the kernel side: the
+    /// over-cap test declares `u32::MAX`, where `>` and `>=` refuse alike, so
+    /// it cannot pin which operator the check uses. At EXACTLY the cap the
+    /// frame must be admitted past the cap check and fail at DECODE instead —
+    /// a different error, which is the discriminator.
+    #[test]
+    fn the_request_cap_refuses_above_it_and_admits_at_it() {
+        let me = nix::unistd::getuid().as_raw();
+
+        // n == MAX: past the cap, so the failure comes from decoding junk.
+        let (a, b) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            let mut c = a;
+            let n = MAX_REQUEST_FRAME_BYTES as u32;
+            let _ = c.write_all(&n.to_be_bytes());
+            let _ = c.write_all(&vec![0u8; n as usize]);
+        });
+        match serve_one(b, me, &bounds()) {
+            Err(ServeError::Io(_)) => {}
+            Err(ServeError::OversizeFrame(n)) => panic!(
+                "a frame EXACTLY at the cap ({n}) was refused as oversize — the check is `>=`, not `>`"
+            ),
+            other => panic!("expected a decode-stage failure, got {other:?}"),
+        }
+
+        // n == MAX + 1: refused by the cap, before any allocation.
+        let (a2, b2) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            let mut c = a2;
+            let _ = c.write_all(&((MAX_REQUEST_FRAME_BYTES + 1) as u32).to_be_bytes());
+        });
+        assert_eq!(
+            serve_one(b2, me, &bounds()),
+            Err(ServeError::OversizeFrame(MAX_REQUEST_FRAME_BYTES + 1))
+        );
+    }
 }

@@ -386,6 +386,31 @@ mod tests {
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
         };
         let cap = reply_capacity(&reply);
+
+        // INDEPENDENT ORACLE, as a literal. #295: this assertion used to be
+        // `buf.capacity() == cap` and NOTHING ELSE, with `cap` taken from the
+        // function under test — so both sides moved together and five
+        // arithmetic mutants on `reply_capacity`'s `+` operators survived
+        // (`+`→`-` and `+`→`*` at three operand positions). A self-referential
+        // assertion can only ever catch a capacity that is too SMALL, and only
+        // when the encode happens to exceed it.
+        //
+        // The expected value is spelled as a NUMBER, not as a sum: an oracle
+        // written with the same operators as the implementation mutates in
+        // sympathy with it. Derivation, for the reader:
+        //     name "read_file"            9
+        //   + call_id "call_1"            6
+        //   + arguments  (MAX_TOOL_CALL_ARGS_BYTES)   4096
+        //   + TOOL_CALL_ENVELOPE                        64
+        //   + FRAME_ENVELOPE_MARGIN                    512
+        //   + text length 0, blocks 0 × REPLY_BLOCK_ENVELOPE
+        //   = 4687
+        assert_eq!(
+            cap, 4687,
+            "reply_capacity's arithmetic changed; recompute the oracle deliberately \
+             rather than copying the new value"
+        );
+
         let r = maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
@@ -397,6 +422,60 @@ mod tests {
             "encode grew the buffer — realloc leaves an un-zeroized copy of the \
              tool-call payload in freed heap"
         );
+        // And the bound must actually BOUND: the encoded frame fits inside it.
+        // Without this, an oversized capacity satisfies the no-grow check while
+        // saying nothing about correctness.
+        assert!(
+            buf.len() <= cap,
+            "the encoded reply ({}) exceeds the capacity it was sized with ({cap})",
+            buf.len()
+        );
+    }
+
+    /// Each operand of `reply_capacity` is load-bearing, pinned by a literal.
+    /// #295: three `+` positions survived mutation because no test ever
+    /// asserted the VALUE the function computes — only that an encode fitted
+    /// inside whatever it returned.
+    #[test]
+    fn reply_capacity_counts_every_operand() {
+        // text only: 5 bytes of text, one block
+        let text_only = maknae_proto::PromptReply {
+            blocks: vec![text("hello")],
+            tool_calls: vec![],
+        };
+        // 5 + (1 × 32) + 512 = 549
+        assert_eq!(reply_capacity(&text_only), 549);
+
+        // one minimal tool call: name 1, id 1, args 1, envelope 64, margin 512
+        let one_call = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![maknae_proto::ProposedToolCall {
+                name: "a".into(),
+                call_id: "b".into(),
+                arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+            }],
+        };
+        // 1 + 1 + 1 + 64 + 512 = 579
+        assert_eq!(reply_capacity(&one_call), 579);
+
+        // TWO calls: the per-call envelope is counted per call, not once.
+        let two_calls = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![
+                maknae_proto::ProposedToolCall {
+                    name: "a".into(),
+                    call_id: "b".into(),
+                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                },
+                maknae_proto::ProposedToolCall {
+                    name: "a".into(),
+                    call_id: "b".into(),
+                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                },
+            ],
+        };
+        // (1+1+1+64) × 2 + 512 = 646
+        assert_eq!(reply_capacity(&two_calls), 646);
     }
 
     /// `Empty` now means BOTH lists empty. A reply that is only tool calls is
