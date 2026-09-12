@@ -142,7 +142,11 @@ jobs:
         run: bash ci/gates/clippy-all.sh
       - name: Per-package release builds (single-package AUDITABLE — spec §3/§6)
         run: |
-          for p in maknaed maknae maknae-spifc; do cargo auditable build --locked -p "$p" --release; done
+          # #240a: maknae-egress joins the loop. A new binary that is never
+          # auditable-built here ships without the embedded dependency inventory
+          # the P2 witness reads — and P2 is what proves a binary carries no
+          # privileged crate.
+          for p in maknaed maknae maknae-spifc maknae-egress; do cargo auditable build --locked -p "$p" --release; done
       - name: Tests (workspace test IS permitted; does NOT establish isolation)
         run: cargo test --locked --workspace
       - name: cargo-deny

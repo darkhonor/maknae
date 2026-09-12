@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # Build the maknae .deb from pre-built binaries + packaging/ assets.
 # CI-ready: non-interactive, hermetic, deterministic output name. Can run on any
 # host with dpkg-deb (no Debian target host required for the build itself).
@@ -85,6 +86,8 @@ install -D -m 0644 "$COMMON/maknae.sysusers" \
 # --- AppArmor profile -----------------------------------------------------------
 install -D -m 0644 "$HERE/apparmor/usr.bin.maknaed" \
     "$PKG_ROOT/etc/apparmor.d/usr.bin.maknaed"
+install -D -m 0644 "$HERE/apparmor/usr.bin.maknae-egress" \
+    "$PKG_ROOT/etc/apparmor.d/usr.bin.maknae-egress"
 
 # --- Vault-port label helper (layout parity; SELinux-only no-op on Debian) ------
 install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
@@ -116,6 +119,23 @@ maknae (${VERSION}-1) stable; urgency=medium
  -- Alex Ackerman <developer@maknae.io>  Mon, 17 Aug 2026 00:00:00 +0000
 CHLOG
 gzip -9n "$PKG_ROOT/usr/share/doc/maknae/changelog.Debian"
+
+# --- Payload vs declaration: every conffile MUST be in the payload ------------
+# #240a. The failure this prevents, which shipped once and was caught in review:
+# the egress AppArmor profile was DECLARED in conffiles and LOADED in postinst,
+# but never installed into $PKG_ROOT. postinst suppresses parser errors with
+# `|| :`, so the install completed and the deputy ran UNCONFINED — a declared
+# control that was silently absent.
+#
+# Derived from the conffiles list rather than a second hand-written list: a
+# hand-written copy is the drift this exists to stop.
+while IFS= read -r cf; do
+    [ -n "$cf" ] || continue
+    [ -f "$PKG_ROOT$cf" ] || {
+        echo "ERROR: conffile '$cf' is declared but not present in the payload" >&2
+        exit 1
+    }
+done < "$PKG_ROOT/DEBIAN/conffiles"
 
 # --- Build the .deb -------------------------------------------------------------
 mkdir -p "$DIST"
