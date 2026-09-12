@@ -1129,6 +1129,14 @@ dependencies = [
 [[package]]
 name = "maknae-llm"
 version = "0.0.0"
+dependencies = [
+ "maknae-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
 
 [[package]]
 name = "maknae-mcp"
@@ -1477,6 +1485,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

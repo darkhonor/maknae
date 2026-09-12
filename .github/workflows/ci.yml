@@ -46,7 +46,7 @@ concurrency:
 # clean, so ten crates -- `maknae-authz-basic` among them -- were compiled for
 # macOS by nothing. Same defect class as #74's clippy list, same cure.
 env:
-  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus"
+  MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus,crates/maknae-llm"
 
 jobs:
   affected:

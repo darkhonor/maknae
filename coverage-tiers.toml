@@ -138,6 +138,12 @@ files = [
   # operator wrote and the boot gate validated — a rfind/find slip turns
   # secret/data/maknae/data/openai into mount "secret/data/maknae".
   "crates/maknae-vault/src/kv.rs",
+  # #240b: the provider request/response MAPPING, T1 by #240's own declaration.
+  # Everything it parses is bytes from a third party outside the enforcement
+  # boundary; a shape we do not recognise must be a refusal the loop sees, never
+  # an empty success. The tool-name check is the vocabulary control — the model
+  # proposes, it does not invent the names it was offered.
+  "crates/maknae-llm/src/wire.rs",
   # #240a: the shared bounds parser and its CONTAINMENT check. A bare
   # `starts_with` admits `providers-evil/key` under a `providers` prefix — a
   # malformed or hostile registry entry naming a Vault path outside the
@@ -223,7 +229,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
