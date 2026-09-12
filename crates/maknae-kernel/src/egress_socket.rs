@@ -30,6 +30,11 @@ pub struct SocketEgress {
     /// whose own message reads "failing closed without spawning more NSS work".
     expected_uid: u32,
     timeout: Duration,
+    /// The largest reply frame this kernel will ACCEPT from the deputy.
+    /// Checked against the declared length BEFORE any allocation: the deputy
+    /// is authenticated but untrusted, and a four-byte prefix must not be able
+    /// to make the kernel reserve four gigabytes.
+    max_frame_bytes: usize,
 }
 
 impl SocketEgress {
@@ -37,11 +42,17 @@ impl SocketEgress {
     /// construction. Taking it as a value rather than resolving here keeps the
     /// NSS lookup on the caller's blocking path and makes the refusal testable
     /// on a host that has no such account.
-    pub fn new(path: PathBuf, expected_uid: u32, timeout: Duration) -> Self {
+    pub fn new(
+        path: PathBuf,
+        expected_uid: u32,
+        timeout: Duration,
+        max_frame_bytes: usize,
+    ) -> Self {
         Self {
             path,
             expected_uid,
             timeout,
+            max_frame_bytes,
         }
     }
 
@@ -101,6 +112,16 @@ impl Egress for SocketEgress {
         let mut len = [0u8; 4];
         s.read_exact(&mut len).map_err(Self::transport)?;
         let n = u32::from_be_bytes(len) as usize;
+        // BEFORE the allocation. The deputy is authenticated but untrusted (see
+        // this module's header), so a four-byte length prefix must not be able
+        // to make the kernel reserve up to 4 GiB. The CBOR decode and
+        // `admitted_reply` run later and would never see it.
+        if n > self.max_frame_bytes {
+            return Err(EgressFailure::Transport(format!(
+                "deputy declared a {n}-byte reply frame over the {}-byte cap",
+                self.max_frame_bytes
+            )));
+        }
         let mut body = vec![0u8; n];
         s.read_exact(&mut body).map_err(Self::transport)?;
         let reply = decode_egress_frame_reply(&body).map_err(Self::transport)?;
@@ -173,7 +194,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (path, seen) = fake_deputy(d.path(), None);
         let me = nix::unistd::getuid().as_raw();
-        let e = SocketEgress::new(path, me.wrapping_add(1), Duration::from_secs(2));
+        let e = SocketEgress::new(path, me.wrapping_add(1), Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let out = e.send(&intent, req());
         assert!(
@@ -199,7 +220,7 @@ mod tests {
         };
         let (path, seen) = fake_deputy(d.path(), Some(reply.clone()));
         let me = nix::unistd::getuid().as_raw();
-        let e = SocketEgress::new(path, me, Duration::from_secs(2));
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let got = e.send(&intent, req()).unwrap();
         assert_eq!(got.reply, reply);
@@ -211,7 +232,12 @@ mod tests {
     #[test]
     fn ready_fails_closed_with_no_socket() {
         let d = tempfile::tempdir().unwrap();
-        let e = SocketEgress::new(d.path().join("absent.sock"), 0, Duration::from_secs(1));
+        let e = SocketEgress::new(
+            d.path().join("absent.sock"),
+            0,
+            Duration::from_secs(1),
+            64 * 1024,
+        );
         assert_eq!(e.ready(), Err(EgressFailure::NotConfigured));
     }
 
@@ -219,14 +245,19 @@ mod tests {
     fn ready_succeeds_once_the_deputy_socket_exists() {
         let d = tempfile::tempdir().unwrap();
         let (path, _seen) = fake_deputy(d.path(), None);
-        let e = SocketEgress::new(path, 0, Duration::from_secs(1));
+        let e = SocketEgress::new(path, 0, Duration::from_secs(1), 64 * 1024);
         assert_eq!(e.ready(), Ok(()));
     }
 
     #[test]
     fn a_connect_to_no_deputy_is_a_transport_failure() {
         let d = tempfile::tempdir().unwrap();
-        let e = SocketEgress::new(d.path().join("absent.sock"), 0, Duration::from_secs(1));
+        let e = SocketEgress::new(
+            d.path().join("absent.sock"),
+            0,
+            Duration::from_secs(1),
+            64 * 1024,
+        );
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
@@ -256,7 +287,7 @@ mod tests {
             }
         });
         let me = nix::unistd::getuid().as_raw();
-        let e = SocketEgress::new(path, me, Duration::from_secs(2));
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
@@ -279,11 +310,49 @@ mod tests {
             }
         });
         let me = nix::unistd::getuid().as_raw();
-        let e = SocketEgress::new(path, me, Duration::from_secs(2));
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
             Err(EgressFailure::Transport(_))
         ));
+    }
+
+    /// A four-byte length prefix from the deputy must NOT become a
+    /// four-gigabyte allocation. The deputy is authenticated but untrusted —
+    /// this file says so in its own header — so a compromised or faulty one
+    /// exhausting the kernel with four bytes is a denial of service the
+    /// protocol admission never sees, because the allocation happens first.
+    #[test]
+    fn a_deputy_declaring_an_enormous_frame_is_refused_before_allocating() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                if c.read_exact(&mut len).is_ok() {
+                    let n = u32::from_be_bytes(len) as usize;
+                    let mut body = vec![0u8; n];
+                    let _ = c.read_exact(&mut body);
+                    // Declare the largest frame a u32 can express, and send
+                    // nothing after it. A kernel that pre-allocates dies here.
+                    let _ = c.write_all(&u32::MAX.to_be_bytes());
+                }
+            }
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let out = e.send(&intent, req());
+        match out {
+            Err(EgressFailure::Transport(m)) => {
+                assert!(
+                    m.contains("frame"),
+                    "expected a frame-cap refusal, got: {m}"
+                )
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 }
