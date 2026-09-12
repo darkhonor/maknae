@@ -1371,8 +1371,7 @@ pub async fn handle<S, E, P>(
             // `run.rs` handed #240 this obligation by name; the ordering is the
             // whole control, not the presence of a breaker.
             let egress_breaker = egress_send_breaker();
-            let egress_admission =
-                { egress_breaker.lock().await.begin_attempt_at(Instant::now()) };
+            let egress_admission = { egress_breaker.lock().await.begin_attempt_at(Instant::now()) };
             let sent = if !matches!(egress_admission, BreakerAdmission::Admit) {
                 // Refused without spawning anything. Delivery did not happen,
                 // so this is a `Failed` — the content never left.

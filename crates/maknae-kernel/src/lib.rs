@@ -23,11 +23,11 @@ pub use boot::{boot, BootConfig};
 pub use boot_gate::{authz_boot_gate, AuthzBootRefusal};
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
-pub use egress_socket::SocketEgress;
 pub use egress::{
     admitted_reply, production_egress, reply_capacity, reply_text_length, DurableEgressIntent,
     Egress, EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
 };
+pub use egress_socket::SocketEgress;
 pub use groupres::*;
 pub use handler::{
     admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, may_respond,

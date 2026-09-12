@@ -14,7 +14,6 @@
 //! carrier today (ADR-0024) and #241 owns closing that; a slot for an unbuilt
 //! mechanism is the ADR-0023 failure.
 
-
 use serde::{Deserialize, Serialize};
 
 /// What the kernel hands the egress deputy for one decided `session.prompt`.
@@ -72,7 +71,6 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.content.is_empty()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +102,10 @@ mod tests {
         let d = format!("{r:?}");
         assert!(!d.contains("0300"), "prompt content leaked: {d}");
         assert!(!d.contains("secret/data"), "key path leaked: {d}");
-        assert!(d.contains("provider:openai"), "destination should be visible: {d}");
+        assert!(
+            d.contains("provider:openai"),
+            "destination should be visible: {d}"
+        );
     }
 
     #[test]
@@ -121,7 +122,10 @@ mod tests {
     /// inventing a second one.
     #[test]
     fn an_over_long_conversation_is_refused() {
-        let ok = req(&"a".repeat(crate::MAX_CONVERSATION_ID_BYTES), vec![text("x")]);
+        let ok = req(
+            &"a".repeat(crate::MAX_CONVERSATION_ID_BYTES),
+            vec![text("x")],
+        );
         assert!(egress_frame_request_is_acceptable(&ok));
         let bad = req(
             &"a".repeat(crate::MAX_CONVERSATION_ID_BYTES + 1),
@@ -162,12 +166,39 @@ mod tests {
     fn every_required_field_is_checked() {
         let base = req("conv1", vec![text("x")]);
         for (label, bad) in [
-            ("destination", EgressFrameRequest { destination: String::new(), ..base.clone() }),
-            ("endpoint", EgressFrameRequest { endpoint: String::new(), ..base.clone() }),
-            ("model", EgressFrameRequest { model: String::new(), ..base.clone() }),
-            ("key_vault_path", EgressFrameRequest { key_vault_path: String::new(), ..base.clone() }),
+            (
+                "destination",
+                EgressFrameRequest {
+                    destination: String::new(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "endpoint",
+                EgressFrameRequest {
+                    endpoint: String::new(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "model",
+                EgressFrameRequest {
+                    model: String::new(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "key_vault_path",
+                EgressFrameRequest {
+                    key_vault_path: String::new(),
+                    ..base.clone()
+                },
+            ),
         ] {
-            assert!(!egress_frame_request_is_acceptable(&bad), "{label} unchecked");
+            assert!(
+                !egress_frame_request_is_acceptable(&bad),
+                "{label} unchecked"
+            );
         }
         assert!(egress_frame_request_is_acceptable(&base));
     }

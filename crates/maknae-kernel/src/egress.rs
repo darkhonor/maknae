@@ -409,7 +409,10 @@ mod tests {
         };
         assert_eq!(admitted_reply(&reply), Ok(()));
         assert_eq!(
-            admitted_reply(&maknae_proto::PromptReply { blocks: vec![], tool_calls: vec![] }),
+            admitted_reply(&maknae_proto::PromptReply {
+                blocks: vec![],
+                tool_calls: vec![]
+            }),
             Err(ReplyRefusal::Empty),
         );
     }
@@ -434,7 +437,10 @@ mod tests {
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1)],
         };
-        assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::ToolCallUnacceptable));
+        assert_eq!(
+            admitted_reply(&reply),
+            Err(ReplyRefusal::ToolCallUnacceptable)
+        );
     }
 
     use super::*;
@@ -487,7 +493,8 @@ mod tests {
         ) -> Result<EgressReply, EgressFailure> {
             self.calls.lock().unwrap().push("send");
             Ok(EgressReply {
-                reply: maknae_proto::PromptReply { tool_calls: vec![],
+                reply: maknae_proto::PromptReply {
+                    tool_calls: vec![],
                     blocks: vec![text("ok")],
                 },
             })
@@ -682,7 +689,8 @@ mod tests {
             vec![text(&"y".repeat(70_000))],
             (0..50).map(|i| text(&"z".repeat(i * 100))).collect(),
         ] {
-            let reply = maknae_proto::PromptReply { tool_calls: vec![],
+            let reply = maknae_proto::PromptReply {
+                tool_calls: vec![],
                 blocks: blocks.clone(),
             };
             let cap = reply_capacity(&reply);
@@ -713,7 +721,8 @@ mod tests {
         }
         // The non-text arm of reply_text_length is still a region: it contributes nothing.
         assert_eq!(
-            reply_text_length(&maknae_proto::PromptReply { tool_calls: vec![],
+            reply_text_length(&maknae_proto::PromptReply {
+                tool_calls: vec![],
                 blocks: vec![
                     text("ab"),
                     ContentBlock::ResourceLink {
@@ -725,7 +734,10 @@ mod tests {
             2
         );
         assert_eq!(
-            reply_capacity(&maknae_proto::PromptReply { tool_calls: vec![], blocks: vec![] }),
+            reply_capacity(&maknae_proto::PromptReply {
+                tool_calls: vec![],
+                blocks: vec![]
+            }),
             crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
         // EXACT arithmetic on a multi-block reply: `buf.capacity() == cap` above
@@ -735,7 +747,8 @@ mod tests {
         // re-kills the other operator mutants; an over-estimate is a real
         // defect, it refuses replies that fit.
         assert_eq!(
-            reply_capacity(&maknae_proto::PromptReply { tool_calls: vec![],
+            reply_capacity(&maknae_proto::PromptReply {
+                tool_calls: vec![],
                 blocks: vec![text("abc"), text("de")],
             }),
             5 + 2 * REPLY_BLOCK_ENVELOPE + crate::handler::FRAME_ENVELOPE_MARGIN as usize
@@ -744,16 +757,21 @@ mod tests {
 
     #[test]
     fn a_reply_is_admitted_only_when_text_only_and_non_empty_and_the_refusal_is_named() {
-        let ok = maknae_proto::PromptReply { tool_calls: vec![],
+        let ok = maknae_proto::PromptReply {
+            tool_calls: vec![],
             blocks: vec![text("a"), text("b")],
         };
         assert_eq!(admitted_reply(&ok), Ok(()));
         assert_eq!(
-            admitted_reply(&maknae_proto::PromptReply { tool_calls: vec![], blocks: vec![] }),
+            admitted_reply(&maknae_proto::PromptReply {
+                tool_calls: vec![],
+                blocks: vec![]
+            }),
             Err(ReplyRefusal::Empty)
         );
         assert_eq!(
-            admitted_reply(&maknae_proto::PromptReply { tool_calls: vec![],
+            admitted_reply(&maknae_proto::PromptReply {
+                tool_calls: vec![],
                 blocks: vec![
                     text("a"),
                     ContentBlock::Image {

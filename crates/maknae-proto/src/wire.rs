@@ -637,8 +637,7 @@ pub fn encode_egress_frame_request(
     r: &crate::EgressFrameRequest,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
     let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf)
-        .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
 }
 
@@ -650,8 +649,7 @@ pub fn encode_egress_frame_reply(
     r: &crate::EgressFrameReply,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
     let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf)
-        .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
 }
 
@@ -788,7 +786,8 @@ mod tests {
     fn prompt_reply_payload_round_trips_and_redacts() {
         let resp = Response {
             protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(PromptReply { tool_calls: vec![],
+            result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                tool_calls: vec![],
                 blocks: vec![text("hi there")],
             })),
         };
@@ -1200,7 +1199,9 @@ mod tests {
         };
         assert!(!proposed_tool_call_is_acceptable(&c));
         let ok = ProposedToolCall {
-            arguments: SecretText(zeroize::Zeroizing::new("a".repeat(MAX_TOOL_CALL_ARGS_BYTES))),
+            arguments: SecretText(zeroize::Zeroizing::new(
+                "a".repeat(MAX_TOOL_CALL_ARGS_BYTES),
+            )),
             ..c
         };
         assert!(proposed_tool_call_is_acceptable(&ok));

@@ -35,7 +35,11 @@ mod tests {
     use super::*;
 
     fn creds(uid: u32) -> PeerCreds {
-        PeerCreds { uid, gid: None, pid: None }
+        PeerCreds {
+            uid,
+            gid: None,
+            pid: None,
+        }
     }
 
     /// A uid that is not the expected one is refused. This is the whole

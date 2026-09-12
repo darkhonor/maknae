@@ -14,8 +14,8 @@
 //! The path is not the boundary — a socket path can be replaced by anything
 //! that can write the directory; a uid cannot be forged.
 
-use crate::egress::{Egress, EgressFailure, EgressReply, EgressRequest};
 use crate::egress::DurableEgressIntent;
+use crate::egress::{Egress, EgressFailure, EgressReply, EgressRequest};
 use maknae_proto::{decode_egress_frame_reply, encode_egress_frame_request, EgressFrameRequest};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -38,7 +38,11 @@ impl SocketEgress {
     /// NSS lookup on the caller's blocking path and makes the refusal testable
     /// on a host that has no such account.
     pub fn new(path: PathBuf, expected_uid: u32, timeout: Duration) -> Self {
-        Self { path, expected_uid, timeout }
+        Self {
+            path,
+            expected_uid,
+            timeout,
+        }
     }
 
     fn transport(e: impl std::fmt::Display) -> EgressFailure {
@@ -71,8 +75,12 @@ impl Egress for SocketEgress {
             ));
         }
 
-        stream.set_read_timeout(Some(self.timeout)).map_err(Self::transport)?;
-        stream.set_write_timeout(Some(self.timeout)).map_err(Self::transport)?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .map_err(Self::transport)?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(Self::transport)?;
 
         let frame = EgressFrameRequest {
             destination: req.destination,
@@ -85,7 +93,8 @@ impl Egress for SocketEgress {
         let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
 
         let mut s = stream;
-        s.write_all(&(buf.len() as u32).to_be_bytes()).map_err(Self::transport)?;
+        s.write_all(&(buf.len() as u32).to_be_bytes())
+            .map_err(Self::transport)?;
         s.write_all(&buf).map_err(Self::transport)?;
         s.flush().map_err(Self::transport)?;
 
@@ -115,14 +124,19 @@ mod tests {
             key_vault_path: "secret/data/maknae/providers/openai".into(),
             conversation: "conv1".into(),
             content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new("the president flies at 0300".into())),
+                text: SecretText(maknae_io::Zeroizing::new(
+                    "the president flies at 0300".into(),
+                )),
             }],
         }
     }
 
     /// A fake deputy. Returns how many bytes it ever read, so a test can assert
     /// that a refused connection wrote NOTHING.
-    fn fake_deputy(dir: &std::path::Path, reply: Option<maknae_proto::PromptReply>) -> (PathBuf, StdArc<AtomicUsize>) {
+    fn fake_deputy(
+        dir: &std::path::Path,
+        reply: Option<maknae_proto::PromptReply>,
+    ) -> (PathBuf, StdArc<AtomicUsize>) {
         let path = dir.join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
         let seen = StdArc::new(AtomicUsize::new(0));
@@ -162,7 +176,10 @@ mod tests {
         let e = SocketEgress::new(path, me.wrapping_add(1), Duration::from_secs(2));
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let out = e.send(&intent, req());
-        assert!(matches!(out, Err(EgressFailure::Transport(_))), "expected refusal, got {out:?}");
+        assert!(
+            matches!(out, Err(EgressFailure::Transport(_))),
+            "expected refusal, got {out:?}"
+        );
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(
             seen.load(Ordering::SeqCst),
