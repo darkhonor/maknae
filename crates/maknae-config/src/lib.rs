@@ -32,6 +32,8 @@
 
 mod audit_cfg;
 mod authz;
+mod bounds;
+mod bounds_io;
 mod builder;
 mod ceiling;
 mod document;
@@ -58,6 +60,11 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, Decision,
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
+pub use bounds::{
+    bounds_from_document, path_is_within_prefix, EgressBounds, EGRESS_BOUNDS_FILE,
+    MAX_KEY_VAULT_PREFIX_BYTES,
+};
+pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
     effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,

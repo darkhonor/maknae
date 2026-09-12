@@ -1,0 +1,33 @@
+[package]
+name = "maknae-egress"
+publish.workspace = true
+description = "The Maknae egress deputy — the only process with a route out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-config = { path = "../../crates/maknae-config" }
+maknae-proto = { path = "../../crates/maknae-proto" }
+maknae-vault = { path = "../../crates/maknae-vault" }
+# #240a D4-A, maintainer ruling 2026-09-12 (option b). Adopting an inherited
+# listening fd requires `UnixListener::from_raw_fd`, which is `unsafe`, and
+# `[workspace.lints.rust] unsafe_code = "forbid"` cannot be lifted by an
+# in-crate `#[allow]`. `forbid` is PER CRATE, so a dependency's internal
+# `unsafe` is permitted where our own is not — this crate exposes a safe API
+# returning an owned `std::os::unix::net::UnixListener`. The alternative was a
+# narrow `deny` + `#[allow]` in the one binary that holds the provider
+# credential, which is the worst place in the tree to make that exception.
+listenfd = "=1.0.2"
+
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+tempfile = "3"
