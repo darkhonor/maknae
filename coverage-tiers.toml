@@ -126,6 +126,10 @@ files = [
   # ratchet_cohort — the ratchet is the security-seam + config-loading-core
   # cohort, ADR-0016 §4).
   "crates/maknae-proto/src/wire.rs",
+  # #240a: the maknaed<->egress frame. The request/response mapping is T1 by
+  # #240's own declaration; its Debug redaction is what keeps prompt content
+  # and the provider key path out of operator-visible error strings.
+  "crates/maknae-proto/src/egress_frame.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
