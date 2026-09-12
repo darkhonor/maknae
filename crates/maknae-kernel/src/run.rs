@@ -3506,9 +3506,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn valid_authz_and_principal_reaches_posture_record() {
         let _g = ENV_LOCK.lock().unwrap();
         let d = Dir::new("valid_reaches_posture");
+        // #216: the boot gate resolves `principal.home` through the kernel, so
+        // the fixture names a home that EXISTS. A fictional path is now a boot
+        // refusal by design, which is what this test must not accidentally hit.
         write_common_fixture(
             &d,
-            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
+            &format!(
+                "principal:\n  name: op\n  uid: 1000\n  home: {}\n",
+                std::env::temp_dir().display()
+            ),
         );
         put(
             &d.0,

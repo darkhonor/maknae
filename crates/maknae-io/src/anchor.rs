@@ -331,6 +331,35 @@ pub fn open_anchor_resolved(
     finish_anchor(afd, path, req, pref)
 }
 
+/// Resolve an absolute directory to the form the KERNEL reports for a descriptor
+/// on it — `F_GETPATH` on darwin, `readlink /proc/self/fd/N` on Linux.
+///
+/// **This is deliberately the SAME resolver [`crate::verify_delegated`] uses to
+/// name a delegated descriptor's path** (issue #216). That identity is the whole
+/// point: the defect it closes was two different resolvers disagreeing about the
+/// FORM of one directory. `principal.home` was compared, unresolved, against a
+/// kernel-reported resolved path, so `strip_prefix` never matched and every
+/// `fs.read` was denied fail-closed — a `/home -> /export/home` layout, an
+/// autofs/NFS estate, or any macOS `/var`-rooted path could not serve a single
+/// read. Canonicalizing with anything else (`std::fs::canonicalize`, say) would
+/// leave the two forms free to drift apart again; resolving through the kernel's
+/// own answer makes agreement structural rather than asserted.
+///
+/// The directory is opened `O_RDONLY|O_DIRECTORY`, symlink-following **by
+/// design** — resolving the link is the job. Descendant resolution elsewhere in
+/// this crate remains symlink-refusing; nothing here relaxes that.
+pub fn resolve_dir(path: &Path) -> Result<PathBuf, IoError> {
+    if !path.is_absolute() {
+        return Err(IoError::RelativeAnchor {
+            path: path.to_path_buf(),
+        });
+    }
+    let fd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
+    syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
+        kind: crate::checks::kind_of_errno(e),
+    })
+}
+
 fn finish_anchor(
     afd: OwnedFd,
     path: &Path,
@@ -644,6 +673,50 @@ impl Anchor {
 
 #[cfg(test)]
 mod tests {
+    // --- #216: resolve_dir ---------------------------------------------------
+    /// A directory reached THROUGH a symlink resolves to the same form the
+    /// kernel reports for a descriptor on the real directory. This is the
+    /// property the whole fix rests on: one resolver, so the confinement root
+    /// and the kernel-reported path cannot disagree in FORM.
+    #[test]
+    fn resolve_dir_returns_the_kernel_form_through_a_symlink() {
+        let base = std::env::temp_dir().join(format!("rd_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let via_real = super::resolve_dir(&real).expect("the real dir resolves");
+        let via_link = super::resolve_dir(&link).expect("the linked dir resolves");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            via_link, via_real,
+            "a symlinked path must resolve to the same form as the real one"
+        );
+        assert_ne!(via_link, link, "the link's own form must not survive");
+    }
+
+    /// Fail-closed: a path with no directory behind it is an error, never a
+    /// pass-through of the input.
+    #[test]
+    fn resolve_dir_refuses_a_dangling_path() {
+        let missing = std::env::temp_dir().join(format!("rd_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(super::resolve_dir(&missing).is_err());
+    }
+
+    /// A relative anchor is refused before any syscall, like every other
+    /// entry point in this module.
+    #[test]
+    fn resolve_dir_refuses_a_relative_path() {
+        match super::resolve_dir(std::path::Path::new("relative/home")) {
+            Err(super::IoError::RelativeAnchor { .. }) => {}
+            other => panic!("expected RelativeAnchor, got {other:?}"),
+        }
+    }
+
     use super::*;
 
     /// The process cwd is global state; a test that moves it must not interleave with

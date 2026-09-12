@@ -550,43 +550,41 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
 }
 
-/// #216-TRIPWIRE -- PINS CURRENT BEHAVIOUR, not a desired property. The enrolled home
-/// (`principal.home`) is written by `maknae enroll` VERBATIM from `getpwuid` --
-/// the directory service's value, not an operator's choice, and re-derived on every
-/// enroll -- and the daemon feeds that one value to at least THREE consumers: the
-/// delegated lane's confinement root (`handler::delegated_plan`, reached at decision
-/// time AND again inside the read PEP), which is prefix-checked against the
+/// #216 -- FLIPPED 2026-09-12, and now asserts the DESIRED property. This test
+/// previously pinned the defect: an enrolled home whose path traverses a symlink
+/// denied EVERY `fs.read`, fail-closed.
+///
+/// `principal.home` is written by `maknae enroll` VERBATIM from `getpwuid` -- the
+/// directory service's value, not an operator's choice, and re-derived on every
+/// enroll -- and the daemon feeds that one value to FOUR consumers: the delegated
+/// lane's confinement root (`handler::delegated_plan`, reached at decision time
+/// AND again inside the read PEP), which is prefix-checked against the
 /// KERNEL-reported path of the subject's descriptor; the `~` referent of every
 /// policy glob (`PathGlob::parse`); and the boot-time anchor probe in `run.rs`.
-/// (Enroll consumes it too, for the CLI dir and the `_maknae` read-ACL grant -- the
-/// surface the production ruling must cover.) Here the home is a SYMLINK to the real
-/// directory. The kernel reports the resolved form, the configured form never
-/// prefix-matches, the OS's answer is never established, and a read of the enrolled
-/// home -- one the operator's `Read(~/**)` grant was written to cover, and which the
-/// positive control below proves IS permitted under the canonical home -- is refused
-/// fail-closed with `os accessibility unknown`: the same fail-closed form mismatch
-/// ADR-0009 decision 4's macOS bullet names for firmlinks, and what a
-/// `/home -> /export/home` layout does to a real deployment whose passwd entry says
-/// `/home/alex`. (Once a descriptor verifies and the RESOLVED path is stamped, the
-/// symlinked home's `~` globs do not match it either -- see the next paragraph --
-/// which is why the name does not say "the policy permits".)
+/// Because the kernel reports the RESOLVED form and the configured form never
+/// prefix-matched it, a `/home -> /export/home` layout, an autofs/NFS estate or
+/// any macOS `/var`-rooted path could not serve a single read. Not a bypass -- a
+/// deployment that answered `os dac: os accessibility unknown` to everything.
 ///
-/// Canonicalizing ONLY `confined_beneath` does not make this read succeed: the `~`
-/// globs -- allow and deny alike -- still expand from the configured string, so the
-/// resolved path matches nothing and the deny merely changes reason
-/// (`no capability entry`). It becomes a genuine deny-turned-permit only where an
-/// operator wrote an ABSOLUTE allow glob covering the resolved path beside
-/// `~`-form denies: the allow matches, the denies never do. Either way the fix must
-/// establish one canonical form for every consumer; when it lands, this test is
-/// flipped DELIBERATELY. Until then: a spurious Deny, never a bypass -- and the
-/// authorizer here is built from the SAME symlinked principal the PEP sees, so a
-/// ROOT-only partial fix changes the asserted reason (to `no capability entry`)
-/// rather than silently satisfying it. A GLOB-only partial fix (canonical `~`
-/// referent, unresolved confinement root) still fails confinement and is
-/// invisible here -- one more reason the ruling must land at or above
-/// `Principal`, where neither half can be fixed alone.
+/// **The fix, per the maintainer's ruling of 2026-09-12 (option B):** boot
+/// canonicalises `principal.home` ONCE, in `authz_boot_gate`, at or above
+/// `Principal` -- never at a call site, because a partial fix permits at decision
+/// and then dies in the PEP with a different record shape. Enroll does NOT own
+/// this: `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so
+/// the trust plane must not depend on the CLI having written a canonical value.
+///
+/// The resolver is `maknae_io::resolve_dir`, which is the SAME mechanism
+/// `verify_delegated` uses to name a delegated descriptor, so the confinement
+/// root and the kernel-reported path agree by CONSTRUCTION. Operators keep
+/// writing `~`: it now expands from the resolved home, which is the point --
+/// nobody should need to know whether their home is NFS-mounted to write policy.
+///
+/// This test mirrors that wiring: the ENROLLED value is the link, and the
+/// resolution happens before either consumer sees it. The unit half -- that the
+/// boot gate is what performs it -- is pinned in `boot_gate.rs`; neither test
+/// covers both halves alone.
 #[tokio::test]
-async fn a_symlinked_principal_home_denies_a_read_beneath_the_enrolled_home() {
+async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
     let fx = Fixture::new("symroot");
     fx.write_policy(SHIPPED_POLICY);
     let content: &[u8] = b"reachable only via the link";
@@ -638,12 +636,25 @@ async fn a_symlinked_principal_home_denies_a_read_beneath_the_enrolled_home() {
         std::fs::remove_file(&link).expect("clear a stale entry at the fixture link path");
     }
     std::os::unix::fs::symlink(&fx.dir, &link).unwrap();
-    let via_link = maknae_config::Principal {
+    // #216 FLIPPED 2026-09-12. Production resolves `principal.home` ONCE at the
+    // boot gate (`authz_boot_gate`), at or above `Principal`, using the SAME
+    // resolver the kernel names a delegated descriptor with. This mirrors that
+    // wiring exactly: the enrolled value is the LINK, and the daemon canonicalises
+    // it before anything consumes it.
+    let enrolled = maknae_config::Principal {
         home: link.clone(),
         ..fx.principal.clone()
     };
+    let via_link = maknae_config::Principal {
+        home: maknae_io::resolve_dir(&enrolled.home).expect("the enrolled home resolves"),
+        ..enrolled.clone()
+    };
+    assert_ne!(
+        via_link.home, enrolled.home,
+        "the fixture must actually exercise a form difference"
+    );
     // ONE principal for both consumers, as production wires it: the PDP expands
-    // `~` against the link, and the PEP confines beneath the link.
+    // `~` against the resolved home, and the PEP confines beneath the same form.
     let pdp_via_link = Arc::new(
         HermeticAuthorizer::new(fx.dir.join("authz.yaml"), via_link.clone(), seam_req())
             .expect("policy constructs against the symlinked home"),
@@ -674,30 +685,28 @@ async fn a_symlinked_principal_home_denies_a_read_beneath_the_enrolled_home() {
     .expect("a deny frame");
     let _ = std::fs::remove_file(&link);
     match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "no reason may reach the wire");
-        }
+        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(
+            &*b.0, content,
+            "a symlinked enrolled home must serve the bytes, not deny"
+        ),
         other => panic!(
-            "a symlinked principal.home is expected to DENY today (#216); if this \
-             read succeeded, the canonical-form fix landed for BOTH consumers -- \
-             flip this test deliberately. Got {other:?}"
+            "#216: a symlinked principal.home must PERMIT once boot canonicalises. \
+             A DENY here means the resolution stopped reaching one of the four \
+             consumers -- `os accessibility unknown` points at the confinement \
+             root, `no capability entry` at the `~` glob expansion. Got {other:?}"
         ),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(req.outcome.result, "permit");
+    // The trail records the RESOLVED object (ADR-0009 decision 6: the verified
+    // path is what the PDP decided on), and `object_requested` carries the link
+    // form the client asked with, because the two now differ.
     assert_eq!(
-        req.outcome.reason, "os dac: os accessibility unknown",
-        "the OS answer is never established through a mismatched confinement root; \
-         a partial fix that canonicalizes only the root would surface here as \
-         `no capability entry` instead"
+        req.object.as_deref(),
+        Some(via_link.home.join("notes.txt").to_string_lossy().as_ref()),
+        "the audit record names the resolved object"
     );
-    // No verified object, so the trail records what was ASKED (the link form) and
-    // nothing to diverge from it: `run.rs`'s `object_path` falls back to the
-    // client's string when `verified_read` is `None`, and `object_asked` is
-    // `Some` only when the decided path differs from it.
-    assert_eq!(req.object.as_deref(), Some(target.as_str()));
-    assert!(req.object_requested.is_none());
+    assert_eq!(req.object_requested.as_deref(), Some(target.as_str()));
 }
 
 #[tokio::test]

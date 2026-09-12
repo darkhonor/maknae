@@ -59,8 +59,8 @@ mod walk;
 mod write;
 
 pub use anchor::{
-    open_anchor, open_anchor_resolved, read_absolute, Anchor, Entry, Kind, Mode, Outcome, Strategy,
-    StrategyPref,
+    open_anchor, open_anchor_resolved, read_absolute, resolve_dir, Anchor, Entry, Kind, Mode,
+    Outcome, Strategy, StrategyPref,
 };
 pub use audit_append::open_audit_append;
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
