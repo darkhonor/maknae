@@ -132,6 +132,35 @@ mod tests {
         assert!(!path_is_within_prefix("x", ""));
     }
 
+    /// An EMPTY prefix admits nothing. Measured gap (#295's class, found by
+    /// `cargo mutants` on this PR's own code): `||` → `&&` on the emptiness
+    /// guard survived, because every input the tests used was also refused
+    /// downstream. This one is not: with `&&`, an empty prefix strips to ""
+    /// and `"/x".strip_prefix("")` yields `"/x"`, which is segment-aligned and
+    /// long enough — so an UNSET prefix would admit an absolute-looking path.
+    /// An absent grant must never be a universal grant.
+    #[test]
+    fn an_empty_prefix_admits_nothing_including_an_absolute_looking_path() {
+        assert!(!path_is_within_prefix("/x", ""));
+        assert!(!path_is_within_prefix(
+            "/secret/data/maknae/providers/openai",
+            ""
+        ));
+        assert!(!path_is_within_prefix("", ""));
+    }
+
+    /// The prefix itself, with a trailing slash and nothing after it, is not a
+    /// document. Measured gap: `rest.len() > 1` → `>=` survived, which would
+    /// make `<prefix>/` count as contained — a path naming the directory
+    /// rather than a secret inside it.
+    #[test]
+    fn the_prefix_with_a_trailing_slash_is_not_a_document_within_it() {
+        let p = "secret/data/maknae/providers";
+        assert!(!path_is_within_prefix("secret/data/maknae/providers/", p));
+        // and one character after the slash IS a document
+        assert!(path_is_within_prefix("secret/data/maknae/providers/a", p));
+    }
+
     #[test]
     fn a_well_formed_document_parses() {
         assert_eq!(
@@ -152,6 +181,9 @@ mod tests {
         assert!(bounds_from_document(&doc("/secret/data")).is_err());
         assert!(bounds_from_document(&doc("secret data")).is_err());
         assert!(bounds_from_document(&doc(&"a".repeat(MAX_KEY_VAULT_PREFIX_BYTES + 1))).is_err());
+        // AT the bound, accepted. Measured gap: `>` → `>=` survived because the
+        // only length ever tested was MAX+1, where both operators refuse alike.
+        assert!(bounds_from_document(&doc(&"a".repeat(MAX_KEY_VAULT_PREFIX_BYTES))).is_ok());
         assert!(bounds_from_document(&Value::Map(vec![(
             "key_vault_path_prefix".into(),
             Value::Int(3)
