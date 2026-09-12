@@ -32,7 +32,14 @@ REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"
 DIST="$REPO/dist"
 
-for b in maknaed maknae maknae-egress; do
+# DERIVED from `cargo metadata`, never hand-listed (#74's lesson, and the
+# standing direction in #290/#291/#292: a control that depends on somebody
+# remembering to edit a literal is the control that ships a gap). A new binary
+# is packaged the moment it exists.
+BINS="$(cargo metadata --no-deps --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
+  | python3 -c "import json,sys; m=json.load(sys.stdin); print(' '.join(sorted(p['name'] for p in m['packages'] if any('bin' in t['kind'] for t in p['targets']))))")"
+[ -n "$BINS" ] || { echo "ERROR: derived an EMPTY binary set — refusing to build" >&2; exit 1; }
+for b in $BINS; do
     [ -x "$BINDIR/$b" ] || { echo "ERROR: missing binary $BINDIR/$b" >&2; exit 1; }
 done
 
@@ -129,13 +136,34 @@ gzip -9n "$PKG_ROOT/usr/share/doc/maknae/changelog.Debian"
 #
 # Derived from the conffiles list rather than a second hand-written list: a
 # hand-written copy is the drift this exists to stop.
+#
+# WHY THIS IS SHELL AND NOT THE COMPILER (#290/#291/#292's standard): the
+# property is "the .deb payload contains what DEBIAN/conffiles declares" — a
+# dpkg property, not a Rust one, so there is no type to make it structural. It
+# reads dpkg's OWN format (one path per line), not a model of some other
+# language, and it derives from the declaration rather than duplicating it.
+# That is the distinction those issues draw: a gate re-deriving Rust's type
+# inventory by regex is the problem; a gate checking a package payload is not.
+#
+# FAIL CLOSED ON ZERO. A missing or empty conffiles file would run the loop
+# zero times and report success — the "linted ZERO rows" hole that
+# isolation-contract-lint was fixed for (#219). A present file is not a
+# scanned file.
+[ -s "$PKG_ROOT/DEBIAN/conffiles" ] || {
+    echo "ERROR: DEBIAN/conffiles is absent or empty — nothing was checked" >&2
+    exit 1
+}
+checked=0
 while IFS= read -r cf; do
     [ -n "$cf" ] || continue
     [ -f "$PKG_ROOT$cf" ] || {
         echo "ERROR: conffile '$cf' is declared but not present in the payload" >&2
         exit 1
     }
+    checked=$((checked + 1))
 done < "$PKG_ROOT/DEBIAN/conffiles"
+[ "$checked" -gt 0 ] || { echo "ERROR: checked ZERO conffiles" >&2; exit 1; }
+echo "payload check: $checked declared conffile(s) present"
 
 # --- Build the .deb -------------------------------------------------------------
 mkdir -p "$DIST"
