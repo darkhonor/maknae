@@ -27,13 +27,13 @@ REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"
 DIST="$REPO/dist"
 
-# DERIVED from `cargo metadata`, never hand-listed (#74's lesson, and the
-# standing direction in #290/#291/#292: a control that depends on somebody
-# remembering to edit a literal is the control that ships a gap). A new binary
-# is packaged the moment it exists.
-BINS="$(cargo metadata --no-deps --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
-  | python3 -c "import json,sys; m=json.load(sys.stdin); print(' '.join(sorted(p['name'] for p in m['packages'] if any('bin' in t['kind'] for t in p['targets']))))")"
-[ -n "$BINS" ] || { echo "ERROR: derived an EMPTY binary set — refusing to build" >&2; exit 1; }
+# The binaries this package SHIPS, from the shared manifest — NOT derived from
+# `cargo metadata`. The workspace builds maknae-spifc and this package does not
+# ship it, so a metadata-derived set selects a binary that never lands in the
+# payload (reviewed finding, #293). The helper validates in the other
+# direction: every named binary must be a real bin target.
+. "$REPO/ci/gates/packaged-binaries.sh"
+BINS="$(packaged_binaries "$REPO")"
 for b in $BINS; do
     [ -x "$BINDIR/$b" ] || { echo "ERROR: missing binary $BINDIR/$b" >&2; exit 1; }
 done
@@ -43,8 +43,10 @@ trap 'rm -rf "$TOP"' EXIT
 mkdir -p "$TOP"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
 
 # Stage numbered sources (must match Source0..N in the spec).
-install -m 0755 "$BINDIR/maknaed"                 "$TOP/SOURCES/maknaed"
-install -m 0755 "$BINDIR/maknae"                  "$TOP/SOURCES/maknae"
+# ONE list drives the existence check above AND the staging here.
+for b in $BINS; do
+    install -m 0755 "$BINDIR/$b" "$TOP/SOURCES/$b"
+done
 install -m 0644 "$COMMON/maknaed.service"         "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae.sysusers"         "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae.te"               "$TOP/SOURCES/"
@@ -55,9 +57,22 @@ install -m 0644 "$COMMON/authz.yaml"              "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae.yaml"             "$TOP/SOURCES/"
 # #240a — Source10..12. Staging must match Source0..N in the spec exactly, or
 # rpmbuild fails on a missing source rather than silently shipping without it.
-install -m 0755 "$BINDIR/maknae-egress"           "$TOP/SOURCES/maknae-egress"
 install -m 0644 "$COMMON/maknae-egress.service"   "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-egress.socket"    "$TOP/SOURCES/"
+
+# --- Spec %files vs manifest: what the rpm SHIPS is what was declared --------
+# The rpm's equivalent of the deb payload check. rpmbuild builds the payload
+# from the spec, so the spec's %{_bindir} entries ARE the shipped set. Compared
+# as SETS: a binary staged but not shipped, or shipped but not declared, fails.
+spec_bins="$(grep -oE '^%\{_bindir\}/\S+' "$HERE/maknae.spec" | sed 's|^%{_bindir}/||' | sort)"
+want_bins="$(printf '%s\n' $BINS | sort)"
+[ "$spec_bins" = "$want_bins" ] || {
+    echo "ERROR: maknae.spec %files does not match the packaged-binaries manifest" >&2
+    echo "  manifest: $(echo $want_bins)" >&2
+    echo "  spec:     $(echo $spec_bins)" >&2
+    exit 1
+}
+echo "spec check: $(echo $spec_bins | wc -w) binary/binaries match the manifest"
 
 # --- Declaration vs staging: every Source in the spec MUST be staged --------
 # The rpm's equivalent of the deb payload check, and derived from the spec for

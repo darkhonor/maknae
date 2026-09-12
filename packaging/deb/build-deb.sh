@@ -32,13 +32,14 @@ REPO="$(cd "$HERE/../.." && pwd)"              # repo root
 COMMON="$REPO/packaging/common"
 DIST="$REPO/dist"
 
-# DERIVED from `cargo metadata`, never hand-listed (#74's lesson, and the
-# standing direction in #290/#291/#292: a control that depends on somebody
-# remembering to edit a literal is the control that ships a gap). A new binary
-# is packaged the moment it exists.
-BINS="$(cargo metadata --no-deps --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
-  | python3 -c "import json,sys; m=json.load(sys.stdin); print(' '.join(sorted(p['name'] for p in m['packages'] if any('bin' in t['kind'] for t in p['targets']))))")"
-[ -n "$BINS" ] || { echo "ERROR: derived an EMPTY binary set — refusing to build" >&2; exit 1; }
+# The binaries this package SHIPS, from the shared manifest. NOT derived from
+# `cargo metadata`: the workspace builds maknae-spifc and the packages do not
+# ship it, so a metadata-derived set selects a binary that never lands in the
+# payload — it broke this build and proved nothing about package content
+# (reviewed finding, #293). The helper validates the manifest against metadata
+# in the other direction: every named binary must be a real bin target.
+. "$REPO/ci/gates/packaged-binaries.sh"
+BINS="$(packaged_binaries "$REPO")"
 for b in $BINS; do
     [ -x "$BINDIR/$b" ] || { echo "ERROR: missing binary $BINDIR/$b" >&2; exit 1; }
 done
@@ -69,12 +70,15 @@ cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 CONF
 
 # --- Binaries -------------------------------------------------------------------
-install -D -m 0755 "$BINDIR/maknaed" "$PKG_ROOT/usr/bin/maknaed"
-install -D -m 0755 "$BINDIR/maknae"  "$PKG_ROOT/usr/bin/maknae"
-install -D -m 0755 "$BINDIR/maknae-egress" "$PKG_ROOT/usr/bin/maknae-egress"
+# ONE list drives the check above AND the payload below, so the two cannot
+# disagree — which is the defect this replaces.
+for b in $BINS; do
+    install -D -m 0755 "$BINDIR/$b" "$PKG_ROOT/usr/bin/$b"
+done
 # Strip debug symbols (lintian: unstripped-binary-or-object) — best-effort.
-strip --strip-unneeded "$PKG_ROOT/usr/bin/maknaed" "$PKG_ROOT/usr/bin/maknae" \
-    "$PKG_ROOT/usr/bin/maknae-egress" 2>/dev/null || true
+for b in $BINS; do
+    strip --strip-unneeded "$PKG_ROOT/usr/bin/$b" 2>/dev/null || true
+done
 
 # --- systemd unit ---------------------------------------------------------------
 install -D -m 0644 "$COMMON/maknaed.service" \
@@ -126,6 +130,20 @@ maknae (${VERSION}-1) stable; urgency=medium
  -- Alex Ackerman <developer@maknae.io>  Mon, 17 Aug 2026 00:00:00 +0000
 CHLOG
 gzip -9n "$PKG_ROOT/usr/share/doc/maknae/changelog.Debian"
+
+# --- Payload vs manifest: what LANDED is exactly what was declared -----------
+# Hobi's point, and the one that matters: the invariant must cover what lands in
+# the .deb, not what happens to sit in target/release. Compared as SETS, so an
+# extra unexpected binary fails too.
+landed="$(cd "$PKG_ROOT/usr/bin" && ls -1 | sort)"
+declared="$(printf '%s\n' $BINS | sort)"
+[ "$landed" = "$declared" ] || {
+    echo "ERROR: payload usr/bin does not match the packaged-binaries manifest" >&2
+    echo "  declared: $(echo $declared)" >&2
+    echo "  landed:   $(echo $landed)" >&2
+    exit 1
+}
+echo "payload check: $(echo $landed | wc -w) binary/binaries match the manifest"
 
 # --- Payload vs declaration: every conffile MUST be in the payload ------------
 # #240a. The failure this prevents, which shipped once and was caught in review:
