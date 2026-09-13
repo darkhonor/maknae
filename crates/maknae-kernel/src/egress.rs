@@ -361,8 +361,61 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
+/// Is a length the deputy DECLARED small enough to allocate for?
+///
+/// Pure, and in the T1 module rather than beside its one caller in
+/// `egress_socket.rs` (T2), because it is a security decision and the tier
+/// contract is what proves it exact. The failure that put it here: as an inline
+/// `n > self.max_frame_bytes` inside `SocketEgress::send`, the comparison could
+/// only be reached through a socket, so the only test that distinguished `>`
+/// from `==`/`<` was one declaring `u32::MAX` — and a mutant that removed the
+/// guard made the kernel allocate and zeroize **4 GiB**, blowing the mutation
+/// timeout. The operators were caught by the CLOCK, not by an assertion:
+/// `cargo mutants` reported TIMEOUT (exit 3), which is a machine-dependent
+/// result, not a kill. As a pure predicate the same operators die on a table of
+/// integers in microseconds, `u32::MAX` included, and cost nothing.
+///
+/// `n <= cap` admits a frame EXACTLY at the cap: the cap is the largest
+/// ACCEPTABLE frame, not the first refused one.
+pub fn frame_len_within_cap(n: usize, cap: usize) -> bool {
+    n <= cap
+}
+
 #[cfg(test)]
 mod tests {
+    // ---- the declared-length cap, as integers ----------------------------
+
+    /// Every operator `cargo mutants` substitutes for `<=` here, killed on a
+    /// table rather than on the clock. `u32::MAX` is the DoS witness Hobi's
+    /// review asked for and it costs nothing at this layer — no socket, no
+    /// allocation, no 20-second budget.
+    #[test]
+    fn the_declared_length_cap_admits_at_the_cap_and_refuses_above_it() {
+        use super::frame_len_within_cap as within;
+        let cap = 64 * 1024usize;
+
+        // Below and AT the cap: acceptable. `cap` itself is the discriminator
+        // between `<=` and `<`.
+        assert!(within(0, cap), "an empty frame is within any cap");
+        assert!(within(1, cap));
+        assert!(within(cap - 1, cap));
+        assert!(within(cap, cap), "the cap is the largest ACCEPTABLE frame");
+
+        // Above it: refused. `cap + 1` is the discriminator between `<=` and
+        // `==`, and against a mutant returning a constant `true`.
+        assert!(!within(cap + 1, cap), "one byte over the cap is refused");
+        assert!(
+            !within(u32::MAX as usize, cap),
+            "four bytes must not become a 4 GiB allocation"
+        );
+        assert!(!within(usize::MAX, cap));
+
+        // A zero cap admits nothing but the empty frame — the fail-closed
+        // reading, and it pins `<=` against `<` at the degenerate end too.
+        assert!(within(0, 0));
+        assert!(!within(1, 0));
+    }
+
     // ---- #240a Task 1: tool-call proposals in the reply -------------------
 
     fn tc(args_len: usize) -> maknae_proto::ProposedToolCall {
