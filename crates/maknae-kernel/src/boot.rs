@@ -568,7 +568,12 @@ mod tests {
         }
     }
     #[cfg(unix)]
-    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5\n  key_vault_path: maknae/provider/openai\n";
+    // #308: `key_vault_path` is mount-relative and `key_field` is required, and
+    // the model is the pinned test model (maintainer ruling 2026-09-13). This
+    // fixture also carried the pre-#307 SINGULAR `maknae/provider/...`, which
+    // matched neither Terraform's `maknae/providers` default nor any other
+    // fixture; both are corrected here.
+    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5.6-luna\n  key_vault_path: maknae/providers/openai\n  key_field: api-key\n";
 
     #[cfg(unix)]
     #[test]
@@ -594,13 +599,15 @@ mod tests {
                 p.name.as_str(),
                 p.endpoint.as_str(),
                 p.model.as_str(),
-                p.key_vault_path.as_str()
+                p.key_vault_path.as_str(),
+                p.key_field.as_str()
             ),
             (
                 "openai",
                 "https://api.openai.com/v1",
-                "gpt-5",
-                "maknae/provider/openai"
+                "gpt-5.6-luna",
+                "maknae/providers/openai",
+                "api-key"
             )
         );
         assert!(format!("{cfg:?}").contains("openai"));

@@ -22,6 +22,9 @@ pub struct EgressRequest {
     pub endpoint: String,
     pub model: String,
     pub key_vault_path: String,
+    /// #308: the field name inside the secret, carried per request rather than
+    /// fixed in the deputy — the registry knows it, the deputy must not guess.
+    pub key_field: String,
     pub conversation: String,
     pub content: Vec<ContentBlock>,
 }
@@ -687,7 +690,8 @@ mod tests {
             destination: "provider:x".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
-            key_vault_path: "secret/data/maknae/providers/x".into(),
+            key_vault_path: "maknae/providers/x".into(),
+            key_field: "api-key".into(),
             conversation: "c".into(),
             content: vec![text("a")],
         }

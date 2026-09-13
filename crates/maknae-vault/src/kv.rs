@@ -29,6 +29,15 @@ const KV2_DATA: &str = "/data/";
 /// empty secret path, a leading slash, or any `.`/`..` segment. A path that
 /// cannot be split unambiguously is refused rather than guessed at — guessing
 /// here would read the wrong secret, or read one outside the deputy's grant.
+/// **What its input is, since #308.** Configuration no longer carries an
+/// absolute KV path: `provider.key_vault_path` is mount-relative and the mount
+/// comes from the deputy's `egress-bounds.yaml`, so the string reaching here is
+/// **composed by `VaultKeys::read`**, not written by an operator. That makes the
+/// checks below defence in depth at the crate boundary rather than the primary
+/// control — the primary control is `maknae_config::kv_fragment_is_acceptable`,
+/// which validates both halves at load and refuses a `data` segment outright.
+/// Kept rather than retired precisely because a caller can still hand this
+/// function a malformed mount, and it fails closed on one.
 pub fn split_kv_path(key_vault_path: &str) -> Result<(&str, &str), VaultError> {
     let refuse = |why: &str| {
         Err(VaultError::InvalidKeyVaultPath(format!(

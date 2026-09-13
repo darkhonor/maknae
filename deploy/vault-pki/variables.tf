@@ -85,11 +85,40 @@ variable "approle_path" {
 variable "provider_key_prefix" {
   description = <<-EOT
     KV v2 path prefix, RELATIVE to kv_mount_path, under which provider API keys
-    live. #240a. MUST match `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml:
-    Terraform grants the deputy a read on this prefix, maknaed validates every
-    registered key_vault_path against the file at boot, and the deputy re-checks
-    the frame's path at use. A mismatch is a boot refusal, not a silent 403 at
-    request time — which is the point of validating at boot.
+    live. #240a.
+
+    MUST equal `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml.
+    NOTHING CHECKS THAT FOR YOU — see the bottom of this description. Since #308
+    it is at least a plain string comparison rather than a transformation.
+    Before #308 this variable was mount-relative while the configuration value
+    was mount-absolute AND carried the KV v2 `data/` segment: two coordinate
+    systems for one value, required to "match". That is what made #307's
+    singular/plural defect invisible — the two host-side values agreed with each
+    other, the boot gate compares only those two and never this grant, so the
+    daemon booted clean and took a 403 at the credential read.
+
+    Now: this value, `egress-bounds.yaml`'s `key_vault_path_prefix`, and every
+    `provider.key_vault_path` are all mount-relative and `data/`-free. The mount
+    is `kv_mount_path` here and `kv_mount` in egress-bounds.yaml; `data/` is
+    synthesized by the reader and appears in no configuration file.
+
+    WHAT IS ACTUALLY ENFORCED, AND WHERE. Two relations, and only one of them is
+    checked by anything (corrected 2026-09-13 — this description previously
+    concluded "a mismatch is a boot refusal", which is true of only one of them
+    and promised a guarantee the system does not provide):
+
+      1. this value EQUALS egress-bounds.yaml's key_vault_path_prefix
+         -> enforced NOWHERE. No component in the boot path reads Terraform or
+            the Vault policy, so a mismatch here boots cleanly and surfaces as a
+            403 at the credential read. This is #307's mechanism and #308 did not
+            remove it; it is an operator obligation with no automated check.
+
+      2. each provider.key_vault_path is STRICTLY BENEATH that prefix
+         -> enforced AT BOOT by maknae-kernel's egress_bounds_boot_gate, which
+            refuses OutsideBounds and names both values, and re-checked by the
+            deputy on every frame at use. "Strictly beneath" means at least one
+            further segment: maknae/providers/openai is inside maknae/providers,
+            and a path EQUAL to the prefix is OUTSIDE it and is refused.
   EOT
   type        = string
   default     = "maknae/providers"

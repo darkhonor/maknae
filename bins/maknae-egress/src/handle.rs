@@ -63,7 +63,8 @@ mod tests {
 
     fn bounds() -> EgressBounds {
         EgressBounds {
-            key_vault_path_prefix: "secret/data/maknae/providers".into(),
+            kv_mount: "maknae-kv".into(),
+            key_vault_path_prefix: "maknae/providers".into(),
         }
     }
 
@@ -73,6 +74,7 @@ mod tests {
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
             key_vault_path: key_vault_path.into(),
+            key_field: "api-key".into(),
             conversation: "conv1".into(),
             content: vec![ContentBlock::Text {
                 text: SecretText(zeroize::Zeroizing::new("hello".into())),
@@ -82,7 +84,7 @@ mod tests {
 
     #[test]
     fn a_frame_within_bounds_is_accepted() {
-        assert!(decide(&req("secret/data/maknae/providers/openai"), &bounds()).is_ok());
+        assert!(decide(&req("maknae/providers/openai"), &bounds()).is_ok());
     }
 
     /// The containment check, from the deputy's side. A sibling path that
@@ -102,7 +104,7 @@ mod tests {
 
     #[test]
     fn a_malformed_frame_is_refused_before_the_bounds_check() {
-        let mut r = req("secret/data/maknae/providers/openai");
+        let mut r = req("maknae/providers/openai");
         r.content.clear();
         assert_eq!(decide(&r, &bounds()).unwrap_err(), Refusal::MalformedFrame);
     }

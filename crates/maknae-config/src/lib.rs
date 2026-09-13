@@ -61,8 +61,8 @@ pub use authz::{
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
 pub use bounds::{
-    bounds_from_document, path_is_within_prefix, EgressBounds, EGRESS_BOUNDS_FILE,
-    MAX_KEY_VAULT_PREFIX_BYTES,
+    bounds_from_document, kv_fragment_is_acceptable, path_is_within_prefix, EgressBounds,
+    EGRESS_BOUNDS_FILE, MAX_KEY_VAULT_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};

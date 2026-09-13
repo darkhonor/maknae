@@ -25,8 +25,12 @@ use crate::{ConfigError, Value};
 /// The registered section name.
 pub const PROVIDER_SECTION: &str = "provider";
 
-/// The four keys the section accepts, and no others.
-const KEYS: [&str; 4] = ["name", "endpoint", "model", "key_vault_path"];
+/// The five keys the section accepts, and no others.
+const KEYS: [&str; 5] = ["name", "endpoint", "model", "key_vault_path", "key_field"];
+/// Upper bound on `provider.key_field`. It reaches `VaultError::MissingKvField`
+/// and therefore terminals and audit lines, so it is bounded like every other
+/// operator-supplied string that can be printed.
+pub const MAX_KEY_FIELD_BYTES: usize = 64;
 /// Upper bound on `provider.name` (#172): it is written into every egress
 /// audit record's `object`, and the macOS unified-log line cap was measured
 /// with this bound (maknae-audit-append `syslog_fmt.rs` tests).
@@ -54,8 +58,19 @@ pub struct ProviderConfig {
     pub endpoint: String,
     /// The model identifier sent on every request.
     pub model: String,
-    /// The Vault KV path holding the API key. Never disclosed (`omit`).
+    /// The KV v2 secret path holding the API key, **RELATIVE to the mount
+    /// declared in `egress-bounds.yaml`'s `kv_mount`, and without the `data/`
+    /// segment** (#308) — `maknae/providers/openai`, written exactly as the Vault
+    /// CLI shows it. The deputy composes `<mount>/data/<path>` at read time, so
+    /// the API artifact never appears in configuration. Never disclosed
+    /// (`omit`).
     pub key_vault_path: String,
+    /// The field name INSIDE that secret — `api-key`, `api_key`, whatever the
+    /// deployment actually used. Required, with **no default**: the only field
+    /// name that existed in the tree before #308 was a test fixture's
+    /// `api_key`, and defaulting to it would silently ask the wrong question of
+    /// a store that used a different name.
+    pub key_field: String,
 }
 
 fn err(reason: impl Into<String>) -> ConfigError {
@@ -213,16 +228,27 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
     }
     let model = required_str(m, "model")?;
     let key_vault_path = required_str(m, "key_vault_path")?;
-    if key_vault_path.chars().any(char::is_whitespace) || key_vault_path.starts_with('/') {
-        return Err(err(
-            "provider.key_vault_path must be a relative Vault path without whitespace",
-        ));
+    // The SAME validator the bounds document uses for its mount and prefix, so
+    // a path and the prefix bounding it cannot disagree about what a valid
+    // fragment is (#308). It is also what refuses a value still carrying the
+    // mount and the `data/` segment.
+    crate::kv_fragment_is_acceptable(key_vault_path)
+        .map_err(|why| err(format!("provider.key_vault_path {why}")))?;
+    let key_field = required_str(m, "key_field")?;
+    if key_field.chars().any(char::is_whitespace) {
+        return Err(err("provider.key_field must not contain whitespace"));
+    }
+    if key_field.len() > MAX_KEY_FIELD_BYTES {
+        return Err(err(format!(
+            "provider.key_field may be at most {MAX_KEY_FIELD_BYTES} bytes"
+        )));
     }
     Ok(Some(ProviderConfig {
         name: name.to_string(),
         endpoint: endpoint.to_string(),
         model: model.to_string(),
         key_vault_path: key_vault_path.to_string(),
+        key_field: key_field.to_string(),
     }))
 }
 
@@ -231,7 +257,83 @@ mod tests {
     use super::*;
     use crate::load_str;
 
-    const OK: &str = "name: openai\nendpoint: https://api.openai.com/v1\nmodel: gpt-5\nkey_vault_path: maknae/provider/openai\n";
+    const OK: &str = "name: openai\nendpoint: https://api.openai.com/v1\nmodel: gpt-5.6-luna\nkey_vault_path: maknae/providers/openai\nkey_field: api-key\n";
+
+    /// #308: `key_field` names the field INSIDE the secret, so a deployment
+    /// storing its key under `api-key` needs no code change and no Vault
+    /// rename. Before this, the only field name in the tree was
+    /// `keys_vault.rs`'s test fixture `api_key` — underscore — which a client
+    /// built by copying it would have asked for against a store holding
+    /// `api-key`.
+    #[test]
+    fn the_key_field_is_required_and_is_not_confused_with_a_pasted_credential() {
+        let p = parse(OK).unwrap().unwrap();
+        assert_eq!(p.key_field, "api-key");
+
+        // Required: no default guess at `api_key`.
+        let without = OK
+            .lines()
+            .filter(|l| !l.starts_with("key_field:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let e = parse(&format!("{without}\n")).unwrap_err();
+        assert!(e.to_string().contains("key_field"), "{e}");
+
+        // A field NAME is not a secret, but `key:` is refused as one — the
+        // plaintext-key check is on the field's NAME and cannot know the value
+        // is only a field name. Recorded so the refusal is not read as a bug.
+        let e = parse(&OK.replace("key_field: api-key", "key: api-key")).unwrap_err();
+        assert!(
+            matches!(e, ConfigError::ProviderPlaintextKey { .. }),
+            "`key:` must still be refused as a pasted credential, got {e}"
+        );
+
+        for bad in ["", "api key", &"f".repeat(MAX_KEY_FIELD_BYTES + 1)] {
+            assert!(
+                parse(&OK.replace("key_field: api-key", &format!("key_field: '{bad}'"))).is_err(),
+                "key_field {bad:?} must be refused"
+            );
+        }
+        // AT the bound, accepted — the operator/`>=` discriminator.
+        assert!(parse(&OK.replace(
+            "key_field: api-key",
+            &format!("key_field: '{}'", "f".repeat(MAX_KEY_FIELD_BYTES))
+        ))
+        .is_ok());
+    }
+
+    /// THE MIGRATION TRAP, and why it is a refusal rather than a compose.
+    /// `key_vault_path` is now RELATIVE to the mount declared in
+    /// `egress-bounds.yaml`, so a value still carrying the mount and the KV v2
+    /// `data/` segment would compose to `<mount>/data/<mount>/data/<path>` and
+    /// fetch nothing — discovered at the credential read, which is exactly how
+    /// #307 failed. Refused by name at boot instead.
+    #[test]
+    fn a_key_vault_path_still_carrying_the_mount_or_data_segment_is_refused() {
+        for bad in [
+            "maknae-kv/data/maknae/providers/openai", // the old absolute value
+            "data/maknae/providers/openai",           // mount stripped, data/ left
+            "llm/data/openai",                        // a `data` segment anywhere
+        ] {
+            let e = parse(&OK.replace("maknae/providers/openai", bad)).unwrap_err();
+            assert!(
+                e.to_string().contains("data"),
+                "key_vault_path {bad:?} must be refused naming 'data', got: {e}"
+            );
+        }
+        // Still relative, still whitespace-free, still no traversal.
+        for bad in [
+            "/maknae/providers/openai",
+            "maknae/providers/",
+            "a//b",
+            "a/../b",
+        ] {
+            assert!(
+                parse(&OK.replace("maknae/providers/openai", bad)).is_err(),
+                "key_vault_path {bad:?} must be refused"
+            );
+        }
+    }
 
     fn parse(yaml: &str) -> Result<Option<ProviderConfig>, ConfigError> {
         let v = load_str(yaml).expect("test yaml parses");
@@ -261,16 +363,17 @@ mod tests {
         let p = parse(OK).unwrap().unwrap();
         assert_eq!(p.name, "openai");
         assert_eq!(p.endpoint, "https://api.openai.com/v1");
-        assert_eq!(p.model, "gpt-5");
-        assert_eq!(p.key_vault_path, "maknae/provider/openai");
+        assert_eq!(p.model, "gpt-5.6-luna");
+        assert_eq!(p.key_vault_path, "maknae/providers/openai");
+        assert_eq!(p.key_field, "api-key");
     }
 
     #[test]
     fn values_are_trimmed_but_never_defaulted() {
-        let p = parse(&OK.replace("model: gpt-5", "model: '  gpt-5  '"))
+        let p = parse(&OK.replace("model: gpt-5.6-luna", "model: '  gpt-5.6-luna  '"))
             .unwrap()
             .unwrap();
-        assert_eq!(p.model, "gpt-5");
+        assert_eq!(p.model, "gpt-5.6-luna");
         for key in ["name", "endpoint", "model", "key_vault_path"] {
             let y: String = OK
                 .lines()
@@ -432,11 +535,11 @@ mod tests {
                 "{bad:?}"
             );
         }
-        for bad in ["/secret/x", "maknae/provider x", ""] {
+        for bad in ["/secret/x", "maknae/providers x", ""] {
             assert!(
                 matches!(
                     parse(&OK.replace(
-                        "key_vault_path: maknae/provider/openai",
+                        "key_vault_path: maknae/providers/openai",
                         &format!("key_vault_path: '{bad}'")
                     )),
                     Err(ConfigError::InvalidProvider(_))

@@ -30,9 +30,19 @@ pub struct EgressFrameRequest {
     pub endpoint: String,
     /// The resolved model identifier.
     pub model: String,
-    /// The resolved Vault KV path holding this provider's key. Egress
-    /// validates it against its own configured prefix before reading.
+    /// The KV v2 secret path holding this provider's key, **RELATIVE to the
+    /// mount the deputy has in its own `egress-bounds.yaml`** and without the
+    /// `data/` segment (#308). The deputy validates it against its configured
+    /// prefix and then composes `<mount>/data/<path>` itself — so the mount is
+    /// never on the wire, and the KV v2 API artifact appears in no
+    /// configuration file.
     pub key_vault_path: String,
+    /// The field name inside that secret (#308). **Per request, not a deputy
+    /// constant**, for the same reason `destination` is: two providers may
+    /// store their keys under different field names, and a constant fails the
+    /// moment there are two. Before #308 the only field name in the tree was a
+    /// test fixture's `api_key`.
+    pub key_field: String,
     /// The loop's identifier (#241). Informational, never decided on.
     pub conversation: String,
     /// The content leaving the trust plane.
@@ -46,6 +56,10 @@ impl std::fmt::Debug for EgressFrameRequest {
             .field("endpoint", &self.endpoint)
             .field("model", &self.model)
             .field("key_vault_path", &"<omitted>")
+            // Omitted for the same reason as the path: a field NAME is not a
+            // secret, but together with the path it describes exactly where a
+            // credential is kept, and nothing needs it in a log line.
+            .field("key_field", &"<omitted>")
             .field("conversation", &self.conversation)
             .field("content", &format_args!("<{} blocks>", self.content.len()))
             .finish()
@@ -68,6 +82,7 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.endpoint.is_empty()
         && !r.model.is_empty()
         && !r.key_vault_path.is_empty()
+        && !r.key_field.is_empty()
         && !r.content.is_empty()
 }
 
@@ -87,7 +102,8 @@ mod tests {
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "some-model".into(),
-            key_vault_path: "secret/data/maknae/providers/openai".into(),
+            key_vault_path: "maknae/providers/openai".into(),
+            key_field: "api-key".into(),
             conversation: conversation.into(),
             content,
         }
@@ -191,6 +207,7 @@ mod tests {
                 "key_vault_path",
                 EgressFrameRequest {
                     key_vault_path: String::new(),
+                    key_field: "api-key".into(),
                     ..base.clone()
                 },
             ),
