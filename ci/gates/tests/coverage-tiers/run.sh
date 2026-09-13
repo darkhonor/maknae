@@ -32,15 +32,26 @@ newroot() { # one mktemp per fixture; must not sit inside a work tree
 }
 
 # expect <label> <expected-substring> <expected-rc(0|nonzero)> -- cmd...
+#
+# Matches with a HERE-STRING, never `printf ... | grep -q`. The failure that
+# motivated it (hobibot, 2026-09-13): this suite reported `workflow-sync
+# multi-line` as FAILED in a reviewer's environment while the expected text was
+# visibly present. Under `set -o pipefail`, `grep -q` exits the instant it
+# matches, `printf` is then killed by SIGPIPE, and the PIPELINE's status becomes
+# nonzero — so a successful match reads as a miss. It is a race on how much the
+# writer flushed before the reader left, which is why it fired on the largest
+# expected string and passed everywhere else: a false failure that looks exactly
+# like a real one. A here-string has no writer process to kill. Applies to every
+# matcher in the gates, not only this one.
 expect() {
   local label="$1" want="$2" rc_kind="$3"; shift 3; [ "$1" = "--" ] && shift
   local out rc=0
   out="$("$@" 2>&1)" || rc=$?
   if [ "$rc_kind" = "0" ]; then
-    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "$label"; else
+    if [ "$rc" -eq 0 ] && grep -qF "$want" <<<"$out"; then ok "$label"; else
       bad "$label (rc=$rc)"; printf '%s\n' "$out" | tail -5; fi
   else
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "$label"; else
+    if [ "$rc" -ne 0 ] && grep -qF "$want" <<<"$out"; then ok "$label"; else
       bad "$label (rc=$rc, wanted substring: $want)"; printf '%s\n' "$out" | tail -5; fi
   fi
 }
@@ -848,6 +859,13 @@ args = sys.argv[1:]
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
 package = args[args.index('--package') + 1]
+# Proof-of-invocation marker: the scratch preflight must PREEMPT the loop, so a
+# fixture needs to show this stub was never reached — not merely that the gate
+# exited nonzero (hobibot review, 694a77f).
+marker = os.environ.get('FIXTURE_MUTANT_MARKER')
+if marker:
+    with open(marker, 'a') as f:
+        f.write(package + '\n')
 if package == 'maknae-io':
     if '--minimum-test-timeout' not in args or args[args.index('--minimum-test-timeout') + 1] != '60':
         raise SystemExit('missing enclosing I/O watchdog budget')
@@ -916,6 +934,40 @@ expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outc
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=none \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+# THE PREFLIGHT MUST PREEMPT, not merely record. The floor is declared for this
+# fixture via MUTATION_ORACLE_MIN_KIB so the probe does not depend on the host's
+# free space, and the stub writes a marker line whenever it is invoked — so the
+# assertion is that `cargo mutants` NEVER RAN, which a nonzero exit alone would
+# not show.
+r_pf="$(newroot)"; mk_base "$r_pf"
+marker_pf="$r_pf/cargo-was-invoked"
+expect "mutation oracle: an unusable scratch volume stops the run BEFORE it starts" "scratch volume unusable" nonzero -- \
+  env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=999999999999 \
+    FIXTURE_MUTANT_MARKER="$marker_pf" \
+    COVERAGE_TIERS_JSON="$r_pf/cov.json" COVERAGE_TIERS_FILELIST="$r_pf/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf" --injection --mutants xcore
+if [ -e "$marker_pf" ]; then
+  bad "mutation oracle: cargo mutants RAN after the scratch volume was refused ($(tr '\n' ' ' < "$marker_pf"))"
+else
+  ok "mutation oracle: cargo mutants was never invoked after the scratch refusal"
+fi
+
+# The control on that control: with a floor the volume DOES meet, the same
+# fixture reaches the stub and the marker appears. Without this, the assertion
+# above is equally satisfied by a gate that never runs mutants at all.
+r_pf2="$(newroot)"; mk_base "$r_pf2"
+marker_pf2="$r_pf2/cargo-was-invoked"
+expect "mutation oracle: a usable scratch volume does not block the run" "verified mutant budget for xcore" 0 -- \
+  env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=1 \
+    FIXTURE_MUTANT_MARKER="$marker_pf2" \
+    COVERAGE_TIERS_JSON="$r_pf2/cov.json" COVERAGE_TIERS_FILELIST="$r_pf2/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf2" --injection --mutants xcore
+if [ -e "$marker_pf2" ]; then
+  ok "mutation oracle: the marker proves the stub IS reached when space is sufficient"
+else
+  bad "mutation oracle: the stub was never invoked even with a met floor — the preemption assertion above proves nothing"
+fi
 
 expect "mutation oracle: outcomes with no counts is refused, not read as 0 of 0" "has no 'total_mutants'" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=empty-counts \

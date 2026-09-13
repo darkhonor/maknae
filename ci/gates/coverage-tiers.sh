@@ -393,10 +393,30 @@ if [ "$mutants_mode" != "" ]; then
       fail "cannot resolve mutants_crates package names (mutation stage)"
       oracle_ok=0
     fi
-    # BEFORE the first build, so a full scratch volume is reported as itself
-    # rather than discovered N mutants later as a wall of 'unviable' (#301).
+  fi
+  # BEFORE the first build, so a full scratch volume is reported as itself rather
+  # than discovered N mutants later as a wall of 'unviable' (#301).
+  #
+  # AND IT MUST STOP HERE, before the loop. Recording the failure and continuing
+  # was the whole defect restated: the gate would run `cargo mutants` on the
+  # volume it had just declared unusable, consume what space was left, and
+  # produce exactly the wall of environment-driven `unviable` builds this check
+  # exists to prevent — with the verdict arriving only after all that work, from
+  # the accumulated fail_n. A preflight that does not preempt is not a preflight
+  # (hobibot review, 694a77f).
+  #
+  # WHEN IT APPLIES: whenever real mutant builds will happen, i.e. --injection
+  # off. Under --injection the build is a stub and needs no volume, so imposing
+  # the floor there would make every mutation fixture depend on the host's free
+  # space — on a host whose /tmp is smaller than the floor (the very condition
+  # that caused #301) the fixture suite would fail for the wrong reason. The one
+  # exception is a fixture that DECLARES a floor via MUTATION_ORACLE_MIN_KIB,
+  # which is how this preemption is itself proven: a check that cannot be shown
+  # to fire is not a control.
+  if [ "$injection" -eq 0 ] || [ -n "${MUTATION_ORACLE_MIN_KIB:-}" ]; then
     if ! out="$(bash "$oracle" scratch "${TMPDIR:-/tmp}" 2>&1)"; then
       fail "mutation scratch volume unusable: $out"
+      printf '%d violation(s).\n' "$fail_n"; exit 1
     fi
   fi
   for cname in "${mutant_crates[@]}"; do

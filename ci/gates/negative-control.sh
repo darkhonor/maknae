@@ -25,12 +25,19 @@ trap 'rm -rf -- "$NC_TMP"' EXIT INT TERM
 # Materialize contaminated workspaces in temp dirs and assert the REAL gate scripts reject each
 # (root-override arg). A gate that cannot be shown to fire is not a control (spec §3 P2c).
 pass=0; total=0; skipped=0
+# Every matcher below uses a HERE-STRING, never `printf ... | grep -q`. Under
+# `set -o pipefail` a matching `grep -q` exits at once, SIGPIPEs the `printf`
+# feeding it, and the pipeline's nonzero status turns a successful match into a
+# miss — a race on output size, observed 2026-09-13 in the sibling fixture suite
+# as a probe reporting FAILED while its expected text was plainly present. In a
+# suite whose whole job is to distinguish a real failure from a false one, that
+# is the worst possible bug. Do not reintroduce the pipe.
 expect_reject() { # <label> <cmd...> — require a genuine rejection (a printed FAIL), not merely a non-zero exit
   local label="$1"; shift; total=$((total+1))
   local out rc
   # `if out=$(...)` keeps the expected non-zero exit out of set -e's reach.
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL'; then
+  if [ "$rc" -ne 0 ] && grep -q 'FAIL' <<<"$out"; then
     echo "neg-ok: [$label] gate rejected"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
@@ -49,11 +56,11 @@ expect_reject_because() { # <label> <expected-FAIL-substring> <cmd...>
   local label="$1" why="$2"; shift 2; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why"; then
+  if [ "$rc" -ne 0 ] && grep -q "FAIL" <<<"$out" && grep -qF -- "$why" <<<"$out"; then
     echo "neg-ok: [$label] gate rejected, for '$why'"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
-  elif printf '%s' "$out" | grep -q "FAIL"; then # rejected, but not for `$why`
+  elif grep -q "FAIL" <<<"$out"; then # rejected, but not for `$why`
     echo "NEG-FAIL: [$label] gate rejected for the WRONG reason (wanted '$why'): $out"
   else
     echo "NEG-FAIL: [$label] gate exited $rc without a FAIL line (crash, not a rejection): $out"
@@ -94,7 +101,7 @@ expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must
   local label="$1" want="$2"; shift 2; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$want"; then
+  if [ "$rc" -eq 0 ] && grep -q "$want" <<<"$out"; then
     echo "pos-ok: [$label] gate accepted"; pass=$((pass+1))
   elif [ "$rc" -ne 0 ]; then
     echo "POS-FAIL: [$label] gate rejected a CLEAN fixture (exit $rc): $out"
@@ -846,7 +853,7 @@ cfg_manifest() { # <drop-regex-or-empty> <appended-rows...> -- compose CFG_OK sa
   # gate left negative-control at 78/78.
   local drop="$1"; shift
   local body="$CFG_OK"
-  [ -n "$drop" ] && body="$(printf '%s' "$body" | grep -v "$drop")"$'\n'
+  [ -n "$drop" ] && body="$(grep -v "$drop" <<<"$body")"$'\n'
   printf '%s' "$body"
   local row
   for row in "$@"; do printf '%s\n' "$row"; done
@@ -1198,7 +1205,7 @@ expect_reject "config-disclosure-drift/section-block-with-unreadable-name" "$fx/
 
 # REJECT: a NO_STRUCT_SECTIONS entry with no manifest row. Struct-less means
 # the keys are carried verbatim, not that the disclosure is undecided.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^mask	lake")")"
+fx="$(cfg_fixture "$(grep -v "^mask	lake" <<<"$CFG_OK")")"
 expect_reject "config-disclosure-drift/no-struct-section-without-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a subtree whose struct is declared `pub(crate)`. The depth check was
@@ -2143,12 +2150,12 @@ expect_reject_without() { # <label> <expected-FAIL-substring> <forbidden-substri
   local label="$1" why="$2" forbid="$3"; shift 3; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why" \
-     && ! printf '%s' "$out" | grep -qF -- "$forbid"; then
+  if [ "$rc" -ne 0 ] && grep -q "FAIL" <<<"$out" && grep -qF -- "$why" <<<"$out" \
+     && ! grep -qF -- "$forbid" <<<"$out"; then
     echo "neg-ok: [$label] gate rejected for '$why' and never said '$forbid'"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
-  elif printf '%s' "$out" | grep -qF -- "$forbid"; then
+  elif grep -qF -- "$forbid" <<<"$out"; then
     echo "NEG-FAIL: [$label] gate rejected but its output ALSO carries '$forbid': $out"
   else
     echo "NEG-FAIL: [$label] gate exited $rc without the expected rejection (wanted '$why'): $out"
@@ -2984,12 +2991,12 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
     local label="$1" want="$2"; shift 2; total=$((total+1)); local out rc
     if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
     if [ "$darwin_host" = 1 ]; then
-      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && printf '%s' "$out" | grep -q -- "$want"; then
+      if [ "$rc" -ne 0 ] && grep -q 'FAIL: on a host whose triple IS the target' <<<"$out" && grep -q -- "$want" <<<"$out"; then
         echo "neg-ok: [$label] classified, refused on a darwin host, and reported '$want'"; pass=$((pass+1))
       else
         echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL plus '$want' (rc=$rc): $out"
       fi
-    elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q -- "$want"; then
+    elif [ "$rc" -eq 0 ] && grep -q -- "$want" <<<"$out"; then
       echo "pos-ok: [$label] gate accepted and reported '$want'"; pass=$((pass+1))
     else
       echo "POS-FAIL: [$label] (rc=$rc) wanted '$want': $out"
@@ -3000,7 +3007,7 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
     if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
     n="$(printf '%s' "$out" | sed -n "s/.*${prefix}\([0-9][0-9]*\).*/\1/p" | head -1)"
     if [ "$darwin_host" = 1 ]; then
-      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && [ "$n" = "$expected" ]; then
+      if [ "$rc" -ne 0 ] && grep -q 'FAIL: on a host whose triple IS the target' <<<"$out" && [ "$n" = "$expected" ]; then
         echo "neg-ok: [$label] classified ($prefix$n), then refused on a darwin host"; pass=$((pass+1))
       else
         echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL with $prefix$expected, got rc=$rc, '$n': $out"
@@ -3145,7 +3152,7 @@ SHIM
   # script is already compiled by the time `root` is checked).
   total=$((total+1))
   dm_out="$("$here/darwin-cross-check.sh" --root "$fx_dm" 2>&1 || true)"
-  if printf '%s' "$dm_out" | grep -q 'undeclared_fn_real_darwin_error' && printf '%s' "$dm_out" | grep -Eq 'failed to run custom build command for `ring v'; then
+  if grep -q 'undeclared_fn_real_darwin_error' <<<"$dm_out" && grep -Eq 'failed to run custom build command for `ring v' <<<"$dm_out"; then
     echo "neg-ok: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] both the real error and the SDK line are in the log"; pass=$((pass+1))
   else
     echo "NEG-FAIL: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] the two errors did not co-occur — the masking probe proves nothing: $dm_out"
