@@ -77,6 +77,24 @@ fn main() {
         Err(e) => fail(format!("cannot start a runtime: {e}")),
     };
 
+    // ONE cache for the PROCESS, outside the accept loop.
+    //
+    // Reviewed finding (#296): this was constructed inside the per-connection
+    // closure, which gave "read on first use, cached per destination" a lifetime
+    // of exactly one request — every prompt would have re-read Vault and then
+    // dropped the entry. The unit test passed because IT held a cache across
+    // calls; the deputy never did. A cache the production path rebuilds per
+    // request is not a cache.
+    //
+    // CONCURRENCY MODEL, stated because a shared mutable cache needs one: the
+    // accept loop is SEQUENTIAL — `incoming()` yields one connection at a time
+    // and each is served to completion before the next is accepted — so access
+    // is serialized by construction and needs no lock. If the deputy ever serves
+    // connections concurrently, this becomes shared state and must gain one;
+    // the `&mut` borrow here is what will force that decision rather than
+    // letting it pass silently.
+    let mut keys = keys::KeyCache::new(keys::NoCredentialSource);
+
     // Accept forever. A failed connection is refused and the loop continues:
     // one bad or hostile peer must not take the deputy down. This is wiring,
     // not logic — the decision is `handle::decide`, the per-connection I/O is
@@ -88,11 +106,7 @@ fn main() {
                     // The REAL fulfilment path, on a credential source that has
                     // nothing to give yet. Constructing the Vault client means
                     // an AppRole login against the sealed SecretID, and none of
-                    // it can be verified until the third plane is provisioned —
-                    // so the source refuses and the deputy's own path runs
-                    // unchanged, rather than being short-circuited by a closure
-                    // that would leave it unexercised.
-                    let mut keys = keys::KeyCache::new(keys::NoCredentialSource);
+                    // it can be verified until the third plane is provisioned.
                     rt.block_on(call::fulfil(
                         admitted,
                         &mut keys,

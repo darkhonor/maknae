@@ -60,6 +60,7 @@ pub async fn fulfil<S: KeySource>(
     let req = admitted.request();
     let key = keys
         .get(&req.key_vault_path)
+        .await
         .map_err(FulfilError::Credential)?
         .clone();
 
@@ -108,7 +109,7 @@ mod tests {
 
     struct Denied;
     impl KeySource for Denied {
-        fn read(&self, p: &str) -> Result<Zeroizing<String>, String> {
+        async fn read(&self, p: &str) -> Result<Zeroizing<String>, String> {
             Err(format!("permission denied on {p}"))
         }
     }
@@ -153,7 +154,7 @@ mod tests {
 
     struct Fixed(&'static str);
     impl KeySource for Fixed {
-        fn read(&self, _p: &str) -> Result<Zeroizing<String>, String> {
+        async fn read(&self, _p: &str) -> Result<Zeroizing<String>, String> {
             Ok(Zeroizing::new(self.0.to_string()))
         }
     }

@@ -1092,6 +1092,7 @@ dependencies = [
  "nix",
  "tempfile",
  "tokio",
+ "vaultrs",
  "zeroize",
 ]
 

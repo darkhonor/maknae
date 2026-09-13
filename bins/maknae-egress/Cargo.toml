@@ -35,6 +35,11 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ne
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [dev-dependencies]
+# Dev-only, and ONLY to construct a client for the VaultKeys composition test —
+# the production code reaches vaultrs through maknae-vault, which owns the
+# pinning. Pinned to the same version maknae-vault resolves so there is one
+# vaultrs in the tree.
+vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 maknae-vault = { path = "../../crates/maknae-vault" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
 tempfile = "3"

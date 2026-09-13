@@ -362,4 +362,75 @@ mod tests {
             Err(ServeError::OversizeFrame(MAX_REQUEST_FRAME_BYTES + 1))
         );
     }
+
+    /// TWO SERVED CONNECTIONS SHARING A DESTINATION read the credential ONCE.
+    ///
+    /// Reviewed finding (#296): the cache was constructed inside the
+    /// per-connection closure, so "read on first use, cached per destination"
+    /// lasted exactly one request. `keys.rs`'s unit test passed because IT held
+    /// a cache across calls — the deputy did not. This drives the real serving
+    /// path twice and counts reads, which is the assertion that was missing.
+    #[test]
+    fn two_served_connections_sharing_a_destination_read_the_key_once() {
+        use std::sync::Mutex;
+
+        struct Counting {
+            reads: Mutex<usize>,
+        }
+        impl crate::keys::KeySource for Counting {
+            async fn read(&self, _p: &str) -> Result<zeroize::Zeroizing<String>, String> {
+                *self.reads.lock().unwrap() += 1;
+                Ok(zeroize::Zeroizing::new("k".into()))
+            }
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let p2 = path.clone();
+        let h = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut c = UnixStream::connect(&p2).unwrap();
+                let f = frame("secret/data/maknae/providers/openai");
+                c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
+                c.write_all(&f).unwrap();
+                let mut len = [0u8; 4];
+                let _ = c.read_exact(&mut len);
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // ONE cache, outside the loop — exactly as main.rs holds it.
+        let mut keys = crate::keys::KeyCache::new(Counting {
+            reads: Mutex::new(0),
+        });
+        let b = bounds();
+        let mut served = 0;
+        for conn in l.incoming() {
+            let _ = serve_one(conn.unwrap(), me, &b, |admitted| {
+                rt.block_on(crate::call::fulfil(
+                    admitted,
+                    &mut keys,
+                    &[],
+                    crate::call::CallBounds::default(),
+                ))
+                .map_err(|e| ServeError::Fulfil(e.to_string()))
+            });
+            served += 1;
+            if served == 2 {
+                break;
+            }
+        }
+        h.join().unwrap();
+        assert_eq!(
+            *keys.source().reads.lock().unwrap(),
+            1,
+            "two connections to the SAME destination must read the credential once; \
+             a cache the serving path rebuilds per request is not a cache"
+        );
+    }
 }
