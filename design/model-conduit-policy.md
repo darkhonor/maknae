@@ -270,6 +270,91 @@ destinations:
 
 **A consequence for principle 6.** The Agent Deck assessment (§3.7) records the deck's own argument that review must run *"as a separate agent in a fresh context, ideally a different model family."* Under this candidate that is a policy statement rather than a convention: an assessment sub-agent runs on its own conduit with its own trust basis, and the orchestrator that produced the work can neither widen what the reviewer sees nor narrow what the reviewer is permitted to report. Blind review becomes something the kernel can enforce.
 
+## Per-user conduits, and the deployment spectrum from one person to a multinational
+
+*(Added 2026-09-13, at the maintainer's direction, from discussion during #243's configuration documentation.)*
+
+**The maintainer's framing, this date:** the range to support is **a single-user / admin HomeLab operator through a multi-national enterprise where users and admins follow the full range of roles within an organization.** Everything below is read against that span, not against either end of it.
+
+This is the same criterion the document already carries as [question 3](#open-questions) — ADR-0024's dormancy test, *"if a single-subject deployment has to do something it would not otherwise do, the mechanism is wrong"* — generalised from *how many subjects* to *how many distinct authorities*. The OV-1 already names the three environments (Homelab, Enterprise, and Classified · multinational · air-gapped); what is new is the requirement that the **role separation inside** an organization be expressible without becoming ceremony for the operator who is every role at once.
+
+### What is already per-subject in the code
+
+Recorded first, because it changes what the rest of this section is asking for. This is further along than the single `provider:` config block suggests.
+
+1. **The egress frame is per-request, never process-global.** `EgressFrameRequest.destination` is documented in `crates/maknae-proto/src/egress_frame.rs` as *"`provider:<name>`, per request, never process-global (#240a I1)"*, and `endpoint`, `model` and `key_vault_path` are all **resolved by the kernel per request** and handed to the deputy. The deputy parses no registry, deliberately — *"so it cannot drift from the kernel's view of it — one parser, the `maknae-io` lesson."*
+2. **The credential cache is per destination, and says why.** `bins/maknae-egress/src/keys.rs`, in its own header: *"At boot is single-provider thinking and fails the moment there are two, so it is first use, per destination."*
+3. **Where a key comes from is already a seam.** `KeySource` is an async trait whose only argument is a path string, with two implementations today (`NoCredentialSource`, `VaultKeys`). This is [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)'s *"modular by contract, where a real substitution axis exists"* — and a user's own secret store is a real axis.
+4. **The authorization vocabulary is already per-role and multi-provider** — `destinations:` maps a role to an allowlist of `provider:<name>`, deny-by-default (item 1 of *What is already true in the code*).
+
+**So the wire, the credential layer, and the authorization vocabulary are already plural. The single-valued thing is the `provider` configuration block** — and consequently **no protocol change is implied** by making conduits per-user. That matters for scheduling: this is additive configuration and resolution work, not a wire event.
+
+### The one field that cannot be delegated
+
+A per-user configuration is desirable; a per-user **`endpoint`** is not, and the distinction is the whole of this subsection.
+
+`endpoint` **is** the release decision — it names where content leaves the trust plane to. A user-writable endpoint is the subject choosing its own exfiltration destination, which contradicts this document's own governing sentence (*Maknae governs RELEASE to a conduit, not CONTAINMENT of its host*), [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) decision 3's custody-of-the-registration rule, and the delegation principle recorded above (*delegation transmits intent, never authority*). It is the same trap as a self-labelled conduit locus in [question 9](#open-questions), one layer out: a subject may *inform* which destination it wants, and may never *authorize* it.
+
+The workable division, as candidate rather than decision:
+
+| | administrator declares | user contributes |
+|---|---|---|
+| which destinations **exist** — `name` → `endpoint` | yes; this is release policy | never |
+| which permitted destination to **use**, and `model` | bounds it via `destinations:` per role | yes — a *selection* among already-permitted destinations |
+| the **credential** | trusts a registered *source*, not a value | yes — the user's own key, in the user's own store |
+| classification ceiling, audit sink, custody posture | yes | never |
+
+The shape that follows: **the registry becomes plural and stays root-owned; the user's document is a selection, not a registration.** A per-user document must also be a **standalone document with its own reader** — as `authz.yaml` and `egress-bounds.yaml` already are — and never a `config.d/` member, because the loader merges section-by-section and a merged user file is precisely how a subject would smuggle an `endpoint` past the root-ownership requirement.
+
+A corollary worth recording because it removes a rough edge rather than adding one: if the credential path is **derived** as `<prefix>/<subject>` from the authenticated subject rather than written by anyone, there is no user-supplied path string to bound, and the containment check becomes structural instead of a string comparison. That also dissolves the *"two places for one value to match"* objection the maintainer raised against `egress-bounds.yaml` on 2026-09-13: one prefix, declared once, with no per-provider path for an operator to keep in sync.
+
+### The degeneracy rule — and why it is a security constraint, not a usability one
+
+The HomeLab operator is **both** administrator and user. The enterprise deployment has those as different people with different authorities, and the multinational case adds that they may be in different organizations. One mechanism must serve all three.
+
+The failure mode to avoid is not the obvious one. It is this: **a split that can be *waived* for the single-operator case is a split an enterprise can inherit by accident.** A configuration flag that says "this deployment is single-user, so the user may write `endpoint`" is a waiver, and waivers propagate through copied configuration, base images and Ansible roles. The homelab case must therefore be *the same mechanism, trivially satisfied* — the operator writes the registry because they are the administrator, and the mechanism never learns that the two roles are the same person.
+
+Stated as a test, in the register of question 3: **the mechanism must not contain the predicate "is this a single-user deployment?"** If it needs to know, it is the wrong mechanism. What the HomeLab operator should experience is one registry they own and a selection they also own — two documents, no ceremony, no flag, and no code path that only they take.
+
+The consequence for Maknae's posture claims is the useful half: an enterprise's evidence and a homelab's evidence are then **produced by the same path**, so the homelab configuration is a genuine (if trivially-satisfied) instance of the enterprise control, rather than a reduced profile whose behaviour nobody has exercised.
+
+### The custody inversion
+
+Today the administrator holds the provider credential and the user is a subject of it. In the per-user target, **the user holds their own credential and the administrator governs only the destination.**
+
+That is *stronger* custody, not weaker — the administrator never possesses the user's key at all — but it breaks the **form** of the claim the isolation contract currently makes. [#242](https://github.com/darkhonor/maknae/issues/242)'s custody assertion is *no egress credential readable by the operator uid*, phrased over one administrator-controlled Vault. With per-user credentials in per-user stores the property has to become per-source, and the acceptance evidence changes shape with it: several assertions, one per registered source, rather than one assertion over one store.
+
+Recorded as a finding rather than a plan: **the property improves and the evidence gets harder**, and those are easy to confuse when the claim is restated.
+
+### A user's secret store is a trust plane the administrator does not control
+
+The maintainer's observation, this date: *"the vault path that a user provides for the API key would be a location and server they have access to and not necessarily the same vault the administrators are using."* And on the landscape: **Vault has always been a barrier for HomeLab; 1Password and Bitwarden are what that deployment model actually runs.**
+
+Adding a backend is the contained part — `KeySource` is already the seam (item 3 above). What does not survive the change unexamined:
+
+- **The containment bound's shape.** `key_vault_path_prefix` is a path prefix inside one KV v2 mount. Across backends with different naming grammars a path prefix is not a bound at all. The question becomes *"may this subject use this registered source?"* rather than *"is this string beneath that string"* — a named-source grant, closer in shape to `destinations:` than to a path check.
+- **One client, one AppRole.** The deputy holds a single Vault client under a single AppRole. Several sources means several credentials *to reach credentials*, and a recursion this design has not addressed — including who holds the user's store credential, and whether the deputy ever may.
+- **What the audit record can say.** A release decision names the destination. If the credential came from a store outside the deployment's control, the record should say *which source* was consulted, or an investigator cannot distinguish "the administrator's key was used" from "a user's own key was used" — a distinction that matters precisely in the enterprise case.
+
+### Vault currently fuses the certificate authority with the secret store
+
+The sharpest structural finding from this discussion, and a **separate seam** from the one above.
+
+`deploy/vault-pki/main.tf` provisions, from one Vault: the PKI root certificate, the intermediate, the signing roles for each principal — **and** the `maknae_kv` mount holding provider keys. The HomeLab model the maintainer describes splits exactly these: **Let's Encrypt for certificates, 1Password or Bitwarden for secrets.** So two independent concerns are one component today:
+
+- **secret source** — already seamed at `KeySource`;
+- **certificate provenance** — **not seamed at all**; `maknae-vault` *is* the TLS identity path.
+
+**These are not symmetric, and should not be staged together merely because one deployment model motivates both.** Swapping the secret store changes who can read a key: contained, and the seam exists. Swapping the certificate authority moves **the trust plane's own identity** — inter-plane mTLS, the FIPS-pinned rustls stack, certificate verification — and therefore reaches [ADR-0002](adr/ADR-0002-kernel-is-rust.md)'s TCB argument and the FIPS posture. Bundling a CA change inside a convenience feature is how a posture regression ships.
+
+One hazard to state before anyone reaches for the obvious answer: **Let's Encrypt certificates are publicly logged.** Issuing one for an internal host name publishes that name to Certificate Transparency. That is an acceptable trade for many HomeLab operators and unacceptable in the posture Maknae is otherwise built for, so a public-CA path cannot be a silent default — it is a deployment-model decision with a disclosure consequence, and it belongs on the record as one.
+
+### What this section does not resolve
+
+- It does not decide that `provider` becomes plural. That is an **amendment to ADR-0023's scope**, which pinned one provider deliberately and which [#243](https://github.com/darkhonor/maknae/issues/243)'s configuration was built to match.
+- It does not schedule anything. The maintainer's framing is explicit: *"Maybe not for Cooky, but most assuredly for later."*
+- It does not settle where a per-user document lives, nor whether the per-user part belongs in the configuration system at all rather than in enrollment state.
+
 ## What this would *not* do
 
 Recorded now so that no later reading overstates it:
@@ -300,6 +385,14 @@ Numbered for citation; none are answered.
 12. **The deputy contract.** The address policy (which address classes are authorized, whether an operator may extend them, and how the pinned connect is expressed), the declared-resolver set and whether DoT/DoH is required or merely permitted, redirect handling, TLS, size, content types: is the egress deputy's behaviour its own decision record, and is it the same deputy for `prompt` egress (case 1) and `Fetch` egress (case 3)?
 13. **Per-deployment address policy and per-source DNSSEC.** The air-gapped inversion makes the address policy deployment configuration rather than a fixed list; where does it live, and is it a lake registry concern or a Maknae policy concern? And is `dnssec: required` a per-source attribute of the lake's registry (authority tier signed by mandate, vendor tier not), consumed by the deputy as data — with the deputy validating from a declared trust anchor, which raises where the anchor is declared, how rollover is handled, and where the deputy gets **trusted time** for signature validity?
 
+14. **Does `provider` become plural, and is that an ADR-0023 amendment?** [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) pinned **one** provider deliberately and [#243](https://github.com/darkhonor/maknae/issues/243)'s configuration was built to match, while `destinations:`, the frame, and the credential cache are already plural. So the question is not whether the machinery can carry several — it can — but whether the *decision* to carry several is an amendment to that ADR's scope or a new record. The maintainer's stated direction is that this is post-Cooky.
+15. **Where does the per-user part live, and is it configuration at all?** A standalone per-user document with its own reader (the `authz.yaml` / `egress-bounds.yaml` shape), or enrollment state, or something the subject supplies per session. What it may **never** be is a `config.d/` member: the loader merges section-by-section, so a merged user file is how a subject would smuggle an `endpoint` past the root-ownership rule. The rest is open.
+16. **Is the credential path derived or declared?** Deriving `<prefix>/<subject>` from the authenticated subject removes the only user-supplied string the deputy would otherwise have to bound, and makes the containment check structural. Declaring it per user is more flexible and reintroduces the string. This is the question that decides whether `key_vault_path_prefix` survives in its present form.
+17. **What is the bound's shape once a secret source is not necessarily Vault?** A path prefix inside one KV mount is not a bound across backends with different naming grammars. A **named-source grant** — *may this subject use this registered source* — is closer in shape to `destinations:` than to a path check, but it is new vocabulary, and it leaves open who holds the credential that reaches a user's own store, and whether the deputy ever may.
+18. **Does the audit record name the credential's SOURCE, not only the destination?** In a single-Vault deployment the source is implied. Once a key may come from a user's own store, a record that names only the destination cannot distinguish *the administrator's key was used* from *this user's own key was used* — a distinction that matters most in exactly the enterprise case this span is meant to serve. [ADR-0019](adr/ADR-0019-audit-record-model.md) would have to carry it.
+19. **Is a non-Vault certificate authority in scope at all?** It is a different seam from the secret source and a much larger one: it moves the trust plane's own identity and therefore reaches [ADR-0002](adr/ADR-0002-kernel-is-rust.md)'s TCB argument and the FIPS posture. If yes, how is the Certificate Transparency disclosure consequence of a public CA handled — since a publicly logged certificate for an internal host name publishes that name, which is acceptable in one deployment model and not in another? **It should not be staged with question 17 merely because one deployment model motivates both.**
+20. **Does the mechanism contain the predicate "is this a single-user deployment?"** Recorded as a question rather than a rule because it is a test to apply to any eventual proposal, not a decision: if the answer is yes, the proposal is wrong, because a split that can be waived for the single-operator case is a split an enterprise inherits by accident through copied configuration and base images. The HomeLab case must be the same mechanism trivially satisfied, never the mechanism switched off.
+
 ## Provenance
 
 Originating discussion: maintainer and assistant, 2026-09-10, during the Cooky milestone and unrelated to the work in flight. The maintainer's contributions are the core idea, the two-model use case, the resource-not-subject framing, and the scoping ruling that excludes weight attestation. Drafted the same day and recorded here in the repository, deliberately and publicly.
@@ -315,3 +408,7 @@ Originating discussion: maintainer and assistant, 2026-09-10, during the Cooky m
 **Extended a third time 2026-09-11**, after the second review's approval, from the maintainer's question on trusted resolution: name resolution as a declared policy input rather than an ambient fact — the `maknae-io` parallel, the three-control layering, the candidate shape (declared resolvers, deputy-side resolution over the FIPS provider, `maknaed` authorizing the lookup and recording the answer), DNSSEC as a per-source registry attribute, the air-gapped inversion, and the costs. Open question 13 exists because of it.
 
 **Corrected a third time before merge, 2026-09-11**, on review of [#280](https://github.com/darkhonor/maknae/pull/280): the DNSSEC paragraph claimed answer integrity independent of the resolver's honesty while the candidate shape had the deputy ask that resolver and trust its AD bit — assigning end-to-end integrity to a party the document had just called named-not-verified. The paragraph now states the two honest positions (deputy-side validation from a declared trust anchor, with its authenticated-denial, trusted-time, rollover, and fail-closed obligations; or the resolver trusted for correctness with the independence claim dropped), makes (i) the candidate for `dnssec: required` sources and (ii) the description of every other, and says plainly that `dnssec: required` is a security attribute only under (i).
+
+**Extended a fourth time 2026-09-13**, at the maintainer's direction, from a discussion that began with a documentation question about [#243](https://github.com/darkhonor/maknae/issues/243)'s `provider` section and became a design one. **The maintainer's contributions** are the load-bearing ones: that provider configuration and egress are performed *on behalf of a user* rather than the daemon, and that a second user-scoped configuration is therefore implied; the objection that `provider.key_vault_path` and `egress-bounds.yaml`'s prefix are *"two places for a single value to match ... not very user friendly"*, which is what produced the derived-path candidate in question 16; the observation that a user's secret store would be **a location and server they have access to and not necessarily the same vault the administrators are using**; that **Vault has always been a challenge for HomeLab while 1Password and Bitwarden are what that landscape runs**, and that neither issues TLS certificates, which is Let's Encrypt's job in that model — the observation from which the certificate-authority/secret-store fusion finding follows; the judgement that these are *"design conversation pieces"* rather than issues, and so belong here; and the governing span: **a single-user / admin HomeLab operator through a multi-national enterprise where users and admins follow the full range of roles within an organization.**
+
+The assistant's contributions, as proposals in discussion: the four already-per-subject facts read out of the code (the per-request frame, the per-destination credential cache with its own header saying why, the `KeySource` seam, the existing `destinations:` grammar) and the consequence that no protocol change is implied; that `endpoint` is the one field which cannot be delegated because it *is* the release decision; the administrator/user division table; the degeneracy rule and its framing as a security constraint — that a waivable split is one an enterprise inherits by accident; the custody inversion and its effect on [#242](https://github.com/darkhonor/maknae/issues/242)'s assertion form; that the containment bound's *shape* rather than its value is what a non-Vault source breaks; the asymmetry between the secret-source seam and the certificate-provenance seam, with the recommendation not to stage them together; and the Certificate Transparency disclosure hazard. Questions 14–20 exist because of this discussion. **One of the maintainer's proposals in this discussion was rejected, and both halves are recorded because the next reader should see the reasoning and not only the outcome.** The maintainer asked why the deputy could not simply read `config.d/providers.yaml` instead of a separate bounds file — one document, nothing to keep in sync. The assistant's objection: a `config.d/` member is a **candidate**, not the resolved section. The `provider` section may be contributed by `maknae.yaml` and by any `config.d/` member with section-by-section shadowing — `Document::shadowed_sections` and `boot.rs`'s loop over shadowed contributions exist precisely for that — so a deputy reading one named member could read a provider that is not the one in force, while `maknaed` resolved a different one. That is the two-resolvers-one-value defect [#216](https://github.com/darkhonor/maknae/issues/216) had just fixed for `principal.home` (`enroll` wrote one form, the kernel resolved another, every `fs.read` denied), and avoiding it would require the deputy to run the whole merge — which *is* reading the whole configuration, the thing the split exists to prevent. Candidate, or everything; no middle. The maintainer's underlying objection to the hand-synchronised prefix stands regardless, and is question 16. That reasoning is recorded because the proposal was the maintainer's and the rejection is the assistant's, and the next reader should see both.
