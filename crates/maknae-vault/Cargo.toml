@@ -71,6 +71,13 @@ rustls = { version = "0.23", default-features = false, features = ["fips"] }
 #   3.0.x              | >=1.17.3, <1.18  | 0.13.x   <-- maknae is here, deliberately
 #   4.x                | >=1.18           | 0.14.x
 #
+# Narrowed 2026-09-13 (#284): "VALIDATED" above is a claim about the MODULE, not
+# about any platform Maknae ships on. Certificate #5314's security policy Table 3
+# lists Amazon Linux 2023 on Graviton4 / Xeon 8375C as the tested operational
+# environments; RHEL/Rocky 9 and macOS arm64 are both PORTED, unlisted ones, and
+# CMVP "makes no statement as to the correct operation of the module when so
+# ported". The honest claim is "a validated module", never "validated here".
+#
 # ASD STIG APSC-DV-001860 (CAT I) requires the module on the NIST CMVP
 # VALIDATED list; in-process does not satisfy it. Raising this bound moves the
 # product off a validated module and is an AO-visible change. Revisit only when

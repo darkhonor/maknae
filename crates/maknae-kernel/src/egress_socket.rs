@@ -116,7 +116,15 @@ impl Egress for SocketEgress {
         // this module's header), so a four-byte length prefix must not be able
         // to make the kernel reserve up to 4 GiB. The CBOR decode and
         // `admitted_reply` run later and would never see it.
-        if n > self.max_frame_bytes {
+        //
+        // The comparison itself lives in the T1 module as a pure predicate, and
+        // is proven there on a table of integers (`u32::MAX` included). Inline
+        // here it was only reachable through a socket, so the operators `>` vs
+        // `==`/`<` could only be distinguished by a test that declared
+        // `u32::MAX` — and a mutant that removed the guard allocated and
+        // zeroized 4 GiB, timing the mutation lane out instead of failing an
+        // assertion. Do not inline it back.
+        if !crate::egress::frame_len_within_cap(n, self.max_frame_bytes) {
             return Err(EgressFailure::Transport(format!(
                 "deputy declared a {n}-byte reply frame over the {}-byte cap",
                 self.max_frame_bytes
@@ -324,11 +332,22 @@ mod tests {
         ));
     }
 
-    /// A four-byte length prefix from the deputy must NOT become a
-    /// four-gigabyte allocation. The deputy is authenticated but untrusted —
-    /// this file says so in its own header — so a compromised or faulty one
-    /// exhausting the kernel with four bytes is a denial of service the
-    /// protocol admission never sees, because the allocation happens first.
+    /// A four-byte length prefix from the deputy must NOT become a giant
+    /// allocation. The deputy is authenticated but untrusted — this file says
+    /// so in its own header — so a compromised or faulty one exhausting the
+    /// kernel with four bytes is a denial of service the protocol admission
+    /// never sees, because the allocation happens first.
+    ///
+    /// This test's job is the WIRING: that `send` consults the cap predicate at
+    /// all, on the real socket path. The predicate's operators are proven on a
+    /// table in `egress::tests` — `u32::MAX` included, at no cost.
+    ///
+    /// It declares 8 MiB over a 64 KiB cap rather than `u32::MAX`
+    /// DELIBERATELY. With `u32::MAX`, a mutant that neutralises the guard makes
+    /// the kernel allocate and zeroize 4 GiB, so the mutation lane reported
+    /// TIMEOUT (a clock result, machine-dependent, `cargo mutants` exit 3)
+    /// instead of an assertion failure. 128x over the cap proves the refusal
+    /// just as well and, when the guard is gone, fails in milliseconds.
     #[test]
     fn a_deputy_declaring_an_enormous_frame_is_refused_before_allocating() {
         let d = tempfile::tempdir().unwrap();
@@ -341,9 +360,10 @@ mod tests {
                     let n = u32::from_be_bytes(len) as usize;
                     let mut body = vec![0u8; n];
                     let _ = c.read_exact(&mut body);
-                    // Declare the largest frame a u32 can express, and send
-                    // nothing after it. A kernel that pre-allocates dies here.
-                    let _ = c.write_all(&u32::MAX.to_be_bytes());
+                    // Declare far more than the cap and send nothing after
+                    // it. A kernel that pre-allocates reads EOF instead of the
+                    // cap refusal, which is the discriminator below.
+                    let _ = c.write_all(&(8u32 * 1024 * 1024).to_be_bytes());
                 }
             }
         });
@@ -353,9 +373,12 @@ mod tests {
         let out = e.send(&intent, req());
         match out {
             Err(EgressFailure::Transport(m)) => {
+                // The CAP message specifically, not merely any transport
+                // failure: a kernel that allocated first and then hit EOF also
+                // returns Transport, and that is exactly the defect.
                 assert!(
-                    m.contains("frame"),
-                    "expected a frame-cap refusal, got: {m}"
+                    m.contains("over the") && m.contains("cap"),
+                    "expected the frame-cap refusal, got: {m}"
                 )
             }
             other => panic!("expected a refusal, got {other:?}"),
