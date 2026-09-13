@@ -112,6 +112,10 @@ fn main() {
                         &mut keys,
                         &[],
                         call::CallBounds::default(),
+                        // #308: the KV mount, from the deputy's own bounds
+                        // document — the only place it is declared, because the
+                        // deputy is the only component in the tree that reads KV.
+                        &bounds.kv_mount,
                     ))
                     .map_err(|e| serve::ServeError::Fulfil(e.to_string()))
                 }) {

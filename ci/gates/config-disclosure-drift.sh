@@ -47,7 +47,7 @@ SURFACE=(
   "crates/maknae-config/src/principal.rs|Principal|principal|3|config"
   # The `provider` section (#243): three disclosed leaves and the Vault path,
   # which is `omit` -- the layout of the secret store is not what the grant is for.
-  "crates/maknae-config/src/provider.rs|ProviderConfig|provider|4|config"
+  "crates/maknae-config/src/provider.rs|ProviderConfig|provider|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised

@@ -381,6 +381,12 @@ const SUPPRESSED: &[&str] = &[
     // layout of the secret store is nobody's business on a grant that exists to
     // show WHAT is configured, and ADR-0023 decision 3 records it as `omit`.
     "provider.key_vault_path",
+    // The field name inside that secret (#308). Not a secret in itself, and
+    // useless without the path and a token — but together with the path it
+    // describes exactly where a credential is kept, and a grant that exists to
+    // show WHAT is configured has no need of it. Classified with its sibling
+    // rather than separately, so the two cannot drift apart.
+    "provider.key_field",
     // The deployer's AU-3(1) extension object, and everything under it.
     //
     // Masking was the recorded decision and it applied the VALUE rule to a KEY

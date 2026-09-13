@@ -85,11 +85,26 @@ variable "approle_path" {
 variable "provider_key_prefix" {
   description = <<-EOT
     KV v2 path prefix, RELATIVE to kv_mount_path, under which provider API keys
-    live. #240a. MUST match `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml:
-    Terraform grants the deputy a read on this prefix, maknaed validates every
-    registered key_vault_path against the file at boot, and the deputy re-checks
-    the frame's path at use. A mismatch is a boot refusal, not a silent 403 at
-    request time — which is the point of validating at boot.
+    live. #240a.
+
+    MUST equal `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml — and
+    since #308 that is a literal string equality rather than a transformation.
+    Before #308 this variable was mount-relative while the configuration value
+    was mount-absolute AND carried the KV v2 `data/` segment: two coordinate
+    systems for one value, required to "match". That is what made #307's
+    singular/plural defect invisible — the two host-side values agreed with each
+    other, the boot gate compares only those two and never this grant, so the
+    daemon booted clean and took a 403 at the credential read.
+
+    Now: this value, `egress-bounds.yaml`'s `key_vault_path_prefix`, and every
+    `provider.key_vault_path` are all mount-relative and `data/`-free. The mount
+    is `kv_mount_path` here and `kv_mount` in egress-bounds.yaml; `data/` is
+    synthesized by the reader and appears in no configuration file.
+
+    maknaed validates every registered key_vault_path against the bounds file at
+    boot, and the deputy re-checks the frame's path at use. A mismatch is a boot
+    refusal, not a silent 403 at request time — which is the point of validating
+    at boot.
   EOT
   type        = string
   default     = "maknae/providers"

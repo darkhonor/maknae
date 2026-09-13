@@ -403,24 +403,30 @@ it.)*
 
 ### 6.1 The `provider` section (#243)
 
-The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). Exactly four keys, all required when the block is present; the block is optional, and a deployment without it boots with a loop that has nothing to prompt. Which roles may send content to this provider is decided in `authz.yaml` (`roles:` and `destinations:`), see the runbook, Chapter 3 §7.
+The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). Exactly **five** keys, all required when the block is present; the block is optional, and a deployment without it boots with a loop that has nothing to prompt. Which roles may send content to this provider is decided in `authz.yaml` (`roles:` and `destinations:`), see the runbook, Chapter 3 §7.
 
-> **Corrected 2026-09-13 — the `key_vault_path` example below was not usable.** It read `maknae/providers/openai`, which the config parser accepts (it only requires a relative, whitespace-free string) and the boot bounds gate compares as a string — but `maknae_vault::split_kv_path` **refuses a path with no `/data/` segment** (`"is not a KV v2 path"`), so the value failed at the moment the deputy tried to read it. `key_vault_path` is the **full KV v2 API path**, `<mount>/data/<secret path>`; with `deploy/vault-pki`'s default `maknae-kv` mount that is `maknae-kv/data/…`. Two further requirements that were absent from this section entirely are added below: a `provider` block makes **`/etc/maknae/egress-bounds.yaml` mandatory**, and **no Vault client is wired yet**, so a real call cannot succeed today. Read from the code, not from the prose it replaces.
+> **Changed 2026-09-13 (#308) — `key_vault_path` is now MOUNT-RELATIVE, and `key_field` is new.** Write the secret path exactly as your Vault CLI shows it: `llm-providers/openai`. The mount is declared once, in `egress-bounds.yaml`'s `kv_mount`, and the KV v2 `data/` segment is **synthesized by the reader** — it appears in no configuration file. A value still carrying the mount or a `data` segment is now **refused at boot by name**, because that is the migration error and the alternative is discovering it at the credential read. `key_field` names the field inside the secret (`api-key`, `api_key`, whatever your deployment used) and is **required with no default**, so nothing guesses.
+>
+> *(The two banners below are kept for the trail. They describe the absolute-path shape this change replaces, and the defect it produced.)*
+>
+> **Superseded 2026-09-13 — the `key_vault_path` example below was not usable.** It read `maknae/providers/openai`, which the config parser accepts (it only requires a relative, whitespace-free string) and the boot bounds gate compares as a string — but `maknae_vault::split_kv_path` **refuses a path with no `/data/` segment** (`"is not a KV v2 path"`), so the value failed at the moment the deputy tried to read it. `key_vault_path` is the **full KV v2 API path**, `<mount>/data/<secret path>`; with `deploy/vault-pki`'s default `maknae-kv` mount that is `maknae-kv/data/…`. Two further requirements that were absent from this section entirely are added below: a `provider` block makes **`/etc/maknae/egress-bounds.yaml` mandatory**, and **no Vault client is wired yet**, so a real call cannot succeed today. Read from the code, not from the prose it replaces.
 
 ```yaml
 provider:
   name: openai                          # operator's label; appears in the audit trail; <=32 bytes, [A-Za-z0-9-_.]
   endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only (the hermetic stub); no userinfo; port 1-65535
   model: gpt-5
-  key_vault_path: maknae-kv/data/maknae/providers/openai  # FULL KV v2 path: <mount>/data/<path>; never disclosed
+  key_vault_path: llm-providers/openai  # MOUNT-RELATIVE, no `data/`; never disclosed
+  key_field: api-key                    # the field INSIDE the secret; required, no default
 ```
 
-- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. The key lives in Vault at the path `key_vault_path` names — which already **includes** the mount and the `data/` segment (see the `key_vault_path` bullet below) — readable by the `maknae-egress` principal only.
+- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. The key lives in Vault under the mount `egress-bounds.yaml` declares, at the mount-relative path `key_vault_path` names, in the field `key_field` names — readable by the `maknae-egress` principal only.
 - **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses (`SectionNotRootOwned`, naming the file or directory that failed). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
-- **Disclosure.** `admin.config.show` shows `name`, `endpoint` and `model` in the clear and omits `key_vault_path`.
-- **`key_vault_path` is a FULL KV v2 path**, `<mount>/data/<secret path>` — `maknae-kv/data/maknae/providers/openai`, not `maknae/providers/openai`. The parser checks only that it is relative (a leading `/` refuses) and whitespace-free; the **`/data/` segment is required by the reader**, and the FIRST `/data/` is the mount boundary, deliberately, so a secret whose own path contains `data` cannot move the split. An empty mount, an empty secret path, or a `.`/`..`/empty segment refuses.
-- **The default prefix is `maknae/providers` — plural — and three places must agree.** `deploy/vault-pki`'s `provider_key_prefix` defaults to `maknae/providers` and `kv_mount_path` to `maknae-kv`, so the shipped grant is a read on `maknae-kv/data/maknae/providers/*`. *(Corrected 2026-09-13: this section's examples said `provider`, singular. The boot gate compares `key_vault_path` to `key_vault_path_prefix` and **never to Vault**, so a consistently-misspelled pair boots clean and then takes a 403 at the credential read — the silent failure boot validation exists to prevent.)*
-- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly one key, `key_vault_path_prefix`, and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The same prefix is granted to the deputy by `deploy/vault-pki` (`kv_mount_path` defaults to `maknae-kv`) and re-checked by the deputy at use — a mismatch is a **boot refusal**, not a 403 at request time, which is the point of checking at boot.
+- **Disclosure.** `admin.config.show` shows `name`, `endpoint` and `model` in the clear and omits `key_vault_path` **and `key_field`**. A field *name* is not a secret, but together with the path it describes exactly where a credential is kept, and nothing needs it in a log line.
+- **`key_vault_path` is MOUNT-RELATIVE and `data/`-free** (#308) — `llm-providers/openai`. It must not start or end with `/`, contain whitespace, an empty segment, a `.`/`..` segment, or **any `data` segment**. That last refusal is the migration guard: a value still reading `maknae-kv/data/llm-providers/openai` would compose to `maknae-kv/data/maknae-kv/data/llm-providers/openai` and fetch nothing, and #307 showed that this class fails at the **credential read** rather than at boot, because nothing compares a host-side value to Vault's grant. The cost is stated plainly: a secret path legitimately containing a `data` segment cannot be expressed. That is rare; the migration error is not.
+- **`key_field`** names the field inside the secret — required, at most 64 bytes, no whitespace, and **no default**. Before #308 the only field name in the tree was a test fixture's `api_key`; defaulting to it would have asked the wrong question of a store using `api-key`. Note that naming this key `key:` instead is refused as a **pasted credential** (`ProviderPlaintextKey`) — the plaintext-key check is on the field's *name* and cannot know your value is only a field name.
+- **Three values must agree, and since #308 it is a literal string equality.** `deploy/vault-pki`'s `provider_key_prefix` (default `maknae/providers`), `egress-bounds.yaml`'s `key_vault_path_prefix`, and every `provider.key_vault_path` are now **all mount-relative and `data/`-free**, so matching them needs no transformation. Before #308 the Terraform variable was mount-relative while the configuration value was mount-absolute *plus* `data/` — two coordinate systems for one value — which is precisely what made #307's singular/plural defect invisible: the boot gate compares the two host-side values to each other and **never to Vault's grant**, so a consistently-wrong pair boots clean and takes a 403 at the credential read.
+- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly **two** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*` — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The same prefix is granted to the deputy by `deploy/vault-pki` (`kv_mount_path` defaults to `maknae-kv`) and re-checked by the deputy at use — a mismatch is a **boot refusal**, not a 403 at request time, which is the point of checking at boot.
 - **No Vault client is constructed yet.** `bins/maknae-egress/src/main.rs` uses `NoCredentialSource`, so an otherwise-valid registration still refuses at the credential layer with a named error, and the field name inside the secret is not fixed in production code (only a test names `api_key`). Configuring this block is therefore correct and checkable end-to-end **up to the credential read**; a real provider call needs the remaining wiring, tracked on [#240](https://github.com/darkhonor/maknae/issues/240).
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
@@ -561,34 +567,42 @@ provider:
   name: openai                          # <=32 bytes; [A-Za-z0-9-_.] only
   endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only
   model: gpt-5
-  key_vault_path: maknae-kv/data/maknae/providers/openai   # FULL KV v2 path
+  key_vault_path: llm-providers/openai  # MOUNT-RELATIVE, exactly as `vault kv` shows it
+  key_field: api-key                    # the field inside the secret
 ```
 
+> **Changed 2026-09-13 (#308) — this example is now what you actually type.** `key_vault_path` is **mount-relative and `data/`-free**, the mount is declared once in `egress-bounds.yaml`'s `kv_mount`, and `key_field` names the field inside the secret. The Vault CLI path and the configured path are now the same two strings, so there is no API-versus-CLI spelling to keep straight. *(The banner below is kept for the trail; it describes the absolute-path shape this replaced and the defect that shape produced.)*
+>
 > **Corrected again 2026-09-13, and this one would have produced the exact failure the design tries to prevent.** The examples in this section and in §6.1 used `maknae/provider/…` — **singular** — while `deploy/vault-pki`'s `provider_key_prefix` defaults to **`maknae/providers`** (plural), which is also what every fixture in the code uses. Following this section verbatim against the shipped Terraform therefore produced a host-side pair that agreed with *itself* — `key_vault_path` under `key_vault_path_prefix`, so **boot passed** — while the Vault policy granted a read on `maknae-kv/data/maknae/providers/*` and the deputy asked for `.../provider/openai`. That is **a silent 403 at request time**, which `variables.tf` names as precisely the thing boot validation exists to avoid: *"A mismatch is a boot refusal, not a silent 403 at request time."* The boot gate cannot catch it, because it compares the two host-side values to each other and never to Vault. **Whenever you change one, change all three: the Terraform variable, `egress-bounds.yaml`, and every `provider.key_vault_path`.**
 
 **And `/etc/maknae/egress-bounds.yaml`, which a `provider` block makes mandatory**
 (`640`, root-owned — it is read by the deputy, not by this loader):
 
 ```yaml
-key_vault_path_prefix: maknae-kv/data/maknae/providers
+kv_mount: maknae-kv
+key_vault_path_prefix: llm-providers
 ```
 
 The `provider` path must be **strictly beneath** that prefix — at least one further
 segment, compared segment-aware — or boot refuses with `OutsideBounds` naming both. A
 missing or unreadable bounds file refuses with `Undeclared`. The same prefix is what
 `deploy/vault-pki` grants the deputy a read on, so **these three places must agree**:
-the Terraform variable, `egress-bounds.yaml`, and `provider.key_vault_path`.
+the Terraform variable, `egress-bounds.yaml`, and `provider.key_vault_path`. Since #308
+all three are **mount-relative and `data/`-free**, so agreement is literal string
+equality rather than a transformation — which is what made the mismatch in #307
+invisible.
 
 Then put the key in Vault, never in a config file:
 
 ```
-vault kv put maknae-kv/maknae/providers/openai <field>=sk-…
+vault kv put maknae-kv/llm-providers/openai api-key=sk-…
 ```
 
-Note the shape difference, which is a Vault CLI convention rather than a Maknae one:
-the **CLI** path omits `data/` (`vault kv put maknae-kv/maknae/providers/openai`), while
-`key_vault_path` is the **API** path and includes it
-(`maknae-kv/data/maknae/providers/openai`). Both name the same secret.
+The mount and the secret path are the same two strings you just configured, and the
+`data/` segment appears in neither: the Vault **CLI** omits it by convention, and since
+#308 the configuration omits it too because the reader synthesizes it. *(Before #308 the
+configuration carried the **API** path including `data/`, so an operator had to hold both
+spellings in mind at once — which is the defect this removed.)*
 
 > **`<field>` is not settled yet, and this is the one thing you cannot finish today.**
 > `bins/maknae-egress/src/main.rs` still uses `NoCredentialSource`: no Vault client is
@@ -623,7 +637,7 @@ file.
 
 #### What the parser accepts (`crates/maknae-config/src/provider.rs`)
 
-**Exactly four keys, all required, no others** — a fifth key refuses with
+**Exactly five keys, all required, no others** — a sixth key refuses with
 `provider: unknown key '<name>'`.
 
 - **`name`** — at most **32 bytes** (it is written into every egress audit record's
@@ -636,14 +650,17 @@ file.
   `http://` to a routable address, a port outside `1–65535` or with a leading zero, and
   a malformed literal such as `256.256.256.256` or `api..example.com`.
 - **`model`** — any non-empty string; sent verbatim on every request.
-- **`key_vault_path`** — the **full KV v2 API path**, `<mount>/data/<secret path>`, e.g.
-  `maknae-kv/data/maknae/providers/openai`. The *parser* requires only that it be
-  relative (a leading `/` refuses) and whitespace-free, so a value missing `/data/`
-  loads and then fails later — `maknae_vault::split_kv_path` refuses it as "not a KV v2
-  path" when the deputy reads it. The **first** `/data/` is the mount boundary,
-  deliberately, so a secret whose own path contains `data` cannot move the split; an
-  empty mount, an empty secret path, or a `.`, `..` or empty segment refuses. Read by
+- **`key_vault_path`** — the secret path **relative to `kv_mount`, without `data/`**
+  (#308), e.g. `llm-providers/openai` — exactly what `vault kv put` takes. Refused: a
+  leading or trailing `/`, whitespace, an empty segment, a `.` or `..` segment, and
+  **any `data` segment**. The deputy composes `<mount>/data/<path>` at read time, so the
+  KV v2 API artifact never appears in configuration — and a configured path therefore
+  **cannot name `metadata/`**, the parallel KV v2 tree a `list` would enumerate. Read by
   the **`maknae-egress`** principal only, under its own Vault policy.
+- **`key_field`** — the field name inside that secret, e.g. `api-key`. Required, at most
+  64 bytes, no whitespace, **no default**. It is carried per request rather than fixed in
+  the deputy, for the same reason `destination` is: two providers may use different field
+  names, and a constant fails the moment there are two.
 
 Values are trimmed, and an empty-after-trim value is refused as missing.
 

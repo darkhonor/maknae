@@ -17,7 +17,6 @@ use zeroize::Zeroizing;
 /// Reads through `maknae-vault`, which owns every Vault interaction.
 pub struct VaultKeys<C> {
     pub client: C,
-    pub field: String,
 }
 
 impl<C: maknae_vault::VaultClientTrait + Sync> KeySource for VaultKeys<C> {
@@ -26,8 +25,17 @@ impl<C: maknae_vault::VaultClientTrait + Sync> KeySource for VaultKeys<C> {
     /// already calls `fulfil` inside that runtime and Tokio refuses a nested
     /// block. The credential error this design promises could never have been
     /// produced; the process would have aborted instead (#296).
-    async fn read(&self, key_vault_path: &str) -> Result<Zeroizing<String>, String> {
-        maknae_vault::read_kv_field(&self.client, key_vault_path, &self.field)
+    async fn read(
+        &self,
+        mount: &str,
+        path: &str,
+        field: &str,
+    ) -> Result<Zeroizing<String>, String> {
+        // #308: compose here, in the SOURCE, because addressing is the store's
+        // business. `data/` is a KV v2 API artifact — it is synthesized rather
+        // than written in configuration, which also means a configured path can
+        // never name `metadata/`, the parallel tree a `list` would enumerate.
+        maknae_vault::read_kv_field(&self.client, &format!("{mount}/data/{path}"), field)
             .await
             .map_err(|e| e.to_string())
     }
@@ -68,13 +76,15 @@ mod tests {
             None => panic!("could not construct a Vault client for the composition test"),
         };
 
-        let mut keys = KeyCache::new(VaultKeys {
-            client,
-            field: "api_key".to_string(),
-        });
+        // #308: `VaultKeys` no longer carries a field name. The field is a
+        // PER-REQUEST value from the frame, because the registry knows it and the
+        // deputy must not guess — the constant that used to live here was the
+        // only field name in the tree, and it said `api_key` while a real
+        // deployment stored `api-key`.
+        let mut keys = KeyCache::new(VaultKeys { client });
 
         // INSIDE the runtime — the exact shape that used to abort.
-        let out = rt.block_on(keys.get("secret/data/maknae/providers/openai"));
+        let out = rt.block_on(keys.get("maknae-kv", "llm-providers/openai", "api-key"));
         let e = out.expect_err("a dead Vault address must produce an error");
         assert!(!e.is_empty(), "the error must say something");
     }

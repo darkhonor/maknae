@@ -56,10 +56,15 @@ pub async fn fulfil<S: KeySource>(
     keys: &mut KeyCache<S>,
     offered: &[String],
     bounds: CallBounds,
+    kv_mount: &str,
 ) -> Result<EgressFrameReply, FulfilError> {
     let req = admitted.request();
+    // #308: the mount comes from the deputy's OWN bounds document, the path and
+    // the field from the frame. An explicit parameter rather than a field on
+    // `CallBounds` — which has a `Default` — so there is no defaultable mount to
+    // forget: the compiler requires the caller to supply it.
     let key = keys
-        .get(&req.key_vault_path)
+        .get(kv_mount, &req.key_vault_path, &req.key_field)
         .await
         .map_err(FulfilError::Credential)?
         .clone();
@@ -109,7 +114,7 @@ mod tests {
 
     struct Denied;
     impl KeySource for Denied {
-        async fn read(&self, p: &str) -> Result<Zeroizing<String>, String> {
+        async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
             Err(format!("permission denied on {p}"))
         }
     }
@@ -119,7 +124,8 @@ mod tests {
             destination: "provider:openai".into(),
             endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
             model: "m".into(),
-            key_vault_path: "secret/data/maknae/providers/openai".into(),
+            key_vault_path: "llm-providers/openai".into(),
+            key_field: "api-key".into(),
             conversation: "conv1".into(),
             content: vec![maknae_proto::ContentBlock::Text {
                 text: maknae_proto::SecretText(zeroize::Zeroizing::new("hi".into())),
@@ -129,7 +135,8 @@ mod tests {
 
     fn bounds() -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
-            key_vault_path_prefix: "secret/data/maknae/providers".into(),
+            kv_mount: "maknae-kv".into(),
+            key_vault_path_prefix: "llm-providers".into(),
         }
     }
 
@@ -140,12 +147,18 @@ mod tests {
         let f = frame();
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Denied);
-        let e = fulfil(&admitted, &mut keys, &[], CallBounds::default())
-            .await
-            .unwrap_err();
+        let e = fulfil(
+            &admitted,
+            &mut keys,
+            &[],
+            CallBounds::default(),
+            "maknae-kv",
+        )
+        .await
+        .unwrap_err();
         match &e {
             FulfilError::Credential(m) => {
-                assert!(m.contains("secret/data/maknae/providers/openai"));
+                assert!(m.contains("llm-providers/openai"));
             }
             other => panic!("expected a credential refusal, got {other:?}"),
         }
@@ -154,7 +167,7 @@ mod tests {
 
     struct Fixed(&'static str);
     impl KeySource for Fixed {
-        async fn read(&self, _p: &str) -> Result<Zeroizing<String>, String> {
+        async fn read(&self, _m: &str, _p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
             Ok(Zeroizing::new(self.0.to_string()))
         }
     }
@@ -208,9 +221,15 @@ mod tests {
         let f = frame_to(url);
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        let reply = fulfil(&admitted, &mut keys, &[], CallBounds::default())
-            .await
-            .unwrap();
+        let reply = fulfil(
+            &admitted,
+            &mut keys,
+            &[],
+            CallBounds::default(),
+            "maknae-kv",
+        )
+        .await
+        .unwrap();
         assert_eq!(reply.reply.blocks.len(), 1);
 
         let sent = h.await.unwrap();
@@ -235,9 +254,15 @@ mod tests {
         let f = frame_to(url);
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Fixed("sk-SECRET-VALUE"));
-        let e = fulfil(&admitted, &mut keys, &[], CallBounds::default())
-            .await
-            .unwrap_err();
+        let e = fulfil(
+            &admitted,
+            &mut keys,
+            &[],
+            CallBounds::default(),
+            "maknae-kv",
+        )
+        .await
+        .unwrap_err();
         match &e {
             FulfilError::Provider(m) => assert!(m.contains("401"), "{m}"),
             other => panic!("expected a provider refusal, got {other:?}"),

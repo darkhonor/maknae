@@ -1386,6 +1386,7 @@ pub async fn handle<S, E, P>(
                     endpoint: pcfg.endpoint.clone(),
                     model: pcfg.model.clone(),
                     key_vault_path: pcfg.key_vault_path.clone(),
+                    key_field: pcfg.key_field.clone(),
                     conversation: conversation.clone(),
                     content: content.clone(),
                 };
