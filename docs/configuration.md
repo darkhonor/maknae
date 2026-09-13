@@ -436,8 +436,8 @@ provider:
   *Strictly beneath* means **at least one further segment**: `maknae/providers/openai` is inside `maknae/providers`, and a path **equal** to the prefix is **outside** it — so setting `key_vault_path: maknae/providers` is refused at boot. The comparison is segment-aware, so `maknae/providers-evil/x` is not within `maknae/providers` either.
 
   What #308 did fix is the *vocabulary*: all three are now mount-relative and `data/`-free, so the first relation is a plain string comparison instead of a transformation between two coordinate systems. What it did **not** fix, and cannot, is that **a Terraform-versus-host mismatch still boots clean and becomes a 403 at the credential read** — that is #307's mechanism and it survives this change, because nothing in the boot path reads the grant.
-- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly **two** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*` — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The same prefix is granted to the deputy by `deploy/vault-pki` (`kv_mount_path` defaults to `maknae-kv`) and re-checked by the deputy at use — a mismatch is a **boot refusal**, not a 403 at request time, which is the point of checking at boot.
-- **No Vault client is constructed yet.** `bins/maknae-egress/src/main.rs` uses `NoCredentialSource`, so an otherwise-valid registration still refuses at the credential layer with a named error, and the field name inside the secret is not fixed in production code (only a test names `api_key`). Configuring this block is therefore correct and checkable end-to-end **up to the credential read**; a real provider call needs the remaining wiring, tracked on [#240](https://github.com/darkhonor/maknae/issues/240).
+- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly **two** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*` — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
+- **No Vault client is constructed yet — and that is now the ONLY gap.** `bins/maknae-egress/src/main.rs` uses `NoCredentialSource`, so an otherwise-valid registration refuses at the credential layer with a named error (one that reports the composed path and the field it would have asked for). Configuring this block is correct and checkable end-to-end **up to the credential read**; the read itself needs the remaining wiring, tracked on [#240](https://github.com/darkhonor/maknae/issues/240). *(Corrected 2026-09-13: this bullet also said the field name was "not fixed in production code (only a test names `api_key`)". That stopped being true in #308 — `key_field` is required, carried per request, and read by `VaultKeys::read`, so the name you configure is the name used. The same stale claim in §9.3 was reported in review; this copy was found by sweeping the file rather than the reported line, which is the discipline that should have applied the first time.)*
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
 ---
@@ -619,13 +619,22 @@ The mount and the secret path are the same two strings you just configured, and 
 configuration carried the **API** path including `data/`, so an operator had to hold both
 spellings in mind at once — which is the defect this removed.)*
 
-> **`<field>` is not settled yet, and this is the one thing you cannot finish today.**
-> `bins/maknae-egress/src/main.rs` still uses `NoCredentialSource`: no Vault client is
-> constructed, so nothing reads a field, and the only place a name appears is a test
-> (`api_key`). Everything above is checkable now — the block parses, the bounds gate
-> runs at boot, the ownership and permission rules apply — but the credential read
-> itself refuses with a named error until the wiring lands ([#240](https://github.com/darkhonor/maknae/issues/240)).
-> Choose `api_key` if you want to pre-seed the secret; treat the name as provisional.
+> **The field name is YOURS and it is authoritative — seed the secret with whatever
+> `key_field` says.** *(Rewritten 2026-09-13: this passage said the name was "not settled",
+> that only a test named one, and to pre-seed `api_key` provisionally. All three became
+> false in #308, and following the old advice would seed a field the configuration does
+> not name — recreating a credential-read failure the moment [#240](https://github.com/darkhonor/maknae/issues/240)
+> wires the client.)* `provider.key_field` is required, carried on every request, and read
+> by `VaultKeys::read`; the example above uses `api-key`, and if your secret uses
+> `api_key` or anything else, write that instead. Nothing defaults.
+>
+> **What you still cannot finish today, and it is narrower than it was:**
+> `bins/maknae-egress/src/main.rs` constructs `NoCredentialSource`, so **no Vault client
+> exists** and the credential read refuses with a named error — one that now reports the
+> composed path and the field it would have asked for. Everything else is checkable now:
+> the block parses, the bounds gate runs at boot, the ownership and permission rules
+> apply, and the deputy admits the frame and refuses only at the credential layer. The
+> read itself waits on #240.
 
 #### Permissions — stricter than §2.2 for this section
 
