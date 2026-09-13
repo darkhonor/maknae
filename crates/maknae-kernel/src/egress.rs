@@ -690,7 +690,7 @@ mod tests {
             destination: "provider:x".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
-            key_vault_path: "llm-providers/x".into(),
+            key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
             conversation: "c".into(),
             content: vec![text("a")],

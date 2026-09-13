@@ -91,8 +91,8 @@ pub fn kv_fragment_is_acceptable(s: &str) -> Result<(), String> {
             return Err("has a '.' or '..' segment".into());
         }
         // THE HALF-MIGRATED CONFIG GUARD. A value still carrying the mount and
-        // the API artifact — `maknae-kv/data/llm-providers` — would compose to
-        // `maknae-kv/data/maknae-kv/data/llm-providers` and fetch nothing. #307
+        // the API artifact — `maknae-kv/data/maknae/providers` — would compose to
+        // `maknae-kv/data/maknae-kv/data/maknae/providers` and fetch nothing. #307
         // proved this class fails at the credential read rather than at boot,
         // because nothing compares a host-side value to Vault's grant. Refusing
         // any `data` segment makes it a named boot refusal. The cost, stated: a
@@ -193,8 +193,8 @@ mod tests {
     /// entry name a Vault path outside the deputy's grant.
     #[test]
     fn a_sibling_path_that_merely_starts_with_the_prefix_is_not_contained() {
-        let p = "llm-providers";
-        assert!(path_is_within_prefix("llm-providers/openai", p));
+        let p = "maknae/providers";
+        assert!(path_is_within_prefix("maknae/providers/openai", p));
         assert!(!path_is_within_prefix(
             "secret/data/maknae/providers-evil/key",
             p
@@ -203,8 +203,8 @@ mod tests {
         assert!(!path_is_within_prefix(p, p));
         // a trailing slash on the prefix behaves identically
         assert!(path_is_within_prefix(
-            "llm-providers/openai",
-            "llm-providers/"
+            "maknae/providers/openai",
+            "maknae/providers/"
         ));
         assert!(!path_is_within_prefix("secret/data/other/openai", p));
         assert!(!path_is_within_prefix("", p));
@@ -234,19 +234,19 @@ mod tests {
     /// rather than a secret inside it.
     #[test]
     fn the_prefix_with_a_trailing_slash_is_not_a_document_within_it() {
-        let p = "llm-providers";
-        assert!(!path_is_within_prefix("llm-providers/", p));
+        let p = "maknae/providers";
+        assert!(!path_is_within_prefix("maknae/providers/", p));
         // and one character after the slash IS a document
-        assert!(path_is_within_prefix("llm-providers/a", p));
+        assert!(path_is_within_prefix("maknae/providers/a", p));
     }
 
     #[test]
     fn a_well_formed_document_parses() {
         assert_eq!(
-            bounds_from_document(&doc2("maknae-kv", "llm-providers")).unwrap(),
+            bounds_from_document(&doc2("maknae-kv", "maknae/providers")).unwrap(),
             EgressBounds {
                 kv_mount: "maknae-kv".into(),
-                key_vault_path_prefix: "llm-providers".into()
+                key_vault_path_prefix: "maknae/providers".into()
             }
         );
     }
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn the_mount_is_required_and_validated_like_the_prefix() {
         // absent
-        assert!(bounds_from_document(&doc("llm-providers")).is_err());
+        assert!(bounds_from_document(&doc("maknae/providers")).is_err());
         // Each empty-segment POSITION has its own message, so a mutation of one
         // arm is observable. Asserted rather than merely `is_err()`, which a
         // single shared message would have made indistinguishable.
@@ -270,7 +270,7 @@ mod tests {
             ("maknae-kv/", "must not end with '/'"),
             ("maknae//kv", "empty interior path segment"),
         ] {
-            let e = bounds_from_document(&doc2(bad, "llm-providers")).unwrap_err();
+            let e = bounds_from_document(&doc2(bad, "maknae/providers")).unwrap_err();
             assert!(
                 e.to_string().contains(want),
                 "kv_mount {bad:?} must be refused with {want:?}, got: {e}"
@@ -287,12 +287,12 @@ mod tests {
             "./maknae-kv",  // traversal
         ] {
             assert!(
-                bounds_from_document(&doc2(bad, "llm-providers")).is_err(),
+                bounds_from_document(&doc2(bad, "maknae/providers")).is_err(),
                 "kv_mount {bad:?} must be refused"
             );
         }
         // a NESTED mount is legal in Vault (`-path=a/b`) and must be accepted
-        assert!(bounds_from_document(&doc2("platform/maknae-kv", "llm-providers")).is_ok());
+        assert!(bounds_from_document(&doc2("platform/maknae-kv", "maknae/providers")).is_ok());
     }
 
     /// THE HALF-MIGRATED CONFIG, and the reason this refusal exists rather than
@@ -300,17 +300,17 @@ mod tests {
     /// with each other and disagreed with Vault's grant: the boot gate compares
     /// the two host-side values and NEVER the grant, so it booted clean and took
     /// a 403 at the credential read. The same class after #308 is a value still
-    /// carrying the mount and `data/` — `maknae-kv/data/llm-providers` — which
-    /// would compose to `maknae-kv/data/maknae-kv/data/llm-providers`. Refusing
+    /// carrying the mount and `data/` — `maknae-kv/data/maknae/providers` — which
+    /// would compose to `maknae-kv/data/maknae-kv/data/maknae/providers`. Refusing
     /// any `data` SEGMENT makes it a named boot refusal instead. The cost is
     /// stated: a secret path legitimately containing a `data` segment cannot be
     /// expressed, which is rare, and the migration error is not.
     #[test]
     fn a_prefix_still_carrying_the_mount_or_data_segment_is_refused_by_name() {
         for bad in [
-            "maknae-kv/data/llm-providers", // the old absolute value, pasted
-            "data/llm-providers",           // the mount stripped, `data/` left
-            "llm/data/providers",           // a `data` segment anywhere
+            "maknae-kv/data/maknae/providers", // the old absolute value, pasted
+            "data/maknae/providers",           // the mount stripped, `data/` left
+            "llm/data/providers",              // a `data` segment anywhere
         ] {
             let e = bounds_from_document(&doc2("maknae-kv", bad)).unwrap_err();
             assert!(
@@ -319,7 +319,7 @@ mod tests {
             );
         }
         // And the mount itself must not carry one either.
-        assert!(bounds_from_document(&doc2("maknae-kv/data", "llm-providers")).is_err());
+        assert!(bounds_from_document(&doc2("maknae-kv/data", "maknae/providers")).is_err());
     }
 
     /// Fail closed on every malformed shape: absent, empty, wrong type,
@@ -350,12 +350,12 @@ mod tests {
         // and the same bound applies to the mount, for the same reason
         assert!(bounds_from_document(&doc2(
             &"m".repeat(MAX_KEY_VAULT_PREFIX_BYTES + 1),
-            "llm-providers"
+            "maknae/providers"
         ))
         .is_err());
         assert!(bounds_from_document(&doc2(
             &"m".repeat(MAX_KEY_VAULT_PREFIX_BYTES),
-            "llm-providers"
+            "maknae/providers"
         ))
         .is_ok());
         // a non-string value for either field
@@ -372,7 +372,7 @@ mod tests {
         // a document carrying ONLY the prefix is refused — the mount is not
         // optional and has no default, so an old file fails closed rather than
         // composing against a guessed mount.
-        assert!(bounds_from_document(&doc("llm-providers")).is_err());
+        assert!(bounds_from_document(&doc("maknae/providers")).is_err());
         // an unknown key is refused BY NAME rather than ignored
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str(OK_MOUNT.into())),

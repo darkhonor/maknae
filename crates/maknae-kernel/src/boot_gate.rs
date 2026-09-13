@@ -247,8 +247,8 @@ mod tests {
     fn a_registered_provider_within_the_grant_boots() {
         assert_eq!(
             super::egress_bounds_boot_gate(
-                Some(&provider("llm-providers/openai")),
-                Some(&bounds("llm-providers")),
+                Some(&provider("maknae/providers/openai")),
+                Some(&bounds("maknae/providers")),
             ),
             Ok(())
         );
@@ -265,11 +265,11 @@ mod tests {
         ] {
             match super::egress_bounds_boot_gate(
                 Some(&provider(bad)),
-                Some(&bounds("llm-providers")),
+                Some(&bounds("maknae/providers")),
             ) {
                 Err(super::EgressBoundsRefusal::OutsideBounds { path, prefix }) => {
                     assert_eq!(path, bad);
-                    assert_eq!(prefix, "llm-providers");
+                    assert_eq!(prefix, "maknae/providers");
                 }
                 other => panic!("expected a boot refusal for {bad}, got {other:?}"),
             }
@@ -280,7 +280,7 @@ mod tests {
     /// exists with no stated bound on it. Fail closed, never fail open.
     #[test]
     fn a_registered_provider_with_undeclared_bounds_refuses_to_boot() {
-        match super::egress_bounds_boot_gate(Some(&provider("llm-providers/openai")), None) {
+        match super::egress_bounds_boot_gate(Some(&provider("maknae/providers/openai")), None) {
             Err(super::EgressBoundsRefusal::Undeclared(m)) => {
                 assert!(m.contains(maknae_config::EGRESS_BOUNDS_FILE) || !m.is_empty())
             }

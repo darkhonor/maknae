@@ -573,7 +573,7 @@ mod tests {
     // fixture also carried the pre-#307 SINGULAR `maknae/provider/...`, which
     // matched neither Terraform's `maknae/providers` default nor any other
     // fixture; both are corrected here.
-    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5.6-luna\n  key_vault_path: llm-providers/openai\n  key_field: api-key\n";
+    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5.6-luna\n  key_vault_path: maknae/providers/openai\n  key_field: api-key\n";
 
     #[cfg(unix)]
     #[test]
@@ -606,7 +606,7 @@ mod tests {
                 "openai",
                 "https://api.openai.com/v1",
                 "gpt-5.6-luna",
-                "llm-providers/openai",
+                "maknae/providers/openai",
                 "api-key"
             )
         );

@@ -202,14 +202,14 @@ mod tests {
     async fn the_no_credential_source_refuses_and_names_the_path() {
         let mut c = KeyCache::new(NoCredentialSource);
         let e = c
-            .get("maknae-kv", "llm-providers/openai", "api-key")
+            .get("maknae-kv", "maknae/providers/openai", "api-key")
             .await
             .unwrap_err();
         assert!(e.contains("no Vault client is configured"), "{e}");
-        assert!(e.contains("llm-providers/openai"), "{e}");
+        assert!(e.contains("maknae/providers/openai"), "{e}");
         // Still refuses on a second ask — a refusal is not cached as a value.
         assert!(c
-            .get("maknae-kv", "llm-providers/openai", "api-key")
+            .get("maknae-kv", "maknae/providers/openai", "api-key")
             .await
             .is_err());
     }

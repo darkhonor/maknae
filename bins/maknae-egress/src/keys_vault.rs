@@ -84,7 +84,7 @@ mod tests {
         let mut keys = KeyCache::new(VaultKeys { client });
 
         // INSIDE the runtime — the exact shape that used to abort.
-        let out = rt.block_on(keys.get("maknae-kv", "llm-providers/openai", "api-key"));
+        let out = rt.block_on(keys.get("maknae-kv", "maknae/providers/openai", "api-key"));
         let e = out.expect_err("a dead Vault address must produce an error");
         assert!(!e.is_empty(), "the error must say something");
     }

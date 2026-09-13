@@ -102,7 +102,7 @@ mod tests {
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "some-model".into(),
-            key_vault_path: "llm-providers/openai".into(),
+            key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: conversation.into(),
             content,

@@ -157,7 +157,7 @@ mod tests {
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
-            key_vault_path: "llm-providers/openai".into(),
+            key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
             content: vec![ContentBlock::Text {

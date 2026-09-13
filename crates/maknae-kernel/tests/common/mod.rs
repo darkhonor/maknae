@@ -366,7 +366,7 @@ impl Fixture {
                 name: n.to_string(),
                 endpoint: "http://127.0.0.1:1/v1".into(),
                 model: "test-model".into(),
-                key_vault_path: "llm-providers/test".into(),
+                key_vault_path: "maknae/providers/test".into(),
                 key_field: "api-key".into(),
             })),
             egress,

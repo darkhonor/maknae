@@ -60,7 +60,7 @@ pub struct ProviderConfig {
     pub model: String,
     /// The KV v2 secret path holding the API key, **RELATIVE to the mount
     /// declared in `egress-bounds.yaml`'s `kv_mount`, and without the `data/`
-    /// segment** (#308) — `llm-providers/openai`, written exactly as the Vault
+    /// segment** (#308) — `maknae/providers/openai`, written exactly as the Vault
     /// CLI shows it. The deputy composes `<mount>/data/<path>` at read time, so
     /// the API artifact never appears in configuration. Never disclosed
     /// (`omit`).
@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use crate::load_str;
 
-    const OK: &str = "name: openai\nendpoint: https://api.openai.com/v1\nmodel: gpt-5.6-luna\nkey_vault_path: llm-providers/openai\nkey_field: api-key\n";
+    const OK: &str = "name: openai\nendpoint: https://api.openai.com/v1\nmodel: gpt-5.6-luna\nkey_vault_path: maknae/providers/openai\nkey_field: api-key\n";
 
     /// #308: `key_field` names the field INSIDE the secret, so a deployment
     /// storing its key under `api-key` needs no code change and no Vault
@@ -311,20 +311,25 @@ mod tests {
     #[test]
     fn a_key_vault_path_still_carrying_the_mount_or_data_segment_is_refused() {
         for bad in [
-            "maknae-kv/data/llm-providers/openai", // the old absolute value
-            "data/llm-providers/openai",           // mount stripped, data/ left
-            "llm/data/openai",                     // a `data` segment anywhere
+            "maknae-kv/data/maknae/providers/openai", // the old absolute value
+            "data/maknae/providers/openai",           // mount stripped, data/ left
+            "llm/data/openai",                        // a `data` segment anywhere
         ] {
-            let e = parse(&OK.replace("llm-providers/openai", bad)).unwrap_err();
+            let e = parse(&OK.replace("maknae/providers/openai", bad)).unwrap_err();
             assert!(
                 e.to_string().contains("data"),
                 "key_vault_path {bad:?} must be refused naming 'data', got: {e}"
             );
         }
         // Still relative, still whitespace-free, still no traversal.
-        for bad in ["/llm-providers/openai", "llm-providers/", "a//b", "a/../b"] {
+        for bad in [
+            "/maknae/providers/openai",
+            "maknae/providers/",
+            "a//b",
+            "a/../b",
+        ] {
             assert!(
-                parse(&OK.replace("llm-providers/openai", bad)).is_err(),
+                parse(&OK.replace("maknae/providers/openai", bad)).is_err(),
                 "key_vault_path {bad:?} must be refused"
             );
         }
@@ -359,7 +364,7 @@ mod tests {
         assert_eq!(p.name, "openai");
         assert_eq!(p.endpoint, "https://api.openai.com/v1");
         assert_eq!(p.model, "gpt-5.6-luna");
-        assert_eq!(p.key_vault_path, "llm-providers/openai");
+        assert_eq!(p.key_vault_path, "maknae/providers/openai");
         assert_eq!(p.key_field, "api-key");
     }
 
@@ -530,11 +535,11 @@ mod tests {
                 "{bad:?}"
             );
         }
-        for bad in ["/secret/x", "llm-providers x", ""] {
+        for bad in ["/secret/x", "maknae/providers x", ""] {
             assert!(
                 matches!(
                     parse(&OK.replace(
-                        "key_vault_path: llm-providers/openai",
+                        "key_vault_path: maknae/providers/openai",
                         &format!("key_vault_path: '{bad}'")
                     )),
                     Err(ConfigError::InvalidProvider(_))

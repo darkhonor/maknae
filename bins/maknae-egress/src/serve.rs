@@ -123,7 +123,7 @@ mod tests {
     fn bounds() -> EgressBounds {
         EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: "llm-providers".into(),
+            key_vault_path_prefix: "maknae/providers".into(),
         }
     }
 
@@ -157,7 +157,7 @@ mod tests {
     fn a_peer_that_is_not_the_kernel_is_refused_before_its_bytes_are_read() {
         let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        let f = frame("llm-providers/openai");
+        let f = frame("maknae/providers/openai");
         let expected_len = f.len() as u32;
         // `a` is kept alive for the whole test. An earlier version moved it
         // into a thread and joined before asserting, which made the assertion
@@ -189,7 +189,7 @@ mod tests {
         let me = nix::unistd::getuid().as_raw();
         let h = std::thread::spawn(move || {
             let mut c = a;
-            let f = frame("llm-providers/openai");
+            let f = frame("maknae/providers/openai");
             c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
             c.write_all(&f).unwrap();
             let mut len = [0u8; 4];
@@ -284,7 +284,7 @@ mod tests {
             drop(UnixStream::connect(&p2).unwrap());
             // 2: a real request -> answered
             let mut c = UnixStream::connect(&p2).unwrap();
-            let f = frame("llm-providers/openai");
+            let f = frame("maknae/providers/openai");
             c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
             c.write_all(&f).unwrap();
             let mut len = [0u8; 4];
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn the_receive_buffer_is_zeroizing_from_allocation() {
         let (a, b) = UnixStream::pair().unwrap();
-        let f = frame("llm-providers/openai");
+        let f = frame("maknae/providers/openai");
         let mut writer = a;
         writer.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
         writer.write_all(&f).unwrap();
@@ -399,7 +399,7 @@ mod tests {
         let h = std::thread::spawn(move || {
             for _ in 0..2 {
                 let mut c = UnixStream::connect(&p2).unwrap();
-                let f = frame("llm-providers/openai");
+                let f = frame("maknae/providers/openai");
                 c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
                 c.write_all(&f).unwrap();
                 let mut len = [0u8; 4];

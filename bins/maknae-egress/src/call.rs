@@ -124,7 +124,7 @@ mod tests {
             destination: "provider:openai".into(),
             endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
             model: "m".into(),
-            key_vault_path: "llm-providers/openai".into(),
+            key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
             content: vec![maknae_proto::ContentBlock::Text {
@@ -136,7 +136,7 @@ mod tests {
     fn bounds() -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: "llm-providers".into(),
+            key_vault_path_prefix: "maknae/providers".into(),
         }
     }
 
@@ -158,7 +158,7 @@ mod tests {
         .unwrap_err();
         match &e {
             FulfilError::Credential(m) => {
-                assert!(m.contains("llm-providers/openai"));
+                assert!(m.contains("maknae/providers/openai"));
             }
             other => panic!("expected a credential refusal, got {other:?}"),
         }
