@@ -7,11 +7,15 @@ or a value cannot be validated, Maknae refuses to load rather than run with a gu
 or weakened configuration.
 
 > **Status.** The configuration backbone is built in cycles. This document covers
-> what exists today: the **loading core**, the **document/registry model**, and the
-> **`core` section's classification ceiling**. Sections owned by subsystems not yet
-> built (`authz`, `llm`, `channels`, `dcs`) are marked **Forthcoming** and are
-> documented as they land. This reference is updated by every cycle that changes the
-> configuration language.
+> what exists today: the **loading core**, the **document/registry model**, the
+> **`core` section's classification ceiling**, and the **`provider` section** (§6.1).
+> Sections owned by subsystems not yet built (`authz`, `channels`, `dcs`) are marked
+> **Forthcoming**, and `llm` is **Withdrawn** (superseded by `provider`, 2026-09-07).
+> **Writing any of them refuses boot** — an unregistered section is
+> `ConfigError::UnknownSection`, not a warning — so treat every Forthcoming row as "do
+> not write this yet", never as "ignored until it lands" *(clarified 2026-09-13, after a
+> worked example in this file shipped an `llm` block)*. This reference is updated by
+> every cycle that changes the configuration language.
 
 ---
 
@@ -64,12 +68,31 @@ the credential mint retires the credential on the way out.
 
 ```
 <config-dir>/
-├── maknae.yaml        # the base file (required)
-└── config.d/          # optional overlay directory
-    ├── authz.yaml
-    ├── llm.yaml
+├── maknae.yaml           # the base file (required)
+├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
+├── egress-bounds.yaml    # required WHEN a `provider` section is registered (§6.1)
+└── config.d/             # optional overlay directory of SECTION files
+    ├── 10-provider.yaml  # the `provider` section (§6.1, worked example in §9.3)
     └── …
 ```
+
+**Sections versus standalone documents** — the distinction the old tree blurred.
+`maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged
+section-by-section by this loader. `authz.yaml` and `egress-bounds.yaml` are **standalone
+documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`,
+`<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting either
+inside `config.d/` does not work.
+
+> **Corrected 2026-09-13.** This tree used to list `config.d/authz.yaml` and
+> `config.d/llm.yaml`. Both were unloadable examples, for the reason §6 now states up
+> front: a section the daemon does not register **refuses boot** with
+> `ConfigError::UnknownSection` rather than being ignored, and neither `authz` nor `llm`
+> is in `boot_specs()` — `llm` is Withdrawn outright (superseded by `provider`). The
+> `authz` name was doubly misleading: `/etc/maknae/authz.yaml` **is** a real file, but it
+> is a **standalone policy document with its own reader**, not a `config.d/` member and
+> not a registered section, so putting it in `config.d/` is wrong twice over. The tree
+> now names only what loads today. *(Found in review after §9.3's copy of the same
+> defect was fixed — the sweep should have been the whole file the first time.)*
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -83,7 +106,9 @@ the credential mint retires the credential on the way out.
 - **Extensions `*.yaml` and `*.yml`** (case-insensitive) are loaded. Any other regular
   file (e.g. `README.md`) is **ignored**.
 - **Dotfiles are skipped** (a name beginning with `.`). Editor lock/temp files such as
-  `.#authz.yaml` or `.authz.yaml.swp` do not trip an error.
+  `.#10-provider.yaml` or `.10-provider.yaml.swp` do not trip an error. *(Corrected
+  2026-09-13: this named `.#authz.yaml`, which reads as though `authz.yaml` were a
+  `config.d/` member — it is a standalone document, see §2.)*
 - A `config.d/` entry that is a **subdirectory or a symlink** is an **error**, not
   ignored. `config.d/` itself must be a real directory, not a symlink.
 - Files are read in **lexical order** by filename.
@@ -94,9 +119,20 @@ The configuration can carry policy, so it must not be world-accessible. On Unix,
 path involved is checked: **no world/other permission bits at all** (`mode & 0o007 == 0`
 — no world read, write, *or* execute).
 
-The **only** check is `mode & 0o007 == 0` — *any* mode with no world/other bit is
-valid (`600`, `640`, `660`, `440`, `750`, `770`, `700`, …); the modes below are
-**recommended examples**, not an exhaustive allowlist.
+For a file carrying no root-required section the **only** check is
+`mode & 0o007 == 0` — *any* mode with no world/other bit is valid (`600`, `640`, `660`,
+`440`, `750`, `770`, `700`, …); the modes below are **recommended examples**, not an
+exhaustive allowlist.
+
+> **Scoped 2026-09-13.** This paragraph read "The **only** check is
+> `mode & 0o007 == 0`" without qualification, which is wrong for a **root-required
+> section** and would send an operator to a mode that is refused. `provider` (§6.1) is
+> such a section: the file contributing it, and `<config-dir>` and `config.d/`
+> themselves, must additionally be **root-owned** and **not group-writable**
+> (`mode & 0o022 == 0`), so **`660` and `770` are REFUSED** there even though they pass
+> the universal rule — `loader.rs`'s `ROOT_ARTIFACT` versus `CONFIG_ARTIFACT`. The
+> refusal is `SectionNotRootOwned` and it names the path that failed. See §9.3 for the
+> worked example and the full table.
 
 | Path | Recommended modes | Rejected |
 |---|---|---|
@@ -347,11 +383,21 @@ an `UnknownSection` error.
 These sections are owned by subsystems not yet built. Each is documented here as it
 lands; until then, registering one and providing its content is not yet supported.
 
+**What "not yet supported" means concretely**, because it is stronger than it sounds: a
+section the daemon does not register is `ConfigError::UnknownSection`, which **refuses
+boot** and names the file it came from. The registered set is
+`crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`,
+`audit`, `principal`, `provider`, plus `core` — so every row below marked Forthcoming or
+Withdrawn will stop the daemon if written, rather than being ignored. Only `provider`
+(§6.1) can be configured today. *(Added 2026-09-13: §9.3's worked example used to be a
+`llm` block, which is Withdrawn, and would have done exactly this to anyone who copied
+it.)*
+
 | Section | Owner | Status |
 |---|---|---|
 | `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request as of #77 — see the runbook)* | Forthcoming |
 | `provider` | the one registered model provider (#243, milestone Cooky) — **see §6.1** | **Shipped** |
-| `llm` | LLM-provider authentication *(superseded by `provider`, 2026-09-07)* | Withdrawn |
+| `llm` | LLM-provider authentication *(superseded by `provider`, 2026-09-07)* | Withdrawn — **writing it refuses boot**, see §9.3 |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
 | `dcs` | optional DCS classification backend | Forthcoming |
 
@@ -359,17 +405,22 @@ lands; until then, registering one and providing its content is not yet supporte
 
 The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). Exactly four keys, all required when the block is present; the block is optional, and a deployment without it boots with a loop that has nothing to prompt. Which roles may send content to this provider is decided in `authz.yaml` (`roles:` and `destinations:`), see the runbook, Chapter 3 §7.
 
+> **Corrected 2026-09-13 — the `key_vault_path` example below was not usable.** It read `maknae/provider/openai`, which the config parser accepts (it only requires a relative, whitespace-free string) and the boot bounds gate compares as a string — but `maknae_vault::split_kv_path` **refuses a path with no `/data/` segment** (`"is not a KV v2 path"`), so the value failed at the moment the deputy tried to read it. `key_vault_path` is the **full KV v2 API path**, `<mount>/data/<secret path>`; with `deploy/vault-pki`'s default `maknae-kv` mount that is `maknae-kv/data/…`. Two further requirements that were absent from this section entirely are added below: a `provider` block makes **`/etc/maknae/egress-bounds.yaml` mandatory**, and **no Vault client is wired yet**, so a real call cannot succeed today. Read from the code, not from the prose it replaces.
+
 ```yaml
 provider:
-  name: openai                          # operator's label; appears in the audit trail
+  name: openai                          # operator's label; appears in the audit trail; <=32 bytes, [A-Za-z0-9-_.]
   endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only (the hermetic stub); no userinfo; port 1-65535
   model: gpt-5
-  key_vault_path: maknae/provider/openai  # KV v2 path the maknae-egress process reads; never disclosed
+  key_vault_path: maknae-kv/data/maknae/provider/openai  # FULL KV v2 path: <mount>/data/<path>; never disclosed
 ```
 
-- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. It lives in Vault at `<kv mount>/data/<key_vault_path>` (`deploy/vault-pki`: the `maknae-kv` mount), readable by the `maknae-egress` principal only.
+- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. The key lives in Vault at the path `key_vault_path` names — which already **includes** the mount and the `data/` segment (see the `key_vault_path` bullet below) — readable by the `maknae-egress` principal only.
 - **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses (`SectionNotRootOwned`, naming the file or directory that failed). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
 - **Disclosure.** `admin.config.show` shows `name`, `endpoint` and `model` in the clear and omits `key_vault_path`.
+- **`key_vault_path` is a FULL KV v2 path**, `<mount>/data/<secret path>` — `maknae-kv/data/maknae/provider/openai`, not `maknae/provider/openai`. The parser checks only that it is relative (a leading `/` refuses) and whitespace-free; the **`/data/` segment is required by the reader**, and the FIRST `/data/` is the mount boundary, deliberately, so a secret whose own path contains `data` cannot move the split. An empty mount, an empty secret path, or a `.`/`..`/empty segment refuses.
+- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly one key, `key_vault_path_prefix`, and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The same prefix is granted to the deputy by `deploy/vault-pki` (`kv_mount_path` defaults to `maknae-kv`) and re-checked by the deputy at use — a mismatch is a **boot refusal**, not a 403 at request time, which is the point of checking at boot.
+- **No Vault client is constructed yet.** `bins/maknae-egress/src/main.rs` uses `NoCredentialSource`, so an otherwise-valid registration still refuses at the credential layer with a named error, and the field name inside the secret is not fixed in production code (only a test names `api_key`). Configuring this block is therefore correct and checkable end-to-end **up to the credential read**; a real provider call needs the remaining wiring, tracked on [#240](https://github.com/darkhonor/maknae/issues/240).
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
 ---
@@ -481,25 +532,148 @@ core:
 > Remember: the whole block is required and strict. Setting only `cui_permitted: true`
 > without the other five ceiling fields is **invalid** and refuses the load.
 
-### 9.3 An extension in `config.d/`
+### 9.3 A `provider` in `config.d/` — the worked extension example
+
+> **Corrected 2026-09-13.** This section used to build its example around the **`llm`** section, describing it as a "Forthcoming subsystem, §6". Both halves were wrong, and the second one was not merely stale — it was **unloadable**. §6's own table marks `llm` **Withdrawn** (superseded by `provider`, 2026-09-07), and `llm` is not among the sections the daemon registers (`crates/maknae-kernel/src/boot.rs`, `boot_specs()`: `lake`, `vault`, `transport`, `audit`, `principal`, `provider`, with `core` read directly). An unregistered section is `ConfigError::UnknownSection` (`crates/maknae-config/src/loader.rs`), which is **returned, not warned** — so an operator who copied the old example got a fail-closed boot refusal naming their own file. The example now uses `provider`, the one extension section that is Shipped, and the old `660`/`770` permission advice below is corrected too: for a section like `provider` those modes are **refused**. Every rule stated here was read from the code, not from the prose above it.
 
 Extension sections belong in `config.d/` (or inline in the base). `config.d/` files
-override the base section-by-section. Example directory:
+override the base **section-by-section**. Example directory:
 
 ```
-/etc/maknae/            # 750
-├── maknae.yaml         # 640 — core (+ inline sections)
-└── config.d/           # 750
-    └── llm.yaml        # 640 — the `llm` section (Forthcoming subsystem)
+/etc/maknae/                 # 750, root-owned
+├── maknae.yaml              # 640, root-owned — core (+ inline sections)
+├── egress-bounds.yaml       # 640, root-owned — NOT a config.d member; read by the deputy
+└── config.d/                # 750, root-owned
+    └── 10-provider.yaml     # 640, root-owned — the `provider` section (§6.1)
 ```
 
-`config.d/llm.yaml`:
+`egress-bounds.yaml` sits beside `maknae.yaml`, **not** inside `config.d/`: it is a
+separate document with its own reader, not a registered section, so it is neither merged
+nor shadowed. It is held to the same root-owned, not-group-writable requirement, and for
+a reason worth knowing: **both `maknaed` and `_maknae-egress` read it, so it is owned by
+neither and editable by neither.**
+
+`config.d/10-provider.yaml`:
 
 ```yaml
-llm:
-  # keys defined by the llm subsystem when it lands (Forthcoming, §6)
-  provider: "…"
+provider:
+  name: openai                          # <=32 bytes; [A-Za-z0-9-_.] only
+  endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only
+  model: gpt-5
+  key_vault_path: maknae-kv/data/maknae/provider/openai   # FULL KV v2 path
 ```
 
-Set config files to `640` (or `660`) and directories to `750` (or `770`) — any
-world/other permission bit refuses the load (§2.2).
+**And `/etc/maknae/egress-bounds.yaml`, which a `provider` block makes mandatory**
+(`640`, root-owned — it is read by the deputy, not by this loader):
+
+```yaml
+key_vault_path_prefix: maknae-kv/data/maknae/provider
+```
+
+The `provider` path must be **strictly beneath** that prefix — at least one further
+segment, compared segment-aware — or boot refuses with `OutsideBounds` naming both. A
+missing or unreadable bounds file refuses with `Undeclared`. The same prefix is what
+`deploy/vault-pki` grants the deputy a read on, so **these three places must agree**:
+the Terraform variable, `egress-bounds.yaml`, and `provider.key_vault_path`.
+
+Then put the key in Vault, never in a config file:
+
+```
+vault kv put maknae-kv/maknae/provider/openai <field>=sk-…
+```
+
+Note the shape difference, which is a Vault CLI convention rather than a Maknae one:
+the **CLI** path omits `data/` (`vault kv put maknae-kv/maknae/provider/openai`), while
+`key_vault_path` is the **API** path and includes it
+(`maknae-kv/data/maknae/provider/openai`). Both name the same secret.
+
+> **`<field>` is not settled yet, and this is the one thing you cannot finish today.**
+> `bins/maknae-egress/src/main.rs` still uses `NoCredentialSource`: no Vault client is
+> constructed, so nothing reads a field, and the only place a name appears is a test
+> (`api_key`). Everything above is checkable now — the block parses, the bounds gate
+> runs at boot, the ownership and permission rules apply — but the credential read
+> itself refuses with a named error until the wiring lands ([#240](https://github.com/darkhonor/maknae/issues/240)).
+> Choose `api_key` if you want to pre-seed the secret; treat the name as provisional.
+
+#### Permissions — stricter than §2.2 for this section
+
+§2.2's universal rule is "no world/other bits" (`mode & 0o007 == 0`), which admits
+`660` and `770`. **A root-required section is held to more than that.** `provider` is
+one, so the file that contributes it **and** `<config-dir>` **and** `config.d/` must each
+be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`) —
+`loader.rs`'s `ROOT_ARTIFACT` (`owner: Some(0)`, `mode_mask: 0o022`) rather than
+`CONFIG_ARTIFACT` (`owner: None`, `mode_mask: 0o007`).
+
+| Path | Valid with a `provider` block | Refused |
+|---|---|---|
+| The file carrying `provider` | `640`, `600`, `440` — root-owned | **`660`** (group-writable), any world bit, any non-root owner |
+| `<config-dir>`, `config.d/` | `750`, `700` — root-owned | **`770`** (group-writable), any world bit, any non-root owner |
+
+The failure names the path that failed (`SectionNotRootOwned`). The packaged
+`/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this as shipped. **A dev-shape
+`~/.maknae/maknae.yaml` owned by the operator does not, by design** — the subject the
+loop runs as must not be able to register a destination for its own content.
+
+`config.d/` itself is checked as well as the file, because a subject who can write the
+directory could otherwise hide a root-authored override and hand the win to the base
+file.
+
+#### What the parser accepts (`crates/maknae-config/src/provider.rs`)
+
+**Exactly four keys, all required, no others** — a fifth key refuses with
+`provider: unknown key '<name>'`.
+
+- **`name`** — at most **32 bytes** (it is written into every egress audit record's
+  `object`), and only ASCII letters, digits, `-`, `_` and `.`. A space or a `/` refuses.
+- **`endpoint`** — `https://`, or `http://` **to loopback only** (`localhost`, a
+  loopback IPv4 literal, or a bracketed loopback IPv6). Refused: any other scheme, an
+  uppercase `HTTPS://` (the scheme match is **case-sensitive**), a bare host with no
+  scheme, whitespace anywhere, **userinfo** (`user:pw@host` — a credential in a
+  disclosed field, and the trick that made `localhost:pw@remote` read as loopback), an
+  `http://` to a routable address, a port outside `1–65535` or with a leading zero, and
+  a malformed literal such as `256.256.256.256` or `api..example.com`.
+- **`model`** — any non-empty string; sent verbatim on every request.
+- **`key_vault_path`** — the **full KV v2 API path**, `<mount>/data/<secret path>`, e.g.
+  `maknae-kv/data/maknae/provider/openai`. The *parser* requires only that it be
+  relative (a leading `/` refuses) and whitespace-free, so a value missing `/data/`
+  loads and then fails later — `maknae_vault::split_kv_path` refuses it as "not a KV v2
+  path" when the deputy reads it. The **first** `/data/` is the mount boundary,
+  deliberately, so a secret whose own path contains `data` cannot move the split; an
+  empty mount, an empty secret path, or a `.`, `..` or empty segment refuses. Read by
+  the **`maknae-egress`** principal only, under its own Vault policy.
+
+Values are trimmed, and an empty-after-trim value is refused as missing.
+
+#### The key must not be in the file
+
+A field named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer`
+refuses the load with `ProviderPlaintextKey`, naming the field. Three details worth
+knowing before you write the file:
+
+- **Case-insensitive** on the field name — `API_KEY` and `Token` refuse too.
+- It is checked on **every contribution** to the section, including a base block that
+  a `config.d/` member shadows. Moving the key into a file that loses the override does
+  not hide it.
+- It is reported **before any other defect in the provider block**, so if you pasted a
+  key next to a typo you hear about the key first. (Ownership and classification checks
+  run earlier in boot and can still speak first.)
+
+It is a **field-name check on the `provider` block only** — not a general secret
+scanner. A secret pasted as the *value* of `name` or `key_vault_path` is not detected.
+
+#### `config.d/` mechanics that apply here (§2.1)
+
+Only immediate entries are read; only `*.yaml` / `*.yml` (case-insensitive); dotfiles
+are skipped, so an editor's `.10-provider.yaml.swp` is harmless; a subdirectory or a
+**symlink** in `config.d/` is an **error**, not ignored; files are read in **lexical
+order**, which is why the example is named `10-provider.yaml`.
+
+#### Verifying it loaded
+
+`admin.config.show` shows `name`, `endpoint` and `model` in the clear and **omits
+`key_vault_path`**. `admin.provider.list` / `.set` / `.disable` are **not built** in
+Cooky — registration is this block plus Vault, and nothing else.
+
+Which roles may send content to this provider is a separate decision, made in
+`authz.yaml` (`roles:` and `destinations:`) — see the runbook, Chapter 3 §7. A
+registered provider is reachable by nobody until that grant exists.
