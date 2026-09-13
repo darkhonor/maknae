@@ -1,0 +1,152 @@
+//! Provider credentials, read on first use and cached per destination (#240b).
+//!
+//! Scope says the key is "read at boot or on first use and never logged".
+//! **At boot is single-provider thinking** and fails the moment there are two,
+//! so it is first use, per destination — the invariant #240a's design records.
+//!
+//! The cache holds `Zeroizing<String>`, so a dropped entry wipes. Nothing here
+//! implements `Debug`: a derived one on a map of secrets is exactly how a key
+//! reaches a log line.
+
+use std::collections::BTreeMap;
+use zeroize::Zeroizing;
+
+/// Where a provider key comes from. A trait so the serving path can be tested
+/// without a live Vault — this project has no Vault stub and deliberately uses
+/// none, so the seam is here rather than a fake server.
+/// ASYNC, deliberately. A synchronous seam forces any real implementation to
+/// bridge with `block_on`, and the deputy already calls `fulfil` inside a
+/// runtime — Tokio panics when a thread driving a runtime blocks on it again.
+/// A synchronous `read` therefore could not produce the named fail-closed
+/// credential error this design promises; it would abort the process instead.
+/// Reviewed finding (#296): the shape has to be async, not the bridge.
+pub trait KeySource {
+    fn read(
+        &self,
+        key_vault_path: &str,
+    ) -> impl std::future::Future<Output = Result<Zeroizing<String>, String>> + Send;
+}
+
+/// The source in use until a Vault client is constructed.
+///
+/// Deliberately a `KeySource` and not a special case upstream: the deputy runs
+/// its REAL path — admit, ask for the credential, refuse — so the refusal comes
+/// from the layer that owns credentials and names itself accordingly. A closure
+/// short-circuiting `fulfil` would have left the whole fulfilment path unbuilt
+/// and unexercised, which is what `dead_code` caught.
+pub struct NoCredentialSource;
+
+impl KeySource for NoCredentialSource {
+    async fn read(&self, key_vault_path: &str) -> Result<Zeroizing<String>, String> {
+        Err(format!(
+            "no Vault client is configured; cannot read '{key_vault_path}'"
+        ))
+    }
+}
+
+/// First-use, per-destination cache.
+pub struct KeyCache<S> {
+    source: S,
+    entries: BTreeMap<String, Zeroizing<String>>,
+}
+
+impl<S: KeySource> KeyCache<S> {
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// The key for one destination, read on first use.
+    ///
+    /// Keyed on the VAULT PATH, not the provider name: two providers sharing a
+    /// path share a key, and the path is what the deputy's grant is expressed
+    /// over. The error carries the path — never the value.
+    /// The source, for tests that need to observe how often it was asked.
+    /// `cfg(test)` rather than `#[allow(dead_code)]`: it exists only to let a
+    /// test count reads, and production has no business reaching past the cache
+    /// to the thing behind it.
+    #[cfg(test)]
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    pub async fn get(&mut self, key_vault_path: &str) -> Result<&Zeroizing<String>, String> {
+        if !self.entries.contains_key(key_vault_path) {
+            let v = self.source.read(key_vault_path).await?;
+            self.entries.insert(key_vault_path.to_string(), v);
+        }
+        Ok(&self.entries[key_vault_path])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Counting {
+        reads: Mutex<Vec<String>>,
+    }
+    impl KeySource for Counting {
+        async fn read(&self, p: &str) -> Result<Zeroizing<String>, String> {
+            self.reads.lock().unwrap().push(p.to_string());
+            Ok(Zeroizing::new(format!("key-for-{p}")))
+        }
+    }
+
+    /// First use reads; every use after that does not. Scope says "read at boot
+    /// or on first use" — this is the first-use half, and the count is what
+    /// proves the cache exists rather than a comment claiming it.
+    #[tokio::test]
+    async fn a_key_is_read_once_per_destination_and_reused() {
+        let mut c = KeyCache::new(Counting {
+            reads: Mutex::new(Vec::new()),
+        });
+        assert_eq!(&**c.get("a/data/one").await.unwrap(), "key-for-a/data/one");
+        assert_eq!(&**c.get("a/data/one").await.unwrap(), "key-for-a/data/one");
+        assert_eq!(&**c.get("a/data/two").await.unwrap(), "key-for-a/data/two");
+        assert_eq!(
+            c.source.reads.lock().unwrap().len(),
+            2,
+            "one read per DESTINATION"
+        );
+    }
+
+    struct Failing;
+    impl KeySource for Failing {
+        async fn read(&self, p: &str) -> Result<Zeroizing<String>, String> {
+            Err(format!("permission denied on {p}"))
+        }
+    }
+
+    /// A failed read is a refusal that names the PATH and nothing else, and is
+    /// not cached — a transient Vault failure must not poison the destination.
+    #[tokio::test]
+    async fn a_failed_read_names_the_path_and_is_not_cached() {
+        let mut c = KeyCache::new(Failing);
+        let e = c.get("a/data/one").await.unwrap_err();
+        assert!(e.contains("a/data/one"));
+        assert!(
+            c.get("a/data/one").await.is_err(),
+            "a failure must not be cached"
+        );
+    }
+
+    /// The source the deputy runs on until a Vault client exists. It refuses,
+    /// names the PATH it was asked for, and is never cached as a success —
+    /// this is the deputy's real behaviour right now, not a placeholder.
+    #[tokio::test]
+    async fn the_no_credential_source_refuses_and_names_the_path() {
+        let mut c = KeyCache::new(NoCredentialSource);
+        let e = c
+            .get("secret/data/maknae/providers/openai")
+            .await
+            .unwrap_err();
+        assert!(e.contains("no Vault client is configured"), "{e}");
+        assert!(e.contains("secret/data/maknae/providers/openai"), "{e}");
+        // Still refuses on a second ask — a refusal is not cached as a value.
+        assert!(c.get("secret/data/maknae/providers/openai").await.is_err());
+    }
+}

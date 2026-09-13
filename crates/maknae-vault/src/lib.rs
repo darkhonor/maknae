@@ -63,6 +63,11 @@ pub use secret_source::{
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
 };
+/// Re-exported so a sibling crate can name the client `read_kv_field` takes
+/// WITHOUT depending on `vaultrs` itself. This crate owns every Vault
+/// interaction and its pinning (#240a); a second direct `vaultrs` dependency
+/// elsewhere would be a second place for that pinning to drift.
+pub use vaultrs::client::Client as VaultClientTrait;
 pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]

@@ -22,6 +22,10 @@ pub const MAX_REQUEST_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
+    /// The frame was admitted and the provider call failed. Distinct from
+    /// `Refused`: the deputy was WILLING, and something downstream did not
+    /// work — the kernel needs to tell those apart.
+    Fulfil(String),
     /// The connected peer is not the kernel, or could not be identified at
     /// all. One variant, because the deputy treats them identically: a peer we
     /// cannot police is refused exactly like a peer we can and shouldn't. The
@@ -62,11 +66,20 @@ fn read_body_zeroizing(stream: &mut UnixStream) -> Result<zeroize::Zeroizing<Vec
 }
 
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
-pub fn serve_one(
+///
+/// `fulfil` is what turns an admitted frame into a provider call. It is passed
+/// in rather than constructed here so the transport can be tested without a
+/// provider or a Vault — this project has no Vault stub and deliberately uses
+/// none, so the seam is a function, not a fake server.
+pub fn serve_one<F>(
     mut stream: UnixStream,
     expected_uid: u32,
     bounds: &EgressBounds,
-) -> Result<(), ServeError> {
+    fulfil: F,
+) -> Result<(), ServeError>
+where
+    F: FnOnce(&crate::handle::Admitted<'_>) -> Result<maknae_proto::EgressFrameReply, ServeError>,
+{
     // BEFORE the first read. A peer we have not authenticated does not get to
     // hand us bytes to parse.
     if !maknae_vault::peer_uid_is(&stream, expected_uid).map_err(|_| ServeError::WrongPeer)? {
@@ -76,7 +89,8 @@ pub fn serve_one(
     let body = read_body_zeroizing(&mut stream)?;
 
     let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
-    let reply = decide(&req, bounds).map_err(ServeError::Refused)?;
+    let admitted = decide(&req, bounds).map_err(ServeError::Refused)?;
+    let reply = fulfil(&admitted)?;
 
     let out = maknae_proto::encode_egress_frame_reply(&reply).map_err(io)?;
     stream
@@ -91,6 +105,20 @@ mod tests {
     use super::*;
     use maknae_proto::{ContentBlock, EgressFrameRequest, SecretText};
     use std::os::unix::net::UnixListener;
+
+    /// A fulfiller that answers without a provider, so these tests exercise
+    /// the TRANSPORT alone. The provider path has its own tests in `call.rs`
+    /// and `maknae-llm`'s hermetic stub suite.
+    fn canned(
+        _a: &crate::handle::Admitted<'_>,
+    ) -> Result<maknae_proto::EgressFrameReply, ServeError> {
+        Ok(maknae_proto::EgressFrameReply {
+            reply: maknae_proto::PromptReply {
+                blocks: vec![],
+                tool_calls: vec![],
+            },
+        })
+    }
 
     fn bounds() -> EgressBounds {
         EgressBounds {
@@ -140,7 +168,7 @@ mod tests {
 
         let mut keep = b.try_clone().unwrap();
         assert_eq!(
-            serve_one(b, me.wrapping_add(1), &bounds()),
+            serve_one(b, me.wrapping_add(1), &bounds(), canned),
             Err(ServeError::WrongPeer)
         );
 
@@ -168,7 +196,7 @@ mod tests {
             c.read_exact(&mut body).unwrap();
             maknae_proto::decode_egress_frame_reply(&body).unwrap()
         });
-        serve_one(b, me, &bounds()).unwrap();
+        serve_one(b, me, &bounds(), canned).unwrap();
         let reply = h.join().unwrap();
         assert!(reply.reply.blocks.is_empty() && reply.reply.tool_calls.is_empty());
     }
@@ -184,7 +212,7 @@ mod tests {
             let _ = c.write_all(&f);
         });
         assert_eq!(
-            serve_one(b, me, &bounds()),
+            serve_one(b, me, &bounds(), canned),
             Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
     }
@@ -200,7 +228,7 @@ mod tests {
             let _ = c.write_all(&u32::MAX.to_be_bytes());
         });
         assert_eq!(
-            serve_one(b, me, &bounds()),
+            serve_one(b, me, &bounds(), canned),
             Err(ServeError::OversizeFrame(u32::MAX as usize))
         );
     }
@@ -219,7 +247,7 @@ mod tests {
             let _ = c.write_all(&junk);
         });
         assert!(matches!(
-            serve_one(b, me, &bounds()),
+            serve_one(b, me, &bounds(), canned),
             Err(ServeError::Io(_))
         ));
     }
@@ -235,7 +263,7 @@ mod tests {
             drop(c);
         });
         assert!(matches!(
-            serve_one(b, me, &bounds()),
+            serve_one(b, me, &bounds(), canned),
             Err(ServeError::Io(_))
         ));
     }
@@ -266,7 +294,7 @@ mod tests {
         let b = bounds();
         let mut served = 0;
         for conn in l.incoming() {
-            let _ = serve_one(conn.unwrap(), me, &b);
+            let _ = serve_one(conn.unwrap(), me, &b, canned);
             served += 1;
             if served == 2 {
                 break;
@@ -315,7 +343,7 @@ mod tests {
             let _ = c.write_all(&n.to_be_bytes());
             let _ = c.write_all(&vec![0u8; n as usize]);
         });
-        match serve_one(b, me, &bounds()) {
+        match serve_one(b, me, &bounds(), canned) {
             Err(ServeError::Io(_)) => {}
             Err(ServeError::OversizeFrame(n)) => panic!(
                 "a frame EXACTLY at the cap ({n}) was refused as oversize — the check is `>=`, not `>`"
@@ -330,8 +358,79 @@ mod tests {
             let _ = c.write_all(&((MAX_REQUEST_FRAME_BYTES + 1) as u32).to_be_bytes());
         });
         assert_eq!(
-            serve_one(b2, me, &bounds()),
+            serve_one(b2, me, &bounds(), canned),
             Err(ServeError::OversizeFrame(MAX_REQUEST_FRAME_BYTES + 1))
+        );
+    }
+
+    /// TWO SERVED CONNECTIONS SHARING A DESTINATION read the credential ONCE.
+    ///
+    /// Reviewed finding (#296): the cache was constructed inside the
+    /// per-connection closure, so "read on first use, cached per destination"
+    /// lasted exactly one request. `keys.rs`'s unit test passed because IT held
+    /// a cache across calls — the deputy did not. This drives the real serving
+    /// path twice and counts reads, which is the assertion that was missing.
+    #[test]
+    fn two_served_connections_sharing_a_destination_read_the_key_once() {
+        use std::sync::Mutex;
+
+        struct Counting {
+            reads: Mutex<usize>,
+        }
+        impl crate::keys::KeySource for Counting {
+            async fn read(&self, _p: &str) -> Result<zeroize::Zeroizing<String>, String> {
+                *self.reads.lock().unwrap() += 1;
+                Ok(zeroize::Zeroizing::new("k".into()))
+            }
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let p2 = path.clone();
+        let h = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut c = UnixStream::connect(&p2).unwrap();
+                let f = frame("secret/data/maknae/providers/openai");
+                c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
+                c.write_all(&f).unwrap();
+                let mut len = [0u8; 4];
+                let _ = c.read_exact(&mut len);
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // ONE cache, outside the loop — exactly as main.rs holds it.
+        let mut keys = crate::keys::KeyCache::new(Counting {
+            reads: Mutex::new(0),
+        });
+        let b = bounds();
+        let mut served = 0;
+        for conn in l.incoming() {
+            let _ = serve_one(conn.unwrap(), me, &b, |admitted| {
+                rt.block_on(crate::call::fulfil(
+                    admitted,
+                    &mut keys,
+                    &[],
+                    crate::call::CallBounds::default(),
+                ))
+                .map_err(|e| ServeError::Fulfil(e.to_string()))
+            });
+            served += 1;
+            if served == 2 {
+                break;
+            }
+        }
+        h.join().unwrap();
+        assert_eq!(
+            *keys.source().reads.lock().unwrap(),
+            1,
+            "two connections to the SAME destination must read the credential once; \
+             a cache the serving path rebuilds per request is not a cache"
         );
     }
 }
