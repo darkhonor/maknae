@@ -286,7 +286,14 @@ if [ "$need_default" -eq 1 ]; then
   if [ -n "${COVERAGE_TIERS_FILELIST+x}" ]; then
     universe_file="$COVERAGE_TIERS_FILELIST"
   else
-    universe_file="$(mktemp)"
+    # Released on EVERY exit path, including the two `exit 1`s below and the
+    # fail-closed exits further down (#302). This leaked one temp file per run
+    # — small individually, and it is how the class of problem starts: /tmp
+    # filling is what silently turned this gate's own mutation stage into a
+    # vacuous pass (#301). Only set when WE allocate; an injected
+    # COVERAGE_TIERS_FILELIST belongs to the caller and must not be deleted.
+    universe_file="$(mktemp -t maknae-covtiers.XXXXXXXX)"
+    trap 'rm -f -- "$universe_file"' EXIT INT TERM
     if ! env -u GIT_DIR -u GIT_WORK_TREE git -C "$root" ls-files '*.rs' >"$universe_file"; then
       fail "git ls-files failed enumerating the universe"; exit 1
     fi
@@ -358,6 +365,13 @@ if [ "$need_default" -eq 1 ]; then
 fi
 
 # ---- mutation stage ---------------------------------------------------------
+# The mutation run's exit status is not a sufficient oracle: an all-unviable run
+# exits 0, so this gate once passed the zero-missed contract having tested
+# nothing (#301). `mutation-oracle.sh` carries both halves of the answer — room
+# to run before, and did-it-measure-anything after — as a separate script so
+# negative-control.sh can probe them without a 45-minute mutation run.
+oracle="$here/mutation-oracle.sh"
+
 if [ "$mutants_mode" != "" ]; then
   if [ "$mutants_mode" = "all" ]; then
     # contract-shape validation of the key this stage reads (fail closed:
@@ -378,6 +392,11 @@ if [ "$mutants_mode" != "" ]; then
     if ! resolve_crate_dirs; then
       fail "cannot resolve mutants_crates package names (mutation stage)"
       oracle_ok=0
+    fi
+    # BEFORE the first build, so a full scratch volume is reported as itself
+    # rather than discovered N mutants later as a wall of 'unviable' (#301).
+    if ! out="$(bash "$oracle" scratch "${TMPDIR:-/tmp}" 2>&1)"; then
+      fail "mutation scratch volume unusable: $out"
     fi
   fi
   for cname in "${mutant_crates[@]}"; do
@@ -409,8 +428,21 @@ if [ "$mutants_mode" != "" ]; then
       # dies after five seconds, and missed/timeout outcomes still fail the gate.
       extra_mutants_flags+=(--minimum-test-timeout 60)
     fi
-    if ! (cd "$root" && cargo mutants --package "$cname" "${extra_mutants_flags[@]}"); then
+    # A per-crate output dir, so each crate's outcomes.json and per-mutant logs
+    # survive for the two checks below instead of being overwritten by the next
+    # crate in the loop.
+    mut_out="$root/target/mutants-$cname"
+    rm -rf "$mut_out"
+    if ! (cd "$root" && cargo mutants --package "$cname" --output "$mut_out" "${extra_mutants_flags[@]}"); then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
+    fi
+    # The exit status above answers "were any mutants missed?". This answers
+    # "did the run measure anything at all, and was it the mutations that failed
+    # to build or the environment?" — a green exit code answers neither (#301).
+    if ! out="$(bash "$oracle" judge "$mut_out" "$cname" 2>&1)"; then
+      fail "mutation run for $cname cannot be trusted: $out"
+    else
+      printf '%s\n' "$out"
     fi
   done
 fi

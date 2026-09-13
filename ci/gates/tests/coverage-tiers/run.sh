@@ -14,8 +14,17 @@ pass_n=0; fail_n=0
 ok()  { printf 'fixture-ok: %s\n' "$1"; pass_n=$((pass_n+1)); }
 bad() { printf 'FIXTURE-FAIL: %s\n' "$1"; fail_n=$((fail_n+1)); }
 
+# ONE suite-owned scratch root, released on EVERY exit path (#302). `newroot` is
+# called once or more per fixture — ~348 directories for a full run — and removed
+# none of them, so this suite leaked as freely as negative-control.sh did. The
+# leak is not cosmetic: /tmp filling is what turned the mutation lane's
+# zero-missed contract into a vacuous pass (#301), the very failure this suite
+# now has fixtures for. Named so leaked debris is attributable to this suite.
+COVFIX_TMP="$(mktemp -d -t maknae-covfix.XXXXXXXX)"
+trap 'rm -rf -- "$COVFIX_TMP"' EXIT INT TERM
+
 newroot() { # one mktemp per fixture; must not sit inside a work tree
-  local r; r="$(mktemp -d)"
+  local r; r="$(mktemp -d -p "$COVFIX_TMP")"
   if [ "$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$r" rev-parse --is-inside-work-tree 2>/dev/null || true)" = "true" ]; then
     echo "ABORT: TMPDIR is inside a git work tree — fixtures cannot run" >&2; exit 1
   fi
@@ -834,7 +843,7 @@ exit 0
 EOF
 cat >"$shim/cargo" <<'EOF'
 #!/usr/bin/env python3
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
@@ -844,6 +853,31 @@ if package == 'maknae-io':
         raise SystemExit('missing enclosing I/O watchdog budget')
 elif '--minimum-test-timeout' in args:
     raise SystemExit('I/O watchdog budget leaked to another crate')
+# The gate no longer trusts the exit status alone (#301): it reads the run's
+# outcomes.json to ask whether anything was actually MEASURED. So this stub has
+# to emit what real cargo-mutants emits, at the layout it uses
+# (--output DIR -> DIR/mutants.out/outcomes.json). A stub that printed and
+# exited left the gate's new oracle unexercised by every fixture below.
+out = args[args.index('--output') + 1] if '--output' in args else '.'
+d = os.path.join(out, 'mutants.out')
+shape = os.environ.get('FIXTURE_MUTANT_OUTCOMES', 'measured')
+if shape != 'none':
+    os.makedirs(d, exist_ok=True)
+    if shape == 'all-unviable':
+        # The #301 shape: every mutant failed to BUILD, so nothing was measured,
+        # and real cargo-mutants exits 0 on exactly this.
+        o = {'total_mutants': 41, 'caught': 0, 'missed': 0,
+             'timeout': 0, 'unviable': 41}
+    else:
+        o = {'total_mutants': 7, 'caught': 7, 'missed': 0,
+             'timeout': 0, 'unviable': 0}
+    with open(os.path.join(d, 'outcomes.json'), 'w') as f:
+        json.dump(o, f)
+if shape == 'enospc':
+    os.makedirs(os.path.join(d, 'log'), exist_ok=True)
+    with open(os.path.join(d, 'log', 'm1.log'), 'w') as f:
+        f.write('error: incremental compilation: could not create session '
+                'directory lock file: No space left on device (os error 28)\n')
 print('verified mutant budget for ' + package)
 sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
@@ -856,6 +890,28 @@ done
 expect "mutation watchdog budget still propagates failure" "cargo mutants --package maknae-io reported missed/timeout mutants" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_EXIT=3 COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/x" "$gate" --root "$r" --injection --mutants maknae-io
+
+# THE MUTATION RUN'S EXIT STATUS IS NOT A SUFFICIENT ORACLE (#301). Real
+# cargo-mutants exits 0 when every mutant failed to BUILD and was therefore
+# reported `unviable` — measured 2026-09-13 with cargo-mutants 27.1.0. This gate
+# read only that status, so the zero-missed contract passed having tested
+# NOTHING. The three fixtures below drive the failure THROUGH THE GATE, with the
+# stub exiting 0 exactly as the real tool does; negative-control.sh probes the
+# same decisions at mutation-oracle.sh's own boundary.
+expect "mutation oracle: all-unviable run is refused despite exit 0" "ZERO viable" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=all-unviable \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outcomes.json" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=none \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: an ENOSPC build failure is not unviability" "ENVIRONMENT failure" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=enospc \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
 
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"
