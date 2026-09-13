@@ -78,6 +78,7 @@ judge() {
   fi
   python3 - "$out/outcomes.json" "$cname" <<'PYEOF' || rc=1
 import json, sys
+
 path, cname = sys.argv[1], sys.argv[2]
 try:
     with open(path) as f:
@@ -86,22 +87,68 @@ except (OSError, ValueError) as e:
     print(f"FAIL: {cname}: unreadable mutation outcomes: {e}")
     sys.exit(1)
 if not isinstance(d, dict):
-    print(f"FAIL: {cname}: mutation outcomes is not an object")
+    print(f"FAIL: {cname}: mutation outcomes is not a JSON object, it is a "
+          f"{type(d).__name__} — the run cannot be judged (#301)")
     sys.exit(1)
-def n(k):
-    v = d.get(k) or 0
-    return v if isinstance(v, int) else 0
-total, unviable = n("total_mutants"), n("unviable")
-caught, missed, timeout = n("caught"), n("missed"), n("timeout")
-viable = caught + missed + timeout
-# A run with zero viable mutants proves nothing, whatever it exits with.
-if total and viable == 0:
-    print(f"FAIL: {cname}: {total} mutants, {unviable} unviable, ZERO viable — "
-          "the mutation lane measured nothing and would otherwise pass the "
-          "zero-missed contract (#301)")
+
+# EVERY count must be PRESENT and well-typed before any of them is believed.
+# The failure this replaces, caught in review of the very commit that closed
+# #301: a tolerant reader mapped each missing or non-integer field to 0, and the
+# only rejection was `if total and viable == 0` — so `{}`, `{"outcomes": []}`, a
+# schema drift that renamed or retyped the counters, and a genuine zero-mutant
+# run were all ACCEPTED, printed as "0 viable ... of 0". Those are every one of
+# them a no-measurement state, which is precisely what this oracle exists to
+# refuse. An oracle that fails open on absent data is not an oracle.
+KEYS = ("total_mutants", "caught", "missed", "timeout", "unviable")
+v = {}
+for k in KEYS:
+    if k not in d:
+        print(f"FAIL: {cname}: mutation outcomes has no '{k}' — the counts this "
+              f"gate judges are ABSENT, so the run cannot be judged. Either the "
+              f"run did not complete or cargo-mutants' schema moved (#301)")
+        sys.exit(1)
+    x = d[k]
+    # `isinstance(True, int)` is True in Python, so bools are excluded by name:
+    # `{"caught": true}` must not be read as one caught mutant.
+    if isinstance(x, bool) or not isinstance(x, int) or x < 0:
+        print(f"FAIL: {cname}: mutation outcomes '{k}' is {x!r}, not a "
+              f"non-negative integer — the counts cannot be trusted (#301)")
+        sys.exit(1)
+    v[k] = x
+
+total = v["total_mutants"]
+viable = v["caught"] + v["missed"] + v["timeout"]
+accounted = viable + v["unviable"]
+
+# Internal consistency, verified against real cargo-mutants 27.1.0 output before
+# being enforced: 234+0+0+68 == 302 and 0+0+0+6 == 6. If this ever stops holding
+# the gate fails CLOSED and a human reads the numbers, which is the right
+# direction for an assurance claim — a silently rebalanced set of counters is
+# indistinguishable from a partial run.
+if accounted != total:
+    print(f"FAIL: {cname}: mutation counts do not balance — "
+          f"caught {v['caught']} + missed {v['missed']} + timeout {v['timeout']} "
+          f"+ unviable {v['unviable']} = {accounted}, but total_mutants is "
+          f"{total}. The run is partial or the schema changed (#301)")
     sys.exit(1)
-print(f"mutants[{cname}]: {viable} viable ({caught} caught, {missed} missed, "
-      f"{timeout} timeout), {unviable} unviable of {total}")
+
+# A run over zero mutants measured nothing, however cheerfully it exited. It is
+# also how an empty or drifted outcomes.json presents itself.
+if total == 0:
+    print(f"FAIL: {cname}: the mutation run reports ZERO mutants — nothing was "
+          f"generated, so nothing was measured, and the zero-missed contract "
+          f"would pass vacuously (#301)")
+    sys.exit(1)
+
+if viable == 0:
+    print(f"FAIL: {cname}: {total} mutants, {v['unviable']} unviable, ZERO "
+          f"viable — the mutation lane measured nothing and would otherwise "
+          f"pass the zero-missed contract (#301)")
+    sys.exit(1)
+
+print(f"mutants[{cname}]: {viable} viable ({v['caught']} caught, "
+      f"{v['missed']} missed, {v['timeout']} timeout), {v['unviable']} unviable "
+      f"of {total}")
 PYEOF
   return $rc
 }

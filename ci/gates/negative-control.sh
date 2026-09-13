@@ -3784,6 +3784,36 @@ printf '{"total_mutants": 302, "missed": 0, "caught": 234, "timeout": 0, "unviab
 expect_accept "mutation-oracle/nested-output-layout-accepts-a-real-run" "234 viable" \
   bash "$mo" judge "$mo_nested_ok" maknae-kernel
 
+# JUDGE: THE COUNTS THEMSELVES MUST BE TRUSTWORTHY BEFORE THEY ARE BELIEVED.
+# Review finding on the very commit that closed #301: the judge mapped each
+# missing or non-integer field to 0 and rejected only on `total and viable == 0`,
+# so `{}`, `{"outcomes": []}`, a renamed or retyped counter, an unbalanced set
+# and a genuine zero-mutant run were ALL accepted and printed as
+# "0 viable ... of 0". Every one of those is a no-measurement state. An oracle
+# that fails open on absent data is not an oracle — so each shape gets its own
+# probe with its own expected reason, and none of them may pass.
+mo_shape() { # <label> <expected-FAIL-substring> <json>
+  local d; d="$(mktemp -d -p "$NC_TMP")"
+  printf '%s\n' "$3" > "$d/outcomes.json"
+  expect_reject_because "mutation-oracle/$1" "$2" bash "$mo" judge "$d" maknae-kernel
+}
+mo_shape "counts-empty-object"      "has no 'total_mutants'" '{}'
+mo_shape "counts-outcomes-only"     "has no 'total_mutants'" '{"outcomes":[]}'
+mo_shape "counts-key-absent"        "has no 'unviable'" \
+  '{"total_mutants":41,"caught":0,"missed":0,"timeout":0}'
+mo_shape "counts-mistyped-string"   "not a non-negative integer" \
+  '{"total_mutants":41,"caught":"31","missed":0,"timeout":0,"unviable":10}'
+# `isinstance(True, int)` is True in Python: a bool must not read as a count.
+mo_shape "counts-mistyped-bool"     "not a non-negative integer" \
+  '{"total_mutants":1,"caught":true,"missed":0,"timeout":0,"unviable":0}'
+mo_shape "counts-negative"          "not a non-negative integer" \
+  '{"total_mutants":41,"caught":-1,"missed":0,"timeout":0,"unviable":42}'
+mo_shape "counts-do-not-balance"    "do not balance" \
+  '{"total_mutants":302,"caught":100,"missed":0,"timeout":0,"unviable":68}'
+mo_shape "counts-zero-mutants"      "ZERO mutants" \
+  '{"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}'
+mo_shape "counts-not-an-object"     "not a JSON object" '[]'
+
 # SCRATCH: a volume without room must be refused BEFORE the run, not discovered
 # as a wall of 'unviable' afterwards. The floor is raised via the documented
 # override so the probe does not depend on this host's free space.

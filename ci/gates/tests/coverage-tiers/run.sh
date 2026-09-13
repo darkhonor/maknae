@@ -868,6 +868,15 @@ if shape != 'none':
         # and real cargo-mutants exits 0 on exactly this.
         o = {'total_mutants': 41, 'caught': 0, 'missed': 0,
              'timeout': 0, 'unviable': 41}
+    elif shape == 'empty-counts':
+        # The review-finding shape: a well-formed JSON object with none of the
+        # counts the gate judges. A tolerant reader called this '0 viable of 0'
+        # and PASSED it.
+        o = {}
+    elif shape == 'unbalanced':
+        # Counts that do not add up: a partial run, or a schema that moved.
+        o = {'total_mutants': 302, 'caught': 100, 'missed': 0,
+             'timeout': 0, 'unviable': 68}
     else:
         o = {'total_mutants': 7, 'caught': 7, 'missed': 0,
              'timeout': 0, 'unviable': 0}
@@ -905,6 +914,16 @@ expect "mutation oracle: all-unviable run is refused despite exit 0" "ZERO viabl
 
 expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outcomes.json" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=none \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: outcomes with no counts is refused, not read as 0 of 0" "has no 'total_mutants'" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=empty-counts \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: counts that do not balance are refused" "do not balance" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=unbalanced \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
 
