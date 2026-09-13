@@ -7,11 +7,15 @@ or a value cannot be validated, Maknae refuses to load rather than run with a gu
 or weakened configuration.
 
 > **Status.** The configuration backbone is built in cycles. This document covers
-> what exists today: the **loading core**, the **document/registry model**, and the
-> **`core` section's classification ceiling**. Sections owned by subsystems not yet
-> built (`authz`, `llm`, `channels`, `dcs`) are marked **Forthcoming** and are
-> documented as they land. This reference is updated by every cycle that changes the
-> configuration language.
+> what exists today: the **loading core**, the **document/registry model**, the
+> **`core` section's classification ceiling**, and the **`provider` section** (§6.1).
+> Sections owned by subsystems not yet built (`authz`, `channels`, `dcs`) are marked
+> **Forthcoming**, and `llm` is **Withdrawn** (superseded by `provider`, 2026-09-07).
+> **Writing any of them refuses boot** — an unregistered section is
+> `ConfigError::UnknownSection`, not a warning — so treat every Forthcoming row as "do
+> not write this yet", never as "ignored until it lands" *(clarified 2026-09-13, after a
+> worked example in this file shipped an `llm` block)*. This reference is updated by
+> every cycle that changes the configuration language.
 
 ---
 
@@ -64,12 +68,31 @@ the credential mint retires the credential on the way out.
 
 ```
 <config-dir>/
-├── maknae.yaml        # the base file (required)
-└── config.d/          # optional overlay directory
-    ├── authz.yaml
-    ├── llm.yaml
+├── maknae.yaml           # the base file (required)
+├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
+├── egress-bounds.yaml    # required WHEN a `provider` section is registered (§6.1)
+└── config.d/             # optional overlay directory of SECTION files
+    ├── 10-provider.yaml  # the `provider` section (§6.1, worked example in §9.3)
     └── …
 ```
+
+**Sections versus standalone documents** — the distinction the old tree blurred.
+`maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged
+section-by-section by this loader. `authz.yaml` and `egress-bounds.yaml` are **standalone
+documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`,
+`<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting either
+inside `config.d/` does not work.
+
+> **Corrected 2026-09-13.** This tree used to list `config.d/authz.yaml` and
+> `config.d/llm.yaml`. Both were unloadable examples, for the reason §6 now states up
+> front: a section the daemon does not register **refuses boot** with
+> `ConfigError::UnknownSection` rather than being ignored, and neither `authz` nor `llm`
+> is in `boot_specs()` — `llm` is Withdrawn outright (superseded by `provider`). The
+> `authz` name was doubly misleading: `/etc/maknae/authz.yaml` **is** a real file, but it
+> is a **standalone policy document with its own reader**, not a `config.d/` member and
+> not a registered section, so putting it in `config.d/` is wrong twice over. The tree
+> now names only what loads today. *(Found in review after §9.3's copy of the same
+> defect was fixed — the sweep should have been the whole file the first time.)*
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -83,7 +106,9 @@ the credential mint retires the credential on the way out.
 - **Extensions `*.yaml` and `*.yml`** (case-insensitive) are loaded. Any other regular
   file (e.g. `README.md`) is **ignored**.
 - **Dotfiles are skipped** (a name beginning with `.`). Editor lock/temp files such as
-  `.#authz.yaml` or `.authz.yaml.swp` do not trip an error.
+  `.#10-provider.yaml` or `.10-provider.yaml.swp` do not trip an error. *(Corrected
+  2026-09-13: this named `.#authz.yaml`, which reads as though `authz.yaml` were a
+  `config.d/` member — it is a standalone document, see §2.)*
 - A `config.d/` entry that is a **subdirectory or a symlink** is an **error**, not
   ignored. `config.d/` itself must be a real directory, not a symlink.
 - Files are read in **lexical order** by filename.
