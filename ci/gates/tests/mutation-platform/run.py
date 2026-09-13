@@ -107,7 +107,23 @@ class PlatformSelection(unittest.TestCase):
                 '[t1]\nmutants_crates = ["maknae-io"]\n'
             )
             recorder = tools / "cargo"
-            recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$MUTATION_ARGS"\n')
+            # Record the argv AND emit the outcomes.json the gate now reads: it
+            # no longer trusts the exit status alone, because an all-unviable run
+            # exits 0 and would pass the zero-missed contract having measured
+            # nothing (#301). Real cargo-mutants writes --output DIR ->
+            # DIR/mutants.out/outcomes.json, so the recorder mirrors that.
+            recorder.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$@" > "$MUTATION_ARGS"\n'
+                'out=.\n'
+                'while [ $# -gt 0 ]; do\n'
+                '  [ "$1" = "--output" ] && { out="$2"; break; }\n'
+                '  shift\n'
+                'done\n'
+                'mkdir -p "$out/mutants.out"\n'
+                'printf \'{"total_mutants":7,"caught":7,"missed":0,"timeout":0,"unviable":0}\\n\' '
+                '> "$out/mutants.out/outcomes.json"\n'
+            )
             recorder.chmod(0o755)
             (tools / "cargo-mutants").symlink_to(recorder)
             arguments = root / "args"
@@ -121,9 +137,17 @@ class PlatformSelection(unittest.TestCase):
             ], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
-            self.assertEqual(arguments.read_text().splitlines(),
-                             ["mutants", "--package", "maknae-io", "--exclude-re", expected,
-                              "--minimum-test-timeout", "60"])
+            # `--output` is the gate's, not the platform filter's: each crate
+            # gets its own results dir so the run can be JUDGED afterwards
+            # (#301), and so one crate's outcomes.json does not overwrite the
+            # next one's. Asserted by position like the rest of the argv, with
+            # the path checked separately because it is root-dependent.
+            argv = arguments.read_text().splitlines()
+            self.assertEqual(argv[:3], ["mutants", "--package", "maknae-io"])
+            self.assertEqual(argv[3], "--output")
+            self.assertEqual(argv[4], str(root / "target" / "mutants-maknae-io"))
+            self.assertEqual(argv[5:], ["--exclude-re", expected,
+                                        "--minimum-test-timeout", "60"])
 
 
 if __name__ == "__main__":

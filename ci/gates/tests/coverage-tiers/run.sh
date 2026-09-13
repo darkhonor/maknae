@@ -14,8 +14,17 @@ pass_n=0; fail_n=0
 ok()  { printf 'fixture-ok: %s\n' "$1"; pass_n=$((pass_n+1)); }
 bad() { printf 'FIXTURE-FAIL: %s\n' "$1"; fail_n=$((fail_n+1)); }
 
+# ONE suite-owned scratch root, released on EVERY exit path (#302). `newroot` is
+# called once or more per fixture — ~348 directories for a full run — and removed
+# none of them, so this suite leaked as freely as negative-control.sh did. The
+# leak is not cosmetic: /tmp filling is what turned the mutation lane's
+# zero-missed contract into a vacuous pass (#301), the very failure this suite
+# now has fixtures for. Named so leaked debris is attributable to this suite.
+COVFIX_TMP="$(mktemp -d -t maknae-covfix.XXXXXXXX)"
+trap 'rm -rf -- "$COVFIX_TMP"' EXIT INT TERM
+
 newroot() { # one mktemp per fixture; must not sit inside a work tree
-  local r; r="$(mktemp -d)"
+  local r; r="$(mktemp -d -p "$COVFIX_TMP")"
   if [ "$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$r" rev-parse --is-inside-work-tree 2>/dev/null || true)" = "true" ]; then
     echo "ABORT: TMPDIR is inside a git work tree — fixtures cannot run" >&2; exit 1
   fi
@@ -23,15 +32,26 @@ newroot() { # one mktemp per fixture; must not sit inside a work tree
 }
 
 # expect <label> <expected-substring> <expected-rc(0|nonzero)> -- cmd...
+#
+# Matches with a HERE-STRING, never `printf ... | grep -q`. The failure that
+# motivated it (hobibot, 2026-09-13): this suite reported `workflow-sync
+# multi-line` as FAILED in a reviewer's environment while the expected text was
+# visibly present. Under `set -o pipefail`, `grep -q` exits the instant it
+# matches, `printf` is then killed by SIGPIPE, and the PIPELINE's status becomes
+# nonzero — so a successful match reads as a miss. It is a race on how much the
+# writer flushed before the reader left, which is why it fired on the largest
+# expected string and passed everywhere else: a false failure that looks exactly
+# like a real one. A here-string has no writer process to kill. Applies to every
+# matcher in the gates, not only this one.
 expect() {
   local label="$1" want="$2" rc_kind="$3"; shift 3; [ "$1" = "--" ] && shift
   local out rc=0
   out="$("$@" 2>&1)" || rc=$?
   if [ "$rc_kind" = "0" ]; then
-    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "$label"; else
+    if [ "$rc" -eq 0 ] && grep -qF "$want" <<<"$out"; then ok "$label"; else
       bad "$label (rc=$rc)"; printf '%s\n' "$out" | tail -5; fi
   else
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "$label"; else
+    if [ "$rc" -ne 0 ] && grep -qF "$want" <<<"$out"; then ok "$label"; else
       bad "$label (rc=$rc, wanted substring: $want)"; printf '%s\n' "$out" | tail -5; fi
   fi
 }
@@ -834,16 +854,57 @@ exit 0
 EOF
 cat >"$shim/cargo" <<'EOF'
 #!/usr/bin/env python3
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
 package = args[args.index('--package') + 1]
+# Proof-of-invocation marker: the scratch preflight must PREEMPT the loop, so a
+# fixture needs to show this stub was never reached — not merely that the gate
+# exited nonzero (hobibot review, 694a77f).
+marker = os.environ.get('FIXTURE_MUTANT_MARKER')
+if marker:
+    with open(marker, 'a') as f:
+        f.write(package + '\n')
 if package == 'maknae-io':
     if '--minimum-test-timeout' not in args or args[args.index('--minimum-test-timeout') + 1] != '60':
         raise SystemExit('missing enclosing I/O watchdog budget')
 elif '--minimum-test-timeout' in args:
     raise SystemExit('I/O watchdog budget leaked to another crate')
+# The gate no longer trusts the exit status alone (#301): it reads the run's
+# outcomes.json to ask whether anything was actually MEASURED. So this stub has
+# to emit what real cargo-mutants emits, at the layout it uses
+# (--output DIR -> DIR/mutants.out/outcomes.json). A stub that printed and
+# exited left the gate's new oracle unexercised by every fixture below.
+out = args[args.index('--output') + 1] if '--output' in args else '.'
+d = os.path.join(out, 'mutants.out')
+shape = os.environ.get('FIXTURE_MUTANT_OUTCOMES', 'measured')
+if shape != 'none':
+    os.makedirs(d, exist_ok=True)
+    if shape == 'all-unviable':
+        # The #301 shape: every mutant failed to BUILD, so nothing was measured,
+        # and real cargo-mutants exits 0 on exactly this.
+        o = {'total_mutants': 41, 'caught': 0, 'missed': 0,
+             'timeout': 0, 'unviable': 41}
+    elif shape == 'empty-counts':
+        # The review-finding shape: a well-formed JSON object with none of the
+        # counts the gate judges. A tolerant reader called this '0 viable of 0'
+        # and PASSED it.
+        o = {}
+    elif shape == 'unbalanced':
+        # Counts that do not add up: a partial run, or a schema that moved.
+        o = {'total_mutants': 302, 'caught': 100, 'missed': 0,
+             'timeout': 0, 'unviable': 68}
+    else:
+        o = {'total_mutants': 7, 'caught': 7, 'missed': 0,
+             'timeout': 0, 'unviable': 0}
+    with open(os.path.join(d, 'outcomes.json'), 'w') as f:
+        json.dump(o, f)
+if shape == 'enospc':
+    os.makedirs(os.path.join(d, 'log'), exist_ok=True)
+    with open(os.path.join(d, 'log', 'm1.log'), 'w') as f:
+        f.write('error: incremental compilation: could not create session '
+                'directory lock file: No space left on device (os error 28)\n')
 print('verified mutant budget for ' + package)
 sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
@@ -856,6 +917,72 @@ done
 expect "mutation watchdog budget still propagates failure" "cargo mutants --package maknae-io reported missed/timeout mutants" nonzero -- \
   env PATH="$shim:$PATH" FIXTURE_MUTANT_EXIT=3 COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/x" "$gate" --root "$r" --injection --mutants maknae-io
+
+# THE MUTATION RUN'S EXIT STATUS IS NOT A SUFFICIENT ORACLE (#301). Real
+# cargo-mutants exits 0 when every mutant failed to BUILD and was therefore
+# reported `unviable` — measured 2026-09-13 with cargo-mutants 27.1.0. This gate
+# read only that status, so the zero-missed contract passed having tested
+# NOTHING. The three fixtures below drive the failure THROUGH THE GATE, with the
+# stub exiting 0 exactly as the real tool does; negative-control.sh probes the
+# same decisions at mutation-oracle.sh's own boundary.
+expect "mutation oracle: all-unviable run is refused despite exit 0" "ZERO viable" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=all-unviable \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: a run with no outcomes cannot be judged" "wrote no outcomes.json" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=none \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+# THE PREFLIGHT MUST PREEMPT, not merely record. The floor is declared for this
+# fixture via MUTATION_ORACLE_MIN_KIB so the probe does not depend on the host's
+# free space, and the stub writes a marker line whenever it is invoked — so the
+# assertion is that `cargo mutants` NEVER RAN, which a nonzero exit alone would
+# not show.
+r_pf="$(newroot)"; mk_base "$r_pf"
+marker_pf="$r_pf/cargo-was-invoked"
+expect "mutation oracle: an unusable scratch volume stops the run BEFORE it starts" "scratch volume unusable" nonzero -- \
+  env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=999999999999 \
+    FIXTURE_MUTANT_MARKER="$marker_pf" \
+    COVERAGE_TIERS_JSON="$r_pf/cov.json" COVERAGE_TIERS_FILELIST="$r_pf/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf" --injection --mutants xcore
+if [ -e "$marker_pf" ]; then
+  bad "mutation oracle: cargo mutants RAN after the scratch volume was refused ($(tr '\n' ' ' < "$marker_pf"))"
+else
+  ok "mutation oracle: cargo mutants was never invoked after the scratch refusal"
+fi
+
+# The control on that control: with a floor the volume DOES meet, the same
+# fixture reaches the stub and the marker appears. Without this, the assertion
+# above is equally satisfied by a gate that never runs mutants at all.
+r_pf2="$(newroot)"; mk_base "$r_pf2"
+marker_pf2="$r_pf2/cargo-was-invoked"
+expect "mutation oracle: a usable scratch volume does not block the run" "verified mutant budget for xcore" 0 -- \
+  env PATH="$shim:$PATH" MUTATION_ORACLE_MIN_KIB=1 \
+    FIXTURE_MUTANT_MARKER="$marker_pf2" \
+    COVERAGE_TIERS_JSON="$r_pf2/cov.json" COVERAGE_TIERS_FILELIST="$r_pf2/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r_pf2" --injection --mutants xcore
+if [ -e "$marker_pf2" ]; then
+  ok "mutation oracle: the marker proves the stub IS reached when space is sufficient"
+else
+  bad "mutation oracle: the stub was never invoked even with a met floor — the preemption assertion above proves nothing"
+fi
+
+expect "mutation oracle: outcomes with no counts is refused, not read as 0 of 0" "has no 'total_mutants'" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=empty-counts \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: counts that do not balance are refused" "do not balance" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=unbalanced \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+expect "mutation oracle: an ENOSPC build failure is not unviability" "ENVIRONMENT failure" nonzero -- \
+  env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=enospc \
+    COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
+    COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
 
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"

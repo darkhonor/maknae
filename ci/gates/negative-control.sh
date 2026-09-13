@@ -1,15 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# ONE gate-owned scratch root, released on EVERY exit path (#302).
+#
+# This gate materializes SIXTY throwaway workspaces per run and used to remove
+# none of them — the only one of the seven scratch-allocating gates without a
+# cleanup path (the other six pair `mktemp -d` with a `trap` on the same line or
+# a `trap cleanup EXIT`). 17,667 trees (1.5 GiB) had accumulated in /tmp since
+# Aug 30 on the maintainer's host.
+#
+# THE LEAK DISABLED A DIFFERENT GATE, which is why this is a trap and not a
+# tidiness note: /tmp (5.0 GiB) filled, every `cargo mutants` scratch build then
+# failed with `No space left on device`, and cargo-mutants classifies a mutant
+# that fails to BUILD as `unviable` — so a run reporting `41 unviable` exited 0
+# and coverage-tiers.sh, whose only oracle is the exit status, passed the
+# zero-missed contract having tested nothing (#301).
+#
+# Named, so leaked debris is attributable to this gate rather than indis-
+# tinguishable from every other program's mktemp output — which is how it went
+# unnoticed for two weeks. Every allocation below is a child of this root, so the
+# single trap covers all sixty.
+NC_TMP="$(mktemp -d -t maknae-negctl.XXXXXXXX)"
+trap 'rm -rf -- "$NC_TMP"' EXIT INT TERM
 # Materialize contaminated workspaces in temp dirs and assert the REAL gate scripts reject each
 # (root-override arg). A gate that cannot be shown to fire is not a control (spec §3 P2c).
 pass=0; total=0; skipped=0
+# Every matcher below uses a HERE-STRING, never `printf ... | grep -q`. Under
+# `set -o pipefail` a matching `grep -q` exits at once, SIGPIPEs the `printf`
+# feeding it, and the pipeline's nonzero status turns a successful match into a
+# miss — a race on output size, observed 2026-09-13 in the sibling fixture suite
+# as a probe reporting FAILED while its expected text was plainly present. In a
+# suite whose whole job is to distinguish a real failure from a false one, that
+# is the worst possible bug. Do not reintroduce the pipe.
 expect_reject() { # <label> <cmd...> — require a genuine rejection (a printed FAIL), not merely a non-zero exit
   local label="$1"; shift; total=$((total+1))
   local out rc
   # `if out=$(...)` keeps the expected non-zero exit out of set -e's reach.
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL'; then
+  if [ "$rc" -ne 0 ] && grep -q 'FAIL' <<<"$out"; then
     echo "neg-ok: [$label] gate rejected"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
@@ -28,11 +56,11 @@ expect_reject_because() { # <label> <expected-FAIL-substring> <cmd...>
   local label="$1" why="$2"; shift 2; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why"; then
+  if [ "$rc" -ne 0 ] && grep -q "FAIL" <<<"$out" && grep -qF -- "$why" <<<"$out"; then
     echo "neg-ok: [$label] gate rejected, for '$why'"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
-  elif printf '%s' "$out" | grep -q "FAIL"; then # rejected, but not for `$why`
+  elif grep -q "FAIL" <<<"$out"; then # rejected, but not for `$why`
     echo "NEG-FAIL: [$label] gate rejected for the WRONG reason (wanted '$why'): $out"
   else
     echo "NEG-FAIL: [$label] gate exited $rc without a FAIL line (crash, not a rejection): $out"
@@ -73,7 +101,7 @@ expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must
   local label="$1" want="$2"; shift 2; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$want"; then
+  if [ "$rc" -eq 0 ] && grep -q "$want" <<<"$out"; then
     echo "pos-ok: [$label] gate accepted"; pass=$((pass+1))
   elif [ "$rc" -ne 0 ]; then
     echo "POS-FAIL: [$label] gate rejected a CLEAN fixture (exit $rc): $out"
@@ -83,7 +111,7 @@ expect_accept() { # <label> <expected-stdout-substring> <cmd...> — a gate must
 }
 
 # Fixture A — optional privileged dep → must trip p1-manifest-lint.sh
-tmpA="$(mktemp -d)"; mkdir -p "$tmpA/crates/shared/src" "$tmpA/crates/maknae-kernel/src" "$tmpA/bins"
+tmpA="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpA/crates/shared/src" "$tmpA/crates/maknae-kernel/src" "$tmpA/bins"
 cat > "$tmpA/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "3"
@@ -108,7 +136,7 @@ echo '' > "$tmpA/crates/shared/src/lib.rs"
 expect_reject_because "p1/optional-priv-dep" "as OPTIONAL" "$here/p1-manifest-lint.sh" "$tmpA"
 
 # Fixture A2 — TABLE-form optional privileged dep (`[dependencies.<crate>]`) → must also trip p1.
-tmpA2="$(mktemp -d)"; mkdir -p "$tmpA2/crates/shared/src" "$tmpA2/crates/maknae-kernel/src"
+tmpA2="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpA2/crates/shared/src" "$tmpA2/crates/maknae-kernel/src"
 cat > "$tmpA2/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "3"
@@ -145,7 +173,7 @@ expect_reject_because "p1/optional-priv-dep-TABLE-form" "as OPTIONAL" "$here/p1-
 source "$here/lib.sh"
 p2_fixture() { # <crate-to-link-from-the-CLI, or empty for the clean case>
   local linked="${1:-}" fixture members c
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   members=''
   for c in "${PRIVILEGED_CRATES[@]}"; do
     mkdir -p "$fixture/crates/$c/src"
@@ -195,7 +223,7 @@ expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
 # unexamined and the gate reported `ok` at rc 0. Verified against the pre-change
 # gate on the REAL contract.
 ic_fixture() { # <table-row> — a tree holding a contract file with one table row
-  local fixture; fixture="$(mktemp -d)"
+  local fixture; fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/packaging"
   { printf '# Isolation contract\n\n'
     printf '| Property | A | B | C | D |\n'
@@ -241,7 +269,7 @@ fi
 # rc 0 -- a clean bill of health for a dependency graph nobody looked at. Found
 # while writing the sweep's discover-vs-constant rule, which had mis-classified
 # this gate.
-tmpP0="$(mktemp -d)"
+tmpP0="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpP0/Cargo.toml"
 expect_reject_because "p1-manifest/zero-packages-is-refused" \
   "resolved ZERO packages" \
@@ -251,19 +279,19 @@ expect_reject_because "p1-manifest/zero-packages-is-refused" \
 # then died on empty stdin with a JSONDecodeError traceback, so the gate exited 1
 # printing no FAIL line -- mute, and unprobeable by `expect_reject`, which needs
 # one. The diagnostic now quotes cargo.
-tmpP1="$(mktemp -d)"
+tmpP1="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpP1/Cargo.toml"
 expect_reject_because "p1-manifest/metadata-failure-is-not-silent" \
   "cargo metadata failed" \
   "$here/p1-manifest-lint.sh" "$tmpP1"
 
 # Fixture C — bare workspace build in a workflow → must trip build-invocation-lint.sh
-tmpC="$(mktemp -d)"; mkdir -p "$tmpC/.github/workflows"
+tmpC="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC/.github/workflows/bad.yml"
 expect_reject "build-invocation/workspace-build" "$here/build-invocation-lint.sh" "$tmpC"
 
 # Fixture C2 — MULTILINE (backslash-continued) workspace build → must also trip build-invocation-lint.
-tmpC2="$(mktemp -d)"; mkdir -p "$tmpC2/.github/workflows"
+tmpC2="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC2/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: |\n          cargo build \\\n            --workspace --release\n' > "$tmpC2/.github/workflows/bad.yml"
 expect_reject "build-invocation/multiline-workspace-build" "$here/build-invocation-lint.sh" "$tmpC2"
 
@@ -271,7 +299,7 @@ expect_reject "build-invocation/multiline-workspace-build" "$here/build-invocati
 # it scanned. Without this the rejections above stay green against a gate that
 # refuses every fixture -- the hazard this file names for p2, and which a newly
 # added FLOOR is exactly the kind of change that could introduce.
-tmpC0="$(mktemp -d)"; mkdir -p "$tmpC0/.github/workflows"
+tmpC0="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC0/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC0/.github/workflows/good.yml"
 expect_accept "build-invocation/clean-tree-passes" "build-invocation-lint: ok" \
   "$here/build-invocation-lint.sh" "$tmpC0"
@@ -282,14 +310,14 @@ expect_accept "build-invocation/clean-tree-passes" "build-invocation-lint: ok" \
 # is needed in addition to reading the status.
 expect_reject_because "build-invocation/zero-files-scanned-is-refused" \
   "scanned ZERO files" \
-  "$here/build-invocation-lint.sh" "$(mktemp -d)"
+  "$here/build-invocation-lint.sh" "$(mktemp -d -p "$NC_TMP")"
 
 # REJECT: the scan itself errors (#219). A nonexistent root printed NOTHING at
 # all -- find's message went to /dev/null and its exit status died inside a
 # process substitution -- and reported `ok`.
 expect_reject_because "build-invocation/scan-error-is-not-a-clean-tree" \
   "the file scan errored" \
-  "$here/build-invocation-lint.sh" "$(mktemp -d)/nope"
+  "$here/build-invocation-lint.sh" "$(mktemp -d -p "$NC_TMP")/nope"
 
 # REJECT: a file `find` listed but `awk` could not read (#219). find needs
 # permission on the DIRECTORY, not on the file, so an unreadable file was listed,
@@ -304,7 +332,7 @@ if [ "$(id -u)" -eq 0 ]; then
   echo "neg-skip: [build-invocation/unreadable-file-is-not-cleared] running as root; chmod 000 cannot make awk fail"
   skipped=$((skipped+1))
 else
-  tmpC3="$(mktemp -d)"; mkdir -p "$tmpC3/.github/workflows"
+  tmpC3="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC3/.github/workflows"
   printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --workspace --release\n' > "$tmpC3/.github/workflows/bad.yml"
   chmod 000 "$tmpC3/.github/workflows/bad.yml"
   expect_reject_because "build-invocation/unreadable-file-is-not-cleared" \
@@ -319,7 +347,7 @@ fi
 # assignment failed, and `set -e` killed the script BEFORE the FAIL printed:
 # rc 1 with nothing on stdout OR stderr. `expect_reject` requires a printed
 # FAIL, so the gate's central assertion had no coverage for its commonest case.
-tmpC4="$(mktemp -d)"; mkdir -p "$tmpC4/.github/workflows"
+tmpC4="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC4/.github/workflows"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build --release\n' > "$tmpC4/.github/workflows/nop.yml"
 expect_reject_because "build-invocation/zero-p-is-refused" \
   "exactly one -p (got 0)" \
@@ -329,13 +357,13 @@ expect_reject_because "build-invocation/zero-p-is-refused" \
 # unprobed: nothing showed that a `cargo build --workspace` string UNDER
 # `ci/gates/` is skipped rather than flagged, nor that the prune is scoped to
 # `ci/gates` and not to `ci/` wholesale. Both halves, one fixture each.
-tmpC5="$(mktemp -d)"; mkdir -p "$tmpC5/.github/workflows" "$tmpC5/ci/gates"
+tmpC5="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC5/.github/workflows" "$tmpC5/ci/gates"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC5/.github/workflows/good.yml"
 printf 'cargo build --workspace --release\n' > "$tmpC5/ci/gates/fixture-strings.sh"
 expect_accept "build-invocation/ci-gates-is-pruned" "build-invocation-lint: ok" \
   "$here/build-invocation-lint.sh" "$tmpC5"
 
-tmpC6="$(mktemp -d)"; mkdir -p "$tmpC6/.github/workflows" "$tmpC6/ci"
+tmpC6="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpC6/.github/workflows" "$tmpC6/ci"
 printf 'jobs:\n  b:\n    steps:\n      - run: cargo build -p maknaed --release\n' > "$tmpC6/.github/workflows/good.yml"
 printf 'cargo build --workspace --release\n' > "$tmpC6/ci/other.sh"
 expect_reject_because "build-invocation/prune-does-not-cover-all-of-ci" \
@@ -346,7 +374,7 @@ expect_reject_because "build-invocation/prune-does-not-cover-all-of-ci" \
 # crate must be caught by p2-artifact-witness via the cargo-auditable inventory. CI-gated: the
 # inventory needs cargo-auditable + rust-audit-info; skipped locally (matches the witness itself).
 if command -v rust-audit-info >/dev/null 2>&1 && cargo auditable --version >/dev/null 2>&1; then
-  tmpD="$(mktemp -d)"; mkdir -p "$tmpD/crates/maknae-kernel/src" "$tmpD/bins/maknae/src"
+  tmpD="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD/crates/maknae-kernel/src" "$tmpD/bins/maknae/src"
   cat > "$tmpD/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "3"
@@ -380,7 +408,7 @@ fi
 # --- Fixture E: coverage-tiers gate (ADR-0016) — unclassified file must FAIL.
 # Injection contract (both required vars + --injection; env-prefixed argv is
 # the pinned shape for this, the first env-prefixed fixture in this file).
-tmpE="$(mktemp -d)"
+tmpE="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpE/crates/x/src"
 printf 'pub fn a() -> u32 { 1 }\n' > "$tmpE/crates/x/src/core.rs"
 printf 'crates/x/src/core.rs\ncrates/x/src/rogue.rs\n' > "$tmpE/files.list"
@@ -411,7 +439,7 @@ expect_reject "coverage-tiers/unclassified-file" \
   env COVERAGE_TIERS_JSON="$tmpE/cov.json" COVERAGE_TIERS_FILELIST="$tmpE/files.list" \
       "$here/coverage-tiers.sh" --root "$tmpE" --injection
 
-tmpF="$(mktemp -d)"
+tmpF="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF/ci/gates" "$tmpF/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF/ci/gates/"
 : > "$tmpF/ci/gates/std-fs-allowlist.txt"
@@ -422,7 +450,7 @@ expect_reject "std-fs-drift/production-call" "$tmpF/ci/gates/std-fs-drift.sh" "$
 
 std_fs_reject() {
   local label="$1" source="$2" fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
   cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
   : > "$fixture/ci/gates/std-fs-allowlist.txt"
@@ -436,7 +464,7 @@ std_fs_reject() {
 # literals and backslash escapes survive without printf %b or shell-quoting mangling.
 std_fs_reject_literal() { # <label> — fixture source on stdin
   local label="$1" fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
   cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
   : > "$fixture/ci/gates/std-fs-allowlist.txt"
@@ -448,7 +476,7 @@ std_fs_reject_literal() { # <label> — fixture source on stdin
 
 std_fs_accept_literal() { # <label> — fixture source on stdin; gate must stay green
   local label="$1" fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/x/src"
   cp "$here/std-fs-drift.sh" "$fixture/ci/gates/"
   : > "$fixture/ci/gates/std-fs-allowlist.txt"
@@ -535,7 +563,7 @@ pub const OS_DAC_UNRELATED_SUFFIX: u32 = 1;
 pub fn fine() -> u32 { NOT_OS_DAC + OS_DAC_UNRELATED_SUFFIX }
 FIXTURE
 
-tmpF_alias="$(mktemp -d)"
+tmpF_alias="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF_alias/ci/gates" "$tmpF_alias/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF_alias/ci/gates/"
 : > "$tmpF_alias/ci/gates/std-fs-allowlist.txt"
@@ -544,7 +572,7 @@ git -C "$tmpF_alias" init -q
 git -C "$tmpF_alias" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
 expect_reject "std-fs-drift/module-alias" "$tmpF_alias/ci/gates/std-fs-drift.sh" "$tmpF_alias"
 
-tmpF_stale="$(mktemp -d)"
+tmpF_stale="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF_stale/ci/gates" "$tmpF_stale/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF_stale/ci/gates/"
 printf 'crates/x/src/lib.rs:1|use std::fs::File;\n' > "$tmpF_stale/ci/gates/std-fs-allowlist.txt"
@@ -553,7 +581,7 @@ git -C "$tmpF_stale" init -q
 git -C "$tmpF_stale" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/lib.rs
 expect_reject "std-fs-drift/stale-exemption" "$tmpF_stale/ci/gates/std-fs-drift.sh" "$tmpF_stale"
 
-tmpF2="$(mktemp -d)"
+tmpF2="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF2/ci/gates" "$tmpF2/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF2/ci/gates/"
 : > "$tmpF2/ci/gates/std-fs-allowlist.txt"
@@ -566,7 +594,7 @@ if ! "$tmpF2/ci/gates/std-fs-drift.sh" "$tmpF2" >/dev/null; then
 fi
 echo "neg-ok: [std-fs-drift/test-only] test fixture permitted"
 
-tmpF3="$(mktemp -d)"
+tmpF3="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF3/ci/gates" "$tmpF3/crates/x/src/tests"
 cp "$here/std-fs-drift.sh" "$tmpF3/ci/gates/"
 : > "$tmpF3/ci/gates/std-fs-allowlist.txt"
@@ -575,7 +603,7 @@ git -C "$tmpF3" init -q
 git -C "$tmpF3" add ci/gates/std-fs-drift.sh ci/gates/std-fs-allowlist.txt crates/x/src/tests/bad.rs
 expect_reject "std-fs-drift/src-tests-production" "$tmpF3/ci/gates/std-fs-drift.sh" "$tmpF3"
 
-tmpF4="$(mktemp -d)"
+tmpF4="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpF4/ci/gates" "$tmpF4/crates/x/src"
 cp "$here/std-fs-drift.sh" "$tmpF4/ci/gates/"
 : > "$tmpF4/ci/gates/std-fs-allowlist.txt"
@@ -589,7 +617,7 @@ expect_reject "std-fs-drift/external-test-lost-cfg" "$tmpF4/ci/gates/std-fs-drif
 # path-deps-only workspace (the pin needs a full cargo resolve, unlike p1's
 # --no-deps metadata): "maknaed" normally-depends on a "maknae-config" that
 # declares the feature, WITH the feature enabled.
-tmpG="$(mktemp -d)"
+tmpG="$(mktemp -d -p "$NC_TMP")"
 mkdir -p "$tmpG/crates/maknae-config/src" "$tmpG/bins/maknaed/src" "$tmpG/bins/maknae/src" "$tmpG/bins/maknae-spifc/src"
 cat > "$tmpG/Cargo.toml" <<'EOF_G'
 [workspace]
@@ -633,7 +661,7 @@ expect_reject "feature-resolution-pin/normal-dep-enables-seam" "$here/feature-re
 # has been OBSERVED failing, and that observation must be re-run on every PR.
 vocab_fixture() { # <manifest-body> — builds a minimal repo the gate can read
   local fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-kernel/src" \
            "$fixture/crates/maknae-config/src" "$fixture/crates/maknae-authz-basic/src"
   cp "$here/verb-vocabulary-drift.sh" "$fixture/ci/gates/"
@@ -825,7 +853,7 @@ cfg_manifest() { # <drop-regex-or-empty> <appended-rows...> -- compose CFG_OK sa
   # gate left negative-control at 78/78.
   local drop="$1"; shift
   local body="$CFG_OK"
-  [ -n "$drop" ] && body="$(printf '%s' "$body" | grep -v "$drop")"$'\n'
+  [ -n "$drop" ] && body="$(grep -v "$drop" <<<"$body")"$'\n'
   printf '%s' "$body"
   local row
   for row in "$@"; do printf '%s\n' "$row"; done
@@ -836,7 +864,7 @@ cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [
   # be count-NEUTRAL or the exact-count check rejects first and the depth
   # check under test is never reached.
   local fixture
-  fixture="$(mktemp -d)"
+  fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
            "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
            "$fixture/crates/maknae-proto/src"
@@ -1177,7 +1205,7 @@ expect_reject "config-disclosure-drift/section-block-with-unreadable-name" "$fx/
 
 # REJECT: a NO_STRUCT_SECTIONS entry with no manifest row. Struct-less means
 # the keys are carried verbatim, not that the disclosure is undecided.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | grep -v "^mask	lake")")"
+fx="$(cfg_fixture "$(grep -v "^mask	lake" <<<"$CFG_OK")")"
 expect_reject "config-disclosure-drift/no-struct-section-without-a-decision" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a subtree whose struct is declared `pub(crate)`. The depth check was
@@ -1657,7 +1685,7 @@ expect_reject_because "mutation-disclosure/wrong-payload-type" \
 # ---- external-authority-lint (#34): no Maknae rule rests on a foreign ADR ----
 # The wording IS the control here, so the fixture is a wording fixture.
 ea_fixture() { # <line> — a dir (not a repo) holding one normative doc + the root docs
-  local fixture; fixture="$(mktemp -d)"
+  local fixture; fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/design"
   cp "$here/external-authority-lint.sh" "$fixture/ci/gates/"
   printf '# doc\n\n%s\n' "$1" > "$fixture/design/some-design.md"
@@ -1687,7 +1715,7 @@ expect_accept "external-authority-lint/qualified-citation-passes" \
 # trailing `|| true` discarded the error text, the exit status AND the empty
 # case at once, so a tree with no `design/` reported `ok` -- clearing every rule
 # in the repo by default, in the gate whose entire subject is wording.
-fx_nodesign="$(mktemp -d)"; mkdir -p "$fx_nodesign/ci/gates"
+fx_nodesign="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$fx_nodesign/ci/gates"
 cp "$here/external-authority-lint.sh" "$fx_nodesign/ci/gates/"
 expect_reject_because "external-authority-lint/missing-corpus-is-refused" \
   "could not list design/" \
@@ -1755,7 +1783,7 @@ fi
 # matches no site, or a site no probe matches, is the failure this note is
 # guarding against; re-derive after any edit to either file.
 composition_fixture() { # -> prints the fixture root; a MINIMAL tree the gate accepts
-  local f; f="$(mktemp -d)"
+  local f; f="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$f/ci/gates" "$f/crates/maknae-kernel/src" "$f/crates/maknae-authz-basic/src" "$f/crates/maknae-config/src" "$f/crates/maknae-vault/src" "$f/bins/maknaed/src"
   cp "$here/authz-composition-drift.sh" "$f/ci/gates/"
   cat > "$f/crates/maknae-kernel/src/run.rs" <<'RS'
@@ -1895,7 +1923,7 @@ expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" 
 
 # REJECT: a workspace that resolves to ZERO packages. Same defect as
 # p1-manifest-lint's, same cause: the loop just doesn't iterate.
-tmpQ0="$(mktemp -d)"
+tmpQ0="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ0/Cargo.toml"
 printf '[toolchain]\nchannel = "1.98.1"\n' > "$tmpQ0/rust-toolchain.toml"
 expect_reject_because "clippy-all/zero-packages-is-refused" \
@@ -1904,7 +1932,7 @@ expect_reject_because "clippy-all/zero-packages-is-refused" \
 
 # REJECT: `cargo metadata` itself fails. Its stderr is captured separately for
 # exactly this -- a gate that dies mute is unprobeable by `expect_reject`.
-tmpQ1="$(mktemp -d)"
+tmpQ1="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpQ1/Cargo.toml"
 printf '[toolchain]\nchannel = "1.98.1"\n' > "$tmpQ1/rust-toolchain.toml"
 expect_reject_because "clippy-all/metadata-failure-is-not-silent" \
@@ -1914,14 +1942,14 @@ expect_reject_because "clippy-all/metadata-failure-is-not-silent" \
 # REJECT: no rust-toolchain.toml. The channel is BOTH the container tag and the
 # lint compiler; absent it, the lane would lint whatever rustc happened to be on
 # PATH and call it the pinned toolchain.
-tmpQ2="$(mktemp -d)"
+tmpQ2="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ2/Cargo.toml"
 expect_reject_because "clippy-all/missing-toolchain-file-is-refused" \
   "missing" \
   "$here/clippy-all.sh" --root "$tmpQ2" --check-inputs
 
 # REJECT: a toolchain file with no channel key.
-tmpQ3="$(mktemp -d)"
+tmpQ3="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ3/Cargo.toml"
 printf '[toolchain]\ncomponents = ["clippy"]\n' > "$tmpQ3/rust-toolchain.toml"
 expect_reject_because "clippy-all/no-channel-is-refused" \
@@ -1933,7 +1961,7 @@ expect_reject_because "clippy-all/no-channel-is-refused" \
 # compiler the project does not pin, on a lane whose whole value is that it
 # matches CI's.
 for ch in stable nightly nightly-2026-01-01 beta; do
-  tmpQ4="$(mktemp -d)"
+  tmpQ4="$(mktemp -d -p "$NC_TMP")"
   printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpQ4/Cargo.toml"
   printf '[toolchain]\nchannel = "%s"\n' "$ch" > "$tmpQ4/rust-toolchain.toml"
   expect_reject_because "clippy-all/unpinned-channel-$ch-is-refused" \
@@ -1957,7 +1985,7 @@ expect_reject_because "clippy-all/conflicting-mode-flags-are-refused" \
 # REJECT: a --root that cannot be entered. `[ -d ]` passes on a mode-000
 # directory; `cd "$root" && run_lints` then skipped the lints and the script
 # exited 0, because `cd` is not the last command of an AND-OR list.
-tmpQ5="$(mktemp -d)"; mkdir -p "$tmpQ5/inner"; chmod 000 "$tmpQ5/inner"
+tmpQ5="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ5/inner"; chmod 000 "$tmpQ5/inner"
 if [ "$(id -u)" -ne 0 ]; then   # root ignores the mode bits
   expect_reject_because "clippy-all/unenterable-root-is-refused" \
     "cannot enter --root '$tmpQ5/inner'" \
@@ -1973,7 +2001,7 @@ chmod 755 "$tmpQ5/inner" 2>/dev/null || true
 # proved the success line is not printed before the work; codex showed a gate
 # that printed `ok` first still passed this probe. The ordering claim is
 # carried by `a-failing-lint-never-prints-the-ok-line` in the lint block below.
-tmpQ6="$(mktemp -d)"; mkdir -p "$tmpQ6/bin"
+tmpQ6="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ6/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ6/bin/cargo" <<'SHIM'
 # `metadata` and `--version` pass through so the gate reaches its clippy
 # invocation; everything else fails.
@@ -1993,7 +2021,7 @@ expect_reject_because "clippy-all/failing-clippy-prints-FAIL" \
 # as `toolchain 1.98.1` on the OK line while `clippy 0.1.94` linted. A cargo
 # shim that reports a fake version is hermetic: it needs no second toolchain
 # installed, so this probe runs identically on every host and in CI.
-tmpQ7="$(mktemp -d)"; mkdir -p "$tmpQ7/bin"
+tmpQ7="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ7/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ7/bin/cargo" <<'SHIM'
 if [ "${1:-}" = --version ]; then echo "cargo 1.0.0 (fake 2000-01-01)"; exit 0; fi
 exec "$REAL_CARGO" "$@"
@@ -2026,7 +2054,7 @@ done
 # the linted root. Env beats config; the gate exports an empty RUSTC_WRAPPER,
 # so the file-configured wrapper must never run. Clean two-crate fixture; the
 # wrapper logs every invocation.
-tmpQ9="$(mktemp -d)"; mkdir -p "$tmpQ9/crates/a/src" "$tmpQ9/.cargo" "$tmpQ9/bin"
+tmpQ9="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ9/crates/a/src" "$tmpQ9/.cargo" "$tmpQ9/bin"
 printf '[workspace]\nresolver = "3"\nmembers = ["crates/a"]\n' > "$tmpQ9/Cargo.toml"
 cp "$here/../../rust-toolchain.toml" "$tmpQ9/rust-toolchain.toml"
 printf '[package]\nname = "a"\nversion = "0.0.0"\nedition = "2021"\n' > "$tmpQ9/crates/a/Cargo.toml"; printf 'pub fn a() -> u8 { 1 }\n' > "$tmpQ9/crates/a/src/lib.rs"
@@ -2056,7 +2084,7 @@ fi
 # line. Under `pipefail` the version capture used to exit 101 with nothing on
 # either stream -- found by the failing-clippy probe above, whose shim at the
 # time answered only `metadata`.
-tmpQ8="$(mktemp -d)"; mkdir -p "$tmpQ8/bin"
+tmpQ8="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ8/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpQ8/bin/cargo" <<'SHIM'
 if [ "${1:-}" = metadata ]; then exec "$REAL_CARGO" "$@"; fi
 exit 101
@@ -2122,12 +2150,12 @@ expect_reject_without() { # <label> <expected-FAIL-substring> <forbidden-substri
   local label="$1" why="$2" forbid="$3"; shift 3; total=$((total+1))
   local out rc
   if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "FAIL" && printf '%s' "$out" | grep -qF -- "$why" \
-     && ! printf '%s' "$out" | grep -qF -- "$forbid"; then
+  if [ "$rc" -ne 0 ] && grep -q "FAIL" <<<"$out" && grep -qF -- "$why" <<<"$out" \
+     && ! grep -qF -- "$forbid" <<<"$out"; then
     echo "neg-ok: [$label] gate rejected for '$why' and never said '$forbid'"; pass=$((pass+1))
   elif [ "$rc" -eq 0 ]; then
     echo "NEG-FAIL: [$label] gate did NOT reject the fixture"
-  elif printf '%s' "$out" | grep -qF -- "$forbid"; then
+  elif grep -qF -- "$forbid" <<<"$out"; then
     echo "NEG-FAIL: [$label] gate rejected but its output ALSO carries '$forbid': $out"
   else
     echo "NEG-FAIL: [$label] gate exited $rc without the expected rejection (wanted '$why'): $out"
@@ -2142,7 +2170,7 @@ lint_fixture() { # <clean|test-sentinel|feature-sentinel|dep-profile|bootstrap> 
   # invocation the gate claims to run. The feature variant hides it further,
   # behind a feature nothing in the workspace enables.
   local variant="$1" d
-  d="$(mktemp -d)"
+  d="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$d/crates/root/src" "$d/crates/leaf/src"
   # dep-profile: `leaf` is a path dependency EXCLUDED from the workspace, so a
   # member-named profile pin never reaches it (codex r8).
@@ -2325,7 +2353,7 @@ expect_reject_because "clippy-all/the-tree-config-is-not-read-even-with-TMPDIR-i
 # PATH proxy (a directory override made them differ). Same shim as the darwin
 # block: `rustup which rustc` names a rustc that compiles with the real one but
 # reports 1.0.0.
-tmpQ12="$(mktemp -d)"; mkdir -p "$tmpQ12/bin"
+tmpQ12="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpQ12/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpQ12/bin/lying-rustc" <<'SHIM'
 case " $* " in *" --version "*|*" -vV "*|*" -V "*) exec "$REAL_RUSTC" "$@" | sed 's/^rustc [0-9.]*/rustc 1.0.0/' ;; esac
 exec "$REAL_RUSTC" "$@"
@@ -2562,7 +2590,7 @@ darwin_fixture() { # <variant> [sdk-name] -> prints the fixture root
   #                               config (codex r9: a false FAIL when it was
   #                               read). From outside the tree it is not read.
   local variant="$1" sdk="${2:-ring}" d ws_extra=""
-  d="$(mktemp -d)"
+  d="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$d/crates/root/src" "$d/crates/leaf/src"
   local members='"crates/root", "crates/leaf"' extra_dep=""
   case "$variant" in
@@ -2766,27 +2794,27 @@ darwin_fixture() { # <variant> [sdk-name] -> prints the fixture root
 # The gate carries the same guards as clippy-all.sh. Each has a probe there
 # and, until this block, none here -- so the toolchain pin, for one, was
 # enforced and unproven. Same fixtures, same FAIL strings, darwin labels.
-tmpD0="$(mktemp -d)"
+tmpD0="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD0/Cargo.toml"
 cp "$here/../../rust-toolchain.toml" "$tmpD0/rust-toolchain.toml"
 expect_reject_because "darwin-cross-check/zero-members-is-refused" \
   "resolved ZERO" \
   "$here/darwin-cross-check.sh" --root "$tmpD0" --check-inputs
 
-tmpD1="$(mktemp -d)"
+tmpD1="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$tmpD1/Cargo.toml"
 cp "$here/../../rust-toolchain.toml" "$tmpD1/rust-toolchain.toml"
 expect_reject_because "darwin-cross-check/metadata-failure-is-not-silent" \
   "cargo metadata failed" \
   "$here/darwin-cross-check.sh" --root "$tmpD1" --check-inputs
 
-tmpD2="$(mktemp -d)"
+tmpD2="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD2/Cargo.toml"
 expect_reject_because "darwin-cross-check/missing-toolchain-file-is-refused" \
   "missing" \
   "$here/darwin-cross-check.sh" --root "$tmpD2" --check-inputs
 
-tmpD3="$(mktemp -d)"
+tmpD3="$(mktemp -d -p "$NC_TMP")"
 printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD3/Cargo.toml"
 printf '[toolchain]\ncomponents = ["clippy"]\n' > "$tmpD3/rust-toolchain.toml"
 expect_reject_because "darwin-cross-check/no-channel-is-refused" \
@@ -2794,7 +2822,7 @@ expect_reject_because "darwin-cross-check/no-channel-is-refused" \
   "$here/darwin-cross-check.sh" --root "$tmpD3" --check-inputs
 
 for ch in stable nightly-2026-01-01 1garbage.2whatever; do
-  tmpD4="$(mktemp -d)"
+  tmpD4="$(mktemp -d -p "$NC_TMP")"
   printf '[workspace]\nresolver = "3"\nmembers = []\n' > "$tmpD4/Cargo.toml"
   printf '[toolchain]\nchannel = "%s"\n' "$ch" > "$tmpD4/rust-toolchain.toml"
   expect_reject_because "darwin-cross-check/unpinned-channel-$ch-is-refused" \
@@ -2817,7 +2845,7 @@ expect_reject_because "darwin-cross-check/unenterable-root-is-refused" \
 # The pin is ENFORCED against BOTH tools. A cargo shim reporting a fake version
 # is hermetic (no second toolchain needed); the RUSTC override is the case
 # codex found: cargo 1.98.1 happily drives a 1.94.1 rustc and reports the pin.
-tmpD5="$(mktemp -d)"; mkdir -p "$tmpD5/bin"
+tmpD5="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD5/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpD5/bin/cargo" <<'SHIM'
 if [ "${1:-}" = --version ]; then echo "cargo 1.0.0 (fake 2000-01-01)"; exit 0; fi
 exec "$REAL_CARGO" "$@"
@@ -2848,7 +2876,7 @@ for v in RUSTC_WORKSPACE_WRAPPER CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CAR
     "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
 done
 
-tmpD6="$(mktemp -d)"; mkdir -p "$tmpD6/bin"
+tmpD6="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD6/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_CARGO=%q\n' "$(command -v cargo)"; cat; } > "$tmpD6/bin/cargo" <<'SHIM'
 if [ "${1:-}" = metadata ]; then exec "$REAL_CARGO" "$@"; fi
 exit 101
@@ -2869,7 +2897,7 @@ fi
 
 # A missing darwin target is a FAIL naming the fix, never a skip. (Placed
 # BEFORE the target-gated block so it runs everywhere.)
-tmpD7="$(mktemp -d)"; mkdir -p "$tmpD7/bin"
+tmpD7="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD7/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\n' "$(command -v rustup)"; cat; } > "$tmpD7/bin/rustup" <<'SHIM'
 if [ "${1:-}" = target ]; then exit 0; fi
 exec "$REAL_RUSTUP" "$@"
@@ -2886,7 +2914,7 @@ expect_reject_because "darwin-cross-check/missing-target-is-a-FAIL-not-a-skip" \
 # the pin in its allowlisted environment; "drop the pin" is caught here
 # `cd "$root" &&`. No second toolchain needed -- an earlier comment claimed
 # this could not be probed hermetically; it can.
-tmpD10="$(mktemp -d)"; mkdir -p "$tmpD10/bin"
+tmpD10="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD10/bin"
 { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTUP=%q\n' "$(command -v rustup)"; printf 'EXPECT_CHANNEL=%q\n' "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$here/../../rust-toolchain.toml")"; cat; } > "$tmpD10/bin/rustup" <<'SHIM'
 if [ "${1:-}" = target ]; then [ "${RUSTUP_TOOLCHAIN:-}" = "$EXPECT_CHANNEL" ] && echo aarch64-apple-darwin; exit 0; fi
 exec "$REAL_RUSTUP" "$@"
@@ -2963,12 +2991,12 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
     local label="$1" want="$2"; shift 2; total=$((total+1)); local out rc
     if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
     if [ "$darwin_host" = 1 ]; then
-      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && printf '%s' "$out" | grep -q -- "$want"; then
+      if [ "$rc" -ne 0 ] && grep -q 'FAIL: on a host whose triple IS the target' <<<"$out" && grep -q -- "$want" <<<"$out"; then
         echo "neg-ok: [$label] classified, refused on a darwin host, and reported '$want'"; pass=$((pass+1))
       else
         echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL plus '$want' (rc=$rc): $out"
       fi
-    elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q -- "$want"; then
+    elif [ "$rc" -eq 0 ] && grep -q -- "$want" <<<"$out"; then
       echo "pos-ok: [$label] gate accepted and reported '$want'"; pass=$((pass+1))
     else
       echo "POS-FAIL: [$label] (rc=$rc) wanted '$want': $out"
@@ -2979,7 +3007,7 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
     if out="$("$@" 2>&1)"; then rc=0; else rc=$?; fi
     n="$(printf '%s' "$out" | sed -n "s/.*${prefix}\([0-9][0-9]*\).*/\1/p" | head -1)"
     if [ "$darwin_host" = 1 ]; then
-      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'FAIL: on a host whose triple IS the target' && [ "$n" = "$expected" ]; then
+      if [ "$rc" -ne 0 ] && grep -q 'FAIL: on a host whose triple IS the target' <<<"$out" && [ "$n" = "$expected" ]; then
         echo "neg-ok: [$label] classified ($prefix$n), then refused on a darwin host"; pass=$((pass+1))
       else
         echo "NEG-FAIL: [$label] on a darwin host: wanted the host-rule FAIL with $prefix$expected, got rc=$rc, '$n': $out"
@@ -2994,7 +3022,7 @@ if rustup target list --installed 2>/dev/null | grep -q '^aarch64-apple-darwin$'
     "ran NO check" \
     "$here/darwin-cross-check.sh" --root "$here/../.." --check-inputs
 
-  tmpD5r="$(mktemp -d)"; mkdir -p "$tmpD5r/bin"
+  tmpD5r="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD5r/bin"
   { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD5r/bin/rustc" <<'SHIM'
   if [ "${1:-}" = --version ]; then echo "rustc 1.0.0 (fake 2000-01-01)"; exit 0; fi
   exec "$REAL_RUSTC" "$@"
@@ -3124,7 +3152,7 @@ SHIM
   # script is already compiled by the time `root` is checked).
   total=$((total+1))
   dm_out="$("$here/darwin-cross-check.sh" --root "$fx_dm" 2>&1 || true)"
-  if printf '%s' "$dm_out" | grep -q 'undeclared_fn_real_darwin_error' && printf '%s' "$dm_out" | grep -Eq 'failed to run custom build command for `ring v'; then
+  if grep -q 'undeclared_fn_real_darwin_error' <<<"$dm_out" && grep -Eq 'failed to run custom build command for `ring v' <<<"$dm_out"; then
     echo "neg-ok: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] both the real error and the SDK line are in the log"; pass=$((pass+1))
   else
     echo "NEG-FAIL: [darwin-cross-check/masking-fixture-really-co-locates-both-errors] the two errors did not co-occur — the masking probe proves nothing: $dm_out"
@@ -3161,7 +3189,7 @@ SHIM
   # longer reaches cargo -- that is the config-door fix working). The hermetic
   # route is therefore a `rustup` shim whose `which rustc` names the fake:
   # `--version`/`-vV`/`--print` pass through; root's lib exits 1 silently.
-  tmpD9="$(mktemp -d)"; mkdir -p "$tmpD9/bin"
+  tmpD9="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD9/bin"
   { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD9/bin/fake-rustc" <<'SHIM'
 case " $* " in *" --version "*|*" -vV "*|*" -V "*|*" --print "*) exec "$REAL_RUSTC" "$@" ;; esac
 case " $* " in *" --crate-name root "*) exit 1 ;; esac
@@ -3489,7 +3517,7 @@ SHIM
   # Now resolved under the pinned environment, and the resolved BINARY is
   # version-checked. A `rustup` shim whose `which rustc` names a rustc that
   # compiles with the real one but REPORTS 1.0.0 must be a mismatch FAIL.
-  tmpD12="$(mktemp -d)"; mkdir -p "$tmpD12/bin"
+  tmpD12="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD12/bin"
   { printf '#!/usr/bin/env bash\n'; printf 'REAL_RUSTC=%q\n' "$(cd "$here/../.." && rustup which rustc)"; cat; } > "$tmpD12/bin/lying-rustc" <<'SHIM'
 case " $* " in *" --version "*|*" -vV "*|*" -V "*) exec "$REAL_RUSTC" "$@" | sed 's/^rustc [0-9.]*/rustc 1.0.0/' ;; esac
 exec "$REAL_RUSTC" "$@"
@@ -3529,7 +3557,7 @@ SHIM
   # `a-builder`'s build.rs untars z-victim's primed darwin units into the
   # gate-owned dir; the gate wipes before EVERY pass, so z-victim recompiles
   # cold and fails E0554. (A wipe at start only: `ok`, two checked -- measured.)
-  fx_ir="$(mktemp -d)"; mkdir -p "$fx_ir/crates/a-builder/src" "$fx_ir/crates/z-victim/src"
+  fx_ir="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$fx_ir/crates/a-builder/src" "$fx_ir/crates/z-victim/src"
   cp "$here/../../rust-toolchain.toml" "$fx_ir/rust-toolchain.toml"
   printf '[workspace]\nresolver = "3"\nmembers = ["crates/a-builder", "crates/z-victim"]\n' > "$fx_ir/Cargo.toml"
   printf '[package]\nname = "a-builder"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$fx_ir/crates/a-builder/Cargo.toml"; : > "$fx_ir/crates/a-builder/src/lib.rs"
@@ -3563,7 +3591,7 @@ RS
   # REJECT, NOT MUTE: an artifact counter that dies must produce a FAIL. A
   # `python3` shim that fails only when invoked as `python3 -` (the counter's
   # shape) and passes every other call through.
-  tmpD11="$(mktemp -d)"; mkdir -p "$tmpD11/bin"
+  tmpD11="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD11/bin"
   { printf '#!/usr/bin/env bash\n'; printf 'REAL_PY=%q\n' "$(command -v python3)"; cat; } > "$tmpD11/bin/python3" <<'SHIM'
 if [ "${1:-}" = - ]; then echo "simulated counter crash" >&2; exit 3; fi
 exec "$REAL_PY" "$@"
@@ -3593,7 +3621,7 @@ SHIM
 
   # REJECT: every member blocked -> refuse. (Only member depends on a
   # panicking `ring`; `ring` itself fails its own build script.)
-  tmpD8="$(mktemp -d)"; mkdir -p "$tmpD8/crates/only/src" "$tmpD8/crates/ring/src"
+  tmpD8="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$tmpD8/crates/only/src" "$tmpD8/crates/ring/src"
   printf '[workspace]\nresolver = "3"\nmembers = ["crates/only", "crates/ring"]\n' > "$tmpD8/Cargo.toml"
   cp "$here/../../rust-toolchain.toml" "$tmpD8/rust-toolchain.toml"
   printf '[package]\nname = "ring"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.rs"\n' > "$tmpD8/crates/ring/Cargo.toml"
@@ -3658,6 +3686,156 @@ else
   # and is therefore also skipped here.
   skipped=$((skipped+darwin_block_probes+1)); echo "skip: [darwin-cross-check/<$((darwin_block_probes+1)) check probes>] aarch64-apple-darwin target not installed (rustup target add aarch64-apple-darwin)"
 fi
+# ---- scratch-leak controls ---------------------------------------------------
+# #302: the gates leaked mktemp scratch — 17,667 trees (1.5 GiB) had accumulated
+# in /tmp since Aug 30 on the maintainer's host. That is not housekeeping: the
+# volume filled, every `cargo mutants` scratch build then failed with
+# `No space left on device`, cargo-mutants classifies a mutant that fails to
+# BUILD as `unviable`, and the run exited 0 — so the zero-missed contract passed
+# having tested nothing (#301). A GATE THAT CANNOT CLEAN UP AFTER ITSELF
+# EVENTUALLY DISABLES A DIFFERENT GATE.
+#
+# Each check below runs a gate with a PRIVATE, empty TMPDIR and requires it
+# empty afterwards. Without them the leak returns the next time a probe is
+# added, silently, exactly as it arrived.
+expect_no_leak() { # <label> <cmd...> — the gate must leave its TMPDIR as it found it
+  local label="$1"; shift; total=$((total+1))
+  local td n
+  td="$(mktemp -d -p "$NC_TMP")"
+  TMPDIR="$td" "$@" >/dev/null 2>&1 || true
+  n="$(find "$td" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$n" -eq 0 ]; then
+    echo "pos-ok: [$label] gate left no scratch behind"; pass=$((pass+1))
+  else
+    echo "POS-FAIL: [$label] gate leaked $n scratch entr(y|ies) into its TMPDIR (#302): $(find "$td" -mindepth 1 -maxdepth 1 | head -3 | tr '\n' ' ')"
+  fi
+}
+
+# The control on the control: a script that DOES leak must be caught, or the
+# checks above are satisfied by a helper that can only ever print pos-ok.
+leaker="$NC_TMP/leaker.sh"
+printf '#!/bin/sh\nmktemp -d >/dev/null\nmktemp >/dev/null\nexit 0\n' > "$leaker"
+chmod +x "$leaker"
+total=$((total+1))
+leak_td="$(mktemp -d -p "$NC_TMP")"
+TMPDIR="$leak_td" "$leaker" >/dev/null 2>&1 || true
+if [ "$(find "$leak_td" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 2 ]; then
+  echo "neg-ok: [leak-check/self-test] the leak check sees a deliberate leaker"; pass=$((pass+1))
+else
+  echo "NEG-FAIL: [leak-check/self-test] a script that leaked two entries was not observed — the leak checks below prove nothing"
+fi
+
+expect_no_leak "leak/p1-manifest-lint"        "$here/p1-manifest-lint.sh"
+expect_no_leak "leak/verb-vocabulary-drift"   "$here/verb-vocabulary-drift.sh"
+expect_no_leak "leak/build-invocation-lint"   "$here/build-invocation-lint.sh"
+expect_no_leak "leak/config-disclosure-drift" "$here/config-disclosure-drift.sh"
+expect_no_leak "leak/std-fs-drift"            "$here/std-fs-drift.sh"
+expect_no_leak "leak/external-authority-lint" "$here/external-authority-lint.sh"
+expect_no_leak "leak/isolation-contract-lint" "$here/isolation-contract-lint.sh"
+expect_no_leak "leak/p2-invert-tree"          "$here/p2-invert-tree.sh"
+expect_no_leak "leak/feature-resolution-pin"  "$here/feature-resolution-pin.sh"
+expect_no_leak "leak/packaged-binaries"       "$here/packaged-binaries.sh"
+
+# ---- mutation-oracle: the mutation run's oracle beyond its exit status -------
+# #301: an all-unviable `cargo mutants` run exits 0, so coverage-tiers.sh — whose
+# only oracle was that status — passed the zero-missed contract having tested
+# NOTHING. These probe the two halves of the replacement against crafted
+# fixtures, so the checks themselves are shown to fire without a 45-minute
+# mutation run.
+mo="$here/mutation-oracle.sh"
+
+# JUDGE: a run that measured nothing must be refused, however it exited.
+mo_none="$(mktemp -d -p "$NC_TMP")"
+printf '{"total_mutants": 41, "missed": 0, "caught": 0, "timeout": 0, "unviable": 41}\n' \
+  > "$mo_none/outcomes.json"
+expect_reject_because "mutation-oracle/all-unviable-measured-nothing" "ZERO viable" \
+  bash "$mo" judge "$mo_none" maknae-kernel
+
+# JUDGE: an environment failure is NOT unviability. This is the exact log line
+# from the live incident, so the signature is the observed one and not a guess.
+mo_enospc="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mo_enospc/log"
+printf '{"total_mutants": 41, "missed": 0, "caught": 31, "timeout": 0, "unviable": 10}\n' \
+  > "$mo_enospc/outcomes.json"
+printf 'error: incremental compilation: could not create session directory lock file: No space left on device (os error 28)\n' \
+  > "$mo_enospc/log/crates__maknae-kernel__src__egress.rs_line_359_col_35.log"
+expect_reject_because "mutation-oracle/enospc-is-not-unviability" "ENVIRONMENT failure" \
+  bash "$mo" judge "$mo_enospc" maknae-kernel
+
+# JUDGE: no outcomes.json at all — the run cannot be judged, so it is refused
+# rather than assumed fine (the #301 failure mode is a MISSING measurement).
+mo_empty="$(mktemp -d -p "$NC_TMP")"
+expect_reject_because "mutation-oracle/no-outcomes-cannot-be-judged" "wrote no outcomes.json" \
+  bash "$mo" judge "$mo_empty" maknae-kernel
+
+# JUDGE positive control: a real run must still be ACCEPTED. Without this the
+# three probes above are satisfied by a check that refuses everything.
+mo_good="$(mktemp -d -p "$NC_TMP")"
+printf '{"total_mutants": 302, "missed": 0, "caught": 234, "timeout": 0, "unviable": 68}\n' \
+  > "$mo_good/outcomes.json"
+expect_accept "mutation-oracle/a-real-run-is-accepted" "234 viable" \
+  bash "$mo" judge "$mo_good" maknae-kernel
+
+# JUDGE: the NESTED layout. `cargo mutants --output DIR` writes DIR/mutants.out/,
+# one level below what coverage-tiers.sh names, and reading the wrong level made
+# this check refuse every real run rather than only the vacuous ones. Probed at
+# both spellings so the resolution itself is a control, not a comment.
+mo_nested="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mo_nested/mutants.out"
+printf '{"total_mutants": 41, "missed": 0, "caught": 0, "timeout": 0, "unviable": 41}\n' \
+  > "$mo_nested/mutants.out/outcomes.json"
+expect_reject_because "mutation-oracle/nested-output-layout-is-found" "ZERO viable" \
+  bash "$mo" judge "$mo_nested" maknae-kernel
+
+mo_nested_ok="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mo_nested_ok/mutants.out"
+printf '{"total_mutants": 302, "missed": 0, "caught": 234, "timeout": 0, "unviable": 68}\n' \
+  > "$mo_nested_ok/mutants.out/outcomes.json"
+expect_accept "mutation-oracle/nested-output-layout-accepts-a-real-run" "234 viable" \
+  bash "$mo" judge "$mo_nested_ok" maknae-kernel
+
+# JUDGE: THE COUNTS THEMSELVES MUST BE TRUSTWORTHY BEFORE THEY ARE BELIEVED.
+# Review finding on the very commit that closed #301: the judge mapped each
+# missing or non-integer field to 0 and rejected only on `total and viable == 0`,
+# so `{}`, `{"outcomes": []}`, a renamed or retyped counter, an unbalanced set
+# and a genuine zero-mutant run were ALL accepted and printed as
+# "0 viable ... of 0". Every one of those is a no-measurement state. An oracle
+# that fails open on absent data is not an oracle — so each shape gets its own
+# probe with its own expected reason, and none of them may pass.
+mo_shape() { # <label> <expected-FAIL-substring> <json>
+  local d; d="$(mktemp -d -p "$NC_TMP")"
+  printf '%s\n' "$3" > "$d/outcomes.json"
+  expect_reject_because "mutation-oracle/$1" "$2" bash "$mo" judge "$d" maknae-kernel
+}
+mo_shape "counts-empty-object"      "has no 'total_mutants'" '{}'
+mo_shape "counts-outcomes-only"     "has no 'total_mutants'" '{"outcomes":[]}'
+mo_shape "counts-key-absent"        "has no 'unviable'" \
+  '{"total_mutants":41,"caught":0,"missed":0,"timeout":0}'
+mo_shape "counts-mistyped-string"   "not a non-negative integer" \
+  '{"total_mutants":41,"caught":"31","missed":0,"timeout":0,"unviable":10}'
+# `isinstance(True, int)` is True in Python: a bool must not read as a count.
+mo_shape "counts-mistyped-bool"     "not a non-negative integer" \
+  '{"total_mutants":1,"caught":true,"missed":0,"timeout":0,"unviable":0}'
+mo_shape "counts-negative"          "not a non-negative integer" \
+  '{"total_mutants":41,"caught":-1,"missed":0,"timeout":0,"unviable":42}'
+mo_shape "counts-do-not-balance"    "do not balance" \
+  '{"total_mutants":302,"caught":100,"missed":0,"timeout":0,"unviable":68}'
+mo_shape "counts-zero-mutants"      "ZERO mutants" \
+  '{"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}'
+mo_shape "counts-not-an-object"     "not a JSON object" '[]'
+
+# SCRATCH: a volume without room must be refused BEFORE the run, not discovered
+# as a wall of 'unviable' afterwards. The floor is raised via the documented
+# override so the probe does not depend on this host's free space.
+expect_reject_because "mutation-oracle/scratch-too-small" "below the" \
+  env MUTATION_ORACLE_MIN_KIB=999999999999 bash "$mo" scratch "$NC_TMP"
+
+# SCRATCH: and a volume that does have room must pass, for the same reason the
+# judge probe above has a positive control.
+expect_accept "mutation-oracle/scratch-with-room-passes" "KiB free" \
+  env MUTATION_ORACLE_MIN_KIB=1 bash "$mo" scratch "$NC_TMP"
+
+# SCRATCH: a path that does not exist is fail-closed, never "assume room".
+expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
+  bash "$mo" scratch "$NC_TMP/definitely-not-here"
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
