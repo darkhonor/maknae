@@ -153,6 +153,9 @@ files = [
   # malformed or hostile registry entry naming a Vault path outside the
   # deputy's grant. Both maknaed (at boot) and the deputy (at use) decide on it.
   "crates/maknae-config/src/bounds.rs",
+  # #240: the `egress` section — the deputy's socket and the provider deadline,
+  # range-checked, fail-closed like `transport`.
+  "crates/maknae-config/src/egress_cfg.rs",
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
   "bins/maknae-egress/src/handle.rs",

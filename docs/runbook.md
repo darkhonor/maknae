@@ -421,12 +421,19 @@ destinations:                # #172: per-role egress allowlist for session.promp
   default trigger limit then stops `maknae-egress.socket` and it does NOT restart on
   its own when Vault returns. Recovery: `systemctl reset-failed maknae-egress.socket &&
   systemctl restart maknae-egress.socket`.
-- **Cooky refusal.** The kernel's egress backend is still `Unavailable` — the deputy
-  exists and logs in to Vault (#240b), but `maknaed` does not route to it until #240's
-  last item lands *(corrected 2026-09-14: this said "no egress process exists yet")*: a
-  permitted prompt is refused
-  with posture `unavailable` and reason `egress backend not ready` in the trail, and
-  `Unauthorized` on the wire, like every refusal — build state is never disclosed there.
+- **A permitted prompt, and where it goes (#240).** With a `provider` registered, a
+  permitted `session.prompt` is handed to the egress deputy over `egress.socket_path`
+  (§6.2 of the configuration reference) under `egress.deadline_ms`; the trail carries the
+  intent before the send and the outcome after it. With no provider, or before the
+  deputy's socket exists, the prompt is refused with posture `unavailable` and reason
+  `egress backend not ready`, and `Unauthorized` on the wire like every refusal — build
+  state is never disclosed there. *(Rewritten 2026-09-15: this bullet described the
+  `Unavailable`-only kernel.)*
+- **Boot refuses when a provider is registered but the deputy cannot be found.**
+  `maknaed: refusing to start: a provider is registered but the egress deputy's account
+  '_maknae-egress' does not exist on this host` — the package creates the account; on a
+  source-built host create it (`packaging/common/maknae.sysusers`) before registering a
+  provider.
 
 ### What it proves
 

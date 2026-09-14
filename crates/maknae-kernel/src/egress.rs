@@ -82,6 +82,11 @@ pub async fn commit_intent<E: AuditEmit>(
 pub trait Egress: Send + Sync {
     /// Cheap and side-effect-free: may this backend be asked to send at all?
     fn ready(&self) -> Result<(), EgressFailure>;
+    /// The outer bound the kernel places on one `send` (#240: the
+    /// egress-specific deadline #172 handed over by name — `transport.
+    /// read_timeout_ms` was never a provider deadline). The backend states
+    /// it, so `handle`'s signature and its many call sites stay unchanged.
+    fn deadline(&self) -> std::time::Duration;
     /// Send. The intent is the caller's proof that the trail already holds it.
     /// Blocking is allowed: the kernel calls this on a blocking worker under a deadline.
     fn send(
@@ -91,14 +96,18 @@ pub trait Egress: Send + Sync {
     ) -> Result<EgressReply, EgressFailure>;
 }
 
-/// Cooky's production backend: `maknaed` does not route to the deputy yet —
-/// the deputy exists and logs in to Vault (#240b); selecting it is #240's
-/// last item.
+/// The backend when NO provider is registered (#240): nothing can leave, so
+/// nothing is configured to carry it. Also every test's default.
 pub struct Unavailable;
 
 impl Egress for Unavailable {
     fn ready(&self) -> Result<(), EgressFailure> {
         Err(EgressFailure::NotConfigured)
+    }
+    /// Never consulted: `ready()` refuses first. Zero, so a caller that
+    /// somehow reached `send` would not wait on a backend that cannot send.
+    fn deadline(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
     }
     fn send(
         &self,
@@ -109,9 +118,82 @@ impl Egress for Unavailable {
     }
 }
 
-/// The one production choice, in one place, so a test can pin it.
-pub fn production_egress() -> Arc<dyn Egress> {
+/// The account the deputy runs as (`packaging/common/maknae.sysusers`); the
+/// only peer the kernel will write a prompt to.
+pub const EGRESS_USER: &str = "_maknae-egress";
+/// The largest reply frame the kernel accepts from the deputy — mirrors the
+/// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
+/// delivered reply is bounded again by `transport.frame_max_bytes`.
+pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Why the kernel refused to BOOT over its egress backend (#240). Only
+/// reachable with a provider registered: with none, there is nothing to send
+/// and `Unavailable` is the honest backend.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EgressBootRefusal {
+    /// The deputy's account does not exist on this host.
+    NoSuchAccount(String),
+    /// The account could not be looked up at all (NSS down).
+    Resolve(String),
+}
+
+impl std::fmt::Display for EgressBootRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EgressBootRefusal::NoSuchAccount(name) => write!(
+                f,
+                "a provider is registered but the egress deputy's account '{name}' does not exist on this host"
+            ),
+            EgressBootRefusal::Resolve(e) => write!(
+                f,
+                "a provider is registered but the egress deputy's account could not be resolved: {e}"
+            ),
+        }
+    }
+}
+
+/// The backend with no provider registered — and every test's default.
+pub fn unavailable_egress() -> Arc<dyn Egress> {
     Arc::new(Unavailable)
+}
+
+/// THE production choice, as a pure decision over an injected resolver so it
+/// can be pinned on a host that has no `_maknae-egress` account (the same
+/// seam `authz_boot_gate_with` uses). No provider → `Unavailable`, and the
+/// account is never looked up. A provider → `SocketEgress` under the deputy's
+/// uid, resolved ONCE here on the blocking boot path — never per request on an
+/// async worker — and fail-closed by NAME.
+pub fn production_egress_with(
+    provider: Option<&maknae_config::ProviderConfig>,
+    cfg: &maknae_config::EgressConfig,
+    resolve_uid: impl FnOnce(&str) -> Result<Option<u32>, String>,
+) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
+    if provider.is_none() {
+        return Ok(unavailable_egress());
+    }
+    let uid = match resolve_uid(EGRESS_USER) {
+        Ok(Some(uid)) => uid,
+        Ok(None) => return Err(EgressBootRefusal::NoSuchAccount(EGRESS_USER.to_string())),
+        Err(e) => return Err(EgressBootRefusal::Resolve(e)),
+    };
+    Ok(Arc::new(crate::egress_socket::SocketEgress::new(
+        cfg.socket_path.clone(),
+        uid,
+        std::time::Duration::from_millis(cfg.deadline_ms),
+        EGRESS_MAX_REPLY_FRAME_BYTES,
+    )))
+}
+
+/// The one production choice, in one place: the real resolver over NSS.
+pub fn production_egress(
+    provider: Option<&maknae_config::ProviderConfig>,
+    cfg: &maknae_config::EgressConfig,
+) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
+    production_egress_with(provider, cfg, |name| {
+        nix::unistd::User::from_name(name)
+            .map(|u| u.map(|u| u.uid.as_raw()))
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Text only in Cooky (#153, #229). Names the FIRST non-text kind; an empty
@@ -623,6 +705,9 @@ mod tests {
             self.calls.lock().unwrap().push("ready");
             Ok(())
         }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
         fn send(
             &self,
             _i: &DurableEgressIntent,
@@ -699,11 +784,73 @@ mod tests {
         }
     }
 
+    fn provider() -> maknae_config::ProviderConfig {
+        maknae_config::ProviderConfig {
+            name: "openai".into(),
+            endpoint: "https://api.example.test/v1".into(),
+            model: "m".into(),
+            key_vault_path: "maknae/providers/openai".into(),
+            key_field: "api-key".into(),
+        }
+    }
+
+    /// THE production choice, pinned (#240): no provider → `Unavailable`, and
+    /// the deputy's account is never looked up; a provider → the socket
+    /// backend under `_maknae-egress`'s uid, resolved ONCE at boot and
+    /// fail-closed BY NAME when the account is missing or NSS is down.
     #[test]
-    fn unavailable_is_the_production_backend_and_neither_readies_nor_sends() {
+    fn production_egress_is_unavailable_without_a_provider_and_the_socket_with_one() {
+        let cfg = maknae_config::EgressConfig::default();
+        let never = |_: &str| -> Result<Option<u32>, String> {
+            panic!("no provider registered: the account must not be resolved")
+        };
+        assert_eq!(
+            production_egress_with(None, &cfg, never).unwrap().ready(),
+            Err(EgressFailure::NotConfigured)
+        );
+        let p = provider();
+        match production_egress_with(Some(&p), &cfg, |_| Ok(None)) {
+            Err(EgressBootRefusal::NoSuchAccount(name)) => assert_eq!(name, EGRESS_USER),
+            Err(other) => panic!("a missing account must refuse by name, got {other:?}"),
+            Ok(_) => panic!("a missing account must refuse"),
+        }
+        match production_egress_with(Some(&p), &cfg, |_| Err("nss down".into())) {
+            Err(EgressBootRefusal::Resolve(m)) => assert!(m.contains("nss down"), "{m}"),
+            Err(other) => panic!("an NSS failure must refuse, got {other:?}"),
+            Ok(_) => panic!("an NSS failure must refuse"),
+        }
+        // with a resolvable account the backend is the socket one: ready()
+        // follows the socket's existence, and the deadline is the config's
+        let d = tempfile::tempdir().unwrap();
+        let cfg = maknae_config::EgressConfig {
+            socket_path: d.path().join("egress.sock"),
+            deadline_ms: 7_000,
+        };
+        let b = production_egress_with(Some(&p), &cfg, |name| {
+            assert_eq!(name, EGRESS_USER);
+            Ok(Some(4242))
+        })
+        .unwrap();
+        assert_eq!(b.ready(), Err(EgressFailure::NotConfigured));
+        assert_eq!(b.deadline(), std::time::Duration::from_millis(7_000));
+        let _l = std::os::unix::net::UnixListener::bind(&cfg.socket_path).unwrap();
+        assert_eq!(b.ready(), Ok(()));
+    }
+
+    /// Both refusals render by name — the account, and the resolver's reason.
+    #[test]
+    fn the_boot_refusals_name_the_account_and_the_reason() {
+        let m = EgressBootRefusal::NoSuchAccount(EGRESS_USER.into()).to_string();
+        assert!(m.contains("_maknae-egress"), "{m}");
+        let m = EgressBootRefusal::Resolve("nss down".into()).to_string();
+        assert!(m.contains("nss down"), "{m}");
+    }
+
+    #[test]
+    fn unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends() {
         assert_eq!(Unavailable.ready(), Err(EgressFailure::NotConfigured));
         assert_eq!(
-            production_egress().ready(),
+            unavailable_egress().ready(),
             Err(EgressFailure::NotConfigured)
         );
         // same module: the private constructor is reachable here only

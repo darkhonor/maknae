@@ -291,7 +291,7 @@ impl Fixture {
             records,
             config,
             None,
-            maknae_kernel::production_egress(),
+            maknae_kernel::unavailable_egress(),
         )
     }
     /// The full starter (#172): a registered provider name and an egress

@@ -66,6 +66,9 @@ pub enum ConfigError {
     /// "could not be read", and never routes a bounds error through the
     /// `provider` section's message.
     InvalidEgressBounds(String),
+    /// The `egress` section (#240): a present field out of range or of the
+    /// wrong type, a non-map section, an unknown key.
+    InvalidEgress(String),
     /// The `provider` section carries a key under a spelling that means the API
     /// key itself was pasted into the config. Credentials are delivered via Vault,
     /// never plaintext (ADR-0005 decision 8); refused by the field's name so the
@@ -165,6 +168,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidEgressBounds(reason) => {
                 write!(f, "egress-bounds.yaml: {reason}")
             }
+            ConfigError::InvalidEgress(reason) => write!(f, "invalid egress config: {reason}"),
             ConfigError::ProviderPlaintextKey { field } => {
                 write!(f, "provider config carries a plaintext credential under '{field}': keys are delivered via Vault (key_vault_path), never in the config")
             }

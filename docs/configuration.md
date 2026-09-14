@@ -391,9 +391,9 @@ lands; until then, registering one and providing its content is not yet supporte
 section the daemon does not register is `ConfigError::UnknownSection`, which **refuses
 boot** and names the file it came from. The registered set is
 `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`,
-`audit`, `principal`, `provider`, plus `core` — so every row below marked Forthcoming or
-Withdrawn will stop the daemon if written, rather than being ignored. Only `provider`
-(§6.1) can be configured today. *(Added 2026-09-13: §9.3's worked example used to be a
+`audit`, `principal`, `provider`, `egress`, plus `core` — so every row below marked
+Forthcoming or Withdrawn will stop the daemon if written, rather than being ignored. Only
+`provider` (§6.1) and `egress` (§6.2) can be configured today. *(Added 2026-09-13: §9.3's worked example used to be a
 `llm` block, which is Withdrawn, and would have done exactly this to anyone who copied
 it.)*
 
@@ -401,6 +401,7 @@ it.)*
 |---|---|---|
 | `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request as of #77 — see the runbook)* | Forthcoming |
 | `provider` | the one registered model provider (#243, milestone Cooky) — **see §6.1** | **Shipped** |
+| `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
 | `llm` | LLM-provider authentication *(superseded by `provider`, 2026-09-07)* | Withdrawn — **writing it refuses boot**, see §9.3 |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
 | `dcs` | optional DCS classification backend | Forthcoming |
@@ -441,10 +442,38 @@ provider:
 
   What #308 did fix is the *vocabulary*: all three are now mount-relative and `data/`-free, so the first relation is a plain string comparison instead of a transformation between two coordinate systems. What it did **not** fix, and cannot, is that **a Terraform-versus-host mismatch still boots clean and becomes a 403 at the credential read** — that is #307's mechanism and it survives this change, because nothing in the boot path reads the grant.
 - **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has **three** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*`, and since #240b a `vault` block (`addr`, and optionally `approle_mount`) saying where the deputy redeems that grant *(corrected 2026-09-14: this said "exactly two"; **an existing two-key file now stops `maknaed` from booting** on a host with a registered provider, naming the missing block — add it before upgrading)* — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`), if it was read but its parser refused it (`Refused`, naming the reason — a missing `vault` block, an unknown key), or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
-- **The deputy logs in to Vault and reads the key (#240b, 2026-09-14).** *(Superseded: this bullet said "No Vault client is constructed yet — and that is now the ONLY gap", that `main.rs` used `NoCredentialSource`, and that the read waited on #240. All three stopped being true in #240b.)* `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID from `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. There is **no plaintext fallback and no SEP path** for the deputy: without `$CREDENTIALS_DIRECTORY` it refuses to start, naming the reason (macOS custody is #227's). **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **What still stands between a registration and a live prompt:** `production_egress()` in `maknaed` still selects the `Unavailable` backend — that is the last item on [#240](https://github.com/darkhonor/maknae/issues/240) and lands separately, so `main` stays fail-closed until it does.
+- **The deputy logs in to Vault and reads the key (#240b, 2026-09-14).** *(Superseded: this bullet said "No Vault client is constructed yet — and that is now the ONLY gap", that `main.rs` used `NoCredentialSource`, and that the read waited on #240. All three stopped being true in #240b.)* `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID from `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. There is **no plaintext fallback and no SEP path** for the deputy: without `$CREDENTIALS_DIRECTORY` it refuses to start, naming the reason (macOS custody is #227's). **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **With a `provider` registered, `maknaed` routes every permitted `session.prompt` to the deputy** over the socket §6.2 names, under the deadline §6.2 sets; with none registered the backend is `Unavailable` and nothing leaves *(2026-09-15: the last item on #240; this sentence said it landed separately)*.
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
 ---
+
+### 6.2 The `egress` section (#240)
+
+Where `maknaed` finds the egress deputy, and how long one `session.prompt` send may take.
+Both keys are optional and default to what the packaging ships, so a deployment on the
+packaged Linux layout needs no `egress` block at all.
+
+```yaml
+egress:
+  socket_path: /run/maknae-egress/egress.sock   # the deputy's activation socket (maknae-egress.socket)
+  deadline_ms: 120000                            # the outer bound on one provider call; 1000..=600000
+```
+
+- **`socket_path`** — the Unix socket the deputy accepts on. Linux packaging creates it by
+  socket activation at the default path; macOS (#227) will need the `/usr/local/var/run`
+  spelling here, as `transport.socket_path` does. A non-string or empty value refuses boot
+  (`InvalidEgress`).
+- **`deadline_ms`** — the kernel's outer bound on one send to the deputy. It replaced
+  `transport.read_timeout_ms` in that role: five seconds was a frame read timeout, never a
+  provider deadline. The default matches the deputy's own provider-call timeout, so the two
+  ends agree; a slower provider needs both raised. Out of range refuses boot by name.
+- **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
+  the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
+  by name if the account does not exist or cannot be looked up. With no provider the
+  backend is `Unavailable`, the account is never looked up, and the section is parsed but
+  idle. Whether the deputy's socket exists is checked per request (`egress backend not
+  ready` in the trail), not at boot: the socket unit and the daemon start independently.
+- Both keys are disclosed by `admin.config.show`; neither is a credential.
 
 ## 7. Accepted YAML
 
@@ -498,6 +527,8 @@ performs after the load.
 | `core` defined in a `config.d/` file | `CoreOverride` |
 | A caller registering a reserved name (`core`) | `ReservedSection` |
 | A duplicate section name in the registration | `DuplicateSpec` |
+| `egress-bounds.yaml` read but refused: a missing `vault` block, an unknown key, a malformed path fragment (#240) | `InvalidEgressBounds` |
+| The `egress` section (§6.2): a non-map section, an unknown key, a value of the wrong type or out of range (#240) | `InvalidEgress` |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 
 ---
@@ -675,13 +706,10 @@ spellings in mind at once — which is the defect this removed.)*
 > by `VaultKeys::read`; the example above uses `api-key`, and if your secret uses
 > `api_key` or anything else, write that instead. Nothing defaults.
 >
-> **What you still cannot finish today (updated 2026-09-14, #240b):** the deputy now
-> logs in and reads the key — `NoCredentialSource` is gone — so a registration is
-> checkable end-to-end **through the credential read** once `maknae enroll` has
-> provisioned the third plane (it does, since this change: three RoleIDs, three sealed
-> SecretIDs). What remains is on the kernel side: `production_egress()`
-> still selects the `Unavailable` backend, so no `session.prompt` reaches the deputy
-> until that last item on #240 lands.
+> **Nothing stands between a registration and a live prompt any more (2026-09-15, #240):**
+> the deputy logs in and reads the key, `maknae enroll` provisions its plane, and
+> `maknaed` routes a permitted `session.prompt` to it (§6.2). What this section cannot
+> show you is the live provider call itself — that is #242's acceptance demonstration.
 
 #### Permissions — stricter than §2.2 for this section
 

@@ -1232,7 +1232,6 @@ name = "maknaed"
 version = "0.0.0"
 dependencies = [
  "maknae-kernel",
- "maknae-llm",
  "maknae-mcp",
  "maknae-vault",
 ]

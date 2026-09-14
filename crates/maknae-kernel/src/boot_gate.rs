@@ -726,6 +726,29 @@ mod tests {
     /// provider past `maknae-config` to exercise the gate. What CAN regress is
     /// someone moving the call during a refactor, and that is exactly what
     /// this catches.
+    /// #240: the egress backend is chosen PRE-MINT for the same reason —
+    /// a missing `_maknae-egress` account must refuse before anything is
+    /// minted — and after the bounds gate, so the refusals come in the order
+    /// an operator fixes them.
+    #[test]
+    fn the_egress_backend_is_selected_after_the_bounds_gate_and_before_the_vault_mint() {
+        let run_rs = include_str!("run.rs");
+        let gate = run_rs
+            .find("egress_bounds_boot_gate(boot.provider()")
+            .expect("the egress-bounds gate call moved or was renamed");
+        let select = run_rs
+            .find("production_egress(boot.provider(), &egress_cfg)")
+            .expect("the egress backend selection moved or was renamed");
+        let mint = run_rs
+            .find(".mint()")
+            .expect("the vault mint call moved or was renamed");
+        assert!(
+            gate < select,
+            "the bounds gate must precede the backend selection"
+        );
+        assert!(select < mint, "the backend selection must precede mint()");
+    }
+
     #[test]
     fn the_egress_bounds_gate_is_called_before_the_vault_mint() {
         let run_rs = include_str!("run.rs");

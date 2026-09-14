@@ -62,6 +62,11 @@ impl SocketEgress {
 }
 
 impl Egress for SocketEgress {
+    /// The configured `egress.deadline_ms`; the socket read and write
+    /// timeouts below are set to the same value, so it is the bound.
+    fn deadline(&self) -> Duration {
+        self.timeout
+    }
     fn ready(&self) -> Result<(), EgressFailure> {
         if self.path.exists() {
             Ok(())

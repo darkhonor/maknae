@@ -19,6 +19,9 @@ pub struct Recording {
     seen: Mutex<Vec<(String, String, u64)>>,
     pub fail_send: bool,
     pub sleep: Option<Duration>,
+    /// #240: the backend states its own outer deadline; `None` is a
+    /// generous default so only the deadline test sets one.
+    pub deadline: Option<Duration>,
 }
 impl Recording {
     pub fn calls(&self) -> Vec<&'static str> {
@@ -33,6 +36,9 @@ impl maknae_kernel::Egress for Recording {
     fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
         self.calls.lock().unwrap().push("ready");
         Ok(())
+    }
+    fn deadline(&self) -> std::time::Duration {
+        self.deadline.unwrap_or(Duration::from_secs(5))
     }
     fn send(
         &self,
@@ -278,6 +284,9 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
         }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
         fn send(
             &self,
             _: &maknae_kernel::DurableEgressIntent,
@@ -331,6 +340,9 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
     impl maknae_kernel::Egress for Silence {
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
+        }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
         }
         fn send(
             &self,
@@ -423,16 +435,19 @@ async fn a_failed_send_is_an_outcome_deny_after_a_real_intent() {
 }
 
 #[tokio::test]
-async fn a_send_past_the_transport_deadline_is_deadline_expired_delivery_unknown() {
+async fn a_send_past_the_egress_deadline_is_deadline_expired_delivery_unknown() {
     let fx = Fixture::with_policy("prompt-deadline", "Read", GRANTED);
     let records = Records::new(0);
-    let mut cfg = maknae_config::transport_from_section(None).unwrap();
-    cfg.read_timeout_ms = 200;
+    // #240: the deadline is the BACKEND's (`egress.deadline_ms` in production),
+    // not the transport read timeout — that one stays at its default here to
+    // prove it is no longer what bounds the send.
+    let cfg = maknae_config::transport_from_section(None).unwrap();
     // The abandoned blocking worker keeps sleeping after the handler returns
     // at 200ms; the tokio test runtime waits for it on drop (~1.3s).
     // Deliberate: do not "optimise" the sleep away.
     let eg = Arc::new(Recording {
         sleep: Some(Duration::from_millis(1500)),
+        deadline: Some(Duration::from_millis(200)),
         ..Default::default()
     });
     let resp = fx
@@ -749,6 +764,9 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
     impl maknae_kernel::Egress for Huge {
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
+        }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
         }
         fn send(
             &self,

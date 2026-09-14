@@ -37,6 +37,7 @@ mod bounds_io;
 mod builder;
 mod ceiling;
 mod document;
+mod egress_cfg;
 mod error;
 mod loader;
 mod policy;
@@ -69,6 +70,7 @@ pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPostu
 pub use document::{
     effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
 };
+pub use egress_cfg::{egress_from_section, EgressConfig, EGRESS_SECTION};
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;

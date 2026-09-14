@@ -1390,8 +1390,11 @@ pub async fn handle<S, E, P>(
                     conversation: conversation.clone(),
                     content: content.clone(),
                 };
+                // #240: the backend's own deadline (`egress.deadline_ms`), not
+                // the transport read timeout — 5 s was never a provider bound.
+                let deadline = egress.deadline();
                 tokio::time::timeout(
-                    Duration::from_millis(cfg.read_timeout_ms),
+                    deadline,
                     tokio::task::spawn_blocking(move || egress.send(&intent, req)),
                 )
                 .await
@@ -2707,6 +2710,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let boot = crate::boot(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
     let transport = maknae_config::transport_from_section(boot.section("transport"))
         .map_err(|e| RunError::Other(e.to_string()))?;
+    // #240: where the deputy is, and the outer bound on one send.
+    let egress_cfg =
+        maknae_config::egress_from_section(boot.section(maknae_config::EGRESS_SECTION))
+            .map_err(|e| RunError::Other(e.to_string()))?;
     let audit_cfg = maknae_config::audit_from_section(boot.section("audit"), config_dir)
         .map_err(|e| RunError::Other(e.to_string()))?;
 
@@ -2804,6 +2811,12 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     {
         return Err(RunError::Other(format!("refusing to start: {e}")));
     }
+    // #240: THE egress backend, chosen here — PRE-MINT, like the bounds gate,
+    // because a missing `_maknae-egress` account has nothing minted to revoke.
+    // No provider → `Unavailable`; a provider → the deputy's socket under its
+    // uid, resolved once on this blocking path and never per request.
+    let egress = crate::egress::production_egress(boot.provider(), &egress_cfg)
+        .map_err(|e| RunError::Other(format!("refusing to start: {e}")))?;
 
     let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
@@ -2989,6 +3002,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
                 audit: &audit_cfg,
                 vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
                 vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
+                egress: &egress_cfg,
             },
         ))
     };
@@ -3006,7 +3020,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
     // #172: the registered provider's name (the egress destination the PEP
     // stamps) and the egress backend, both fixed for the life of the process.
-    // Cooky's only backend is `Unavailable`; #240 supplies the real one.
+    // The backend was chosen PRE-MINT above (#240).
     // #240a D1: the kernel carries the RESOLVED record, not just the name —
     // egress parses no registry and so cannot drift from this view of it.
     // #240a D5-E: a registered provider whose Vault path sits outside the
@@ -3016,7 +3030,6 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // confusing refusal on a live request. The gate itself runs PRE-MINT; see
     // the call site above the authz gate.
     let provider = Arc::new(boot.provider().cloned());
-    let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(
         &client,
         &ca,
