@@ -64,7 +64,8 @@ pub struct Integrity {
 /// `IntentOnly` proves nothing was sent yet; `BackendUnavailable` is the Cooky
 /// refusal recorded WITHOUT an intent (nothing was sent); `Failed` is a send
 /// the backend reported as failed; `DeadlineExpired` is a send that ran past
-/// the transport deadline, so whether it reached the provider is UNKNOWN (the
+/// the egress deadline (`egress.deadline_ms`, #240), so whether it reached the
+/// provider is UNKNOWN (the
 /// mutation trail's `DurabilityUnknown` shape); `OutcomeUnknown` (#240) is the
 /// same unknown reached another way — the kernel had begun writing the
 /// request to the deputy and the exchange failed after that, short of the

@@ -490,7 +490,10 @@ egress:
   arrives with #227's packaging, so until then a registered provider refuses boot there. With no provider the
   backend is `Unavailable`, the account is never looked up, and the section is parsed but
   idle. Whether the deputy's socket exists is checked per request (`egress backend not
-  ready` in the trail), not at boot: the socket unit and the daemon start independently.
+  ready` in the trail), not at boot: the socket unit and the daemon start independently —
+  and **nothing enables the socket unit for you**: `sudo systemctl enable --now
+  maknae-egress.socket` once `egress-bounds.yaml` is complete, or every permitted prompt is
+  refused as not ready (the install READMEs and enroll's closing hint carry the step).
 - Both keys are disclosed by `admin.config.show`; neither is a credential.
 
 ## 7. Accepted YAML
@@ -727,9 +730,11 @@ spellings in mind at once — which is the defect this removed.)*
 > **Nothing in the daemon stands between a registration and a live prompt any more
 > (2026-09-15, #240):** the deputy logs in and reads the key, `maknae enroll` provisions
 > its plane, and `maknaed` routes a permitted `session.prompt` to it (§6.2). What does
-> still stand between them: no `session.prompt` client ships yet — the runtime loop is
-> #241's — so the first live prompt, and the live provider call itself, are #241's and
-> #242's acceptance demonstration.
+> still stand between them: the deputy's socket unit, which is preset-disabled and yours
+> to enable (`sudo systemctl enable --now maknae-egress.socket`, §6.2); and no
+> `session.prompt` client ships yet — the runtime loop is #241's — so the first live
+> prompt, and the live provider call itself, are #241's and #242's acceptance
+> demonstration.
 
 #### Permissions — stricter than §2.2 for this section
 

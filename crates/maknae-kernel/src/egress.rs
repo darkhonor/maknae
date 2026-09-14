@@ -329,8 +329,8 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
 /// the reply. Narrower than `EgressStatus` on purpose: `IntentOnly` and
 /// `BackendUnavailable` are never outcomes of a send, so no arm below is
 /// unreachable (T1: every arm must be killable). `DeadlineExpired`: the
-/// transport deadline passed with no answer, delivery to the provider
-/// unknown. `LandedUndelivered`: the reply arrived and the kernel refuses to
+/// egress deadline (`egress.deadline_ms`) passed with no answer, delivery to
+/// the provider unknown. `LandedUndelivered`: the reply arrived and the kernel refuses to
 /// deliver it, ADR-0023 decision 3's meaning, for the [`ReplyRefusal`] named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendOutcome {
