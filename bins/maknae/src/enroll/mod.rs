@@ -1404,6 +1404,13 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let token = intake_token(args, locale)?;
 
     // ---- Step 3: Vault operations ------------------------------------------
+    // The mount names go into three Vault paths and both written configs; an
+    // `auth/` prefix or a malformed path is refused HERE by name, not as a
+    // 404 on the first RoleID read (#240b self-review).
+    maknae_config::mount_path_is_acceptable(&args.approle_mount)
+        .map_err(|why| EnrollError::InvalidVaultAddr(format!("--approle-mount {why}")))?;
+    maknae_config::mount_path_is_acceptable(&args.pki_int_mount)
+        .map_err(|why| EnrollError::InvalidVaultAddr(format!("--pki-int-mount {why}")))?;
     let vault_ca_path = resolve_vault_ca_path(args);
     let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
         path: vault_ca_path.clone(),
