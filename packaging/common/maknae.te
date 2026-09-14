@@ -147,6 +147,15 @@ dev_read_urand(maknae_egress_t)
 miscfiles_read_localization(maknae_egress_t)
 kernel_read_system_state(maknae_egress_t)
 allow maknae_egress_t self:process { signal sigchld };
+# The listening socket is NOT the deputy's own: systemd creates it
+# (maknae-egress.socket) and hands the fd over, so it carries init_t's label
+# and the accept/read/write on it is a different access from maknaed_t's
+# self-bound socket. Inherited from #240a, closed here; the accepted
+# connection's socket is the deputy's own. Which vectors el9/el10 actually
+# demand is #242's enforcing-host shakeout — these are the ones the code path
+# performs.
+allow maknae_egress_t init_t:unix_stream_socket { accept listen getattr getopt setopt read write shutdown };
+allow maknae_egress_t self:unix_stream_socket { create getattr getopt setopt read write shutdown };
 # DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };

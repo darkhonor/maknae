@@ -366,6 +366,9 @@ impl PlaneClient {
             // Stated, not defaulted (#240b self-review): vaultrs fills an unset
             // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
             // any value other than 0/f/false — the empty string included.
+            // The proxy and identity env defaults are NOT closed here; the
+            // deputy scrubs them at start (its `env.rs`), the daemon and the
+            // CLI do not yet — #318.
             .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()

@@ -113,19 +113,28 @@ pub fn kv_fragment_is_acceptable(s: &str) -> Result<(), String> {
         // secret path legitimately containing a `data` segment cannot be
         // expressed here. That is rare; the migration error is not.
         if *seg == "data" {
-            return Err(
-                "contains a 'data' segment — the mount and the KV v2 'data/'                  segment are no longer written in configuration (#308); write                  the path as your Vault CLI shows it"
-                    .into(),
-            );
+            return Err(concat!(
+                "contains a 'data' segment — the mount and the KV v2 'data/' segment ",
+                "are no longer written in configuration (#308); write the path as ",
+                "your Vault CLI shows it"
+            )
+            .into());
         }
     }
     Ok(())
 }
 
-/// Is this a usable Vault MOUNT path (auth or secret engine)? The shape half of
+/// Is this a usable AUTH MOUNT path? The shape half of
 /// [`kv_fragment_is_acceptable`] — non-empty, no whitespace, no empty or
-/// `.`/`..` segment — without the KV v2 `data` rule, which is a statement
-/// about secret paths and not about where an auth method is mounted.
+/// `.`/`..` segment — with the auth-mount analogue of the KV `data` rule in
+/// place of it: a leading `auth` segment is refused by name, because vaultrs
+/// composes `/auth/<mount>/login` itself and `auth/maknae-approle` (the
+/// spelling `vault write` needs, and the README shows) would become
+/// `/auth/auth/…` and fail the boot probe as an opaque 404 rather than here.
+///
+/// A near-copy of `kv_fragment_is_acceptable` rather than a call to it,
+/// deliberately: each arm's message names the field's own rule, and folding
+/// the two would change which reason `data/` reports for a KV path.
 pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("is empty".into());
@@ -133,8 +142,17 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     if s.chars().any(char::is_whitespace) {
         return Err("contains whitespace".into());
     }
+    if s.len() > MAX_KEY_VAULT_PREFIX_BYTES {
+        return Err(format!("exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"));
+    }
     let segs: Vec<&str> = s.split('/').collect();
     let last = segs.len() - 1;
+    if segs[0] == "auth" {
+        return Err(
+            "starts with 'auth' — the auth/ prefix is composed by the client; write the mount name as Terraform's approle_path gives it"
+                .into(),
+        );
+    }
     for (i, seg) in segs.iter().enumerate() {
         if seg.is_empty() {
             return Err(if i == 0 {
@@ -236,6 +254,11 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         return Err(err(
             "egress-bounds.yaml: 'vault.addr' must be a non-empty URL without whitespace",
         ));
+    }
+    if addr.len() > MAX_KEY_VAULT_PREFIX_BYTES {
+        return Err(err(format!(
+            "egress-bounds.yaml: 'vault.addr' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
+        )));
     }
     let approle_mount = match vm.iter().find(|(k, _)| k == "approle_mount") {
         None => None,
@@ -345,14 +368,41 @@ mod tests {
                 "{bad:?}: {m}"
             );
         }
-        assert_eq!(
-            ok(Some("auth/data")).unwrap().approle_mount.as_deref(),
-            Some("auth/data")
-        );
+        // `auth/<mount>` is the one spelling an operator is LIKELY to write
+        // (`vault write` needs it) and it composes to /auth/auth/…: refused by
+        // name, here, not as a 404 at the boot probe.
+        let e = ok(Some("auth/maknae-approle")).unwrap_err();
+        assert!(e.to_string().contains("starts with 'auth'"), "{e}");
+        // a nested mount is legal, and `data` means nothing special for an auth mount
         assert_eq!(
             ok(Some("team/approle")).unwrap().approle_mount.as_deref(),
             Some("team/approle")
         );
+        assert_eq!(
+            ok(Some("data")).unwrap().approle_mount.as_deref(),
+            Some("data")
+        );
+        // both new strings are bounded like the prefix: AT the bound accepted,
+        // one past it refused (the operator both `>` and `>=` refuse alike is
+        // exactly the measured-gap shape the prefix test records)
+        let long = "a".repeat(MAX_KEY_VAULT_PREFIX_BYTES);
+        assert!(ok(Some(&long)).is_ok());
+        assert!(ok(Some(&format!("{long}a"))).is_err());
+        let long_addr = format!("https://{}", "h".repeat(MAX_KEY_VAULT_PREFIX_BYTES - 8));
+        assert!(bounds_from_document(&doc2_vault(
+            "maknae-kv",
+            "maknae/providers",
+            Some(&long_addr),
+            None
+        ))
+        .is_ok());
+        assert!(bounds_from_document(&doc2_vault(
+            "maknae-kv",
+            "maknae/providers",
+            Some(&format!("{long_addr}h")),
+            None
+        ))
+        .is_err());
         // the block must be a mapping
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str("maknae-kv".into())),

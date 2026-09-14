@@ -77,9 +77,11 @@ impl EgressVault {
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
             // Stated rather than defaulted: vaultrs fills an unset `verify`
             // from VAULT_SKIP_VERIFY and turns verification OFF for any value
-            // other than 0/f/false — the empty string included. (`token` is
-            // also env-defaulted, and is overwritten by `login` before any
-            // read; the unit's environment is clean regardless.)
+            // other than 0/f/false — the empty string included. The other
+            // env-defaulted settings (token, identity, proxy) are handled by
+            // the deputy scrubbing those variables before this runs
+            // (`bins/maknae-egress/src/env.rs`); a unit's environment is NOT
+            // clean by default — DefaultEnvironment= reaches every service.
             .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()

@@ -68,6 +68,12 @@ pub async fn chat_completion(
         // destination is what the PDP decided on. Following one silently would
         // move the egress to somewhere the verdict never covered.
         .redirect(reqwest::redirect::Policy::none())
+        // No ambient proxy, for the same reason: reqwest honours
+        // HTTPS_PROXY/ALL_PROXY by default, and an inherited one would move
+        // the egress somewhere the verdict never covered — with the bearer key
+        // in cleartext if the endpoint is a loopback `http://` stub. The deputy
+        // also scrubs those variables at start; this is the client's own half.
+        .no_proxy()
         .build()
         .map_err(|e| CallError::Transport(e.to_string()))?;
 

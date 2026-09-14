@@ -159,6 +159,9 @@ files = [
   # boot" is single-provider thinking and fails with two. A failed read is not
   # cached, so a transient Vault failure cannot poison a destination.
   "bins/maknae-egress/src/keys.rs",
+  # #240b: what the deputy refuses to inherit from its environment — a list, and
+  # the scrub over it. Pure data; the test holds the two families by name.
+  "bins/maknae-egress/src/env.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a

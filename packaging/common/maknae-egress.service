@@ -16,6 +16,13 @@ ExecStart=/usr/bin/maknae-egress
 # (0400, _maknae-egress-only, memory-backed). Name pinned: enroll seals
 # --name=maknae-egress-secret-id.
 LoadCredentialEncrypted=maknae-egress-secret-id:/etc/maknae/private/maknae-egress-secret-id.cred
+# #240b: DefaultEnvironment= (system.conf) and `systemctl set-environment` reach
+# every unit, and a proxied estate sets HTTPS_PROXY that way as routine practice.
+# reqwest honours the proxy variables by default and vaultrs fills VAULT_* from
+# the environment; either would move or unverify a leg the kernel decided on.
+# The deputy also removes these itself at start (src/env.rs); this is the
+# init-system half.
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE
 RuntimeDirectory=maknae-egress
 RuntimeDirectoryMode=0750
 

@@ -10,6 +10,7 @@
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
 mod call;
+mod env;
 mod handle;
 mod keys;
 mod keys_vault;
@@ -28,6 +29,11 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 }
 
 fn main() {
+    // FIRST of all, while single-threaded: nothing inherited from the
+    // environment may choose where a connection goes or how it is verified
+    // (`env.rs` says why "the unit's environment is clean" is not true).
+    env::scrub_env();
+
     let mut args = std::env::args().skip(1);
     let mut bind: Option<PathBuf> = None;
     let mut bounds_path = PathBuf::from(BOUNDS_PATH);
@@ -36,6 +42,9 @@ fn main() {
             // Development only. The shipped unit socket-activates and passes
             // no bind path; a packaging test asserts that.
             "--bind" => bind = args.next().map(PathBuf::from),
+            // Development only, likewise — and it relocates the whole
+            // credential set: the RoleID and the Vault CA are read from
+            // `egress/` BESIDE the bounds file, not from a fixed path.
             "--bounds" => bounds_path = args.next().map(PathBuf::from).unwrap_or(bounds_path),
             other => fail(format!("unknown argument '{other}'")),
         }
