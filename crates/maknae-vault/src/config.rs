@@ -131,12 +131,12 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         .unwrap_or(DEFAULT_APPROLE_MOUNT)
         .to_string();
     maknae_config::mount_path_is_acceptable(&approle_mount)
-        .map_err(|why| VaultError::InvalidAddr(format!("vault.approle_mount {why}")))?;
+        .map_err(|why| VaultError::InvalidMount(format!("vault.approle_mount {why}")))?;
     let pki_int_mount = get_str(vault, "pki_int_mount")
         .unwrap_or(DEFAULT_PKI_INT_MOUNT)
         .to_string();
     maknae_config::mount_path_is_acceptable(&pki_int_mount)
-        .map_err(|why| VaultError::InvalidAddr(format!("vault.pki_int_mount {why}")))?;
+        .map_err(|why| VaultError::InvalidMount(format!("vault.pki_int_mount {why}")))?;
     // Optional — absent (or non-string, since get_str only matches Value::Str) means
     // None, i.e. no plaintext fallback source at all (fail-closed default).
     let insecure_plaintext_secret_path =
@@ -244,6 +244,39 @@ mod tests {
         // Absent mount keys → Terraform-default mounts.
         assert_eq!(c.approle_mount, DEFAULT_APPROLE_MOUNT);
         assert_eq!(c.pki_int_mount, DEFAULT_PKI_INT_MOUNT);
+    }
+
+    /// #240b: the daemon's mounts get the same shape check as the deputy's,
+    /// and the refusal names the KEY — round 6 of self-review found the
+    /// first version rendering as "invalid vault.addr: …" for a mount.
+    #[test]
+    fn a_malformed_or_auth_prefixed_mount_is_refused_naming_its_own_key() {
+        let d = TempDir::new("badmounts");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\n  approle_mount: auth/maknae-approle\ncore:\n  deployment_id: dev-01\n",
+        );
+        let e = match load_vault_config(&d.0) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("this mount must be refused"),
+        };
+        assert!(
+            e.starts_with("invalid Vault mount: vault.approle_mount starts with 'auth'"),
+            "{e}"
+        );
+        assert!(!e.contains("vault.addr"), "{e}");
+        d.write(
+            "maknae.yaml",
+            "vault:\n  addr: https://v.example:8200\n  pki_int_mount: /x\ncore:\n  deployment_id: dev-01\n",
+        );
+        let e = match load_vault_config(&d.0) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("this mount must be refused"),
+        };
+        assert!(
+            e.starts_with("invalid Vault mount: vault.pki_int_mount must not start with '/'"),
+            "{e}"
+        );
     }
 
     #[test]

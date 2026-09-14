@@ -71,6 +71,12 @@ profile maknaed /usr/bin/maknaed {
   # AppArmor analog; confinement of *which* endpoint is left to the network layer
   # and Vault policy.)
   network tcp,
+  # #240b (self-review): the daemon binds, listens and accepts on its AF_UNIX
+  # control socket; stated explicitly, as the deputy's profile states it,
+  # rather than left to abstractions/base and parser defaults. Load-bearing
+  # or not under enforcement is #242's to measure.
+  network unix stream,
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setopt, getopt, shutdown) type=stream,
 
   # /proc and /sys runtime introspection.
   @{PROC}/sys/net/core/somaxconn         r,

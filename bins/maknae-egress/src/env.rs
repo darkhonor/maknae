@@ -53,8 +53,15 @@ pub const SCRUBBED_ENV: &[&str] = &[
 /// Remove every [`SCRUBBED_ENV`] variable. Called first thing in `main`, while
 /// the process is still single-threaded (the environment is process-global).
 pub fn scrub_env() {
+    scrub_with(|k| std::env::remove_var(k));
+}
+
+/// The scrub over an injected remover, so the test proves every listed name
+/// is passed to it WITHOUT mutating the test binary's real environment (which
+/// sibling tests read concurrently — the getenv/setenv race).
+fn scrub_with(mut remove: impl FnMut(&str)) {
     for k in SCRUBBED_ENV {
-        std::env::remove_var(k);
+        remove(k);
     }
 }
 
@@ -141,14 +148,16 @@ mod tests {
         assert!(!exec.contains("--bounds"), "{exec}");
     }
 
-    /// The scrub actually removes them from THIS process.
+    /// The scrub passes every listed name, once, to the remover — proven over
+    /// an injected remover rather than the process environment, which sibling
+    /// tests in this binary read concurrently.
     #[test]
-    fn scrub_env_removes_every_listed_variable() {
-        std::env::set_var("HTTPS_PROXY", "http://proxy.test:3128");
-        std::env::set_var("VAULT_SKIP_VERIFY", "");
-        scrub_env();
+    fn scrub_removes_every_listed_variable_exactly_once() {
+        let mut removed: Vec<String> = vec![];
+        scrub_with(|k| removed.push(k.to_string()));
+        assert_eq!(removed.len(), SCRUBBED_ENV.len());
         for k in SCRUBBED_ENV {
-            assert!(std::env::var_os(k).is_none(), "{k} survived the scrub");
+            assert_eq!(removed.iter().filter(|r| r == k).count(), 1, "{k}");
         }
     }
 }

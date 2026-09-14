@@ -25,6 +25,10 @@ pub enum VaultError {
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
     /// credentials; the CA cert cannot protect a plaintext connection).
     InvalidAddr(String),
+    /// A Vault MOUNT name in `maknae.yaml` (`vault.approle_mount`,
+    /// `vault.pki_int_mount`) failed the shape check (#240b). Its own variant:
+    /// the message names the key, never `vault.addr`.
+    InvalidMount(String),
     /// A file could not be read.
     Io {
         path: PathBuf,
@@ -104,6 +108,7 @@ impl std::fmt::Display for VaultError {
                  (a glob/slash would corrupt the plane URI-SAN)"
             ),
             VaultError::InvalidAddr(msg) => write!(f, "invalid vault.addr: {msg}"),
+            VaultError::InvalidMount(msg) => write!(f, "invalid Vault mount: {msg}"),
             VaultError::Io { path, source } => write!(f, "reading {}: {source}", path.display()),
             VaultError::InsecureCredential { path, detail } => {
                 write!(f, "refusing credential file {}: {detail}", path.display())

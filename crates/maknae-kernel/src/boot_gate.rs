@@ -194,6 +194,10 @@ pub fn egress_bounds_boot_gate(
     let Some(p) = provider else {
         return Ok(());
     };
+    // Since #240b `run.rs` refuses a failed load itself and only ever passes
+    // `Some` here with a provider; this arm is the pure gate's own contract
+    // (a library caller may pass `None`), kept so the gate never admits an
+    // undeclared bound on its own.
     let Some(b) = bounds else {
         return Err(EgressBoundsRefusal::Undeclared(format!(
             "{} is absent or unreadable",
@@ -599,6 +603,23 @@ mod tests {
         assert_eq!(
             audit_offload_boot_gate(&audit_cfg(Some(""))),
             Err(SiemOffloadUnsupported)
+        );
+    }
+
+    /// #240b: a bounds file that was READ and refused says so, with the
+    /// parser's reason, and never "could not be read".
+    #[test]
+    fn a_refused_bounds_file_says_refused_and_carries_the_reason() {
+        let m =
+            super::EgressBoundsRefusal::Refused("egress-bounds.yaml: 'vault' is required".into())
+                .to_string();
+        assert!(m.contains("were refused"), "{m}");
+        assert!(m.contains("'vault' is required"), "{m}");
+        assert!(!m.contains("could not be read"), "{m}");
+        let u = super::EgressBoundsRefusal::Undeclared("absent".into()).to_string();
+        assert!(
+            u.contains("could not be read") && u.contains("absent"),
+            "{u}"
         );
     }
 

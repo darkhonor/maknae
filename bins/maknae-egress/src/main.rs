@@ -59,9 +59,10 @@ fn main() {
         fail(e);
     }
 
+    // The error names the file (or the path that failed) itself.
     let bounds = match maknae_config::load_egress_bounds(&bounds_path) {
         Ok(b) => b,
-        Err(e) => fail(format!("{}: {e}", bounds_path.display())),
+        Err(e) => fail(e),
     };
 
     // Resolved ONCE, at startup, fail-closed. Never per request: a name lookup
