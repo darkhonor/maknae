@@ -427,8 +427,13 @@ destinations:                # #172: per-role egress allowlist for session.promp
   intent before the send and the outcome after it. With no provider, or before the
   deputy's socket exists, the prompt is refused with posture `unavailable` and reason
   `egress backend not ready`, and `Unauthorized` on the wire like every refusal — build
-  state is never disclosed there. *(Rewritten 2026-09-15: this bullet described the
-  `Unavailable`-only kernel.)*
+  state is never disclosed there. **The deputy's socket unit is preset-disabled and
+  nothing enables it for you:** after `egress-bounds.yaml` is complete, `sudo systemctl
+  enable --now maknae-egress.socket`, or every permitted prompt is refused as not ready
+  (enroll's closing hint says so; found by review round 6). The provider key the deputy
+  reads is cached for the life of its process: after rotating the key in Vault, or
+  changing the deputy's grant, `systemctl restart maknae-egress.service`. *(Rewritten
+  2026-09-15: this bullet described the `Unavailable`-only kernel.)*
 - **Boot refuses when a provider is registered but the deputy cannot be found.**
   `maknaed: refusing to start: a provider is registered but the egress deputy's account
   '_maknae-egress' does not exist on this host` — the package creates the account; on a

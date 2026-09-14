@@ -78,8 +78,8 @@ pub use maknae_security::{ClassificationPolicy, Level};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use provider::{
-    provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_PROVIDER_NAME_BYTES,
-    PROVIDER_SECTION,
+    provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_KEY_FIELD_BYTES,
+    MAX_PROVIDER_NAME_BYTES, PROVIDER_SECTION,
 };
 pub use transport::{
     transport_from_section, TransportConfig, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,

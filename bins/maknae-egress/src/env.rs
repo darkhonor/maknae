@@ -94,58 +94,79 @@ mod tests {
         assert!(!SCRUBBED_ENV.contains(&"CREDENTIALS_DIRECTORY"));
     }
 
-    /// The deputy's unit carries EVERY hardening line maknaed's unit carries
-    /// (ProtectHome differs by design: `yes` here, `read-only` there), and
-    /// NEITHER carries the two directives maknaed's unit records as a
-    /// measured SIGSYS crash-loop for aws-lc-fips — the module both binaries
-    /// install at start. Review round 5 found this unit with
-    /// MemoryDenyWriteExecute=yes and five of maknaed's lines missing.
+    /// The deputy's unit carries EVERY `[Service]` line maknaed's unit
+    /// carries, except a NAMED set that differs by design, and NEITHER carries
+    /// the two directives maknaed's unit records as a measured SIGSYS
+    /// crash-loop for aws-lc-fips — the module both binaries install at start.
+    /// Derived from the daemon's file, not an allowlist: a directive added to
+    /// maknaed.service is held to the deputy by default (review round 6; the
+    /// first version of this test was an allowlist that already missed
+    /// `AmbientCapabilities=`). Lines are trimmed, as systemd trims them.
     #[test]
     fn the_units_confinement_is_maknaeds_and_never_the_two_fips_incompatible_directives() {
         let deputy = include_str!("../../../packaging/common/maknae-egress.service");
         let daemon = include_str!("../../../packaging/common/maknaed.service");
-        for unit in [deputy, daemon] {
-            assert!(
-                !unit
-                    .lines()
-                    .any(|l| l.starts_with("MemoryDenyWriteExecute=")),
-                "MemoryDenyWriteExecute= crash-loops aws-lc-fips (measured)"
-            );
-            assert!(
-                !unit.lines().any(|l| l.starts_with("SystemCallFilter=~")),
-                "a subtractive SystemCallFilter crash-loops aws-lc-fips (measured)"
-            );
+        fn service_lines(unit: &str) -> Vec<&str> {
+            let mut in_service = false;
+            let mut out = Vec::new();
+            for raw in unit.lines() {
+                let l = raw.trim();
+                if l.starts_with('[') {
+                    in_service = l == "[Service]";
+                    continue;
+                }
+                if in_service && !l.is_empty() && !l.starts_with('#') {
+                    out.push(l);
+                }
+            }
+            out
         }
-        const HARDENING: &[&str] = &[
-            "ProtectSystem=",
-            "NoNewPrivileges=",
-            "CapabilityBoundingSet=",
-            "PrivateTmp=",
-            "PrivateDevices=",
-            "ProtectKernelTunables=",
-            "ProtectKernelModules=",
-            "ProtectKernelLogs=",
-            "ProtectControlGroups=",
-            "ProtectClock=",
-            "ProtectHostname=",
-            "RestrictNamespaces=",
-            "RestrictRealtime=",
-            "RestrictSUIDSGID=",
-            "LockPersonality=",
-            "SystemCallFilter=",
-            "SystemCallArchitectures=",
+        for unit in [deputy, daemon] {
+            for l in service_lines(unit) {
+                assert!(
+                    !l.starts_with("MemoryDenyWriteExecute="),
+                    "MemoryDenyWriteExecute= crash-loops aws-lc-fips (measured)"
+                );
+                assert!(
+                    !l.starts_with("SystemCallFilter=~"),
+                    "a subtractive SystemCallFilter crash-loops aws-lc-fips (measured)"
+                );
+            }
+        }
+        // Differ by design — each named, each with its reason in the units.
+        const DEPUTY_DIFFERS: &[&str] = &[
+            "ExecStart=",               // its own binary
+            "LoadCredentialEncrypted=", // its own sealed SecretID
+            "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
+            "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
+            "Restart=",
+            "RestartSec=",
+            "RuntimeDirectory=", // the deputy's is the socket unit's
+            "RuntimeDirectoryMode=",
+            "StandardError=",
+            "StandardOutput=",
+            "SupplementaryGroups=", // the daemon's socket-group gate
+            "SyslogIdentifier=",
+            "TimeoutStopSec=", // the daemon's drain chain; the deputy has no handler
+            "Type=",
+            "User=",
         ];
-        let daemon_lines: Vec<&str> = daemon
-            .lines()
-            .filter(|l| HARDENING.iter().any(|p| l.starts_with(p)))
-            .collect();
-        assert!(daemon_lines.len() >= HARDENING.len(), "{daemon_lines:?}");
-        for line in daemon_lines {
+        let deputy_lines = service_lines(deputy);
+        let mut held = 0;
+        for line in service_lines(daemon) {
+            if DEPUTY_DIFFERS.iter().any(|p| line.starts_with(p)) {
+                continue;
+            }
             assert!(
-                deputy.lines().any(|l| l == line),
+                deputy_lines.contains(&line),
                 "maknaed.service's `{line}` is missing from maknae-egress.service"
             );
+            held += 1;
         }
+        assert!(
+            held >= 17,
+            "only {held} hardening lines were held to the deputy"
+        );
     }
 
     /// The unit's `UnsetEnvironment=` is the SAME list — read from the shipped

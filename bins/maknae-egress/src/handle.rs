@@ -65,6 +65,14 @@ pub fn decide<'a>(
     if maknae_config::kv_fragment_is_acceptable(&req.key_vault_path).is_err() {
         return Err(Refusal::KeyPathMalformed);
     }
+    // The field inside the secret, held to the same shape the kernel's config
+    // path holds it to (no whitespace, bounded) — the other half of the
+    // secret-store address (review round 6).
+    if req.key_field.chars().any(char::is_whitespace)
+        || req.key_field.len() > maknae_config::MAX_KEY_FIELD_BYTES
+    {
+        return Err(Refusal::MalformedFrame);
+    }
     if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
@@ -116,6 +124,25 @@ mod tests {
                 Refusal::KeyPathOutsideBounds
             );
         }
+    }
+
+    /// The key FIELD is held to the kernel's shape too: whitespace or an
+    /// over-long name is a malformed frame, not a lookup miss in the deputy.
+    #[test]
+    fn a_key_field_with_whitespace_or_over_length_is_a_malformed_frame() {
+        let long = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES + 1);
+        for bad in ["api key", long.as_str()] {
+            let mut r = req("maknae/providers/openai");
+            r.key_field = bad.into();
+            assert_eq!(
+                decide(&r, &bounds()).map(|_| ()),
+                Err(Refusal::MalformedFrame),
+                "{bad}"
+            );
+        }
+        let mut ok = req("maknae/providers/openai");
+        ok.key_field = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
+        assert!(decide(&ok, &bounds()).is_ok());
     }
 
     /// A dot-segment under the prefix passes the prefix test and would reach

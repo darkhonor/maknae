@@ -182,12 +182,15 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the frame read, the PDP decision, the provider call, the
+    // group lookup, the frame read, the PDP decision, the verb's own blocking
+    // step under the same bound (the read PEP, the subject enumeration — a
+    // second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the provider call, the
     // response write (bounded by the read timeout), the close — then the
     // margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + GROUP_LOOKUP_TIMEOUT
         + Duration::from_millis(cfg.read_timeout_ms)
+        + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + egress_deadline
         + Duration::from_millis(cfg.read_timeout_ms)
@@ -3434,15 +3437,15 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
-        // + 0 + 5 + 1 + 10 = 36 s with no provider, plus the deadline with one
+        // + 5 + 0 + 5 + 1 + 10 = 41 s with no provider, plus the deadline with one
         let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(36)
+            Duration::from_secs(41)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(156)
+            Duration::from_secs(161)
         );
     }
 

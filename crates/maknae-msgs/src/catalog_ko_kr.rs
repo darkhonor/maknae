@@ -44,7 +44,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "CLI를 사용하기 전에 로그아웃 후 다시 로그인하거나 `newgrp maknae`를 실행하세요"
         }
         MsgId::EnrollEgressBoundsHint => {
-            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3) 그리고 chmod 0644로 설정하세요 — 그 전까지 maknae-egress는 시작되지 않아요"
+            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3), chmod 0644로 설정한 뒤: systemctl enable --now maknae-egress.socket — 소켓 유닛은 기본적으로 꺼져 있고, 켜기 전까지 허용된 프롬프트는 모두 준비되지 않음으로 거부돼요"
         }
         MsgId::EnrollEnableDaemonHint => {
             "다음 명령으로 데몬을 시작하세요: systemctl enable --now maknaed"
