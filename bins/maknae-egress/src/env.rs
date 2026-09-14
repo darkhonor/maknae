@@ -50,16 +50,14 @@ pub const SCRUBBED_ENV: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
-/// Remove every [`SCRUBBED_ENV`] variable. Called first thing in `main`, while
-/// the process is still single-threaded (the environment is process-global).
-pub fn scrub_env() {
-    scrub_with(|k| std::env::remove_var(k));
-}
-
-/// The scrub over an injected remover, so the test proves every listed name
-/// is passed to it WITHOUT mutating the test binary's real environment (which
-/// sibling tests read concurrently — the getenv/setenv race).
-fn scrub_with(mut remove: impl FnMut(&str)) {
+/// The scrub, over an injected remover. `main` passes `std::env::remove_var`
+/// — first thing, while the process is still single-threaded. Injected so the
+/// test proves every listed name is passed to it WITHOUT mutating the test
+/// binary's real environment (sibling tests read it concurrently — the
+/// setenv/getenv race, which is between a write and ANY read, not only of the
+/// same name). There is deliberately no zero-argument wrapper: one would be a
+/// production function no test could execute safely.
+pub fn scrub_with(mut remove: impl FnMut(&str)) {
     for k in SCRUBBED_ENV {
         remove(k);
     }
@@ -91,19 +89,6 @@ mod tests {
             assert!(SCRUBBED_ENV.contains(&must), "{must} must be scrubbed");
         }
         assert!(!SCRUBBED_ENV.contains(&"CREDENTIALS_DIRECTORY"));
-    }
-
-    /// The real scrub removes from the real environment. One variable only,
-    /// and one nothing else in this test binary reads (`VAULT_NAMESPACE` is
-    /// not read by vaultrs 0.8.0), so the process-global mutation cannot race
-    /// a sibling test's read; the full list is proven over the injected
-    /// remover above.
-    #[test]
-    fn scrub_env_really_removes_a_listed_variable_from_the_process() {
-        std::env::set_var("VAULT_NAMESPACE", "set-by-the-test");
-        assert!(std::env::var_os("VAULT_NAMESPACE").is_some());
-        scrub_env();
-        assert!(std::env::var_os("VAULT_NAMESPACE").is_none());
     }
 
     /// The unit's `UnsetEnvironment=` is the SAME list — read from the shipped
@@ -139,11 +124,14 @@ mod tests {
             src.find(needle)
                 .unwrap_or_else(|| panic!("{needle} not in main.rs"))
         };
-        let scrub = at("env::scrub_env()");
+        let scrub = at("env::scrub_with(");
         let fips = at("install_default_crypto_provider()");
+        let client = at("EgressVault::new(");
         let probe = at("vault.probe_login()");
         let listener = at("listen::from_init_system()");
         assert!(scrub < fips, "the scrub must precede the FIPS install");
+        assert!(scrub < client, "the scrub must precede any client");
+        assert!(fips < client, "the FIPS install must precede any client");
         assert!(probe < listener, "the probe must precede the listener");
     }
 

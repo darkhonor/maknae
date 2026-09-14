@@ -13,9 +13,9 @@
 //!
 //! What this client states, rather than inherits: **no redirects** at all (a
 //! redirect is a new destination), **HTTPS only** end to end, **no ambient
-//! proxy**, the deployment's Vault CA merged into the platform verifier (an
-//! extra anchor, not a pin — #318 records that gap), the same hard timeout the
-//! three constructors already applied, and no client identity.
+//! proxy**, the deployment's Vault CA as the ONLY trust anchor (a pin — the
+//! system store is not consulted on this leg), the same hard timeout the three
+//! constructors already applied, and no client identity.
 //!
 //! T3: constructs a network client. The two refusals it makes at construction
 //! (a missing or malformed CA; a plaintext URL) are unit-tested; that a
@@ -48,7 +48,14 @@ pub(crate) fn hardened_http_client(
     }
     reqwest::Client::builder()
         .tls_backend_rustls()
-        .tls_certs_merge(certs)
+        // PINNED: the deployment's Vault CA is the ONLY trust anchor for the
+        // Vault leg. `maknae enroll` copies exactly that anchor for each plane,
+        // so a certificate for the Vault hostname issued by any other CA —
+        // public, corporate MITM, anything in the system store — is refused.
+        // Round 7 of self-review: this was `tls_certs_merge` (system store plus
+        // the CA) with a comment calling a pin "not expressible"; it is one
+        // method call, and this is the deputy's most sensitive leg.
+        .tls_certs_only(certs)
         .redirect(reqwest::redirect::Policy::none())
         .https_only(true)
         .no_proxy()

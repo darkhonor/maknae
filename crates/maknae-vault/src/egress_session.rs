@@ -9,8 +9,9 @@
 //! **The invariant, stated by the review that found it missing (PR #317):**
 //! no token stands between reads, and a step that fails is never reported as
 //! a step that succeeded. `revoke-self` is therefore not best-effort. The
-//! deputy's AppRole issues PERIODIC tokens with no maximum TTL; a token whose
-//! revoke failed is usable server-side until its period lapses. So:
+//! deputy's AppRole role bounds its tokens to three uses and sixty seconds
+//! (`deploy/vault-pki`), so a token whose revoke failed is usable for at most
+//! that — but usable, so:
 //!
 //! - the boot probe is login AND revoke, and reports the revoke's failure;
 //! - a key read whose revoke failed WITHHOLDS the secret, so nothing enters
@@ -76,7 +77,7 @@ where
             "{read_err}; and revoke-self failed afterwards, leaving a usable token: {revoke_err}"
         ))),
         (Ok(_withheld), Err(revoke_err)) => Err(VaultError::Revoke(format!(
-            "the key read succeeded but revoke-self failed — the secret is withheld and the token is usable until its period lapses: {revoke_err}"
+            "the key read succeeded but revoke-self failed — the secret is withheld and the token stays usable until its uses or TTL run out: {revoke_err}"
         ))),
     }
 }

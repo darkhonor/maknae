@@ -32,7 +32,7 @@ fn main() {
     // FIRST of all, while single-threaded: nothing inherited from the
     // environment may choose where a connection goes or how it is verified
     // (`env.rs` says why "the unit's environment is clean" is not true).
-    env::scrub_env();
+    env::scrub_with(|k| std::env::remove_var(k));
 
     let mut args = std::env::args().skip(1);
     let mut bind: Option<PathBuf> = None;

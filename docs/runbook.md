@@ -416,6 +416,11 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **What a prompt carries.** Text-only content blocks (any other kind is refused before
   the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
   `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
+- **Egress deputy and a Vault outage (#240b).** The deputy probes a Vault login at
+  start and exits 1 if it fails, so during an outage every activation fails; systemd's
+  default trigger limit then stops `maknae-egress.socket` and it does NOT restart on
+  its own when Vault returns. Recovery: `systemctl reset-failed maknae-egress.socket &&
+  systemctl restart maknae-egress.socket`.
 - **Cooky refusal.** The kernel's egress backend is still `Unavailable` — the deputy
   exists and logs in to Vault (#240b), but `maknaed` does not route to it until #240's
   last item lands *(corrected 2026-09-14: this said "no egress process exists yet")*: a

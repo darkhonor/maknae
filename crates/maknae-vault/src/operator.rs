@@ -43,6 +43,11 @@ impl OperatorClient {
         ca_path: &std::path::Path,
         token: Zeroizing<String>,
     ) -> Result<Self, VaultError> {
+        // The same scheme guard as the two plane clients (self-review round 7
+        // found this the one constructor without it): a plaintext address is
+        // refused by NAME here, before the operator token and three SecretIDs
+        // would ride it. vaultrs's `address()` setter unwraps a URL parse.
+        crate::config::validate_vault_addr(addr)?;
         // A HARD per-request HTTP timeout on every Vault operation this client makes
         // during `maknae enroll` (role-id read, secret-id mint/destroy, CA-chain
         // fetch) — matches `client.rs`'s `from_document_with_secret` exactly (same

@@ -53,8 +53,8 @@ profile maknae-egress /usr/bin/maknae-egress {
 
   # #240b: the two OUTBOUND legs (the inbound one, AF_UNIX, is below).
   # Vault (the AppRole login and the KV read,
-  # with /etc/maknae/egress/vault-ca.crt added as an EXTRA trust anchor beside
-  # the system store — vaultrs merges, it cannot pin) and the provider
+  # with /etc/maknae/egress/vault-ca.crt PINNED as the only trust anchor on
+  # that leg — maknae-vault's own HTTP client, not vaultrs's) and the provider
   # (TLS verified against the SYSTEM trust store — reqwest's platform verifier
   # reads the distribution bundle on Linux, which is what abstractions/ssl_certs
   # grants). WHICH endpoint is reached is the kernel's decision over root-owned

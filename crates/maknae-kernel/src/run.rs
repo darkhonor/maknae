@@ -2791,13 +2791,17 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         Some(_) => Some(
             maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
                 .map_err(|e| {
+                    // Only an I/O failure is "could not be read"; a YAML syntax
+                    // error, a duplicate key or a shape refusal all mean the
+                    // file WAS read (round 7: the first cut matched one refusal
+                    // variant and sent every other parser error to the
+                    // permissions message).
                     let refusal = match e {
-                        maknae_config::ConfigError::InvalidEgressBounds(_) => {
-                            crate::boot_gate::EgressBoundsRefusal::Refused(e.to_string())
+                        maknae_config::ConfigError::Io(_)
+                        | maknae_config::ConfigError::PermissionsUnsupported => {
+                            crate::boot_gate::EgressBoundsRefusal::Undeclared(e.to_string())
                         }
-                        other => {
-                            crate::boot_gate::EgressBoundsRefusal::Undeclared(other.to_string())
-                        }
+                        other => crate::boot_gate::EgressBoundsRefusal::Refused(other.to_string()),
                     };
                     RunError::Other(format!("refusing to start: {refusal}"))
                 })?,

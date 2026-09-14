@@ -37,10 +37,9 @@ use zeroize::Zeroizing;
 pub const EGRESS_APPROLE_ROLE: &str = "maknae-egress";
 /// The RoleID file `maknae enroll` writes into the deputy's credential dir.
 pub const EGRESS_ROLE_ID_FILE: &str = "maknae-egress-approle-id";
-/// The deputy's own copy of the Vault TLS CA, beside the RoleID. An EXTRA
-/// trust anchor beside the system store, not a pin: vaultrs merges `ca_certs`
-/// into the platform verifier (`tls_certs_merge`), and pinning the Vault leg
-/// to this CA alone is not expressible through it (#318 records the gap).
+/// The deputy's own copy of the Vault TLS CA, beside the RoleID — the ONLY
+/// trust anchor on the Vault leg (`http.rs` pins with `tls_certs_only`; the
+/// client vaultrs would have built merged it into the system store).
 pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
 /// The same hard per-request timeout as the two plane clients, for the same
 /// reason: vaultrs defaults to an UNBOUNDED reqwest client, and a hung Vault
@@ -104,21 +103,26 @@ impl EgressVault {
         Ok(Self { settings, auth })
     }
 
-    /// A fresh client per login. `VaultClient::new` reads and parses the CA
-    /// file again each time — the honest cost of holding no client between
-    /// reads, paid once per destination for the life of the process. It also
-    /// means a CA file replaced between reads is picked up by the next one,
-    /// which is the behaviour a rotated Vault CA wants.
+    /// A fresh client per login. The CA file is read and parsed again each
+    /// time — twice, in fact: once by vaultrs's own builder and once by
+    /// `http.rs`'s — the honest cost of holding no client between reads, paid
+    /// once per destination for the life of the process. It also means a CA
+    /// file replaced between reads is picked up by the next one, which is the
+    /// behaviour a rotated Vault CA wants.
     fn client(settings: &VaultClientSettings) -> Result<VaultClient, VaultError> {
         let mut client = VaultClient::new(settings.clone())
             .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))?;
-        // The client vaultrs built follows redirects and is not HTTPS-only;
-        // the one that actually sends is `http.rs`'s (no redirects, HTTPS
-        // only, no proxy) — see that module for the downgrade it prevents.
+        // The client vaultrs built follows redirects, is not HTTPS-only and
+        // merges the CA into the system store; the one that actually sends is
+        // `http.rs`'s (no redirects, HTTPS only, no proxy, the CA pinned).
+        let ca = settings
+            .ca_certs
+            .first()
+            .ok_or_else(|| VaultError::Auth("no Vault CA configured for the deputy".into()))?;
         crate::http::harden(
             &mut client,
             settings.address.as_str(),
-            Path::new(&settings.ca_certs[0]),
+            Path::new(ca),
             VAULT_HTTP_TIMEOUT,
         )?;
         Ok(client)
