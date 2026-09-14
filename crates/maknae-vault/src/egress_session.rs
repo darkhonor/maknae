@@ -9,7 +9,7 @@
 //! **The invariant, stated by the review that found it missing (PR #317):**
 //! no token stands between reads, and a step that fails is never reported as
 //! a step that succeeded. `revoke-self` is therefore not best-effort. The
-//! deputy's AppRole role bounds its tokens to three uses and sixty seconds
+//! deputy's AppRole role bounds its tokens to three uses and two minutes
 //! (`deploy/vault-pki`), so a token whose revoke failed is usable for at most
 //! that — but usable, so:
 //!
@@ -17,6 +17,11 @@
 //! - a key read whose revoke failed WITHHOLDS the secret, so nothing enters
 //!   the process-wide cache on the strength of a token the deputy knows it
 //!   left behind, and the refusal names the token it left.
+//!
+//! Stated plainly: "no token stands between reads" is a SERVER-side property.
+//! The token string itself lives in plain `String`s inside vaultrs's client
+//! and settings for the session and is not wiped on drop — the same shape as
+//! the daemon's plane client, and not changed here.
 
 use crate::VaultError;
 use std::future::Future;
@@ -187,7 +192,8 @@ mod tests {
     }
 
     /// THE finding (PR #317, four heads): a successful read whose revoke failed
-    /// must NOT return the secret. The token is usable until its period; the
+    /// must NOT return the secret. The token stays usable until its uses or
+    /// TTL run out; the
     /// refusal names that, and nothing reaches the cache.
     #[test]
     fn a_successful_read_whose_revoke_failed_withholds_the_secret() {

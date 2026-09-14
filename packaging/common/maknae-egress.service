@@ -21,7 +21,7 @@ LoadCredentialEncrypted=maknae-egress-secret-id:/etc/maknae/private/maknae-egres
 # reqwest honours the proxy variables by default and vaultrs fills VAULT_* from
 # the environment; either would move or unverify a leg the kernel decided on.
 # SSL_CERT_FILE/SSL_CERT_DIR REPLACE the platform verifier's root store on
-# both legs (rustls-native-certs). The deputy also removes these itself at
+# the provider leg (rustls-native-certs; the Vault leg is pinned). The deputy also removes these itself at
 # start (src/env.rs, which holds this line equal to its list); this is the
 # init-system half.
 UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR

@@ -367,9 +367,9 @@ impl PlaneClient {
             // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
             // any value other than 0/f/false — the empty string included.
             // The proxy and identity env defaults do not reach the request
-            // either: the client that actually sends is `http.rs`'s. What
-            // #318 still owes the daemon and the CLI is the environment scrub
-            // for the root-store variables the platform verifier reads.
+            // either, and neither do the root-store variables: the client
+            // that actually sends is `http.rs`'s, pinned to the Vault CA with
+            // no platform verifier on this leg at all.
             .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()

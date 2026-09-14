@@ -631,6 +631,11 @@ created by the package; the files are written by `maknae enroll`, never by hand)
 └── vault-ca.crt               # 0640 root:_maknae-egress — the Vault TLS anchor, a copy
 ```
 
+`vault-ca.crt` is the ONLY trust anchor on the Vault leg, for all three planes: the system
+store is not consulted there. An operator whose Vault presents a publicly issued
+certificate must put that public root (or the issuing intermediate) in the file they hand
+`--vault-ca`; an empty or non-PEM file is a construction-time refusal naming the path.
+
 The SecretID is not here: enroll seals it to `/etc/maknae/private/maknae-egress-secret-id.cred`
 (`0400 root:root`), and `maknae-egress.service`'s `LoadCredentialEncrypted=` has systemd
 decrypt it into `$CREDENTIALS_DIRECTORY` at unit start.

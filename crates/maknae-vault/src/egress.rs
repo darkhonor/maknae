@@ -7,8 +7,8 @@
 //!
 //! **Login per read, revoke after — and revoke is NOT best-effort.** The
 //! deputy reads a key once per destination for the life of the process
-//! (`keys.rs`'s cache). A token acquired at boot would sit unrenewed past
-//! `token_period` and fail the next uncached read with a 403; the daemon's
+//! (`keys.rs`'s cache). A token acquired at boot would sit unused and expire
+//! long before the next uncached read; the daemon's
 //! renewal supervisor is disproportionate for a process that makes a handful
 //! of reads. So each read is login → read → `revoke-self`, and no token
 //! stands between reads. How those three compose — a failed revoke is a
@@ -43,7 +43,9 @@ pub const EGRESS_ROLE_ID_FILE: &str = "maknae-egress-approle-id";
 pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
 /// The same hard per-request timeout as the two plane clients, for the same
 /// reason: vaultrs defaults to an UNBOUNDED reqwest client, and a hung Vault
-/// must surface as an error the deputy can name.
+/// must surface as an error the deputy can name. The deputy's role sets its
+/// token TTL above TWICE this (`deploy/vault-pki`, 120 s), so the read and the
+/// revoke both fit inside one token's life on a slow-but-alive Vault.
 const VAULT_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Read the deputy's AppRole halves: the RoleID from

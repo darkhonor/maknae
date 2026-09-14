@@ -10,7 +10,8 @@
 //! settings from the environment (seven names in its `client.rs`); and the
 //! platform verifier's root store — `rustls-native-certs`, one dependency
 //! further down the same reqwest build — is REPLACED, not extended, by
-//! `SSL_CERT_FILE`/`SSL_CERT_DIR` (self-review round 4: the first two families
+//! `SSL_CERT_FILE`/`SSL_CERT_DIR` on the provider leg, the one that uses the
+//! platform verifier (self-review round 4: the first two families
 //! decide where a connection goes, the third decides how it is verified, and
 //! the third turns an inherited variable directly into the provider key in
 //! an attacker's hands). So the deputy names what it will not inherit and
@@ -45,7 +46,9 @@ pub const SCRUBBED_ENV: &[&str] = &[
     // so a future version that starts reading it cannot do so silently.
     "VAULT_NAMESPACE",
     // rustls-native-certs: either of these REPLACES the system trust store
-    // for the platform verifier, on both legs.
+    // for the platform verifier — the PROVIDER leg's verifier. (The Vault leg
+    // is pinned to the deployment CA by maknae-vault's own client and never
+    // consults the platform store.)
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 ];
@@ -124,7 +127,10 @@ mod tests {
             src.find(needle)
                 .unwrap_or_else(|| panic!("{needle} not in main.rs"))
         };
-        let scrub = at("env::scrub_with(");
+        // The WHOLE call site, remover included: `scrub_with(|_| {})` would
+        // keep every other assertion here green while the deputy inherited
+        // HTTPS_PROXY again.
+        let scrub = at("env::scrub_with(|k| std::env::remove_var(k))");
         let fips = at("install_default_crypto_provider()");
         let client = at("EgressVault::new(");
         let probe = at("vault.probe_login()");

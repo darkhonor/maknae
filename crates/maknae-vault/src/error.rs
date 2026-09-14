@@ -48,10 +48,11 @@ pub enum VaultError {
     /// AppRole login failed.
     Auth(String),
     /// #240b: a token the deputy created could not be revoked. Named on its
-    /// own because the consequence is its own: a periodic token with no
-    /// maximum TTL stays usable server-side until its period lapses, so the
-    /// probe that hit this is a failed probe and a read that hit this
-    /// withholds its secret.
+    /// own because the consequence is its own: the deputy's role bounds its
+    /// tokens to three uses and a short TTL (`deploy/vault-pki`), so the
+    /// leftover token is usable for seconds and at most two more requests —
+    /// usable, so the probe that hit this is a failed probe and a read that
+    /// hit this withholds its secret.
     Revoke(String),
     /// Local keypair / CSR generation failed.
     CsrGen(String),

@@ -187,6 +187,29 @@ impl std::fmt::Display for EgressBoundsRefusal {
 /// boot check is the more valuable half, because it catches the operator's
 /// typo before anything runs rather than turning it into a confusing refusal
 /// on a live request.
+/// Which refusal a failed bounds LOAD is (#240b). Pure, over the loader's own
+/// error taxonomy, so the mapping is tested with real values rather than
+/// inferred from a variant name (round 8 of self-review: an absent file is
+/// `ConfigError::NotFound`, not `Io`, and a match written against the name
+/// sent the single most common operator state — no file — to "refused").
+///
+/// `Undeclared` — the file could not be READ: absent, unreadable, a symlink,
+/// insecure permissions, an unsupported platform. The operator's next step is
+/// on the file's existence or mode. `Refused` — the file WAS read and its
+/// content was refused: a YAML error, a duplicate key, a shape refusal. The
+/// next step is in the file's content.
+pub fn classify_bounds_load_error(e: maknae_config::ConfigError) -> EgressBoundsRefusal {
+    use maknae_config::ConfigError;
+    match e {
+        ConfigError::Io(_)
+        | ConfigError::NotFound { .. }
+        | ConfigError::Symlink { .. }
+        | ConfigError::InsecurePermissions { .. }
+        | ConfigError::PermissionsUnsupported => EgressBoundsRefusal::Undeclared(e.to_string()),
+        other => EgressBoundsRefusal::Refused(other.to_string()),
+    }
+}
+
 pub fn egress_bounds_boot_gate(
     provider: Option<&maknae_config::ProviderConfig>,
     bounds: Option<&maknae_config::EgressBounds>,
@@ -209,6 +232,13 @@ pub fn egress_bounds_boot_gate(
             path: p.key_vault_path.clone(),
             prefix: b.key_vault_path_prefix.clone(),
         });
+    }
+    // The deputy's Vault address is validated at BOOT too (#240b, round 8):
+    // the config crate deliberately checks only shape ("one validator"), and
+    // "discovering this at boot is the point" applies to a plaintext scheme
+    // as much as to a path outside the grant.
+    if let Err(e) = maknae_vault::validate_vault_addr(&b.vault_addr) {
+        return Err(EgressBoundsRefusal::Refused(format!("vault.addr: {e}")));
     }
     Ok(())
 }
@@ -604,6 +634,58 @@ mod tests {
             audit_offload_boot_gate(&audit_cfg(Some(""))),
             Err(SiemOffloadUnsupported)
         );
+    }
+
+    /// THE classifier, over REAL loader errors — round 8 of self-review found
+    /// the previous test asserting only the Display of a hand-built variant,
+    /// which cannot see a wrong mapping. An absent file is `NotFound`, and it
+    /// must be "could not be read"; a parse refusal must be "refused".
+    #[test]
+    fn a_failed_bounds_load_is_classified_by_what_happened_not_by_variant_name() {
+        use maknae_config::ConfigError;
+        let undeclared = |e: ConfigError| match super::classify_bounds_load_error(e) {
+            super::EgressBoundsRefusal::Undeclared(m) => m,
+            other => panic!("expected Undeclared, got {other}"),
+        };
+        let refused = |e: ConfigError| match super::classify_bounds_load_error(e) {
+            super::EgressBoundsRefusal::Refused(m) => m,
+            other => panic!("expected Refused, got {other}"),
+        };
+        // could not be read: absent, unreadable, a symlink, insecure mode
+        assert!(undeclared(ConfigError::NotFound {
+            path: "/etc/maknae/egress-bounds.yaml".into()
+        })
+        .contains("egress-bounds.yaml"));
+        undeclared(ConfigError::Io("permission denied".into()));
+        undeclared(ConfigError::Symlink {
+            path: "/etc/maknae/egress-bounds.yaml".into(),
+        });
+        undeclared(ConfigError::InsecurePermissions {
+            path: "/etc/maknae/egress-bounds.yaml".into(),
+            mode: 0o666,
+        });
+        // read and refused: the content
+        let m = refused(ConfigError::InvalidEgressBounds(
+            "'vault' is required".into(),
+        ));
+        assert!(m.contains("'vault' is required"), "{m}");
+        refused(ConfigError::DuplicateKey {
+            key: "kv_mount".into(),
+            line: 3,
+            col: 1,
+        });
+    }
+
+    /// #240b: a plaintext Vault address in the bounds file is a BOOT refusal,
+    /// not a first-request failure in the deputy.
+    #[test]
+    fn a_plaintext_vault_addr_in_the_bounds_is_refused_at_boot() {
+        let mut b = bounds("maknae/providers");
+        b.vault_addr = "http://vault.example:8200".into();
+        match super::egress_bounds_boot_gate(Some(&provider("maknae/providers/openai")), Some(&b)) {
+            Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("vault.addr"), "{m}"),
+            other => panic!("expected a Refused naming vault.addr, got {other:?}"),
+        }
     }
 
     /// #240b: a bounds file that was READ and refused says so, with the
