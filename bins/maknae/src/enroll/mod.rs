@@ -1192,6 +1192,20 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
 /// loader's `0o022` mask and is refused, so the loader's check is not weakened.
 const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:rx";
 
+/// The `getfacl` line [`EGRESS_TRAVERSAL_ACL`] must read back as — derived
+/// from the constant, never a second copy of its permissions: `u:NAME:rx`
+/// renders as `user:NAME:r-x`. Matched at line START, so a `default:user:…`
+/// entry (inheritance for new files, no access on the directory itself)
+/// cannot satisfy it.
+fn egress_traversal_acl_readback() -> String {
+    let (who, perms) = EGRESS_TRAVERSAL_ACL
+        .rsplit_once(':')
+        .expect("the ACL constant is u:NAME:PERMS");
+    let name = who.strip_prefix("u:").expect("a user entry");
+    let bit = |c: char| if perms.contains(c) { c } else { '-' };
+    format!("user:{name}:{}{}{}", bit('r'), bit('w'), bit('x'))
+}
+
 /// Apply [`EGRESS_TRAVERSAL_ACL`] to `/etc/maknae` (Linux, root context). Warn
 /// on failure, as `grant_read_path_access` does: enrollment establishes
 /// identity; without the entry the deputy refuses to start, naming its bounds
@@ -1213,23 +1227,28 @@ fn grant_egress_traversal(verbose: bool) {
             let back = std::process::Command::new("getfacl")
                 .args(["-p", "/etc/maknae"])
                 .output();
+            let want = egress_traversal_acl_readback();
             let seen = back
                 .as_ref()
-                .map(|o| String::from_utf8_lossy(&o.stdout).contains("user:_maknae-egress:r-x"))
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l.trim() == want)
+                })
                 .unwrap_or(false);
             if !seen {
                 eprintln!(
-                    "maknae enroll: the ACL entry did not read back (getfacl shows no user:_maknae-egress:r-x on /etc/maknae); the egress deputy cannot start until it does"
+                    "maknae enroll: the ACL entry did not read back (getfacl shows no `{want}` on /etc/maknae); the egress deputy cannot start until it does"
                 );
             }
         }
         Ok(o) => eprintln!(
-            "maknae enroll: setfacl failed ({}); the egress deputy cannot open /etc/maknae/egress-bounds.yaml until /etc/maknae grants _maknae-egress x: {}",
+            "maknae enroll: setfacl failed ({}); the egress deputy cannot open /etc/maknae/egress-bounds.yaml until /etc/maknae carries the ACL entry `{EGRESS_TRAVERSAL_ACL}` (r-x: the anchored reader opens the directory): {}",
             o.status,
             String::from_utf8_lossy(&o.stderr).trim()
         ),
         Err(e) => eprintln!(
-            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or grant _maknae-egress x on /etc/maknae — the egress deputy refuses to start until then"
+            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or apply `setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae` by hand (r-x: the anchored reader opens the directory) — the egress deputy refuses to start until then"
         ),
     }
 }
@@ -1801,6 +1820,25 @@ mod tests {
             !perms.contains('w'),
             "a write entry trips the loader's 0o022 mask: {perms}"
         );
+        // The read-back line is DERIVED from the constant: `rx` -> `r-x`.
+        assert_eq!(egress_traversal_acl_readback(), "user:_maknae-egress:r-x");
+        // And no operator-facing string in this file tells anyone to grant a
+        // bare `x` — round 2 of self-review found two that did, after the
+        // constant had been corrected.
+        // (Composed at runtime: `include_str!` includes THIS test, so a
+        // literal pattern here would match itself.)
+        let src = include_str!("mod.rs");
+        let x = 'x';
+        for bad in [
+            format!("grant _maknae-egress {x} "),
+            format!("grants _maknae-egress {x}:"),
+            format!("egress {x} on"),
+        ] {
+            assert!(
+                !src.contains(&bad),
+                "an operator message still says x-only: {bad:?}"
+            );
+        }
     }
 
     /// The name each seal embeds is the name the plane's UNIT loads — read

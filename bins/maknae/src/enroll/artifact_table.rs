@@ -201,9 +201,9 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
             0o640,
             ContentKind::SealedDaemonSecret,
         ));
-        // A placeholder like the daemon's (enroll refuses at the daemon's SEP
-        // seal first; #227 designs macOS custody) — but under the DEPUTY's
-        // group, never the daemon's.
+        // A placeholder like the daemon's (on a packaged macOS host enroll
+        // refuses at the daemon's SEP seal; #227 designs macOS custody) — but
+        // under the DEPUTY's group, never the daemon's.
         rows.push(row(
             etc.join("private/maknae-egress-secret-id.sep"),
             Owner::RootMaknaeEgressGroup,
