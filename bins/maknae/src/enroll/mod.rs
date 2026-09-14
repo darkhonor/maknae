@@ -86,6 +86,10 @@ pub enum EnrollError {
     MissingToken,
     /// `--vault-addr` could not be parsed into a host:port to reachability-probe.
     InvalidVaultAddr(String),
+    /// `--approle-mount` / `--pki-int-mount` failed the mount shape check
+    /// (#240b). Its own variant: the message names the flag, never
+    /// `--vault-addr`.
+    InvalidVaultMount(String),
     /// The reachability probe (spec §4.1 step 1) could not reach Vault.
     VaultUnreachable { addr: String, detail: String },
     /// The fetched issuer chain was empty/malformed, or omitted the root with
@@ -150,6 +154,7 @@ impl std::fmt::Display for EnrollError {
             EnrollError::InvalidVaultAddr(addr) => {
                 write!(f, "cannot parse --vault-addr {addr:?} as host:port")
             }
+            EnrollError::InvalidVaultMount(msg) => write!(f, "invalid Vault mount: {msg}"),
             EnrollError::VaultUnreachable { addr, detail } => {
                 write!(f, "cannot reach Vault at {addr}: {detail}")
             }
@@ -1408,9 +1413,9 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     // `auth/` prefix or a malformed path is refused HERE by name, not as a
     // 404 on the first RoleID read (#240b self-review).
     maknae_config::mount_path_is_acceptable(&args.approle_mount)
-        .map_err(|why| EnrollError::InvalidVaultAddr(format!("--approle-mount {why}")))?;
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
     maknae_config::mount_path_is_acceptable(&args.pki_int_mount)
-        .map_err(|why| EnrollError::InvalidVaultAddr(format!("--pki-int-mount {why}")))?;
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("--pki-int-mount {why}")))?;
     let vault_ca_path = resolve_vault_ca_path(args);
     let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
         path: vault_ca_path.clone(),
@@ -1875,6 +1880,20 @@ mod tests {
             loaded_name(egress),
             maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME
         );
+    }
+
+    /// The mount refusal renders under its OWN identity, naming the flag —
+    /// round 6 of self-review found it rendering as "cannot parse
+    /// --vault-addr … as host:port" for an --approle-mount defect.
+    #[test]
+    fn a_mount_refusal_names_the_flag_and_never_vault_addr() {
+        let why = maknae_config::mount_path_is_acceptable("auth/maknae-approle").unwrap_err();
+        let m = EnrollError::InvalidVaultMount(format!("--approle-mount {why}")).to_string();
+        assert!(
+            m.starts_with("invalid Vault mount: --approle-mount starts with 'auth'"),
+            "{m}"
+        );
+        assert!(!m.contains("vault-addr") && !m.contains("host:port"), "{m}");
     }
 
     // ---- canonical_home (#216) ---------------------------------------------
