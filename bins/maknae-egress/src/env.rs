@@ -93,6 +93,19 @@ mod tests {
         assert!(!SCRUBBED_ENV.contains(&"CREDENTIALS_DIRECTORY"));
     }
 
+    /// The real scrub removes from the real environment. One variable only,
+    /// and one nothing else in this test binary reads (`VAULT_NAMESPACE` is
+    /// not read by vaultrs 0.8.0), so the process-global mutation cannot race
+    /// a sibling test's read; the full list is proven over the injected
+    /// remover above.
+    #[test]
+    fn scrub_env_really_removes_a_listed_variable_from_the_process() {
+        std::env::set_var("VAULT_NAMESPACE", "set-by-the-test");
+        assert!(std::env::var_os("VAULT_NAMESPACE").is_some());
+        scrub_env();
+        assert!(std::env::var_os("VAULT_NAMESPACE").is_none());
+    }
+
     /// The unit's `UnsetEnvironment=` is the SAME list — read from the shipped
     /// unit, so adding a name to one half and not the other goes red here.
     #[test]
