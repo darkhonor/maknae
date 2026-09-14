@@ -20,7 +20,6 @@ The failure it prevents is specific and has happened in this repository. A revie
 
 - **Desired-state descriptions** — where a subsystem is going, before an ADR decides it.
 - **Orientation documents** — how Maknae relates to the wider field, what it does differently, and why.
-- **System cards** — the per-milestone evidence summary, assembled from artifacts that *are* authoritative, and clearly marking what is not yet established.
 
 ## What does NOT belong here
 
@@ -28,6 +27,12 @@ The failure it prevents is specific and has happened in this repository. A revie
 - Anything asserting a mechanism for something unbuilt. That is the [ADR-0023](../adr/ADR-0023-runtime-loop-role-and-placement.md) lesson: *an ADR states decisions and properties; mechanisms for unbuilt things belong in their issues*. Intent documents state **properties and boundaries**, never mechanisms.
 - Decisions. If it decides, it is an ADR.
 
-## The one exception to non-authority
+## The placement rule — one test, no exceptions
 
-A **system card** may *quote* authoritative evidence — a gate's output, a coverage floor, a mutation result — and that quotation carries exactly the authority of its source, no more. The card is a cover page over evidence, not evidence. **A quotation that cannot be traced to a gate, an ADR, or a measured run does not belong in a card.**
+**If a document is assembled from evidence, it is not intent, and it does not live here.** Whatever it is called.
+
+A per-milestone evidence summary — a control-evidence index, an assurance case, a body of evidence — is *derived* from gate output, coverage floors, mutation results and ADRs. Derived means it can be regenerated and checked, which is the definition of authoritative in this repository. Putting it here would attach a "do not cite this" banner to the one artifact an assessor most needs to cite.
+
+The corollary, which is the useful half: **intent documents may not quote evidence to borrow its weight.** If a passage here needs a gate's output to make its point, the passage belongs in the derived artifact instead. This directory states what we are trying to build; it never reports what was measured.
+
+*(Recorded 2026-09-14 after this README shipped a draft listing "system cards" as belonging here, with a special exception for their quoted evidence, while its companion document concluded the opposite — that the artifact is a control-evidence index, is derived, and belongs elsewhere. A directory contract whose purpose is an unambiguous category boundary cannot carry two classifications. Found in review.)*
