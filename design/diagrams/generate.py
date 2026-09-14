@@ -8,7 +8,7 @@ WHAT THIS DERIVES, AND FROM WHAT. Every fact rendered comes from something that
 ENFORCES it, never from something that merely describes it:
 
   TCB membership   ci/gates/lib.sh   — the list P1 actually polices
-  binary linkage   rust-audit-info   — the real transitive closure in the artifact
+  bin dependencies cargo metadata    — the resolved closure per bin, from source
   members/bins     cargo metadata    — the workspace itself
 
 `packaging/isolation-contract.md` is deliberately NOT a source: it mirrors
@@ -84,15 +84,52 @@ def workspace() -> dict:
     return {"crates": sorted(members), "bins": sorted(bins)}
 
 
-def linkage(binaries: list[str]) -> dict:
-    """The REAL closure per artifact, from the cargo-auditable inventory."""
+def dep_closure(binaries: list[str]) -> dict:
+    """The closure per artifact, from cargo's RESOLVE GRAPH -- not from a
+    compiled binary.
+
+    The failure this fixes (maintainer, #314): this read `rust-audit-info` off
+    `target/release/<bin>` and `sys.exit`ed when one was absent, so EVERY
+    diagram -- including ones whose only inputs are a TOML file and a git sha
+    -- required a release build of all four binaries. On this project that is
+    a FIPS cryptographic module build, and on a host whose gcc the module's
+    delocate step cannot handle it is not merely slow but impossible. **The
+    code does not require a binary to map.** A diagram is not mission-critical
+    code and must never inherit its build.
+
+    Same question, answered from source: walk `resolve.nodes` from each bin
+    package over normal-kind edges only. dev- and build-dependencies are
+    excluded for the reason `crate_graph` excludes them -- they are in no
+    shipped artifact, so they are not part of what these diagrams claim.
+    `--filter-platform` keeps the answer to the host triple rather than the
+    union of every platform's deps, which is the fidelity the SBOM had and a
+    naive metadata read would lose.
+    """
+    triple = sh("rustc", "-vV").split("host: ")[1].split("\n")[0].strip()
+    meta = json.loads(sh("cargo", "metadata", "--format-version", "1",
+                         "--filter-platform", triple))
+    by_id = {p["id"]: p["name"] for p in meta["packages"]}
+    roots = {p["name"]: p["id"] for p in meta["packages"]
+             if p["id"] in set(meta["workspace_members"])}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+
+    def closure(root: str) -> set:
+        seen, stack = {root}, [root]
+        while stack:
+            for d in nodes[stack.pop()]["deps"]:
+                kinds = {k.get("kind") for k in d.get("dep_kinds", [])}
+                if kinds and not kinds & {None, "null"}:
+                    continue  # dev- or build-only edge
+                if d["pkg"] not in seen:
+                    seen.add(d["pkg"])
+                    stack.append(d["pkg"])
+        return seen
+
     out = {}
     for b in binaries:
-        art = ROOT / "target" / "release" / b
-        if not art.exists():
-            sys.exit(f"missing {art} — run:  cargo auditable build -p {b} --release")
-        inv = json.loads(sh("rust-audit-info", str(art)))
-        out[b] = sorted({p["name"] for p in inv.get("packages", [])})
+        if b not in roots:
+            sys.exit(f"{b} is not a workspace member -- cargo metadata knows nothing of it")
+        out[b] = sorted({by_id[i] for i in closure(roots[b])})
     return out
 
 
@@ -308,10 +345,15 @@ def footer(w, h, note):
                    fill=MUTED, anchor="end"))
 
 
-# --- D2: crate x binary linkage matrix ------------------------------------
+# --- D2: crate x binary dependency matrix ---------------------------------
 
 def d2_matrix(gates, ws, links, prov) -> str:
-    """What each shipped artifact ACTUALLY links, and which cells a gate refuses.
+    """Which crates each artifact can REACH through its dependency graph, and
+    which cells a gate refuses.
+
+    Source-level reachability, NOT linker-retained content -- see the caption
+    and `dep_closure`. Renamed from "linkage" on #314 review: the old wording
+    claimed artifact inspection this no longer performs.
 
     A matrix, not a graph — no layout engine needed. Shaped after DoDAF SV-6's
     resource-flow matrix; the cells carry UML stereotypes.
@@ -333,9 +375,9 @@ def d2_matrix(gates, ws, links, prov) -> str:
     w = x0 + colw * len(bins) + 40
 
     p = [box(24, 24, w - 48, h - 64, "#FFFFFF", MUTED, rx=16),
-         text(44, 52, "Crate × binary linkage, and what the gates refuse", 15, "600"),
-         text(44, 72, "Derived from the cargo-auditable inventory of each built artifact — the real "
-                      "transitive closure, not declared dependencies.", 11, fill=MUTED),
+         text(44, 52, "Crate × binary dependency reachability, and what the gates refuse", 15, "600"),
+         text(44, 72, "Source-level reachability from cargo's resolve graph (host triple, "
+                      "normal-kind edges) — NOT proof the linker retained the crate.", 11, fill=MUTED),
          text(44, 88, "«» denotes a UML stereotype. A refused cell is refused by gate P1's "
                       "per-consumer allowlist, not merely absent today.", 11, fill=MUTED)]
 
@@ -384,15 +426,17 @@ def d2_matrix(gates, ws, links, prov) -> str:
 
     # legend
     ly = y + 26
-    p.append(text(44, ly, "● linked", 10, fill=OK_LINE))
-    p.append(text(130, ly, "● linked (privileged)", 10, fill=TRUST_LINE))
+    p.append(text(44, ly, "● reachable", 10, fill=OK_LINE))
+    p.append(text(130, ly, "● reachable (privileged)", 10, fill=TRUST_LINE))
     p.append(text(285, ly, "✕ refused by gate", 10, fill=WARN))
-    p.append(text(410, ly, "· not linked", 10, fill=MUTED))
-    p.append(footer(w, h, f"generated from ci/gates/lib.sh + rust-audit-info · {prov}"))
+    p.append(text(410, ly, "· not reachable", 10, fill=MUTED))
+    p.append(footer(w, h, f"generated from ci/gates/lib.sh + cargo metadata · {prov}"))
     return svg(w, h, "\n  ".join(p),
-               "Maknae crate to binary linkage matrix",
+               "Maknae crate to binary dependency matrix",
                "Which workspace crates and key external dependencies each Maknae binary "
-               "links, with the cells a CI gate refuses marked as UML stereotypes.")
+               "can reach through its resolved dependency graph, with the cells a CI gate "
+               "refuses marked as UML stereotypes. Source-level reachability, not linker "
+               "retention.")
 
 
 # --- D1: TCB boundary, UML component diagram ------------------------------
@@ -448,13 +492,13 @@ def d1_tcb(gates, ws, links, prov) -> str:
 
     b, bh = block("Trust plane · supporting", "«component»", daemon_only, 40, y,
                   OK_FILL, OK_LINE, "#04342C",
-                  caption="linked by the daemon only — not privileged, so not in the TCB")
+                  caption="reachable from the daemon only — not privileged, so not in the TCB")
     p += b
     y += bh + 20
 
     b, bh = block("Shared, non-privileged", "«component»", shared, 40, y,
                   "#FFFFFF", MUTED, INK,
-                  caption="linked by BOTH planes — in the TCB of neither; the client needs "
+                  caption="reachable from BOTH planes — in the TCB of neither; the client needs "
                           "these to connect and to delegate descriptors")
     p += b
     y += bh + 20
@@ -467,7 +511,7 @@ def d1_tcb(gates, ws, links, prov) -> str:
     y += bh
 
     h = y + 60
-    p.append(footer(w, h, f"generated from ci/gates/lib.sh + rust-audit-info · {prov}"))
+    p.append(footer(w, h, f"generated from ci/gates/lib.sh + cargo metadata · {prov}"))
     return svg(w, h, "\n  ".join(p),
                "Maknae trusted computing base",
                "UML component view of Maknae's TCB: privileged crates inside the trust "
@@ -1468,30 +1512,212 @@ def check_catalog(written: list) -> None:
         sys.exit("README.md names files that do not exist: " + ", ".join(ghost))
 
 
-def main() -> None:
+def d11_patterns(prov: str) -> str:
+    """Each published agentic pattern, with what the trust boundary inserts.
+
+    One card per pattern, in the layout the field's own explainers use: a
+    numbered badge, a title, the flow in one line, then a captioned node graph
+    with labelled edges. What differs is inside the graph rather than beside it.
+
+    Node origin is the whole device. A node the field publishes is drawn plain;
+    a node that exists ONLY because the runtime is untrusted is drawn filled and
+    accented. So a reader sees the published pattern and, in the same picture,
+    exactly what Maknae inserts into it.
+
+    UML 2.5.1 activity partitions (15.6) supply the lanes: a partition denotes
+    WHO performs an action, which is precisely the trust question, so nothing is
+    invented. The deny edge is the element the published diagrams have nowhere
+    to put -- and a picture of a deny-by-default system in which nothing is
+    denied depicts a different system.
+
+    The crossing count is a cost model: each is a PDP evaluation, an audit
+    append and a socket round trip.
+    """
+    doc = tomllib.loads((OUT / "agentic-patterns.toml").read_text())
+    pats = doc["pattern"]
+    check_evidence(pats, "evidence", "agentic-patterns.toml")
+
+    W, PAD = 1180, 28
+    CARD, CGAP = 356, 18
+    NW, NH = 176, 46
+    H = 128 + len(pats) * (CARD + CGAP) + 40
+    o = []
+
+    o.append(text(PAD, 42, "Agentic patterns under an untrusted runtime", 22, "600"))
+    o.append(text(PAD, 64, "The pattern as the field publishes it, and what the trust "
+                           "boundary inserts into it.", 12, fill=MUTED))
+    o.append(box(PAD, 78, W - 2 * PAD, 36, "#FFF6E5", WARN, rx=6))
+    o.append(text(PAD + 12, 94, "NOT AUTHORITATIVE — design/intent/. States intent, "
+                                "never what is built.", 11, "600", fill=WARN))
+    o.append(text(PAD + 12, 108, "Plain node = published pattern.   Filled node = inserted "
+                                 "because the runtime is untrusted.   Dashed red = the deny "
+                                 "path published diagrams omit.", 10, fill=MUTED))
+
+    for i, p in enumerate(pats):
+        top = 128 + i * (CARD + CGAP)
+        gap = p["crossings"] < 0
+        accent = WARN if gap else TRUST_LINE
+        o.append(box(PAD, top, W - 2 * PAD, CARD, "#FCFBF7", PLAIN_LINE, rx=10))
+
+        badge = f'AGENTIC PATTERN  {i + 1:02d} / {len(pats):02d}'
+        o.append(box(PAD + 18, top + 16, 178, 20, TRUST_FILL, accent, rx=10))
+        o.append(text(PAD + 107, top + 30, badge, 9, "600", fill=TRUST_INK, anchor="middle"))
+        o.append(text(PAD + 18, top + 66, p["name"], 24, "600"))
+        o.append(text(PAD + 18, top + 86, p["flow"], 12, fill=MUTED))
+        o.append(text(PAD + 18, top + 102, p["source"], 9, fill=MUTED))
+        o.append(text(W - PAD - 18, top + 30,
+                      "crossings: n/a" if gap
+                      else f'{p["crossings"]} decided crossing(s) · {p["records"]} record(s)',
+                      10, "600", fill=accent, anchor="end"))
+        o.append(text(W - PAD - 18, top + 46, p["status"], 9, fill=MUTED, anchor="end"))
+
+        LANE_L, LANE_P = top + 138, top + 222
+        DENY_Y = top + 296
+        o.append(text(PAD + 18, LANE_L - 18, "UNTRUSTED RUNTIME", 8, "600", fill=WARN))
+        o.append(text(PAD + 18, LANE_P - 18, "TRUST PLANE  ·  maknaed decides", 8, "600",
+                      fill=TRUST_INK))
+        o.append(f'<line x1="{PAD + 210}" y1="{LANE_P - 30}" x2="{W - PAD - 14}" '
+                 f'y2="{LANE_P - 30}" stroke="{TRUST_LINE}" stroke-width="1" '
+                 f'stroke-dasharray="5 4"/>')
+
+        used = sorted({n["col"] for n in p["nodes"]})
+        slot = {c: k for k, c in enumerate(used)}
+        span = W - 2 * PAD - 36
+        step = (span - NW) / max(1, len(used) - 1)
+        nd = {n["id"]: n for n in p["nodes"]}
+        pos = {}
+        for n in p["nodes"]:
+            x = PAD + 18 + slot[n["col"]] * step
+            y = LANE_L if n["lane"] == "loop" else LANE_P
+            pos[n["id"]] = (x, y)
+            ins = n["origin"] == "maknae"
+            fill = (TRUST_FILL if ins else PLAIN_FILL)
+            line = (accent if ins else PLAIN_LINE)
+            o.append(box(x, y, NW, NH, fill, line, rx=7, sw="1.1" if ins else "0.75"))
+            o.append(f'<rect x="{x}" y="{y}" width="3.5" height="{NH}" fill="{line}"/>')
+            o.append(text(x + 12, y + 20, n["title"], 12, "600",
+                          fill=TRUST_INK if ins else INK))
+            o.append(text(x + 12, y + 35, n["caption"], 9, fill=MUTED))
+
+        for e in p["edges"]:
+            if e["kind"] == "deny":
+                if e["from"] not in pos:
+                    continue
+                fx, fy = pos[e["from"]]
+                x0 = fx + NW / 2
+                yb = DENY_Y
+                o.append(f'<line x1="{x0}" y1="{fy + NH}" x2="{x0}" y2="{yb}" '
+                         f'stroke="{WARN}" stroke-width="1.1" stroke-dasharray="4 3" '
+                         f'marker-end="url(#dn)"/>')
+                o.append(text(x0 + 10, yb - 2, e["label"], 9, "600", fill=WARN))
+                continue
+            if e["from"] not in pos or e["to"] not in pos:
+                continue
+            fx, fy = pos[e["from"]]
+            tx, ty = pos[e["to"]]
+            col = accent if e["kind"] == "cross" else PLAIN_LINE
+            dash = ' stroke-dasharray="4 3"' if e["kind"] == "cross" else ""
+            if fy == ty:
+                x0, x1 = fx + NW, tx
+                o.append(f'<line x1="{x0}" y1="{fy + NH / 2}" x2="{x1}" y2="{ty + NH / 2}" '
+                         f'stroke="{col}" stroke-width="1"{dash} marker-end="url(#ar)"/>')
+                far = abs(slot[nd[e["to"]]["col"]] - slot[nd[e["from"]]["col"]]) > 1
+                lx = (x0 + (x1 - x0) * 0.82) if far else (x0 + x1) / 2
+                o.append(text(lx, fy + NH / 2 - 9, e["label"], 9,
+                              fill=col, anchor="middle", halo="#FCFBF7"))
+            else:
+                x0 = fx + NW / 2
+                x1 = tx + NW / 2
+                ya = fy + NH if ty > fy else fy
+                yb = ty if ty > fy else ty + NH
+                o.append(f'<path d="M{x0},{ya} L{x0},{(ya + yb) / 2} L{x1},{(ya + yb) / 2} '
+                         f'L{x1},{yb}" fill="none" stroke="{col}" stroke-width="1"{dash} '
+                         f'marker-end="url(#ar)"/>')
+                o.append(text((x0 + x1) / 2, (ya + yb) / 2 - 6, e["label"], 9,
+                              fill=col, anchor="middle", halo="#FCFBF7"))
+
+        dy = top + CARD - 40
+        for k, ln in enumerate(_wrap_words(p["delta"], 128)):
+            o.append(text(PAD + 18, dy + k * 13, ln, 10,
+                          "600" if k == 0 else "400", fill=WARN if gap else INK))
+
+    defs = (f'<defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" '
+            f'markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{TRUST_LINE}"/>'
+            f'</marker><marker id="dn" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
+            f'markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{WARN}"/>'
+            f'</marker></defs>')
+    o.append(footer(W, H, prov))
+    return svg(W, H, defs + "\n".join(o),
+               "Agentic patterns under an untrusted runtime",
+               "One card per published agentic pattern. Plain nodes are the pattern as "
+               "the field publishes it; filled nodes exist only because the runtime is "
+               "untrusted. Lanes are UML activity partitions. The dashed red edge is the "
+               "deny path the published diagrams have nowhere to show.")
+
+
+# Which products derive from the BUILT ARTIFACTS and so need release binaries
+# on disk. Everything else derives from source, a TOML file and a git sha.
+ARTIFACT_DERIVED = frozenset({
+    "generated-tcb-components.svg",
+    "generated-crate-binary-matrix.svg",
+})
+
+
+def main(argv: list) -> None:
+    """Generate every catalogued diagram, or only the ones named on argv.
+
+    `dep_closure()` is resolved on FIRST USE, never at startup. The failure that
+    motivated it (maintainer, #314): it ran unconditionally and `sys.exit`s on
+    a missing `target/release/<bin>`, so regenerating a diagram whose only
+    inputs are a TOML file and a git sha demanded a release build of all four
+    binaries -- which on this project is a FIPS cryptographic module build,
+    and on a host whose gcc the module's delocate step cannot handle it is not
+    possible at all. **A diagram is not mission-critical code and must not
+    inherit its build.** Only the two products in `ARTIFACT_DERIVED` may
+    require binaries, and only when they are actually being generated.
+    """
     gates, ws = gate_facts(), workspace()
-    links = linkage(ws["bins"])
     cg = crate_graph()
     prov = provenance()
-    written: list = []
-    for name, content in [
-        ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
-        ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
-        ("generated-standards-profile.svg", stdv1(prov)),
-        ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
-        ("generated-read-path.svg", d5_readpath(prov)),
-        ("generated-decision-cycle.svg", d6_decision(prov)),
-        ("generated-data-model.svg", d7_datamodel(prov)),
-        ("generated-system-interfaces.svg", d8_interfaces(prov)),
-        ("generated-operational-concept.svg", d9_opconcept(prov)),
-        ("generated-container-architecture.svg", d10_containers(prov)),
-    ]:
-        (OUT / name).write_text(content)
-        print(f"  wrote design/diagrams/{name}")
-        written.append(name)
-    check_catalog(written)
+
+    cached: list = []
+
+    def links():
+        if not cached:
+            cached.append(dep_closure(ws["bins"]))
+        return cached[0]
+
+    products = [
+        ("generated-tcb-components.svg", lambda: d1_tcb(gates, ws, links(), prov)),
+        ("generated-crate-binary-matrix.svg", lambda: d2_matrix(gates, ws, links(), prov)),
+        ("generated-standards-profile.svg", lambda: stdv1(prov)),
+        ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
+        ("generated-read-path.svg", lambda: d5_readpath(prov)),
+        ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
+        ("generated-data-model.svg", lambda: d7_datamodel(prov)),
+        ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
+        ("generated-operational-concept.svg", lambda: d9_opconcept(prov)),
+        ("generated-container-architecture.svg", lambda: d10_containers(prov)),
+        ("generated-agentic-patterns.svg", lambda: d11_patterns(prov)),
+    ]
+    names = [n for n, _ in products]
+
+    want = set(argv) if argv else set(names)
+    unknown = sorted(want - set(names))
+    if unknown:
+        sys.exit("unknown diagram(s): " + ", ".join(unknown)
+                 + "\nknown: " + "\n       ".join(names))
+
+    for name, build in products:
+        if name in want:
+            (OUT / name).write_text(build())
+            print(f"  wrote design/diagrams/{name}")
+
+    # Always the FULL catalogue, never just this run's subset: a partial
+    # regeneration must not be able to skip the drift check.
+    check_catalog(names)
     print(f"  provenance: {prov}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
