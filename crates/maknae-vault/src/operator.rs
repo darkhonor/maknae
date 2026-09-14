@@ -62,8 +62,16 @@ impl OperatorClient {
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Operator(format!("vault client settings: {e}")))?;
-        let inner = VaultClient::new(settings)
+        let mut inner = VaultClient::new(settings)
             .map_err(|e| VaultError::Operator(format!("vault client: {e}")))?;
+        // #240b (codex review): same downgrade protection as the two planes'
+        // clients — no redirects, HTTPS only, no proxy (`http.rs`).
+        crate::http::harden(
+            &mut inner,
+            addr,
+            ca_path,
+            std::time::Duration::from_secs(30),
+        )?;
         Ok(Self { inner })
     }
 

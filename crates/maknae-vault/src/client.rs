@@ -373,8 +373,19 @@ impl PlaneClient {
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
-        let client = VaultClient::new(settings)
+        let mut client = VaultClient::new(settings)
             .map_err(|e| VaultError::Auth(format!("vault client: {e}")))?;
+        // #240b (codex review): the client vaultrs built follows redirects and
+        // is not HTTPS-only — an HTTPS-to-HTTP 307/308 would resend the AppRole
+        // login body in plaintext. `http.rs`'s client (no redirects, HTTPS
+        // only, no proxy) is what actually sends.
+        let address = client.settings.address.to_string();
+        crate::http::harden(
+            &mut client,
+            &address,
+            &vault_ca,
+            std::time::Duration::from_secs(30),
+        )?;
         Ok(Self {
             plane,
             deployment_id: cfg.deployment_id,

@@ -42,6 +42,10 @@ pub const EGRESS_ROLE_ID_FILE: &str = "maknae-egress-approle-id";
 /// into the platform verifier (`tls_certs_merge`), and pinning the Vault leg
 /// to this CA alone is not expressible through it (#318 records the gap).
 pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
+/// The same hard per-request timeout as the two plane clients, for the same
+/// reason: vaultrs defaults to an UNBOUNDED reqwest client, and a hung Vault
+/// must surface as an error the deputy can name.
+const VAULT_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Read the deputy's AppRole halves: the RoleID from
 /// `<egress_dir>/maknae-egress-approle-id`, the SecretID from
@@ -77,9 +81,6 @@ impl EgressVault {
     pub fn new(addr: &str, vault_ca: &Path, auth: AppRoleAuth) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         validate_vault_addr(addr)?;
-        // The same 30 s hard per-request timeout as the two plane clients, for
-        // the same reason: vaultrs defaults to an UNBOUNDED reqwest client, and
-        // a hung Vault must surface as an error the deputy can name.
         let settings = VaultClientSettingsBuilder::default()
             .address(addr)
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
@@ -96,7 +97,7 @@ impl EgressVault {
             // one), no inherited client identity.
             .token("")
             .identity(None)
-            .timeout(Some(std::time::Duration::from_secs(30)))
+            .timeout(Some(VAULT_HTTP_TIMEOUT))
             .build()
             .map_err(|e| VaultError::Auth(format!("egress vault client settings: {e}")))?;
         Self::client(&settings)?;
@@ -109,8 +110,18 @@ impl EgressVault {
     /// means a CA file replaced between reads is picked up by the next one,
     /// which is the behaviour a rotated Vault CA wants.
     fn client(settings: &VaultClientSettings) -> Result<VaultClient, VaultError> {
-        VaultClient::new(settings.clone())
-            .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))
+        let mut client = VaultClient::new(settings.clone())
+            .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))?;
+        // The client vaultrs built follows redirects and is not HTTPS-only;
+        // the one that actually sends is `http.rs`'s (no redirects, HTTPS
+        // only, no proxy) — see that module for the downgrade it prevents.
+        crate::http::harden(
+            &mut client,
+            settings.address.as_str(),
+            Path::new(&settings.ca_certs[0]),
+            VAULT_HTTP_TIMEOUT,
+        )?;
+        Ok(client)
     }
 
     /// Login and revoke: proves the credential at boot without leaving a token,

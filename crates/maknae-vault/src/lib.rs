@@ -18,6 +18,7 @@ mod egress_session;
 mod error;
 mod fips;
 mod fips_glue;
+mod http;
 mod operator;
 mod plane;
 mod plane_verify;

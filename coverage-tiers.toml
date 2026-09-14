@@ -447,6 +447,10 @@ path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
 
 [[t3]]
+path = "crates/maknae-vault/src/http.rs"
+why = "#240b: builds the hardened reqwest client every Vault client sends through (no redirects, HTTPS only, no proxy); the two construction-time refusals are unit-tested, the redirect policy is stated by construction — proving it needs a TLS server. Mutation-excluded like client.rs"
+
+[[t3]]
 path = "crates/maknae-vault/src/egress.rs"
 why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O with no stub by design; the dead-address and fail-closed-construction paths are unit-tested, the SOURCE decision it consumes is T1 in secret_source.rs (the secret_io/secret_source split), mutation-excluded like client.rs"
 
