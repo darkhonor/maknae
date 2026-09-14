@@ -44,7 +44,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "CLI를 사용하기 전에 로그아웃 후 다시 로그인하거나 `newgrp maknae`를 실행하세요"
         }
         MsgId::EnrollEgressBoundsHint => {
-            "이그레스 데몬: /etc/maknae/egress-bounds.yaml에 `vault:` 블록(addr)을 추가하고 chmod 0644로 설정하세요 — 그 전까지는 시작되지 않아요"
+            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3) 그리고 chmod 0644로 설정하세요 — 그 전까지 maknae-egress는 시작되지 않아요"
         }
         MsgId::EnrollEnableDaemonHint => {
             "다음 명령으로 데몬을 시작하세요: systemctl enable --now maknaed"

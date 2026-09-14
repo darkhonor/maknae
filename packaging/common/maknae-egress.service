@@ -20,9 +20,11 @@ LoadCredentialEncrypted=maknae-egress-secret-id:/etc/maknae/private/maknae-egres
 # every unit, and a proxied estate sets HTTPS_PROXY that way as routine practice.
 # reqwest honours the proxy variables by default and vaultrs fills VAULT_* from
 # the environment; either would move or unverify a leg the kernel decided on.
-# The deputy also removes these itself at start (src/env.rs); this is the
+# SSL_CERT_FILE/SSL_CERT_DIR REPLACE the platform verifier's root store on
+# both legs (rustls-native-certs). The deputy also removes these itself at
+# start (src/env.rs, which holds this line equal to its list); this is the
 # init-system half.
-UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
 RuntimeDirectory=maknae-egress
 RuntimeDirectoryMode=0750
 
@@ -48,6 +50,9 @@ ProtectClock=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+# #240b: the only process with a route out gets exactly the families its two
+# legs use — the activation socket and TCP to Vault and the provider.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

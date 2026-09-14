@@ -147,12 +147,6 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     }
     let segs: Vec<&str> = s.split('/').collect();
     let last = segs.len() - 1;
-    if segs[0] == "auth" {
-        return Err(
-            "starts with 'auth' — the auth/ prefix is composed by the client; write the mount name as Terraform's approle_path gives it"
-                .into(),
-        );
-    }
     for (i, seg) in segs.iter().enumerate() {
         if seg.is_empty() {
             return Err(if i == 0 {
@@ -166,6 +160,14 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
         if *seg == "." || *seg == ".." {
             return Err("has a '.' or '..' segment".into());
         }
+    }
+    // After the shape checks, so `auth/` reports its trailing slash rather
+    // than this.
+    if segs[0] == "auth" {
+        return Err(
+            "starts with 'auth' — the auth/ prefix is composed by the client; write the mount name as Terraform's approle_path gives it"
+                .into(),
+        );
     }
     Ok(())
 }

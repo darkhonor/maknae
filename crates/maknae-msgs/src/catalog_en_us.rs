@@ -39,7 +39,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "Log out and back in (or run `newgrp maknae`) before using the CLI"
         }
         MsgId::EnrollEgressBoundsHint => {
-            "Egress deputy: add a `vault:` block (addr) to /etc/maknae/egress-bounds.yaml and chmod it 0644 — the deputy will not start until then"
+            "maknae-egress: create or complete /etc/maknae/egress-bounds.yaml (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3) and chmod it 0644 — maknae-egress will not start until then"
         }
         MsgId::EnrollEnableDaemonHint => "Start the daemon with: systemctl enable --now maknaed",
         MsgId::EnrollRotating => "Existing enrollment found — rotating credentials",

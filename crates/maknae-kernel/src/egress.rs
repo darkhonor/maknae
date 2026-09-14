@@ -91,7 +91,9 @@ pub trait Egress: Send + Sync {
     ) -> Result<EgressReply, EgressFailure>;
 }
 
-/// Cooky's production backend: there is no egress process yet.
+/// Cooky's production backend: `maknaed` does not route to the deputy yet —
+/// the deputy exists and logs in to Vault (#240b); selecting it is #240's
+/// last item.
 pub struct Unavailable;
 
 impl Egress for Unavailable {

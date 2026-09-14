@@ -37,7 +37,10 @@ use zeroize::Zeroizing;
 pub const EGRESS_APPROLE_ROLE: &str = "maknae-egress";
 /// The RoleID file `maknae enroll` writes into the deputy's credential dir.
 pub const EGRESS_ROLE_ID_FILE: &str = "maknae-egress-approle-id";
-/// The deputy's own copy of the Vault TLS trust anchor, beside the RoleID.
+/// The deputy's own copy of the Vault TLS CA, beside the RoleID. An EXTRA
+/// trust anchor beside the system store, not a pin: vaultrs merges `ca_certs`
+/// into the platform verifier (`tls_certs_merge`), and pinning the Vault leg
+/// to this CA alone is not expressible through it (#318 records the gap).
 pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
 
 /// Read the deputy's AppRole halves: the RoleID from
@@ -70,7 +73,7 @@ pub struct EgressVault {
 impl EgressVault {
     /// `assert_fips_provider` runs FIRST so vaultrs's reqwest reads the FIPS
     /// default — the load-bearing ordering `client.rs` documents. The CA file
-    /// is read once here so a missing or malformed anchor is a boot refusal.
+    /// is read once here so a missing or malformed CA is a boot refusal.
     pub fn new(addr: &str, vault_ca: &Path, auth: AppRoleAuth) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         validate_vault_addr(addr)?;
@@ -88,6 +91,11 @@ impl EgressVault {
             // (`bins/maknae-egress/src/env.rs`); a unit's environment is NOT
             // clean by default — DefaultEnvironment= reaches every service.
             .verify(true)
+            // Stated too, so this constructor is safe on its own and not only
+            // under the deputy's scrub: no inherited token (login supplies
+            // one), no inherited client identity.
+            .token("")
+            .identity(None)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Auth(format!("egress vault client settings: {e}")))?;
