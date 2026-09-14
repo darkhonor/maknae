@@ -29,7 +29,7 @@ maknae-vault = { path = "../maknae-vault" }
 # Pinned EXACTLY and to the version vaultrs 0.8.0 already resolves, so the tree
 # carries ONE reqwest. A second, differently-pinned HTTP stack in the process
 # holding the provider credential is the thing to avoid.
-reqwest = { version = "=0.13.4", default-features = false, features = [
+reqwest = { version = "=0.13.5", default-features = false, features = [
   "rustls-no-provider",
   "json",
 ] }
