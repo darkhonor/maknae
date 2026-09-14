@@ -131,9 +131,18 @@ merely describes it:
 >
 > **This costs the assessor nothing, because the matrix was never the enforcement surface.**
 > The refused cells come from `TRUST_CONSUMER_ALLOW` in [`ci/gates/lib.sh`](../../ci/gates/lib.sh),
-> and that allowlist is policed by `p1-manifest-lint.sh` and `p2-invert-tree.sh` on every run.
-> A reader who needs a linker-level fact should read those gates, which decide it, rather than
-> this picture, which illustrates it. The earlier row in this table asserted the opposite and
+> and that allowlist is policed by [`p1-manifest-lint.sh`](../../ci/gates/p1-manifest-lint.sh) —
+> the sole consumer of it — on every run. The adjacent isolation claim, that no
+> `PRIVILEGED_CRATES` member is reachable from `UNTRUSTED_BIN`, is decided by
+> [`p2-invert-tree.sh`](../../ci/gates/p2-invert-tree.sh).
+>
+> **Worth noting, because it settles the question rather than conceding it:** `p2-invert-tree.sh`
+> reaches its verdict with `cargo tree -i -e normal,build` — *source-level reachability*, failing
+> closed on any cargo error. The gate that actually enforces privileged-crate isolation already
+> reasons exactly the way this matrix now does. Deriving the picture from the resolve graph brings
+> it into agreement with its own enforcement surface; the artifact read was the odd one out.
+> A reader who needs a linker-level fact should go to the gates, which decide, rather than to this
+> picture, which illustrates. The earlier row in this table asserted the opposite and
 > was wrong the moment the implementation changed; a source-of-truth table that disagrees with
 > its generator is the precise drift this catalog exists to prevent.
 
