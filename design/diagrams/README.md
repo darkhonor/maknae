@@ -14,8 +14,10 @@ python3 design/diagrams/generate.py generated-agentic-patterns.svg   # just one
 ```
 
 > **Corrected 2026-09-14 (#314), and this is the correction that matters.** This block used
-> to begin with `cargo auditable build … --release` for four binaries, because `linkage()`
-> read `rust-audit-info` off `target/release/<bin>` and `sys.exit`ed when one was absent.
+> to begin with `cargo auditable build … --release` for four binaries, because `dep_closure()`
+> — then named `linkage()`, renamed on the second review because the old name asserted an
+> artifact read it no longer performs — read `rust-audit-info` off `target/release/<bin>` and
+> `sys.exit`ed when one was absent.
 > That made **every** diagram — including ones whose only inputs are a TOML file and a git
 > sha — require a release build of the whole shipping set. On this project that is a **FIPS
 > cryptographic module build**, and on a host whose gcc the module's delocate step cannot
@@ -23,9 +25,16 @@ python3 design/diagrams/generate.py generated-agentic-patterns.svg   # just one
 >
 > **The code does not require a binary to map.** These diagrams map what the crates deliver
 > and where; that question is answered by `cargo metadata`'s resolve graph, from source.
-> `linkage()` now walks `resolve.nodes` from each bin over normal-kind edges only, filtered
-> to the host triple — the same closure, no compilation, no artifacts. **A diagram is not
-> mission-critical code and must never inherit its build.**
+> `dep_closure()` walks `resolve.nodes` from each bin over normal-kind edges only, filtered to
+> the host triple. No compilation, no artifacts. **A diagram is not mission-critical code and
+> must never inherit its build.**
+>
+> **This is not the same closure the artifact read produced, and the wording that said so has
+> been struck (2026-09-14, second review).** A host-triple resolve is not the per-build
+> resolution of a specific release artifact — features, target and profile can differ. It is the
+> *intended* source graph, which is what a diagram should show; it is not a substitute for
+> per-artifact evidence. See the note under the source-of-truth table for where that evidence
+> lives.
 >
 > The proof this was real rather than theoretical: `maknae-egress` landed in #288 and had
 > **never** appeared in the crate×binary matrix, because it had never been compiled on the
@@ -141,8 +150,26 @@ merely describes it:
 > closed on any cargo error. The gate that actually enforces privileged-crate isolation already
 > reasons exactly the way this matrix now does. Deriving the picture from the resolve graph brings
 > it into agreement with its own enforcement surface; the artifact read was the odd one out.
-> A reader who needs a linker-level fact should go to the gates, which decide, rather than to this
-> picture, which illustrates. The earlier row in this table asserted the opposite and
+> **What none of these decide, stated plainly because the earlier wording of this note got it
+> wrong (2026-09-14, second review):** neither P1 nor `p2-invert-tree.sh` decides what the linker
+> retained. P1 polices manifest membership; P2 runs `cargo tree`. Both are source-level, like this
+> matrix. Sending a reader to them "for the linker-level fact" was wrong, and it quietly
+> reintroduced the equivalence the rest of this note disclaims.
+>
+> **Per-artifact evidence has its own path:** [`p2-artifact-witness.sh`](../../ci/gates/p2-artifact-witness.sh),
+> run in CI right after the auditable builds. It builds `UNTRUSTED_BIN` with
+> `CARGO_PROFILE_RELEASE_STRIP=false`, requires a non-empty `rust-audit-info` inventory
+> (fail-closed if absent), and asserts the inventory names no `PRIVILEGED_CRATES` member — plus a
+> symbol scan its own comment marks **best-effort and not load-bearing**, because release
+> optimization can strip a symbol.
+>
+> **And even that is resolver metadata**, as the gate's own comment says — embedded at build time
+> and optimization-proof *because* it is not a symbol table. So nothing in this repository asserts
+> linker retention as such. What `p2-artifact-witness.sh` adds over this matrix is that its
+> inventory belongs to **one specific built artifact**, with that build's features and target,
+> rather than a host-triple resolve. That is the real difference, and it is the reason the
+> per-artifact gate exists alongside the source-level ones. The earlier row in this table asserted
+> the opposite and
 > was wrong the moment the implementation changed; a source-of-truth table that disagrees with
 > its generator is the precise drift this catalog exists to prevent.
 
