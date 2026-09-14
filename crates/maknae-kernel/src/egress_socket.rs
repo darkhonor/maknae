@@ -7,6 +7,10 @@
 //! connection per request is naturally concurrent, needs no correlation id and
 //! no reply demuxer, and — the stronger reason — makes the peer-credential
 //! check run **per request** rather than once on a long-lived connection.
+//! What the OTHER end does with that: the deputy today serves one connection
+//! to completion before accepting the next (`bins/maknae-egress/src/main.rs`),
+//! so two concurrent prompts queue head-to-tail behind one provider call and
+//! the deadline below is a queueing bound as well as a call bound (#321).
 //!
 //! **Peer credentials are checked BEFORE the first write** (D3). The request
 //! carries prompt content and the Vault path naming where the provider
@@ -68,40 +72,94 @@ impl SocketEgress {
     fn remaining(deadline_at: Instant) -> Result<Duration, EgressFailure> {
         let left = deadline_at.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(EgressFailure::Transport("egress deadline exhausted".into()));
+            return Err(EgressFailure::DeadlineExpired);
         }
         Ok(left)
     }
 
     fn arm(s: &UnixStream, deadline_at: Instant) -> Result<(), EgressFailure> {
         let left = Self::remaining(deadline_at)?;
-        s.set_read_timeout(Some(left))
-            .map_err(|e| Self::transport(format!("set_read_timeout({left:?}): {e}")))?;
-        s.set_write_timeout(Some(left))
-            .map_err(|e| Self::transport(format!("set_write_timeout({left:?}): {e}")))?;
+        s.set_read_timeout(Some(left)).map_err(Self::transport)?;
+        s.set_write_timeout(Some(left)).map_err(Self::transport)?;
         Ok(())
     }
 
     /// Wait for readability within what is left of the budget; a timeout is
-    /// the deadline refusal. `poll` rather than a re-armed `SO_RCVTIMEO`:
+    /// `DeadlineExpired` — the request is already on the wire by the time any
+    /// read happens, so this is delivery-unknown, never "nothing left". `poll` rather than a re-armed `SO_RCVTIMEO`:
     /// macOS refuses `setsockopt` (EINVAL) on a socket whose peer has
     /// already disconnected even while its buffered bytes are still
     /// readable, and `poll` reports exactly those as readable at once.
     fn wait_readable(s: &UnixStream, deadline_at: Instant) -> Result<(), EgressFailure> {
-        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        Self::wait_for(s, nix::poll::PollFlags::POLLIN, deadline_at)
+    }
+
+    /// The write side of the same wait.
+    fn wait_writable(s: &UnixStream, deadline_at: Instant) -> Result<(), EgressFailure> {
+        Self::wait_for(s, nix::poll::PollFlags::POLLOUT, deadline_at)
+    }
+
+    fn wait_for(
+        s: &UnixStream,
+        flags: nix::poll::PollFlags,
+        deadline_at: Instant,
+    ) -> Result<(), EgressFailure> {
+        use nix::poll::{poll, PollFd, PollTimeout};
         use std::os::fd::AsFd;
         loop {
             let left = Self::remaining(deadline_at)?;
             let timeout = PollTimeout::try_from(left.max(Duration::from_millis(1)))
                 .unwrap_or(PollTimeout::MAX);
-            let mut fds = [PollFd::new(s.as_fd(), PollFlags::POLLIN)];
+            let mut fds = [PollFd::new(s.as_fd(), flags)];
             match poll(&mut fds, timeout) {
-                Ok(0) => return Err(EgressFailure::Transport("egress deadline exhausted".into())),
+                Ok(0) => return Err(EgressFailure::DeadlineExpired),
                 Ok(_) => return Ok(()),
                 Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => return Err(Self::transport(e)),
+                Err(e) => return Err(Self::transport(format!("poll: {e}"))),
             }
         }
+    }
+
+    /// `write_all` under the budget: NON-BLOCKING writes, each preceded by a
+    /// `poll` for what is left. A blocking write under `SO_SNDTIMEO` is not
+    /// bounded by that timer against a peer that drains one byte per
+    /// interval — macOS restarts the timer every time a byte of space frees,
+    /// inside the one syscall (measured: 1.7 s past a 400 ms budget) — and
+    /// std's `write_all` would loop over such writes besides. This is the leg
+    /// that carries the prompt plaintext, to an untrusted peer (module
+    /// header). The socket is returned to blocking for the read leg.
+    fn write_all_by(
+        s: &mut UnixStream,
+        buf: &[u8],
+        deadline_at: Instant,
+    ) -> Result<(), EgressFailure> {
+        s.set_nonblocking(true).map_err(Self::transport)?;
+        let mut written = 0;
+        let out = loop {
+            if written >= buf.len() {
+                break Ok(());
+            }
+            if let Err(e) = Self::wait_writable(s, deadline_at) {
+                break Err(e);
+            }
+            match s.write(&buf[written..]) {
+                Ok(n) => written += n,
+                Err(e) if Self::write_is_retried(&e) => continue,
+                Err(e) => break Err(Self::transport(format!("write: {e}"))),
+            }
+        };
+        s.set_nonblocking(false).map_err(Self::transport)?;
+        out
+    }
+
+    /// The write errors the budget loop absorbs: a signal mid-syscall, and a
+    /// non-blocking write with no space yet (`poll` reported writability a
+    /// moment ago; the next `poll` re-asks the budget).
+    fn write_is_retried(e: &std::io::Error) -> bool {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+        )
     }
 
     /// `read_exact` under the budget: readability is awaited before EVERY
@@ -134,9 +192,10 @@ impl SocketEgress {
 
 impl Egress for SocketEgress {
     /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
-    /// exchange — the socket timeouts are set to it once, and every read is
-    /// preceded by a `poll` for what is left of it (`read_exact_by`), so
-    /// per-operation timers cannot be strung together past it. The one step outside it is `connect`, which on a Unix socket
+    /// exchange — every write is sent under a timer re-armed to what is left
+    /// (`write_all_by`) and every read is preceded by a `poll` for what is
+    /// left (`read_exact_by`), so per-operation timers cannot be strung
+    /// together past it in either direction. The one step outside it is `connect`, which on a Unix socket
     /// completes or fails at once unless the listener's backlog is full; the
     /// kernel's outer `tokio::time::timeout` on the same value then abandons
     /// the worker and the egress breaker counts the expiry.
@@ -185,9 +244,8 @@ impl Egress for SocketEgress {
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
-        s.write_all(&(buf.len() as u32).to_be_bytes())
-            .map_err(Self::transport)?;
-        s.write_all(&buf).map_err(Self::transport)?;
+        Self::write_all_by(&mut s, &(buf.len() as u32).to_be_bytes(), deadline_at)?;
+        Self::write_all_by(&mut s, &buf, deadline_at)?;
         s.flush().map_err(Self::transport)?;
 
         let mut len = [0u8; 4];
@@ -348,13 +406,105 @@ mod tests {
         let started = std::time::Instant::now();
         let out = e.send(&intent, req());
         let took = started.elapsed();
-        assert!(
-            matches!(out, Err(EgressFailure::Transport(_))),
-            "expected a deadline refusal, got {out:?}"
+        assert_eq!(
+            out,
+            Err(EgressFailure::DeadlineExpired),
+            "an inner expiry is delivery-unknown, never a plain failure"
         );
         assert!(
             took < Duration::from_millis(900),
             "the dribble was allowed to run past the deadline: {took:?}"
+        );
+    }
+
+    /// A budget already spent is `DeadlineExpired` at every step that consults
+    /// it — before arming the socket, before waiting, before reading — and a
+    /// live budget arms the socket with what is left.
+    #[test]
+    fn a_spent_budget_is_deadline_expired_at_every_step() {
+        let past = Instant::now() - Duration::from_secs(1);
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(
+            SocketEgress::remaining(past).unwrap_err(),
+            EgressFailure::DeadlineExpired
+        );
+        assert_eq!(
+            SocketEgress::arm(&a, past).unwrap_err(),
+            EgressFailure::DeadlineExpired
+        );
+        assert_eq!(
+            SocketEgress::wait_readable(&a, past).unwrap_err(),
+            EgressFailure::DeadlineExpired
+        );
+        let mut a = a;
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            SocketEgress::read_exact_by(&mut a, &mut buf, past).unwrap_err(),
+            EgressFailure::DeadlineExpired
+        );
+        let live = Instant::now() + Duration::from_secs(5);
+        assert!(SocketEgress::remaining(live).unwrap() > Duration::from_secs(4));
+        SocketEgress::arm(&a, live).unwrap();
+        assert!(a.read_timeout().unwrap().unwrap() > Duration::from_secs(4));
+    }
+
+    /// The same budget on the WRITE leg — the one carrying the prompt
+    /// plaintext. A peer that drains one byte per interval (eight of them,
+    /// then nothing) against a request larger than any socket buffer must be
+    /// cut off at the deadline, as `DeadlineExpired`, not strung along one
+    /// full send timer per `write`.
+    #[test]
+    fn a_peer_that_drains_the_request_a_byte_at_a_time_is_cut_off_at_the_deadline() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut b = [0u8; 1];
+                for _ in 0..8 {
+                    std::thread::sleep(Duration::from_millis(150));
+                    if c.read(&mut b).is_err() {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_millis(400), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let mut big = req();
+        big.content = vec![ContentBlock::Text {
+            text: SecretText(maknae_io::Zeroizing::new("x".repeat(1 << 20))),
+        }];
+        let started = std::time::Instant::now();
+        let out = e.send(&intent, big);
+        let took = started.elapsed();
+        assert_eq!(out, Err(EgressFailure::DeadlineExpired), "got {out:?}");
+        assert!(
+            took < Duration::from_millis(900),
+            "the write leg was allowed to run past the deadline: {took:?}"
+        );
+    }
+
+    /// The client-side check is the LISTENER predicate, by name. Reverting it
+    /// to the exact-uid one leaves every socket test green — they bind their
+    /// listeners in-process, so listener and connector share a uid — and
+    /// refuses every production send under socket activation (ADR-0023
+    /// correction 1). Pinned at the source, the way boot_gate.rs pins its
+    /// ordering; the patterns are composed so this test does not match itself.
+    #[test]
+    fn the_send_path_checks_the_listener_predicate_not_the_exact_uid() {
+        let src = include_str!("egress_socket.rs");
+        let listener = format!("maknae_vault::{}(&stream,", "listener_uid_is");
+        let exact = format!("{}(&stream", "peer_uid_is");
+        assert!(
+            src.contains(&listener),
+            "the send path must check the listener predicate"
+        );
+        assert!(
+            !src.contains(&exact),
+            "the exact-uid check refuses every socket-activated listener"
         );
     }
 

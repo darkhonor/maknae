@@ -43,6 +43,13 @@ pub struct EgressReply {
 pub enum EgressFailure {
     NotConfigured,
     Transport(String),
+    /// The backend's own deadline ran out AFTER the request was written —
+    /// delivery unknown, exactly as the kernel's outer timeout on the same
+    /// value. Distinguished from `Transport` so the trail records
+    /// `DeadlineExpired` rather than `Failed` (which claims nothing left) and
+    /// the egress breaker counts it as an expiry, not a success (codex on
+    /// #240: the inner budget usually fires first).
+    DeadlineExpired,
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -161,7 +168,7 @@ pub fn unavailable_egress() -> Arc<dyn Egress> {
 /// can be pinned on a host that has no `_maknae-egress` account (the same
 /// seam `authz_boot_gate_with` uses). No provider → `Unavailable`, and the
 /// account is never looked up. A provider → `SocketEgress` under the deputy's
-/// uid, resolved ONCE here on the blocking boot path — never per request on an
+/// uid, resolved ONCE here at boot, before the first request — never on an
 /// async worker — and fail-closed by NAME.
 pub fn production_egress_with(
     provider: Option<&maknae_config::ProviderConfig>,
@@ -843,11 +850,17 @@ mod tests {
         // against: a listener under this test's uid refuses the 4242 backend
         // by identity, and a backend resolved to this uid gets past the check
         // (to fail on the closed connection instead). A mutant handing the
-        // backend 0 — root, which the listener check accepts — fails here.
+        // backend a constant instead of the resolved uid fails the second
+        // assertion — `me` is then not what the backend expects.
+        // The peer HOLDS each connection until the client is done with it:
+        // dropping at once races the client's credential capture, which on
+        // macOS answers ENOTCONN for a peer that has already gone.
         std::thread::spawn(move || {
+            use std::io::Read;
             for _ in 0..2 {
-                if let Ok((c, _)) = l.accept() {
-                    drop(c);
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut b = [0u8; 1];
+                    let _ = c.read(&mut b);
                 }
             }
         });

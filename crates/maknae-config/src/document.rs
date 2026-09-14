@@ -1022,7 +1022,7 @@ mod tests {
         // #240: the egress fold is asserted, not just passed — deleting the
         // merge passed every other test and the disclosure gate.
         assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
-        assert_eq!(v["egress"]["deadline_ms"], "190000");
+        assert_eq!(v["egress"]["deadline_ms"], "280000");
     }
 
     /// A suppressed path stays suppressed on the RESOLVED lane too. Without

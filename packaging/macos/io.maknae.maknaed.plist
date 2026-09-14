@@ -38,11 +38,12 @@
   <key>ThrottleInterval</key>
   <integer>5</integer>
 
-  <!-- systemd TimeoutStopSec=630 (#240): the shutdown drain waits for a
-       provider call in flight — up to egress.deadline_ms plus 10 s — to write
-       its outcome record. launchd's default is 20 s before SIGKILL. -->
+  <!-- systemd TimeoutStopSec=660 (#240): the shutdown chain at the deadline
+       ceiling is the handler drain (600 s + 10 s), the audit drain (5 s), the
+       Vault token revoke-self (30 s) and the runtime teardown (3 s): 648 s.
+       launchd's default is 20 s before SIGKILL. -->
   <key>ExitTimeOut</key>
-  <integer>630</integer>
+  <integer>660</integer>
   <key>RunAtLoad</key>
   <true/>
 

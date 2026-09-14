@@ -22,13 +22,16 @@ use std::path::PathBuf;
 pub const EGRESS_SECTION: &str = "egress";
 
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
-/// The deputy's worst-case wall time on one request, plus a margin. On a cold
-/// key cache the deputy performs a Vault login and a KV read
-/// (`maknae-vault`'s `VAULT_HTTP_TIMEOUT`, 30 s each) BEFORE the provider
-/// call (`bins/maknae-egress`'s `CallBounds::default().timeout`, 120 s):
-/// 180 s. Ten seconds more for framing and scheduling. Raise the deputy's
-/// bound and this one together.
-const DEFAULT_DEADLINE_MS: u64 = 190_000;
+/// The deputy's worst-case wall time on one request, plus a margin. Every
+/// Vault operation is bounded by `maknae-vault`'s `VAULT_HTTP_TIMEOUT`
+/// (30 s). On a socket-activated FIRST request the deputy is still booting:
+/// its probe is a login and a revoke (60 s). On a cold key cache a read is a
+/// login, a KV read and a fail-closed revoke (90 s) BEFORE the provider call
+/// (`bins/maknae-egress`'s `CallBounds::default().timeout`, 120 s). 270 s,
+/// plus ten for framing and scheduling. (Codex on #240: the earlier 190 s
+/// counted the login and the read only.) Raise the deputy's bounds and this
+/// one together.
+const DEFAULT_DEADLINE_MS: u64 = 280_000;
 const DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=600_000;
 
 /// Where the deputy is, and how long one send may take.
@@ -126,7 +129,7 @@ mod tests {
             c.socket_path,
             PathBuf::from("/run/maknae-egress/egress.sock")
         );
-        assert_eq!(c.deadline_ms, 190_000);
+        assert_eq!(c.deadline_ms, 280_000);
         assert_eq!(c, EgressConfig::default());
     }
 

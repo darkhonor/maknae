@@ -18,6 +18,9 @@ pub struct Recording {
     calls: Mutex<Vec<&'static str>>,
     seen: Mutex<Vec<(String, String, u64)>>,
     pub fail_send: bool,
+    /// #240: the backend reports its OWN deadline expiry (the socket's
+    /// wall-clock budget), after the request left.
+    pub fail_deadline: bool,
     pub sleep: Option<Duration>,
     /// #240: the backend states its own outer deadline; `None` is a
     /// generous default so only the deadline test sets one.
@@ -63,6 +66,9 @@ impl maknae_kernel::Egress for Recording {
         }
         if self.fail_send {
             return Err(maknae_kernel::EgressFailure::Transport("hermetic".into()));
+        }
+        if self.fail_deadline {
+            return Err(maknae_kernel::EgressFailure::DeadlineExpired);
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
@@ -504,6 +510,42 @@ async fn a_send_past_the_egress_deadline_is_deadline_expired_delivery_unknown() 
         ),
         ("deny", "send deadline expired")
     );
+}
+
+/// #240 (codex): the backend's OWN expiry — the socket's wall-clock budget
+/// usually fires before the kernel's outer timeout on the same value — is the
+/// same delivery-unknown outcome, never `Failed` ("nothing left").
+#[tokio::test]
+async fn a_backend_reported_deadline_is_deadline_expired_delivery_unknown_too() {
+    let fx = Fixture::with_policy("prompt-inner-deadline", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        fail_deadline: true,
+        ..Default::default()
+    });
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let outcome = last_prompt_record(&records);
+    assert_eq!(
+        outcome.egress.unwrap().status,
+        EgressStatus::DeadlineExpired
+    );
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str()
+        ),
+        ("deny", "send deadline expired")
+    );
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
 }
 
 #[tokio::test]

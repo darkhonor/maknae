@@ -22,6 +22,14 @@ RemoveOnStop=yes
 # in neither of the deputy's groups, so others may traverse (x) but not list
 # — the socket's 0660 _maknae-egress:_maknae above gates the connect. Owned
 # by root (this unit has no User=); the deputy never writes here.
+#
+# Two settings, because they answer different questions. DirectoryMode= is
+# THIS unit's own (systemd.socket): the mode of the parent directories systemd
+# creates at bind time, 0755 by default — world-listable, which the sentence
+# above refuses. RuntimeDirectory= is an exec-context setting; whether a
+# socket unit that spawns no process honours it decides only whether the
+# directory is also REMOVED when this unit stops. The mode never rests on it.
+DirectoryMode=0751
 RuntimeDirectory=maknae-egress
 RuntimeDirectoryMode=0751
 

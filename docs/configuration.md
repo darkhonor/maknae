@@ -456,7 +456,7 @@ packaged Linux layout needs no `egress` block at all.
 ```yaml
 egress:
   socket_path: /run/maknae-egress/egress.sock   # the deputy's activation socket (maknae-egress.socket)
-  deadline_ms: 190000                            # the outer bound on one send to the deputy; 1000..=600000
+  deadline_ms: 280000                            # the outer bound on one send to the deputy; 1000..=600000
 ```
 
 - **`socket_path`** — the Unix socket the deputy accepts on. Linux packaging creates it by
@@ -466,13 +466,15 @@ egress:
 - **`deadline_ms`** — the kernel's outer bound on one send to the deputy. It replaced
   `transport.read_timeout_ms` in that role: five seconds was a frame read timeout, never a
   provider deadline. The default exceeds the deputy's worst-case wall time on one request
-  — a Vault login and a KV read (30 s each, on a cold key cache) before the 120 s provider
-  call — by ten seconds; at "equal" the kernel would expire first and record
-  delivery-unknown for a call the deputy answered. A slower provider needs the deputy's
+  by ten seconds: every Vault operation is bounded at 30 s, a socket-activated first
+  request waits for the boot probe (login and revoke), a cold key cache costs a login, a
+  KV read and a revoke, and then the 120 s provider call — 270 s. At "equal" the kernel
+  would expire first and record delivery-unknown for a call the deputy answered. A slower provider needs the deputy's
   bound raised and this one with it. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by this value plus ten
   seconds so the outcome record is written, and the shipped units' stop timeouts
-  (`TimeoutStopSec=630`, launchd `ExitTimeOut`) cover the ceiling.
+  (`TimeoutStopSec=660`, launchd `ExitTimeOut`) cover the ceiling plus the audit drain, the
+  Vault token revoke and the runtime teardown that follow it.
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
   by name if the account does not exist or cannot be looked up. With no provider the

@@ -170,7 +170,7 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The bound actually used for that drain: the constant above PLUS the egress
 /// backend's own deadline (#240). A permitted `session.prompt` holds its
-/// handler for up to `egress.deadline_ms` (190 s by default, 600 s at most)
+/// handler for up to `egress.deadline_ms` (280 s by default, 600 s at most)
 /// while the provider answers, so a 10 s drain would abort a handler mid-call
 /// on every restart that races a prompt — content left, `IntentOnly` in the
 /// trail, no outcome record. With no provider the backend is `Unavailable`
@@ -1386,10 +1386,32 @@ pub async fn handle<S, E, P>(
             let sent = match egress_admission {
                 // Refused without spawning anything. Delivery did not happen,
                 // so this is a `Failed` — the content never left.
-                BreakerAdmission::RefuseOpen => Ok(Ok(Err(
-                    crate::egress::EgressFailure::Transport("egress circuit breaker open".into()),
-                ))),
+                BreakerAdmission::RefuseOpen => {
+                    // Rate-limited, like the siblings': the trail says
+                    // `send failed`; the journal must say why.
+                    if egress_breaker
+                        .lock()
+                        .await
+                        .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress circuit breaker open (peer_uid={peer_uid} session_id={session_id}) — refusing the send without spawning more egress work"
+                        );
+                    }
+                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
+                        "egress circuit breaker open".into(),
+                    ))))
+                }
                 BreakerAdmission::RefuseAtCapacity => {
+                    if egress_breaker
+                        .lock()
+                        .await
+                        .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress blocking worker budget exhausted (peer_uid={peer_uid} session_id={session_id}) — refusing the send"
+                        );
+                    }
                     Ok(Ok(Err(crate::egress::EgressFailure::Transport(
                         "egress blocking worker budget exhausted".into(),
                     ))))
@@ -1420,8 +1442,11 @@ pub async fn handle<S, E, P>(
                     // the daemon refused every prompt after its first
                     // thirty-two, for the rest of its life.
                     match &sent {
-                        Ok(_) => egress_breaker.lock().await.record_success(),
-                        Err(_elapsed) => {
+                        // The backend's own expiry is an expiry: the request
+                        // left and no reply came within the budget. Counting
+                        // it as a success would reset the breaker on the
+                        // very stall it exists to trip on (codex on #240).
+                        Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) | Err(_) => {
                             if egress_breaker
                                 .lock()
                                 .await
@@ -1434,6 +1459,7 @@ pub async fn handle<S, E, P>(
                                 );
                             }
                         }
+                        Ok(_) => egress_breaker.lock().await.record_success(),
                     }
                     sent
                 }
@@ -1468,6 +1494,12 @@ pub async fn handle<S, E, P>(
                             Some(r.reply),
                         ),
                     }
+                }
+                // The backend's own deadline ran out after the request was
+                // written: delivery unknown, the same class as the outer
+                // expiry below.
+                Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
+                    (crate::egress::SendOutcome::DeadlineExpired, None)
                 }
                 // The backend reported failure: nothing left.
                 Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),

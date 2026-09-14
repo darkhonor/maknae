@@ -6,6 +6,12 @@
 //! in for. It is exercised by a hermetic OpenAI-compatible stub server, which
 //! is what #240's scope specifies.
 //!
+//! **No `https_only` here, unlike the Vault leg** (`maknae-vault`'s hardened
+//! client): `provider.endpoint` admits `http://` to loopback only, for a
+//! hermetic stub, and refuses it anywhere else by name (`maknae-config`'s
+//! `endpoint_is_acceptable`) — the scheme decision is the kernel's, over
+//! root-owned configuration, before the request reaches this client.
+//!
 //! **TLS provider selection is the process's, never this crate's.** `reqwest`
 //! is pinned with `rustls-no-provider` precisely so nothing here installs a
 //! default; the deputy's `.fips()`-asserted provider is the one used. Building

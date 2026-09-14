@@ -142,7 +142,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %postun
-%systemd_postun_with_restart maknaed.service maknae-egress.service
+# the socket before its service: /run/maknae-egress is the socket unit's
+# RuntimeDirectory= (#240); an existing directory keeps the old mode until it is
+# re-created, and the service restarts onto the re-created listener
+%systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
 fi

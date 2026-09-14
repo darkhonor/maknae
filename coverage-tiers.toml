@@ -580,6 +580,40 @@ anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
 why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds body by transport.frame_max_bytes (<=1 MiB, config.rs range-enforced), never by this defensive cap. The Io error paths on the same function (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
 
+# #240: the egress socket's read budget (egress_socket.rs). Four arms that are
+# errno passthroughs with no decision, or an EINTR retry that needs a signal to
+# land mid-syscall; the decisions around them (a spent budget, a poll timeout, a
+# peer closing mid-frame) are each provoked for real by the module's tests.
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(nix::errno::Errno::EINTR) => continue,"
+why = "poll interrupted by a signal mid-syscall: retried; cannot be provoked without a signal delivered to a blocking worker thread"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) => return Err(Self::transport(format!(\"poll: {e}\"))),"
+why = "poll on a live, borrowed socket fd cannot fail (a closed fd reports POLLNVAL as readable, not an error); pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,"
+why = "read interrupted by a signal mid-syscall: retried, as std's read_exact does; cannot be provoked without a signal delivered to a blocking worker thread"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) if Self::write_is_retried(&e) => continue,"
+why = "a send timer that expired with nothing moved, or a signal mid-syscall: the loop re-asks the budget; which of the two the platform reports under SO_SNDTIMEO is not controllable from a test (the dribble test observes the partial-write path)"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) => break Err(Self::transport(format!(\"write: {e}\"))),"
+why = "a write that fails for a reason other than the timer or a signal is a kernel-level fault (EPIPE on a peer that already went is raised on the read that follows in every test that provokes it); pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) => return Err(Self::transport(e)),"
+why = "a read that poll just reported readable fails only on a kernel-level fault; the two outcomes with a decision — EOF mid-frame and the budget — are provoked for real"
+
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
 

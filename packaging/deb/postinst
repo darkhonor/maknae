@@ -101,6 +101,11 @@ case "$1" in
         # onto the new binary — preserving the operator's enabled/running state.
         if [ -n "${2:-}" ]; then
             systemctl try-restart maknaed.service 2>/dev/null || :
+            # The SOCKET first: /run/maknae-egress is its RuntimeDirectory= now
+            # (#240), and an existing directory keeps the mode the old service
+            # unit gave it until the socket unit re-creates it. The service
+            # then restarts onto the re-created listener.
+            systemctl try-restart maknae-egress.socket 2>/dev/null || :
             systemctl try-restart maknae-egress.service 2>/dev/null || :
         fi
         ;;

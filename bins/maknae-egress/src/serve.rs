@@ -189,6 +189,26 @@ mod tests {
     /// CONSUMPTION: the client writes a full frame, the deputy refuses, and the
     /// frame is still sitting unread in the socket afterwards. A deputy that
     /// read first would have drained it.
+    /// The deputy's check of the CONNECTING daemon is the exact-uid one, by
+    /// name: an accepted connection reports the connecting process's own
+    /// credentials, so the listener predicate (which also accepts root) has
+    /// no place here. Pinned at the source, patterns composed so this test
+    /// does not match itself.
+    #[test]
+    fn the_accept_path_checks_the_exact_uid_not_the_listener_predicate() {
+        let src = include_str!("serve.rs");
+        let exact = format!("maknae_vault::{}(&stream,", "peer_uid_is");
+        let listener = format!("{}(&stream", "listener_uid_is");
+        assert!(
+            src.contains(&exact),
+            "the accept path must check the exact uid"
+        );
+        assert!(
+            !src.contains(&listener),
+            "root is not the kernel; the listener predicate must not be used here"
+        );
+    }
+
     #[test]
     fn a_peer_that_is_not_the_kernel_is_refused_before_its_bytes_are_read() {
         let (a, b) = UnixStream::pair().unwrap();
