@@ -8,7 +8,7 @@ WHAT THIS DERIVES, AND FROM WHAT. Every fact rendered comes from something that
 ENFORCES it, never from something that merely describes it:
 
   TCB membership   ci/gates/lib.sh   — the list P1 actually polices
-  binary linkage   cargo metadata    — the resolved closure per bin, from source
+  bin dependencies cargo metadata    — the resolved closure per bin, from source
   members/bins     cargo metadata    — the workspace itself
 
 `packaging/isolation-contract.md` is deliberately NOT a source: it mirrors
@@ -84,7 +84,7 @@ def workspace() -> dict:
     return {"crates": sorted(members), "bins": sorted(bins)}
 
 
-def linkage(binaries: list[str]) -> dict:
+def dep_closure(binaries: list[str]) -> dict:
     """The closure per artifact, from cargo's RESOLVE GRAPH -- not from a
     compiled binary.
 
@@ -345,10 +345,15 @@ def footer(w, h, note):
                    fill=MUTED, anchor="end"))
 
 
-# --- D2: crate x binary linkage matrix ------------------------------------
+# --- D2: crate x binary dependency matrix ---------------------------------
 
 def d2_matrix(gates, ws, links, prov) -> str:
-    """What each shipped artifact ACTUALLY links, and which cells a gate refuses.
+    """Which crates each artifact can REACH through its dependency graph, and
+    which cells a gate refuses.
+
+    Source-level reachability, NOT linker-retained content -- see the caption
+    and `dep_closure`. Renamed from "linkage" on #314 review: the old wording
+    claimed artifact inspection this no longer performs.
 
     A matrix, not a graph — no layout engine needed. Shaped after DoDAF SV-6's
     resource-flow matrix; the cells carry UML stereotypes.
@@ -370,9 +375,9 @@ def d2_matrix(gates, ws, links, prov) -> str:
     w = x0 + colw * len(bins) + 40
 
     p = [box(24, 24, w - 48, h - 64, "#FFFFFF", MUTED, rx=16),
-         text(44, 52, "Crate × binary linkage, and what the gates refuse", 15, "600"),
-         text(44, 72, "Derived from cargo's resolve graph for the host triple — the full "
-                      "transitive closure, not just declared dependencies.", 11, fill=MUTED),
+         text(44, 52, "Crate × binary dependency reachability, and what the gates refuse", 15, "600"),
+         text(44, 72, "Source-level reachability from cargo's resolve graph (host triple, "
+                      "normal-kind edges) — NOT proof the linker retained the crate.", 11, fill=MUTED),
          text(44, 88, "«» denotes a UML stereotype. A refused cell is refused by gate P1's "
                       "per-consumer allowlist, not merely absent today.", 11, fill=MUTED)]
 
@@ -421,15 +426,17 @@ def d2_matrix(gates, ws, links, prov) -> str:
 
     # legend
     ly = y + 26
-    p.append(text(44, ly, "● linked", 10, fill=OK_LINE))
-    p.append(text(130, ly, "● linked (privileged)", 10, fill=TRUST_LINE))
+    p.append(text(44, ly, "● reachable", 10, fill=OK_LINE))
+    p.append(text(130, ly, "● reachable (privileged)", 10, fill=TRUST_LINE))
     p.append(text(285, ly, "✕ refused by gate", 10, fill=WARN))
-    p.append(text(410, ly, "· not linked", 10, fill=MUTED))
+    p.append(text(410, ly, "· not reachable", 10, fill=MUTED))
     p.append(footer(w, h, f"generated from ci/gates/lib.sh + cargo metadata · {prov}"))
     return svg(w, h, "\n  ".join(p),
-               "Maknae crate to binary linkage matrix",
+               "Maknae crate to binary dependency matrix",
                "Which workspace crates and key external dependencies each Maknae binary "
-               "links, with the cells a CI gate refuses marked as UML stereotypes.")
+               "can reach through its resolved dependency graph, with the cells a CI gate "
+               "refuses marked as UML stereotypes. Source-level reachability, not linker "
+               "retention.")
 
 
 # --- D1: TCB boundary, UML component diagram ------------------------------
@@ -485,13 +492,13 @@ def d1_tcb(gates, ws, links, prov) -> str:
 
     b, bh = block("Trust plane · supporting", "«component»", daemon_only, 40, y,
                   OK_FILL, OK_LINE, "#04342C",
-                  caption="linked by the daemon only — not privileged, so not in the TCB")
+                  caption="reachable from the daemon only — not privileged, so not in the TCB")
     p += b
     y += bh + 20
 
     b, bh = block("Shared, non-privileged", "«component»", shared, 40, y,
                   "#FFFFFF", MUTED, INK,
-                  caption="linked by BOTH planes — in the TCB of neither; the client needs "
+                  caption="reachable from BOTH planes — in the TCB of neither; the client needs "
                           "these to connect and to delegate descriptors")
     p += b
     y += bh + 20
@@ -1659,7 +1666,7 @@ ARTIFACT_DERIVED = frozenset({
 def main(argv: list) -> None:
     """Generate every catalogued diagram, or only the ones named on argv.
 
-    `linkage()` is resolved on FIRST USE, never at startup. The failure that
+    `dep_closure()` is resolved on FIRST USE, never at startup. The failure that
     motivated it (maintainer, #314): it ran unconditionally and `sys.exit`s on
     a missing `target/release/<bin>`, so regenerating a diagram whose only
     inputs are a TOML file and a git sha demanded a release build of all four
@@ -1677,7 +1684,7 @@ def main(argv: list) -> None:
 
     def links():
         if not cached:
-            cached.append(linkage(ws["bins"]))
+            cached.append(dep_closure(ws["bins"]))
         return cached[0]
 
     products = [

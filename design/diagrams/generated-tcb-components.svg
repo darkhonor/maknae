@@ -31,7 +31,7 @@
   <text x="239" y="293" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="500" fill="#04342C">maknae-spif</text>
   <rect x="406" y="280" width="164" height="19" rx="6" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
   <text x="415" y="293" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="500" fill="#04342C">maknae-subject-ctx</text>
-  <text x="56" y="319" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">linked by the daemon only — not privileged, so not in the TCB</text>
+  <text x="56" y="319" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">reachable from the daemon only — not privileged, so not in the TCB</text>
   <rect x="40" y="350" width="552" height="138" rx="16" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
   <text x="56" y="374" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Shared, non-privileged</text>
   <text x="233.2" y="374" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">«component»</text>
@@ -49,7 +49,7 @@
   <text x="415" y="425" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="500" fill="#2C2C2A">maknae-security</text>
   <rect x="54" y="438" width="164" height="19" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
   <text x="63" y="451" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="500" fill="#2C2C2A">maknae-vault</text>
-  <text x="56" y="477" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">linked by BOTH planes — in the TCB of neither; the client needs these to connect and to delegate descriptors</text>
+  <text x="56" y="477" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">reachable from BOTH planes — in the TCB of neither; the client needs these to connect and to delegate descriptors</text>
   <rect x="40" y="508" width="552" height="60" rx="16" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
   <text x="56" y="532" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Untrusted plane · maknae</text>
   <text x="248.39999999999998" y="532" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">«untrusted»</text>

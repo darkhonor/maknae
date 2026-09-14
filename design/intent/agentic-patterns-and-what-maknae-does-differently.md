@@ -74,19 +74,36 @@ The field publishes guides. Frontier labs publish **system cards** and a **Prepa
 
 **That index would not belong in this directory.** Assembled from gate output it is *derived*, not intent, and should be **generated** with `check_evidence` refusing a control row whose citation does not resolve — authoritative precisely because it is computed. Scoping it is the maintainer's.
 
-## The diagram contract this implies
+## What we want these diagrams to show
 
-Recorded here rather than in `design/diagrams/README.md` because it describes intent, not the generated catalog's rules. **A desired-state or pattern diagram is not acceptable unless it shows:**
+**Descriptive, not a rule — reworded 2026-09-14 on review.** This section previously called
+itself a *"diagram contract"* and said a diagram was *"not acceptable unless"* it satisfied five
+mandatory criteria. That is an acceptance rule, and an acceptance rule cannot live in a directory
+whose own banner says nothing here may be cited as a reason to accept or reject a change. The
+contradiction was the finding; the wording below is the fix. **Nothing here gates anything.** If
+these turn out to be worth enforcing, they belong in `design/diagrams/README.md` or an ADR, and
+ratifying them there is the maintainer's call.
 
-1. **The trust boundary**, drawn — which side is untrusted.
-2. **Every crossing**, labelled with the verb that carries it.
-3. **The deny path** for each crossing. A crossing drawn without its refusal is an incomplete claim.
-4. **What is recorded** — a crossing that produces no audit record should look different from one that does.
-5. **A provenance line** — the ADR or ruling that authorises the *desired* element. Unauthorised elements are someone's assumption and must not be drawn.
+What we have found makes a desired-state or pattern diagram *useful*, and what tends to be missing
+when one is not:
 
-UML 2.5.1 **activity diagrams with partitions** (§15.6) are the natural notation and are already in the catalog's conformance table: a partition means *"who performs this action"*, which is precisely the trust question. Nothing new needs inventing.
+1. **The trust boundary, drawn** — a reader cannot see which side is untrusted unless the diagram
+   says so.
+2. **Every crossing, labelled with the verb that carries it.** An unlabelled arrow leaves the
+   reader guessing at the mechanism.
+3. **The deny path for each crossing.** This is the one the field's diagrams almost always omit,
+   and it is the one that distinguishes Maknae — a crossing drawn without its refusal tells half
+   the story.
+4. **What is recorded** — a crossing that produces no audit record reads very differently from one
+   that does, and the picture should not flatten them together.
+5. **Provenance for desired elements** — naming the ADR or ruling behind a *desired* element is
+   what separates a plan from someone's assumption.
 
-**Desired-state views carry this document's banner.** The derived catalog is generated from the repository and is evidence; a desired-state view is intent, and a reviewer must not cite it.
+UML 2.5.1 **activity diagrams with partitions** (§15.6) suit this well and are already in the
+catalog's conformance table: a partition means *"who performs this action"*, which is precisely the
+trust question. Nothing new needs inventing.
+
+**Desired-state views carry this document's banner**, and the reason is the distinction this whole directory turns on: the derived catalog is generated from the repository and is evidence, whereas a desired-state view is intent. What follows from that is stated once, in [`README.md`](README.md), and is not restated as a rule here — a non-authoritative document repeating a directive in its own voice is how the contradiction this section already had to fix gets reintroduced.
 
 ## Sources
 

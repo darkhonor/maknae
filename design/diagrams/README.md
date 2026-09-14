@@ -72,7 +72,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | File | Notation | Question it answers | Reader | Kind |
 |---|---|---|---|---|
 | `generated-tcb-components.svg` | UML component | *What is in the TCB and where does the boundary run?* | security assessor | generated |
-| `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
+| `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What can each shipped artifact reach through its dependency graph, and what do the gates refuse?* | security assessor, release reviewer | generated |
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
@@ -116,9 +116,26 @@ merely describes it:
 | Content | Source | Deliberately not |
 |---|---|---|
 | TCB membership | `ci/gates/lib.sh` — the list P1 polices | `packaging/isolation-contract.md`, a mirror that can agree with itself while both drift |
-| Binary linkage | `rust-audit-info` on the built artifact — the real transitive closure | `cargo depgraph` — declared dependencies are not what a binary links |
+| Binary dependency reachability | `cargo metadata`'s resolve graph — normal-kind edges, host triple, transitive | a hand-kept list, and `cargo depgraph`'s *declared* (non-transitive) edges |
 | Members, binaries | `cargo metadata` | a hardcoded list |
 | Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
+
+> **What the matrix claims, and what it does not — narrowed 2026-09-14 on #314 review.** The
+> cells are **source-level dependency reachability**: the crate is in that binary's resolved
+> dependency closure. They are **not** evidence that the linker retained it. Dead-code
+> elimination and features that resolve on but contribute nothing mean a reachable crate may
+> put no bytes in the shipped artifact. The stronger claim — what a specific built binary
+> actually links — requires `rust-audit-info` on that artifact, and this generator
+> deliberately no longer makes it, because no diagram may require a FIPS cryptographic module
+> build to draw.
+>
+> **This costs the assessor nothing, because the matrix was never the enforcement surface.**
+> The refused cells come from `TRUST_CONSUMER_ALLOW` in [`ci/gates/lib.sh`](../../ci/gates/lib.sh),
+> and that allowlist is policed by `p1-manifest-lint.sh` and `p2-invert-tree.sh` on every run.
+> A reader who needs a linker-level fact should read those gates, which decide it, rather than
+> this picture, which illustrates it. The earlier row in this table asserted the opposite and
+> was wrong the moment the implementation changed; a source-of-truth table that disagrees with
+> its generator is the precise drift this catalog exists to prevent.
 
 ### Generation is a manual step, by standing operator decision
 

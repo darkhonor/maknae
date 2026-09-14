@@ -1,10 +1,10 @@
 <svg width="786" height="952" viewBox="0 0 786 952" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Maknae crate to binary linkage matrix</title>
-  <desc>Which workspace crates and key external dependencies each Maknae binary links, with the cells a CI gate refuses marked as UML stereotypes.</desc>
+  <title>Maknae crate to binary dependency matrix</title>
+  <desc>Which workspace crates and key external dependencies each Maknae binary can reach through its resolved dependency graph, with the cells a CI gate refuses marked as UML stereotypes. Source-level reachability, not linker retention.</desc>
   <rect x="0" y="0" width="786" height="952" fill="#FFFFFF"/>
 <rect x="24" y="24" width="738" height="888" rx="16" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
-  <text x="44" y="52" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#2C2C2A">Crate × binary linkage, and what the gates refuse</text>
-  <text x="44" y="72" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Derived from cargo's resolve graph for the host triple — the full transitive closure, not just declared dependencies.</text>
+  <text x="44" y="52" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#2C2C2A">Crate × binary dependency reachability, and what the gates refuse</text>
+  <text x="44" y="72" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Source-level reachability from cargo's resolve graph (host triple, normal-kind edges) — NOT proof the linker retained the crate.</text>
   <text x="44" y="88" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">«» denotes a UML stereotype. A refused cell is refused by gate P1's per-consumer allowlist, not merely absent today.</text>
   <rect x="256" y="108" width="112" height="34" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="4 3"/>
   <text x="312.0" y="123" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="600" fill="#2C2C2A">maknae</text>
@@ -200,9 +200,9 @@
   <text x="436.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="44" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">● linked</text>
-  <text x="130" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● linked (privileged)</text>
+  <text x="44" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">● reachable</text>
+  <text x="130" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● reachable (privileged)</text>
   <text x="285" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#B3452F">✕ refused by gate</text>
-  <text x="410" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not linked</text>
+  <text x="410" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not reachable</text>
   <text x="24" y="936" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + cargo metadata · inputs at 1d3dae9 · 2026-09-14</text><text x="762" y="936" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>
