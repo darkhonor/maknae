@@ -1468,6 +1468,149 @@ def check_catalog(written: list) -> None:
         sys.exit("README.md names files that do not exist: " + ", ".join(ghost))
 
 
+def d11_patterns(prov: str) -> str:
+    """Each published agentic pattern, with what the trust boundary inserts.
+
+    One card per pattern, in the layout the field's own explainers use: a
+    numbered badge, a title, the flow in one line, then a captioned node graph
+    with labelled edges. What differs is inside the graph rather than beside it.
+
+    Node origin is the whole device. A node the field publishes is drawn plain;
+    a node that exists ONLY because the runtime is untrusted is drawn filled and
+    accented. So a reader sees the published pattern and, in the same picture,
+    exactly what Maknae inserts into it.
+
+    UML 2.5.1 activity partitions (15.6) supply the lanes: a partition denotes
+    WHO performs an action, which is precisely the trust question, so nothing is
+    invented. The deny edge is the element the published diagrams have nowhere
+    to put -- and a picture of a deny-by-default system in which nothing is
+    denied depicts a different system.
+
+    The crossing count is a cost model: each is a PDP evaluation, an audit
+    append and a socket round trip.
+    """
+    doc = tomllib.loads((OUT / "agentic-patterns.toml").read_text())
+    pats = doc["pattern"]
+    check_evidence(pats, "evidence", "agentic-patterns.toml")
+
+    W, PAD = 1180, 28
+    CARD, CGAP = 356, 18
+    NW, NH = 176, 46
+    H = 128 + len(pats) * (CARD + CGAP) + 40
+    o = []
+
+    o.append(text(PAD, 42, "Agentic patterns under an untrusted runtime", 22, "600"))
+    o.append(text(PAD, 64, "The pattern as the field publishes it, and what the trust "
+                           "boundary inserts into it.", 12, fill=MUTED))
+    o.append(box(PAD, 78, W - 2 * PAD, 36, "#FFF6E5", WARN, rx=6))
+    o.append(text(PAD + 12, 94, "NOT AUTHORITATIVE — design/intent/. States intent, "
+                                "never what is built.", 11, "600", fill=WARN))
+    o.append(text(PAD + 12, 108, "Plain node = published pattern.   Filled node = inserted "
+                                 "because the runtime is untrusted.   Dashed red = the deny "
+                                 "path published diagrams omit.", 10, fill=MUTED))
+
+    for i, p in enumerate(pats):
+        top = 128 + i * (CARD + CGAP)
+        gap = p["crossings"] < 0
+        accent = WARN if gap else TRUST_LINE
+        o.append(box(PAD, top, W - 2 * PAD, CARD, "#FCFBF7", PLAIN_LINE, rx=10))
+
+        badge = f'AGENTIC PATTERN  {i + 1:02d} / {len(pats):02d}'
+        o.append(box(PAD + 18, top + 16, 178, 20, TRUST_FILL, accent, rx=10))
+        o.append(text(PAD + 107, top + 30, badge, 9, "600", fill=TRUST_INK, anchor="middle"))
+        o.append(text(PAD + 18, top + 66, p["name"], 24, "600"))
+        o.append(text(PAD + 18, top + 86, p["flow"], 12, fill=MUTED))
+        o.append(text(PAD + 18, top + 102, p["source"], 9, fill=MUTED))
+        o.append(text(W - PAD - 18, top + 30,
+                      "crossings: n/a" if gap
+                      else f'{p["crossings"]} decided crossing(s) · {p["records"]} record(s)',
+                      10, "600", fill=accent, anchor="end"))
+        o.append(text(W - PAD - 18, top + 46, p["status"], 9, fill=MUTED, anchor="end"))
+
+        LANE_L, LANE_P = top + 138, top + 222
+        DENY_Y = top + 296
+        o.append(text(PAD + 18, LANE_L - 18, "UNTRUSTED RUNTIME", 8, "600", fill=WARN))
+        o.append(text(PAD + 18, LANE_P - 18, "TRUST PLANE  ·  maknaed decides", 8, "600",
+                      fill=TRUST_INK))
+        o.append(f'<line x1="{PAD + 210}" y1="{LANE_P - 30}" x2="{W - PAD - 14}" '
+                 f'y2="{LANE_P - 30}" stroke="{TRUST_LINE}" stroke-width="1" '
+                 f'stroke-dasharray="5 4"/>')
+
+        used = sorted({n["col"] for n in p["nodes"]})
+        slot = {c: k for k, c in enumerate(used)}
+        span = W - 2 * PAD - 36
+        step = (span - NW) / max(1, len(used) - 1)
+        nd = {n["id"]: n for n in p["nodes"]}
+        pos = {}
+        for n in p["nodes"]:
+            x = PAD + 18 + slot[n["col"]] * step
+            y = LANE_L if n["lane"] == "loop" else LANE_P
+            pos[n["id"]] = (x, y)
+            ins = n["origin"] == "maknae"
+            fill = (TRUST_FILL if ins else PLAIN_FILL)
+            line = (accent if ins else PLAIN_LINE)
+            o.append(box(x, y, NW, NH, fill, line, rx=7, sw="1.1" if ins else "0.75"))
+            o.append(f'<rect x="{x}" y="{y}" width="3.5" height="{NH}" fill="{line}"/>')
+            o.append(text(x + 12, y + 20, n["title"], 12, "600",
+                          fill=TRUST_INK if ins else INK))
+            o.append(text(x + 12, y + 35, n["caption"], 9, fill=MUTED))
+
+        for e in p["edges"]:
+            if e["kind"] == "deny":
+                if e["from"] not in pos:
+                    continue
+                fx, fy = pos[e["from"]]
+                x0 = fx + NW / 2
+                yb = DENY_Y
+                o.append(f'<line x1="{x0}" y1="{fy + NH}" x2="{x0}" y2="{yb}" '
+                         f'stroke="{WARN}" stroke-width="1.1" stroke-dasharray="4 3" '
+                         f'marker-end="url(#dn)"/>')
+                o.append(text(x0 + 10, yb - 2, e["label"], 9, "600", fill=WARN))
+                continue
+            if e["from"] not in pos or e["to"] not in pos:
+                continue
+            fx, fy = pos[e["from"]]
+            tx, ty = pos[e["to"]]
+            col = accent if e["kind"] == "cross" else PLAIN_LINE
+            dash = ' stroke-dasharray="4 3"' if e["kind"] == "cross" else ""
+            if fy == ty:
+                x0, x1 = fx + NW, tx
+                o.append(f'<line x1="{x0}" y1="{fy + NH / 2}" x2="{x1}" y2="{ty + NH / 2}" '
+                         f'stroke="{col}" stroke-width="1"{dash} marker-end="url(#ar)"/>')
+                far = abs(slot[nd[e["to"]]["col"]] - slot[nd[e["from"]]["col"]]) > 1
+                lx = (x0 + (x1 - x0) * 0.82) if far else (x0 + x1) / 2
+                o.append(text(lx, fy + NH / 2 - 9, e["label"], 9,
+                              fill=col, anchor="middle", halo="#FCFBF7"))
+            else:
+                x0 = fx + NW / 2
+                x1 = tx + NW / 2
+                ya = fy + NH if ty > fy else fy
+                yb = ty if ty > fy else ty + NH
+                o.append(f'<path d="M{x0},{ya} L{x0},{(ya + yb) / 2} L{x1},{(ya + yb) / 2} '
+                         f'L{x1},{yb}" fill="none" stroke="{col}" stroke-width="1"{dash} '
+                         f'marker-end="url(#ar)"/>')
+                o.append(text((x0 + x1) / 2, (ya + yb) / 2 - 6, e["label"], 9,
+                              fill=col, anchor="middle", halo="#FCFBF7"))
+
+        dy = top + CARD - 40
+        for k, ln in enumerate(_wrap_words(p["delta"], 128)):
+            o.append(text(PAD + 18, dy + k * 13, ln, 10,
+                          "600" if k == 0 else "400", fill=WARN if gap else INK))
+
+    defs = (f'<defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" '
+            f'markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{TRUST_LINE}"/>'
+            f'</marker><marker id="dn" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
+            f'markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{WARN}"/>'
+            f'</marker></defs>')
+    o.append(footer(W, H, prov))
+    return svg(W, H, defs + "\n".join(o),
+               "Agentic patterns under an untrusted runtime",
+               "One card per published agentic pattern. Plain nodes are the pattern as "
+               "the field publishes it; filled nodes exist only because the runtime is "
+               "untrusted. Lanes are UML activity partitions. The dashed red edge is the "
+               "deny path the published diagrams have nowhere to show.")
+
+
 def main() -> None:
     gates, ws = gate_facts(), workspace()
     links = linkage(ws["bins"])
@@ -1485,6 +1628,7 @@ def main() -> None:
         ("generated-system-interfaces.svg", d8_interfaces(prov)),
         ("generated-operational-concept.svg", d9_opconcept(prov)),
         ("generated-container-architecture.svg", d10_containers(prov)),
+        ("generated-agentic-patterns.svg", d11_patterns(prov)),
     ]:
         (OUT / name).write_text(content)
         print(f"  wrote design/diagrams/{name}")

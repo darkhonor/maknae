@@ -9,9 +9,16 @@ Issue [#196](https://github.com/darkhonor/maknae/issues/196) carries the require
 ## Regenerate
 
 ```bash
-cargo auditable build -p maknaed -p maknae -p maknae-spifc --release
+cargo auditable build -p maknaed -p maknae -p maknae-spifc -p maknae-egress --release
 python3 design/diagrams/generate.py
 ```
+
+> **Corrected 2026-09-14.** This command named three binaries while `generate.py` derives its
+> required set from `cargo metadata`, so it has demanded four since `maknae-egress` landed in
+> #288 — and following the documented command has failed with
+> `missing target/release/maknae-egress` ever since. Nobody noticed because nobody regenerated.
+> `check_catalog` guards the README against the *catalog*; nothing guarded it against the
+> *build command*.
 
 Python 3 and nothing else — no Mermaid, no Graphviz, no npm, no `xtask`. The build step
 is what `rust-audit-info` reads; both tools are already CI tooling
@@ -64,6 +71,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
 | `generated-container-architecture.svg` | UML deployment | *What containers exist, in which plane, with what trust and which volumes?* | contributor, security assessor | generated |
+| `generated-agentic-patterns.svg` | UML activity partitions | *For each published agentic pattern, what does the trust boundary insert — and where is the deny path the field's diagrams omit?* | contributor, reviewer new to the project | generated — **intent, NOT authoritative** (see [`../intent/`](../intent/)) |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
