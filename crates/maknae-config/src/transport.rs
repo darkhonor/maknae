@@ -16,7 +16,11 @@ const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
 
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
 const FRAME_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 1..=1_048_576;
-const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=60_000;
+/// The ceiling on both transport timeouts. Named and exported because the
+/// shipped units' stop timeouts are derived from it (`maknae-kernel`'s
+/// shutdown-chain test evaluates the handler drain at this ceiling too).
+pub const TRANSPORT_TIMEOUT_MS_MAX: u64 = 60_000;
+const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=TRANSPORT_TIMEOUT_MS_MAX as i64;
 
 /// The transport-layer configuration: connection/frame caps + timeouts + the
 /// Unix-domain socket path. `Clone` — the run-loop clones this per accepted

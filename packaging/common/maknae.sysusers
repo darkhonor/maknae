@@ -7,7 +7,7 @@
 #                    neither the daemon nor the operator, and so the deputy's
 #                    Vault policy can be scoped to the provider-key prefix
 #                    alone (ADR-0023 decision 3).
-# Both must exist. NO on-disk cross-membership (spec §5.3): _maknae's membership
+# All three must exist. NO on-disk cross-membership (spec §5.3): _maknae's membership
 # in `maknae` exists ONLY at unit scope via the unit's SupplementaryGroups=maknae.
 #
 # Type Name     ID   GECOS                       Home          Shell

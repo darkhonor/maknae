@@ -263,7 +263,7 @@ where
         backend_name,
         classification_policy,
         std::sync::Arc::new(None),
-        maknae_kernel::production_egress(),
+        maknae_kernel::unavailable_egress(),
         timeout,
         maknae_security::Lane::Local,
         delegated,

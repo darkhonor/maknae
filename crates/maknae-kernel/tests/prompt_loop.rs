@@ -18,7 +18,15 @@ pub struct Recording {
     calls: Mutex<Vec<&'static str>>,
     seen: Mutex<Vec<(String, String, u64)>>,
     pub fail_send: bool,
+    /// #240: the backend reports its OWN deadline expiry (the socket's
+    /// wall-clock budget), after the request left.
+    pub fail_deadline: bool,
+    /// #240: the backend reports a failure AFTER the request left.
+    pub fail_after_send: bool,
     pub sleep: Option<Duration>,
+    /// #240: the backend states its own outer deadline; `None` is a
+    /// generous default so only the deadline test sets one.
+    pub deadline: Option<Duration>,
 }
 impl Recording {
     pub fn calls(&self) -> Vec<&'static str> {
@@ -33,6 +41,9 @@ impl maknae_kernel::Egress for Recording {
     fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
         self.calls.lock().unwrap().push("ready");
         Ok(())
+    }
+    fn deadline(&self) -> std::time::Duration {
+        self.deadline.unwrap_or(Duration::from_secs(5))
     }
     fn send(
         &self,
@@ -57,6 +68,14 @@ impl maknae_kernel::Egress for Recording {
         }
         if self.fail_send {
             return Err(maknae_kernel::EgressFailure::Transport("hermetic".into()));
+        }
+        if self.fail_deadline {
+            return Err(maknae_kernel::EgressFailure::DeadlineExpired);
+        }
+        if self.fail_after_send {
+            return Err(maknae_kernel::EgressFailure::AfterSend(
+                "deputy hung up".into(),
+            ));
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
@@ -278,6 +297,9 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
         }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
         fn send(
             &self,
             _: &maknae_kernel::DurableEgressIntent,
@@ -331,6 +353,9 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
     impl maknae_kernel::Egress for Silence {
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
+        }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
         }
         fn send(
             &self,
@@ -422,17 +447,51 @@ async fn a_failed_send_is_an_outcome_deny_after_a_real_intent() {
     assert_eq!(eg.calls(), vec!["ready", "send"]);
 }
 
+/// #240 (critical review): the egress breaker's OTHER half. Admission takes
+/// an in-flight slot on every send; a send that returns must give it back,
+/// or the daemon refuses every prompt after its first thirty-two — for the
+/// rest of its life, with no diagnostic. One more sequential send than the
+/// cap, through the real handler: every one must reach the backend.
 #[tokio::test]
-async fn a_send_past_the_transport_deadline_is_deadline_expired_delivery_unknown() {
+async fn every_returned_send_releases_its_breaker_slot_so_sequential_sends_never_hit_the_cap() {
+    // its own fixture name: the directory is keyed by name and pid, and a
+    // sibling test's Drop would remove a shared one mid-loop
+    let fx = Fixture::with_policy("prompt-breaker", "Read", GRANTED);
+    let eg = Arc::new(Recording::default());
+    let n = usize::from(maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT) + 1;
+    for i in 0..n {
+        let records = Records::new(0);
+        let resp = fx
+            .roundtrip(
+                prompt("hello world"),
+                Arc::clone(&records),
+                Some("openai"),
+                eg.clone(),
+            )
+            .await
+            .expect("a reply frame");
+        assert!(
+            matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
+            "send {i} of {n}: {resp:?}"
+        );
+    }
+    assert_eq!(eg.seen().len(), n);
+}
+
+#[tokio::test]
+async fn a_send_past_the_egress_deadline_is_deadline_expired_delivery_unknown() {
     let fx = Fixture::with_policy("prompt-deadline", "Read", GRANTED);
     let records = Records::new(0);
-    let mut cfg = maknae_config::transport_from_section(None).unwrap();
-    cfg.read_timeout_ms = 200;
+    // #240: the deadline is the BACKEND's (`egress.deadline_ms` in production),
+    // not the transport read timeout — that one stays at its default here to
+    // prove it is no longer what bounds the send.
+    let cfg = maknae_config::transport_from_section(None).unwrap();
     // The abandoned blocking worker keeps sleeping after the handler returns
     // at 200ms; the tokio test runtime waits for it on drop (~1.3s).
     // Deliberate: do not "optimise" the sleep away.
     let eg = Arc::new(Recording {
         sleep: Some(Duration::from_millis(1500)),
+        deadline: Some(Duration::from_millis(200)),
         ..Default::default()
     });
     let resp = fx
@@ -458,6 +517,77 @@ async fn a_send_past_the_transport_deadline_is_deadline_expired_delivery_unknown
         ),
         ("deny", "send deadline expired")
     );
+}
+
+/// #240 (codex): the backend's OWN expiry — the socket's wall-clock budget
+/// usually fires before the kernel's outer timeout on the same value — is the
+/// same delivery-unknown outcome, never `Failed` ("nothing left").
+#[tokio::test]
+async fn a_backend_reported_deadline_is_deadline_expired_delivery_unknown_too() {
+    let fx = Fixture::with_policy("prompt-inner-deadline", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        fail_deadline: true,
+        ..Default::default()
+    });
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let outcome = last_prompt_record(&records);
+    assert_eq!(
+        outcome.egress.unwrap().status,
+        EgressStatus::DeadlineExpired
+    );
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str()
+        ),
+        ("deny", "send deadline expired")
+    );
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
+}
+
+/// #240 (codex): a failure AFTER the request left the kernel — the deputy
+/// hung up because its provider call failed or timed out, or answered with
+/// garbage — is `OutcomeUnknown`, never `Failed`: the provider may have the
+/// prompt, and "nothing left" would be a false record.
+#[tokio::test]
+async fn a_failure_after_the_request_left_is_outcome_unknown_never_failed() {
+    let fx = Fixture::with_policy("prompt-after-send", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        fail_after_send: true,
+        ..Default::default()
+    });
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let outcome = last_prompt_record(&records);
+    assert_eq!(outcome.egress.unwrap().status, EgressStatus::OutcomeUnknown);
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str(),
+            outcome.outcome.posture.as_str()
+        ),
+        ("deny", "send outcome unknown", "unavailable")
+    );
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
 }
 
 #[tokio::test]
@@ -749,6 +879,9 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
     impl maknae_kernel::Egress for Huge {
         fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
             Ok(())
+        }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
         }
         fn send(
             &self,

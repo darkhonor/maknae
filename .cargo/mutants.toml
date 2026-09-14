@@ -104,6 +104,12 @@
 # algebraically identical. The executable bit proof passes natively on Rocky9.
 # Only | -> ^ in these named functions is exempt: & mutations remain tested.
 exclude_re = [
+  # #240: `Unavailable::deadline` returns `Duration::ZERO`, and the mutant
+  # replacing its body with `Default::default()` returns the SAME value —
+  # equivalent, not missed (measured on f69639c). The value is pinned by
+  # `unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends`;
+  # every other mutant of the file stays tested.
+  "maknae-kernel/src/egress\\.rs:[0-9]+:[0-9]+: replace <impl Egress for Unavailable>::deadline -> std::time::Duration with Default::default\\(\\)$",
   "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_writable_delegation)$",
   "^crates/maknae-io/src/audit_append\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in flags$",
   "maknae-plane.*::poll_flush",
@@ -141,6 +147,8 @@ exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind enum + Display; no From impl exists
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
+  "crates/maknae-vault/src/egress.rs",     # #240b: the deputy's login-per-read/revoke and KV read — live-Vault I/O; the SecretID-source decision is secret_source.rs (T1, NOT excluded)
+  "crates/maknae-vault/src/http.rs",       # #240b: the hardened reqwest client builder — construction I/O; `redirect(none)`/`https_only(true)` have no getter to assert against
   "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)

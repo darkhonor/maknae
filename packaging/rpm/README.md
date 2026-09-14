@@ -45,6 +45,9 @@ sudo /usr/libexec/maknae/maknae-selinux-ports.sh add <vault-tcp-port>   # defaul
 sudo maknae enroll --deployment-id <id>
 # re-login so your shell joins the `maknae` group
 sudo systemctl enable --now maknaed
+# with a provider registered (#240), the deputy's socket unit too — it is
+# preset-disabled, and without it every permitted prompt is refused as not ready
+sudo systemctl enable --now maknae-egress.socket
 ```
 
 **Upgrades follow the same order** — enroll (if not already) before restarting the

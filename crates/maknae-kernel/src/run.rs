@@ -157,14 +157,46 @@ const ATCAP_AUDIT_QUEUE_DEPTH: usize = 256;
 /// aborted so shutdown can proceed; the normal (fast) case still drains fully.
 const AUDIT_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on draining IN-FLIGHT connection handlers at the end of the accept loop.
-/// Same class as `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`: each handler performs audit appends
-/// (`spawn_blocking` write+fsync under the hood), so a wedged audit filesystem can
-/// block a handler indefinitely — an unbounded `join_next()` drain would then hang
-/// shutdown BEFORE the at-capacity drain bound is even reached. Sized above the
-/// per-connection work bounds (handshake_timeout + read_timeout + response write
-/// bound, each ≤ 60s only in pathological configs; defaults total ≤ ~15s).
+/// The MARGIN on draining IN-FLIGHT connection handlers at the end of the accept
+/// loop, on top of the per-connection bounds `handler_drain_bound` adds up
+/// explicitly. Same class as `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`: each handler performs
+/// audit appends (`spawn_blocking` write+fsync under the hood), so a wedged audit
+/// filesystem can block a handler indefinitely — an unbounded `join_next()` drain
+/// would then hang shutdown BEFORE the at-capacity drain bound is even reached.
+/// (Corrected 2026-09-15, review round 5: this constant used to BE the whole
+/// drain bound, with a comment that said the per-connection work "totals ≤ ~15s"
+/// — it is 26 s at the defaults and 191 s at the transport ceiling, and the
+/// handshake runs inside the handler. Those terms are now named below.)
 const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bound actually used for that drain: every per-connection bound the
+/// transport configuration sets, the egress backend's own deadline (#240 — a
+/// permitted `session.prompt` holds its handler for up to `egress.deadline_ms`,
+/// 280 s by default and 600 s at most, while the provider answers; with no
+/// provider the backend is `Unavailable` and its deadline is zero), and the
+/// margin above. A drain shorter than this aborts a handler mid-work on a
+/// restart that races it — for a prompt: content left, `IntentOnly` in the
+/// trail, no outcome record. The units give the supervisor the matching
+/// patience (`TimeoutStopSec=`, launchd's `ExitTimeOut`), held to this sum at
+/// both ceilings by a test.
+fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
+    // One connection's bounded work, in the order the handler performs it:
+    // the mTLS handshake (inside the handler, not on the loop), the peer's
+    // group lookup, the frame read, the PDP decision, the verb's own blocking
+    // step under the same bound (the read PEP, the subject enumeration — a
+    // second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the provider call, the
+    // response write (bounded by the read timeout), the close — then the
+    // margin for the audit appends.
+    Duration::from_millis(cfg.handshake_timeout_ms)
+        + GROUP_LOOKUP_TIMEOUT
+        + Duration::from_millis(cfg.read_timeout_ms)
+        + crate::handler::AUTHZ_DECIDE_TIMEOUT
+        + crate::handler::AUTHZ_DECIDE_TIMEOUT
+        + egress_deadline
+        + Duration::from_millis(cfg.read_timeout_ms)
+        + STREAM_CLOSE_TIMEOUT
+        + HANDLER_DRAIN_SHUTDOWN_TIMEOUT
+}
 
 /// Bound on the final TLS close (`AsyncWriteExt::shutdown` → close_notify write) of a
 /// connection stream. A peer that stops reading can otherwise block the close on a
@@ -193,6 +225,21 @@ const GROUP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// the OS reclaims the stuck thread. This backstop is what makes every shutdown bound
 /// above *terminal* rather than advisory.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Bound on reaping the credential supervisor after it is aborted at the end of
+/// the accept loop (#240, review round 3). Detached, the supervisor could be
+/// holding the plane client's lock across a Vault call — `renew_token_once`,
+/// `rotate_leaf` — while `client.shutdown()` waits for that lock before its
+/// `revoke-self`: a further 30 s the walked stop chain did not carry, and a
+/// rotation finishing after retirement could re-install a leaf. Aborting drops
+/// any held guard; the reap is bounded like every other drain here.
+const SUPERVISOR_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Bound on reaping the handlers `drain_handlers_bounded` aborts on elapse. A
+/// term of the shutdown chain in its own right (review round 4 found it
+/// unnamed and uncounted): the drain's bound plus this is what a handler
+/// drain can take.
+const DRAIN_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Close `stream` (TLS close_notify + FIN) within [`STREAM_CLOSE_TIMEOUT`], abandoning
 /// the close on elapse (the stream is dropped regardless, which closes the fd). Every
@@ -248,7 +295,7 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
             // Reap the aborted tasks; each resolves promptly with a cancellation
             // JoinError unless it is pinned inside non-abortable blocking I/O — which
             // the runtime-level shutdown bound then caps.
-            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            let _ = tokio::time::timeout(DRAIN_ABORT_REAP_TIMEOUT, async {
                 while handlers.join_next().await.is_some() {}
             })
             .await;
@@ -1357,44 +1404,103 @@ pub async fn handle<S, E, P>(
                     return;
                 }
             };
-            // 3. the send, on a blocking worker, under the transport's per-peer
-            //    permit bound (the same bound the response write uses). The
-            //    intent is shared by Arc so the outcome record can be derived
-            //    from it even if the worker is abandoned on expiry.
-            //    NO BlockingBreaker here, unlike the four sibling offloads
-            //    (decide, subject list, read PEP, group lookup): in Cooky
-            //    `ready()` fails before any send, so no blocking thread can be
-            //    held; the breaker belongs with #240's egress-specific deadline
-            //    (#240 is handed this by name).
+            // 3. the send, on a blocking worker, under the BACKEND's own
+            //    deadline (`egress.deadline()`, #240 — the transport read
+            //    timeout was never a provider bound) and the egress breaker.
+            //    The intent is shared by Arc so the outcome record can be
+            //    derived from it even if the worker is abandoned on expiry.
             let intent = Arc::new(intent);
             // #240a: admitted BEFORE the spawn, matching the four siblings.
             // `run.rs` handed #240 this obligation by name; the ordering is the
             // whole control, not the presence of a breaker.
             let egress_breaker = egress_send_breaker();
             let egress_admission = { egress_breaker.lock().await.begin_attempt_at(Instant::now()) };
-            let sent = if !matches!(egress_admission, BreakerAdmission::Admit) {
+            let sent = match egress_admission {
                 // Refused without spawning anything. Delivery did not happen,
                 // so this is a `Failed` — the content never left.
-                Ok(Ok(Err(crate::egress::EgressFailure::Transport(
-                    "egress blocking worker budget exhausted".into(),
-                ))))
-            } else {
-                let egress = Arc::clone(&egress);
-                let intent = Arc::clone(&intent);
-                let req = crate::egress::EgressRequest {
-                    destination: destination.clone(),
-                    endpoint: pcfg.endpoint.clone(),
-                    model: pcfg.model.clone(),
-                    key_vault_path: pcfg.key_vault_path.clone(),
-                    key_field: pcfg.key_field.clone(),
-                    conversation: conversation.clone(),
-                    content: content.clone(),
-                };
-                tokio::time::timeout(
-                    Duration::from_millis(cfg.read_timeout_ms),
-                    tokio::task::spawn_blocking(move || egress.send(&intent, req)),
-                )
-                .await
+                BreakerAdmission::RefuseOpen => {
+                    // Rate-limited, like the siblings': the trail says
+                    // `send failed`; the journal must say why.
+                    if egress_breaker
+                        .lock()
+                        .await
+                        .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress circuit breaker open (peer_uid={peer_uid} session_id={session_id}) — refusing the send without spawning more egress work"
+                        );
+                    }
+                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
+                        "egress circuit breaker open".into(),
+                    ))))
+                }
+                BreakerAdmission::RefuseAtCapacity => {
+                    if egress_breaker
+                        .lock()
+                        .await
+                        .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress blocking worker budget exhausted (peer_uid={peer_uid} session_id={session_id}) — refusing the send"
+                        );
+                    }
+                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
+                        "egress blocking worker budget exhausted".into(),
+                    ))))
+                }
+                BreakerAdmission::Admit => {
+                    let egress = Arc::clone(&egress);
+                    let intent = Arc::clone(&intent);
+                    let req = crate::egress::EgressRequest {
+                        destination: destination.clone(),
+                        endpoint: pcfg.endpoint.clone(),
+                        model: pcfg.model.clone(),
+                        key_vault_path: pcfg.key_vault_path.clone(),
+                        key_field: pcfg.key_field.clone(),
+                        conversation: conversation.clone(),
+                        content: content.clone(),
+                    };
+                    let deadline = egress.deadline();
+                    let sent = tokio::time::timeout(
+                        deadline,
+                        tokio::task::spawn_blocking(move || egress.send(&intent, req)),
+                    )
+                    .await;
+                    // The OTHER half of admission (#240, critical review): a
+                    // worker that returned — reply, failure or panic — gives its
+                    // slot back; an expired one counts toward the trip, so a
+                    // stalled deputy opens the breaker after three orphaned
+                    // workers instead of pinning one per prompt. Without this
+                    // the daemon refused every prompt after its first
+                    // thirty-two, for the rest of its life.
+                    // The backend's own expiry is an expiry: the request left
+                    // and no reply came within the budget. Counting it as a
+                    // success would reset the breaker on the very stall it
+                    // exists to trip on (codex on #240). Which failures count
+                    // is `failure_counts_as_expiry`'s decision, T1-pinned.
+                    let expired = match &sent {
+                        Err(_elapsed) => true,
+                        Ok(Ok(Err(f))) => crate::egress::failure_counts_as_expiry(f),
+                        Ok(_) => false,
+                    };
+                    match expired {
+                        true => {
+                            if egress_breaker
+                                .lock()
+                                .await
+                                .record_timeout_at(Instant::now())
+                                == BreakerTransition::Tripped
+                            {
+                                eprintln!(
+                                    "maknaed: egress circuit breaker tripped after repeated {}s send deadlines — failing closed without spawning more egress work",
+                                    deadline.as_secs()
+                                );
+                            }
+                        }
+                        false => egress_breaker.lock().await.record_success(),
+                    }
+                    sent
+                }
             };
             let (send_outcome, reply) = match sent {
                 Ok(Ok(Ok(r))) => {
@@ -1427,7 +1533,19 @@ pub async fn handle<S, E, P>(
                         ),
                     }
                 }
-                // The backend reported failure: nothing left.
+                // The backend's own deadline ran out once the kernel had begun
+                // writing the request: delivery unknown, the same class as the
+                // outer expiry below.
+                Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
+                    (crate::egress::SendOutcome::DeadlineExpired, None)
+                }
+                // The exchange failed once the kernel had begun writing the
+                // request: the deputy hung up or answered with something
+                // unusable. Delivery unknown — the provider may have the prompt.
+                Ok(Ok(Err(crate::egress::EgressFailure::AfterSend(_)))) => {
+                    (crate::egress::SendOutcome::OutcomeUnknown, None)
+                }
+                // The backend reported failure BEFORE the request left: nothing left.
                 Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
@@ -2366,18 +2484,42 @@ where
         while handlers.try_join_next().is_some() {}
     };
 
+    // #240: the credential supervisor is stopped HERE, before the drains and the
+    // caller's `client.shutdown()` (see `SUPERVISOR_ABORT_REAP_TIMEOUT`). Not on
+    // the path where it already exited — that handle has been polled to
+    // completion and must not be polled again.
+    if !matches!(outcome, ServeOutcome::SupervisorExited(_)) {
+        supervisor.abort();
+        match tokio::time::timeout(SUPERVISOR_ABORT_REAP_TIMEOUT, &mut supervisor).await {
+            // The expected outcome of an abort; anything else is an exit the
+            // select above did not get to report (both ready in one wakeup).
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(joined) => {
+                let reason = supervisor_exit_reason(joined);
+                eprintln!(
+                    "maknaed: credential supervisor had already exited at shutdown ({reason})"
+                );
+            }
+            Err(_elapsed) => {
+                eprintln!(
+                    "maknaed: credential supervisor did not stop within {}s of abort; the plane token revoke may wait on its lock (bounded)",
+                    SUPERVISOR_ABORT_REAP_TIMEOUT.as_secs()
+                );
+            }
+        }
+    }
+
     // Stopped accepting (done — we broke the loop, either way). Drain in-flight
     // handlers: this IS the graceful-shutdown drain regardless of which outcome ended
     // the loop, so a supervisor exit still lets already-admitted requests finish rather
     // than dropping them mid-flight. BOUNDED (same class as the audit drain below): a
     // handler stuck in a wedged audit append would otherwise hang shutdown here before
     // the at-capacity drain bound is even reached.
-    if drain_handlers_bounded(&mut handlers, HANDLER_DRAIN_SHUTDOWN_TIMEOUT).await
-        == DrainOutcome::Aborted
-    {
+    let handler_drain = handler_drain_bound(&cfg, egress.deadline());
+    if drain_handlers_bounded(&mut handlers, handler_drain).await == DrainOutcome::Aborted {
         eprintln!(
             "maknaed: in-flight handler drain did not complete within {}s during shutdown; aborting remaining handlers to allow exit",
-            HANDLER_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
+            handler_drain.as_secs()
         );
     }
 
@@ -2707,6 +2849,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let boot = crate::boot(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
     let transport = maknae_config::transport_from_section(boot.section("transport"))
         .map_err(|e| RunError::Other(e.to_string()))?;
+    // #240: where the deputy is, and the outer bound on one send.
+    let egress_cfg =
+        maknae_config::egress_from_section(boot.section(maknae_config::EGRESS_SECTION))
+            .map_err(|e| RunError::Other(e.to_string()))?;
     let audit_cfg = maknae_config::audit_from_section(boot.section("audit"), config_dir)
         .map_err(|e| RunError::Other(e.to_string()))?;
 
@@ -2780,14 +2926,37 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // right answer is not to revoke afterwards but to never acquire the
     // credential when the deployment is already unstartable. A pre-mint
     // failure has nothing minted to revoke.
-    let egress_bounds = boot.provider().and_then(|_| {
-        maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE)).ok()
-    });
+    // The read's OWN error is carried into the refusal, never collapsed to
+    // "absent or unreadable" (#240b self-review): a bounds file that is
+    // present, root-owned and readable but refused by the parser — a missing
+    // `vault` block, an unknown key — is `Refused`, naming the parser's
+    // reason; only an I/O failure is `Undeclared`. Otherwise the operator is
+    // sent to check permissions on a file whose permissions are fine.
+    let egress_bounds = match boot.provider() {
+        None => None,
+        Some(_) => Some(
+            maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
+                .map_err(|e| {
+                    // Which refusal this is — could not be read, or read and
+                    // refused — is the pure classifier's decision, tested over
+                    // the loader's real error values (boot_gate.rs).
+                    let refusal = crate::boot_gate::classify_bounds_load_error(e);
+                    // main() prints "maknaed: refusing to start: {e}" — no prefix here
+                    RunError::Other(refusal.to_string())
+                })?,
+        ),
+    };
     if let Err(e) =
         crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
     {
-        return Err(RunError::Other(format!("refusing to start: {e}")));
+        return Err(RunError::Other(e.to_string()));
     }
+    // #240: THE egress backend, chosen here — PRE-MINT, like the bounds gate,
+    // because a missing `_maknae-egress` account has nothing minted to revoke.
+    // No provider → `Unavailable`; a provider → the deputy's socket under its
+    // uid, resolved once on this blocking path and never per request.
+    let egress = crate::egress::production_egress(boot.provider(), &egress_cfg)
+        .map_err(|e| RunError::Other(e.to_string()))?;
 
     let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
@@ -2954,6 +3123,11 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // daemon instead of leaving the accept loop running as a zombie against a listener
     // whose cert slot the supervisor already cleared.
     let supervisor = client.spawn_supervisor();
+    // #240 (review round 4): the abort that MUST precede `client.shutdown()`
+    // lives here, on the one path every exit takes — the accept loop's own
+    // abort-and-reap covers the graceful path and the ordering; this covers
+    // the post-mint `?` exits (gid, bind, signal install) that never reach it.
+    let supervisor_abort = supervisor.abort_handle();
 
     // Once `mint()` succeeds the privileged kernel-plane Vault token is LIVE until
     // lease expiry — so EVERY post-mint startup step (bind, and anything before the
@@ -2973,6 +3147,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
                 audit: &audit_cfg,
                 vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
                 vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
+                egress: &egress_cfg,
             },
         ))
     };
@@ -2990,7 +3165,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
     // #172: the registered provider's name (the egress destination the PEP
     // stamps) and the egress backend, both fixed for the life of the process.
-    // Cooky's only backend is `Unavailable`; #240 supplies the real one.
+    // The backend was chosen PRE-MINT above (#240).
     // #240a D1: the kernel carries the RESOLVED record, not just the name —
     // egress parses no registry and so cannot drift from this view of it.
     // #240a D5-E: a registered provider whose Vault path sits outside the
@@ -3000,7 +3175,6 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // confusing refusal on a live request. The gate itself runs PRE-MINT; see
     // the call site above the authz gate.
     let provider = Arc::new(boot.provider().cloned());
-    let egress = crate::egress::production_egress();
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -3023,6 +3197,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
 
     // Retire the plane credential (revoke token, clear leaf) on the way out — on the
     // graceful-shutdown path AND on any post-mint startup failure (e.g. bind).
+    // The supervisor is aborted first, on EVERY path (idempotent on the
+    // graceful one): detached, it could hold the client lock across a Vault
+    // call while `shutdown()` waits, or re-install a leaf after retirement.
+    supervisor_abort.abort();
     client.shutdown().await;
     outcome.map_err(RunError::Other)
 }
@@ -3249,6 +3427,95 @@ mod tests {
         assert!(
             handlers.is_empty(),
             "aborted handlers must be reaped so shutdown proceeds"
+        );
+    }
+
+    /// #240: the drain must outlast a provider call in flight, or a restart
+    /// that races a prompt aborts the handler before its outcome record —
+    /// content left, `IntentOnly` in the trail. With no provider (the
+    /// `Unavailable` backend's zero deadline) the bound is the old one.
+    #[test]
+    fn the_handler_drain_bound_covers_the_egress_deadline() {
+        // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
+        // + 5 + 0 + 5 + 1 + 10 = 41 s with no provider, plus the deadline with one
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        assert_eq!(
+            handler_drain_bound(&cfg, Duration::ZERO),
+            Duration::from_secs(41)
+        );
+        assert_eq!(
+            handler_drain_bound(&cfg, Duration::from_secs(120)),
+            Duration::from_secs(161)
+        );
+    }
+
+    /// How far above the walked shutdown chain the shipped units' stop
+    /// timeouts may sit. Two-sided on purpose: a unit BELOW the chain
+    /// SIGKILLs inside the token revoke; a unit far ABOVE it means a term
+    /// was dropped from the chain expression while the unit kept the old
+    /// sum — the failure four review rounds found in a row.
+    const STOP_TIMEOUT_SLACK: Duration = Duration::from_secs(10);
+
+    /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
+    /// the shutdown chain at the deadline CEILING, term by term and in the
+    /// order `accept_loop` and `run_inner` execute them — the supervisor
+    /// abort-reap, the handler drain (deadline + its own bound) and the reap
+    /// of what it aborts, the audit drain, the plane client's shutdown (a
+    /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
+    /// four rounds each found a term the expression had skipped while the
+    /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
+    /// the chain is as red as one below it.
+    #[test]
+    fn the_units_stop_timeouts_cover_the_shutdown_chain_at_the_deadline_ceiling() {
+        // BOTH ceilings: the transport timeouts at their maximum and the
+        // egress deadline at its maximum — the configuration the units must
+        // survive, not the defaults (review round 5).
+        let ceiling = maknae_config::TransportConfig {
+            handshake_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+            read_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+            ..maknae_config::transport_from_section(None).unwrap()
+        };
+        let chain = SUPERVISOR_ABORT_REAP_TIMEOUT
+            + handler_drain_bound(
+                &ceiling,
+                Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
+            )
+            + DRAIN_ABORT_REAP_TIMEOUT
+            + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
+            + maknae_vault::PLANE_SHUTDOWN_BOUND
+            + RUNTIME_SHUTDOWN_TIMEOUT;
+        let unit = include_str!("../../../packaging/common/maknaed.service");
+        let stop: u64 = unit
+            .lines()
+            .find_map(|l| l.strip_prefix("TimeoutStopSec="))
+            .expect("maknaed.service states TimeoutStopSec=")
+            .trim()
+            .parse()
+            .unwrap();
+        let stop = Duration::from_secs(stop);
+        assert!(
+            stop >= chain,
+            "TimeoutStopSec={stop:?} is below the shutdown chain at the ceiling, {chain:?}"
+        );
+        assert!(
+            stop <= chain + STOP_TIMEOUT_SLACK,
+            "TimeoutStopSec={stop:?} is more than {STOP_TIMEOUT_SLACK:?} above the chain {chain:?}: a term was dropped from the expression"
+        );
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknaed.plist");
+        let after = &plist[plist
+            .find("<key>ExitTimeOut</key>")
+            .expect("the launchd plist states ExitTimeOut")..];
+        let s = after.find("<integer>").unwrap() + "<integer>".len();
+        let e = s + after[s..].find("</integer>").unwrap();
+        let exit: u64 = after[s..e].parse().unwrap();
+        let exit = Duration::from_secs(exit);
+        assert!(
+            exit >= chain,
+            "ExitTimeOut={exit:?} is below the shutdown chain at the ceiling, {chain:?}"
+        );
+        assert!(
+            exit <= chain + STOP_TIMEOUT_SLACK,
+            "ExitTimeOut={exit:?} is more than {STOP_TIMEOUT_SLACK:?} above the chain {chain:?}: a term was dropped from the expression"
         );
     }
 

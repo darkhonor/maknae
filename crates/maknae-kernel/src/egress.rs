@@ -34,15 +34,34 @@ pub struct EgressReply {
     pub reply: PromptReply,
 }
 
-/// Why a backend did not send. Deadline expiry is NOT a variant: the kernel
-/// bounds the call and maps expiry to [`SendOutcome::DeadlineExpired`]
-/// (delivery unknown); [`SendOutcome::LandedUndelivered`] is the kernel's own
+/// Why a send did not complete — and, the part the trail depends on, WHEN.
+/// `Transport` is a failure BEFORE the request left (nothing sent);
+/// `AfterSend` is a failure after it left, so delivery is unknown;
+/// `DeadlineExpired` is the backend's own budget running out after the
+/// request left (the kernel's outer timeout maps to the same outcome).
+/// [`SendOutcome::LandedUndelivered`] is the kernel's own
 /// refusal to deliver a reply that DID arrive, for one of [`ReplyRefusal`]'s
 /// reasons (over the cap, non-text, empty).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EgressFailure {
     NotConfigured,
     Transport(String),
+    /// The backend's own deadline ran out once the kernel had begun writing
+    /// the request — from that point delivery is unknown, exactly as under
+    /// the kernel's outer timeout on the same value. (Spent before the first
+    /// write it is the same variant: conservative, never "nothing left".) Distinguished from `Transport` so the trail records
+    /// `DeadlineExpired` rather than `Failed` (which claims nothing left) and
+    /// the egress breaker counts it as an expiry, not a success (codex on
+    /// #240: the inner budget usually fires first).
+    DeadlineExpired,
+    /// Something failed from the point the kernel began writing the request
+    /// to the deputy: the deputy closed the connection (its provider call
+    /// failed or timed out — the provider may have received the prompt), the
+    /// reply was malformed, or its frame was over the cap. Bytes may or may
+    /// not have crossed; the record is conservative. Recorded as
+    /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
+    /// be a false statement about content that did (codex on #240).
+    AfterSend(String),
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -82,6 +101,11 @@ pub async fn commit_intent<E: AuditEmit>(
 pub trait Egress: Send + Sync {
     /// Cheap and side-effect-free: may this backend be asked to send at all?
     fn ready(&self) -> Result<(), EgressFailure>;
+    /// The outer bound the kernel places on one `send` (#240: the
+    /// egress-specific deadline #172 handed over by name — `transport.
+    /// read_timeout_ms` was never a provider deadline). The backend states
+    /// it, so `handle`'s signature and its many call sites stay unchanged.
+    fn deadline(&self) -> std::time::Duration;
     /// Send. The intent is the caller's proof that the trail already holds it.
     /// Blocking is allowed: the kernel calls this on a blocking worker under a deadline.
     fn send(
@@ -91,12 +115,18 @@ pub trait Egress: Send + Sync {
     ) -> Result<EgressReply, EgressFailure>;
 }
 
-/// Cooky's production backend: there is no egress process yet.
+/// The backend when NO provider is registered (#240): nothing can leave, so
+/// nothing is configured to carry it. Also every test's default.
 pub struct Unavailable;
 
 impl Egress for Unavailable {
     fn ready(&self) -> Result<(), EgressFailure> {
         Err(EgressFailure::NotConfigured)
+    }
+    /// Never consulted: `ready()` refuses first. Zero, so a caller that
+    /// somehow reached `send` would not wait on a backend that cannot send.
+    fn deadline(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
     }
     fn send(
         &self,
@@ -107,9 +137,107 @@ impl Egress for Unavailable {
     }
 }
 
-/// The one production choice, in one place, so a test can pin it.
-pub fn production_egress() -> Arc<dyn Egress> {
+/// The account the deputy runs as (`packaging/common/maknae.sysusers`); the
+/// only peer the kernel will write a prompt to.
+pub const EGRESS_USER: &str = "_maknae-egress";
+/// The largest reply frame the kernel accepts from the deputy — mirrors the
+/// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
+/// delivered reply is bounded again by `transport.frame_max_bytes`.
+pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
+// (The REQUEST cap below is `maknae-proto`'s, shared with the deputy; this
+// reply cap is the kernel's own and is pinned by value in the tests.)
+
+/// The largest request frame the kernel will WRITE to the deputy — the
+/// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte
+/// leaves. Without it a prompt that fills `transport.frame_max_bytes` at its
+/// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
+/// as oversize after reading it, and the trail says "outcome unknown" for a
+/// prompt that provably never reached a provider (review round 3). Refused
+/// here it is a pre-send failure: `Failed`, the true record. The VALUE is
+/// `maknae-proto`'s, shared with the deputy so the two ends cannot drift.
+pub const EGRESS_MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MAX_BYTES;
+
+/// Which send failures the egress breaker counts as an EXPIRY (toward its
+/// trip) rather than a completed attempt: only the backend's own deadline.
+/// A pre-send failure and a post-send failure both mean the worker came back
+/// promptly; a stall is what the breaker exists to bound. Pure and T1 so the
+/// arm in `run.rs` (mutation-excluded) is pinned here.
+pub fn failure_counts_as_expiry(f: &EgressFailure) -> bool {
+    matches!(f, EgressFailure::DeadlineExpired)
+}
+
+/// Why the kernel refused to BOOT over its egress backend (#240). Only
+/// reachable with a provider registered: with none, there is nothing to send
+/// and `Unavailable` is the honest backend.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EgressBootRefusal {
+    /// The deputy's account does not exist on this host.
+    NoSuchAccount(String),
+    /// The account could not be looked up at all (NSS down).
+    Resolve(String),
+}
+
+impl std::fmt::Display for EgressBootRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EgressBootRefusal::NoSuchAccount(name) => write!(
+                f,
+                "a provider is registered but the egress deputy's account '{name}' does not exist on this host"
+            ),
+            EgressBootRefusal::Resolve(e) => write!(
+                f,
+                "a provider is registered but the egress deputy's account could not be resolved: {e}"
+            ),
+        }
+    }
+}
+
+/// The backend with no provider registered — and every test's default.
+pub fn unavailable_egress() -> Arc<dyn Egress> {
     Arc::new(Unavailable)
+}
+
+/// THE production choice, as a pure decision over an injected resolver so it
+/// can be pinned on a host that has no `_maknae-egress` account (the same
+/// seam `authz_boot_gate_with` uses). No provider → `Unavailable`, and the
+/// account is never looked up. A provider → `SocketEgress` under the deputy's
+/// uid, resolved ONCE here at boot, before the first request — never on an
+/// async worker — and fail-closed by NAME.
+pub fn production_egress_with(
+    provider: Option<&maknae_config::ProviderConfig>,
+    cfg: &maknae_config::EgressConfig,
+    resolve_uid: impl FnOnce(&str) -> Result<Option<u32>, String>,
+) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
+    if provider.is_none() {
+        return Ok(unavailable_egress());
+    }
+    let uid = match resolve_uid(EGRESS_USER) {
+        Ok(Some(uid)) => uid,
+        Ok(None) => return Err(EgressBootRefusal::NoSuchAccount(EGRESS_USER.to_string())),
+        Err(e) => return Err(EgressBootRefusal::Resolve(e)),
+    };
+    Ok(Arc::new(crate::egress_socket::SocketEgress::new(
+        cfg.socket_path.clone(),
+        uid,
+        std::time::Duration::from_millis(cfg.deadline_ms),
+        EGRESS_MAX_REPLY_FRAME_BYTES,
+    )))
+}
+
+/// The real resolver over NSS: the account's uid, `None` when no such
+/// account exists, and the library's error text when NSS itself fails.
+pub(crate) fn resolve_account_uid(name: &str) -> Result<Option<u32>, String> {
+    nix::unistd::User::from_name(name)
+        .map(|u| u.map(|u| u.uid.as_raw()))
+        .map_err(|e| e.to_string())
+}
+
+/// The one production choice, in one place: the real resolver over NSS.
+pub fn production_egress(
+    provider: Option<&maknae_config::ProviderConfig>,
+    cfg: &maknae_config::EgressConfig,
+) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
+    production_egress_with(provider, cfg, resolve_account_uid)
 }
 
 /// Text only in Cooky (#153, #229). Names the FIRST non-text kind; an empty
@@ -201,8 +329,8 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
 /// the reply. Narrower than `EgressStatus` on purpose: `IntentOnly` and
 /// `BackendUnavailable` are never outcomes of a send, so no arm below is
 /// unreachable (T1: every arm must be killable). `DeadlineExpired`: the
-/// transport deadline passed with no answer, delivery to the provider
-/// unknown. `LandedUndelivered`: the reply arrived and the kernel refuses to
+/// egress deadline (`egress.deadline_ms`) passed with no answer, delivery to
+/// the provider unknown. `LandedUndelivered`: the reply arrived and the kernel refuses to
 /// deliver it, ADR-0023 decision 3's meaning, for the [`ReplyRefusal`] named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendOutcome {
@@ -211,6 +339,10 @@ pub enum SendOutcome {
     },
     Failed,
     DeadlineExpired,
+    /// The exchange failed once the kernel had begun writing the request,
+    /// short of the deadline: delivery to the provider is unknown
+    /// (`EgressFailure::AfterSend`).
+    OutcomeUnknown,
     LandedUndelivered {
         reply_length: u64,
         refusal: ReplyRefusal,
@@ -218,8 +350,9 @@ pub enum SendOutcome {
 }
 
 /// The outcome record derived from the intent: same identity, new seq and ts,
-/// `result`/`reason`/`posture` per outcome. A send that did NOT go out
-/// (`Failed`, `DeadlineExpired`) is a `deny`, never a `permit` that reads
+/// `result`/`reason`/`posture` per outcome. A send that did NOT go out, or
+/// whose delivery is unknown (`Failed`, `DeadlineExpired`, `OutcomeUnknown`),
+/// is a `deny`, never a `permit` that reads
 /// "send failed"; a reply the kernel refused to deliver (`LandedUndelivered`)
 /// stays `permit`, because the content DID leave and the trail must say so
 /// (the `refused-oversize` pairing of `read_refusal_disposition`). Every
@@ -255,6 +388,13 @@ pub fn outcome_for(
             None,
             "deny",
             "send deadline expired",
+            "unavailable",
+        ),
+        SendOutcome::OutcomeUnknown => (
+            EgressStatus::OutcomeUnknown,
+            None,
+            "deny",
+            "send outcome unknown",
             "unavailable",
         ),
         // `permit` + `refused-oversize`: the pairing ADR-0019 pins for a permit
@@ -621,6 +761,9 @@ mod tests {
             self.calls.lock().unwrap().push("ready");
             Ok(())
         }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
         fn send(
             &self,
             _i: &DurableEgressIntent,
@@ -697,13 +840,176 @@ mod tests {
         }
     }
 
+    fn provider() -> maknae_config::ProviderConfig {
+        maknae_config::ProviderConfig {
+            name: "openai".into(),
+            endpoint: "https://api.example.test/v1".into(),
+            model: "m".into(),
+            key_vault_path: "maknae/providers/openai".into(),
+            key_field: "api-key".into(),
+        }
+    }
+
+    /// THE production choice, pinned (#240): no provider → `Unavailable`, and
+    /// the deputy's account is never looked up; a provider → the socket
+    /// backend under `_maknae-egress`'s uid, resolved ONCE at boot and
+    /// fail-closed BY NAME when the account is missing or NSS is down.
     #[test]
-    fn unavailable_is_the_production_backend_and_neither_readies_nor_sends() {
-        assert_eq!(Unavailable.ready(), Err(EgressFailure::NotConfigured));
+    fn production_egress_is_unavailable_without_a_provider_and_the_socket_with_one() {
+        let cfg = maknae_config::EgressConfig::default();
+        let never = |_: &str| -> Result<Option<u32>, String> {
+            panic!("no provider registered: the account must not be resolved")
+        };
         assert_eq!(
-            production_egress().ready(),
+            production_egress_with(None, &cfg, never).unwrap().ready(),
             Err(EgressFailure::NotConfigured)
         );
+        let p = provider();
+        match production_egress_with(Some(&p), &cfg, |_| Ok(None)) {
+            Err(EgressBootRefusal::NoSuchAccount(name)) => assert_eq!(name, EGRESS_USER),
+            Err(other) => panic!("a missing account must refuse by name, got {other:?}"),
+            Ok(_) => panic!("a missing account must refuse"),
+        }
+        match production_egress_with(Some(&p), &cfg, |_| Err("nss down".into())) {
+            Err(EgressBootRefusal::Resolve(m)) => assert!(m.contains("nss down"), "{m}"),
+            Err(other) => panic!("an NSS failure must refuse, got {other:?}"),
+            Ok(_) => panic!("an NSS failure must refuse"),
+        }
+        // with a resolvable account the backend is the socket one: ready()
+        // follows the socket's existence, and the deadline is the config's
+        let d = tempfile::tempdir().unwrap();
+        let cfg = maknae_config::EgressConfig {
+            socket_path: d.path().join("egress.sock"),
+            deadline_ms: 7_000,
+        };
+        let b = production_egress_with(Some(&p), &cfg, |name| {
+            assert_eq!(name, EGRESS_USER);
+            Ok(Some(4242))
+        })
+        .unwrap();
+        assert_eq!(b.ready(), Err(EgressFailure::NotConfigured));
+        assert_eq!(b.deadline(), std::time::Duration::from_millis(7_000));
+        let l = std::os::unix::net::UnixListener::bind(&cfg.socket_path).unwrap();
+        assert_eq!(b.ready(), Ok(()));
+        // and the RESOLVED uid is the one the backend checks the listener
+        // against: a listener under this test's uid refuses the 4242 backend
+        // by identity, and a backend resolved to this uid gets past the check
+        // (to fail on the closed connection instead). A mutant handing the
+        // backend a constant instead of the resolved uid fails the second
+        // assertion — `me` is then not what the backend expects.
+        // The peer HOLDS each connection until the client is done with it:
+        // dropping at once races the client's credential capture, which on
+        // macOS answers ENOTCONN for a peer that has already gone.
+        std::thread::spawn(move || {
+            use std::io::Read;
+            for _ in 0..2 {
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut b = [0u8; 1];
+                    let _ = c.read(&mut b);
+                }
+            }
+        });
+        let intent = DurableEgressIntent {
+            record: intent_record(),
+        };
+        let me = nix::unistd::getuid().as_raw();
+        if me != 0 {
+            let e = b.send(&intent, req()).unwrap_err();
+            assert_eq!(
+                e,
+                EgressFailure::Transport("egress peer is not the expected uid".into())
+            );
+        }
+        let mine = production_egress_with(Some(&p), &cfg, |_| Ok(Some(me))).unwrap();
+        let e = mine.send(&intent, req()).unwrap_err();
+        assert!(
+            matches!(e, EgressFailure::AfterSend(_)),
+            "the resolved uid did not reach the backend, or a post-send failure was not classed as one: {e:?}"
+        );
+    }
+
+    /// The two frame caps are 1 MiB by VALUE, mirroring the deputy's
+    /// `MAX_REQUEST_FRAME_BYTES`; a mutant turning `1024 * 1024` into 2048
+    /// or 1 survives every test that uses them symbolically (measured: two
+    /// such mutants missed until this test).
+    #[test]
+    fn the_frame_caps_are_one_mebibyte_by_value() {
+        assert_eq!(EGRESS_MAX_REPLY_FRAME_BYTES, 1_048_576);
+        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 1_048_576);
+    }
+
+    /// Only the backend's own deadline is an expiry to the breaker; every
+    /// other failure is a completed attempt. Each arm of the table kills the
+    /// mutant that swaps it.
+    #[test]
+    fn only_the_backends_own_deadline_counts_as_an_expiry() {
+        assert!(failure_counts_as_expiry(&EgressFailure::DeadlineExpired));
+        assert!(!failure_counts_as_expiry(&EgressFailure::NotConfigured));
+        assert!(!failure_counts_as_expiry(&EgressFailure::Transport(
+            "x".into()
+        )));
+        assert!(!failure_counts_as_expiry(&EgressFailure::AfterSend(
+            "x".into()
+        )));
+    }
+
+    /// Both refusals render by name — the account, and the resolver's reason.
+    #[test]
+    fn the_boot_refusals_name_the_account_and_the_reason() {
+        let m = EgressBootRefusal::NoSuchAccount(EGRESS_USER.into()).to_string();
+        assert!(m.contains("_maknae-egress"), "{m}");
+        let m = EgressBootRefusal::Resolve("nss down".into()).to_string();
+        assert!(m.contains("nss down"), "{m}");
+    }
+
+    /// The real resolver, over NSS, with values this host actually has: the
+    /// running account resolves to the running uid, and a name no host has
+    /// resolves to `None` — the arm `production_egress` refuses on by name.
+    /// Then the production entry point itself: on a host without the deputy's
+    /// account the refusal names it; on a packaged host it is the socket
+    /// backend under that account, with the configured deadline.
+    #[test]
+    fn the_account_resolver_finds_the_running_account_and_not_an_invented_one() {
+        let me = nix::unistd::getuid();
+        let name = nix::unistd::User::from_uid(me).unwrap().unwrap().name;
+        assert_eq!(resolve_account_uid(&name), Ok(Some(me.as_raw())));
+        assert_eq!(
+            resolve_account_uid("no-such-account-maknae-240-test"),
+            Ok(None)
+        );
+        let p = provider();
+        let cfg = maknae_config::EgressConfig::default();
+        match production_egress(Some(&p), &cfg) {
+            Err(EgressBootRefusal::NoSuchAccount(n)) => {
+                assert_eq!(n, EGRESS_USER);
+                assert_eq!(resolve_account_uid(EGRESS_USER), Ok(None));
+            }
+            Ok(b) => {
+                assert!(resolve_account_uid(EGRESS_USER).unwrap().is_some());
+                assert_eq!(
+                    b.deadline(),
+                    std::time::Duration::from_millis(cfg.deadline_ms)
+                );
+            }
+            Err(EgressBootRefusal::Resolve(m)) => panic!("NSS is expected to answer here: {m}"),
+        }
+        // and no provider never resolves, through the real entry point too
+        assert_eq!(
+            production_egress(None, &cfg).unwrap().ready(),
+            Err(EgressFailure::NotConfigured)
+        );
+    }
+
+    #[test]
+    fn unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends() {
+        assert_eq!(Unavailable.ready(), Err(EgressFailure::NotConfigured));
+        assert_eq!(
+            unavailable_egress().ready(),
+            Err(EgressFailure::NotConfigured)
+        );
+        // never consulted, and zero so nothing could wait on it if it were
+        assert_eq!(Unavailable.deadline(), std::time::Duration::ZERO);
+        assert_eq!(unavailable_egress().deadline(), std::time::Duration::ZERO);
         // same module: the private constructor is reachable here only
         let i = DurableEgressIntent {
             record: intent_record(),
@@ -950,6 +1256,14 @@ mod tests {
                 "unavailable",
                 None,
             ),
+            (
+                SendOutcome::OutcomeUnknown,
+                EgressStatus::OutcomeUnknown,
+                "deny",
+                "send outcome unknown",
+                "unavailable",
+                None,
+            ),
             // permit: the decision WAS a permit and the content DID leave; only
             // delivery back was refused (the same pairing as the Read path's
             // refused-oversize corrective, locked by enforce_loop.rs).
@@ -985,6 +1299,17 @@ mod tests {
                 "reply refused: empty",
                 "unauthorized",
                 Some(0),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
+                    reply_length: 3,
+                    refusal: ReplyRefusal::ToolCallUnacceptable,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: tool call",
+                "unauthorized",
+                Some(3),
             ),
         ] {
             let o = outcome_for(&i, 9, "2026-09-08T00:00:00Z".into(), outcome);

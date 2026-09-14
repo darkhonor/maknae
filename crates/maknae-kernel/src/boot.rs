@@ -7,8 +7,8 @@
 use maknae_config::{
     ceiling_from_core, load_config_rooted, policy_name_from_core, provider_from_section,
     refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError, Document, IngestPosture,
-    ProviderConfig, SectionSpec, Value, AUDIT_SECTION, PRINCIPAL_SECTION, PROVIDER_SECTION,
-    TRANSPORT_SECTION,
+    ProviderConfig, SectionSpec, Value, AUDIT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION,
+    PROVIDER_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -110,7 +110,7 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
 /// The sections the daemon registers, as literal blocks: the disclosure drift
 /// gate reads each registration's `name:` operand from this file, so the list
 /// is never built by a loop (and this comment never spells the block's opener).
-fn boot_specs() -> [SectionSpec; 6] {
+fn boot_specs() -> [SectionSpec; 7] {
     [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
@@ -134,6 +134,10 @@ fn boot_specs() -> [SectionSpec; 6] {
         },
         SectionSpec {
             name: PROVIDER_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: EGRESS_SECTION.to_string(),
             required: false,
         },
     ]

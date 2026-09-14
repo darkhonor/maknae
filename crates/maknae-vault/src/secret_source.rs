@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 
 /// The credential name `$CREDENTIALS_DIRECTORY` always carries for the daemon
 /// (systemd `LoadCredential=maknaed-secret-id:...` / `SetCredentialEncrypted`).
-const CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
+pub const DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
+
+/// The credential name the DEPUTY's unit loads (`LoadCredentialEncrypted=
+/// maknae-egress-secret-id:…` in `maknae-egress.service`; `maknae enroll`
+/// seals with the same `--name`). #240b.
+pub const EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknae-egress-secret-id";
 
 /// The CLI's user-scoped `systemd-creds` credential file name.
 const CLI_USER_CREDS_FILE: &str = "maknae-secret-id.cred";
@@ -88,8 +93,9 @@ impl From<&CliSecretSource> for CredentialSourceKind {
 /// wins, no fallthrough once a source is chosen:
 ///
 /// 1. `$CREDENTIALS_DIRECTORY/maknaed-secret-id` (if `credentials_dir_env` is `Some`
-///    — the systemd HRoT-sealed boot path; ALWAYS preferred when present, regardless
-///    of what else is configured).
+///    and non-empty — the systemd HRoT-sealed boot path; ALWAYS preferred when
+///    present, regardless of what else is configured. `Some("")`, an exported
+///    but empty variable, is a REFUSAL, never a fallthrough to 2 or 3).
 /// 2. The SEP-sealed blob (if `sep_blob` is `Some`).
 /// 3. The configured plaintext path (if `insecure_plaintext_secret_path` is `Some`).
 /// 4. Else `Err` — fail closed. There is no silent plaintext default.
@@ -98,10 +104,24 @@ pub fn resolve_daemon_secret_source(
     sep_blob: Option<&Path>,
     insecure_plaintext_secret_path: Option<&Path>,
 ) -> Result<DaemonSecretSource, VaultError> {
-    if let Some(dir) = credentials_dir_env {
-        return Ok(DaemonSecretSource::CredentialsDirectory(
-            Path::new(dir).join(CREDENTIALS_DIRECTORY_CRED_NAME),
-        ));
+    // An exported-but-empty $CREDENTIALS_DIRECTORY is a REFUSAL, not a
+    // fallthrough: it must resolve neither to `/maknaed-secret-id` nor —
+    // silently — to the SEP or plaintext arm below (self-review round 4 caught
+    // this as a demotion). The egress resolver refuses the same input.
+    match credentials_dir_env {
+        Some("") => {
+            return Err(VaultError::CredentialSource(
+                "$CREDENTIALS_DIRECTORY is exported but empty — refusing rather than \
+                 falling through to a weaker source"
+                    .to_string(),
+            ))
+        }
+        Some(dir) => {
+            return Ok(DaemonSecretSource::CredentialsDirectory(
+                Path::new(dir).join(DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME),
+            ))
+        }
+        None => {}
     }
     if let Some(blob) = sep_blob {
         return Ok(DaemonSecretSource::SepSealed(blob.to_path_buf()));
@@ -114,6 +134,26 @@ pub fn resolve_daemon_secret_source(
          provide a SEP-sealed blob, or configure vault.insecure_plaintext_secret_path"
             .to_string(),
     ))
+}
+
+/// Resolve the egress deputy's SecretID source (#240b). ONE source and no
+/// fallthrough: `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, else a named
+/// refusal. There is deliberately no SEP arm and no plaintext arm — the deputy
+/// holds the provider credential, and its custody on macOS is #227's to
+/// design, stated as weaker rather than papered over with a plaintext file.
+pub fn resolve_egress_secret_source(
+    credentials_dir_env: Option<&str>,
+) -> Result<PathBuf, VaultError> {
+    match credentials_dir_env {
+        Some(dir) if !dir.is_empty() => {
+            Ok(Path::new(dir).join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME))
+        }
+        _ => Err(VaultError::CredentialSource(
+            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset — the unit's \
+             LoadCredentialEncrypted= is the only source (#240b; macOS custody is #227)"
+                .to_string(),
+        )),
+    }
 }
 
 /// Resolve the CLI's SecretID source. Resolution order — first match wins:
@@ -147,6 +187,27 @@ pub fn resolve_cli_secret_source(
 mod tests {
     use super::*;
 
+    // ---- egress resolution (#240b) -------------------------------------------
+
+    /// The deputy has ONE source — the unit's LoadCredentialEncrypted= — and
+    /// no fallthrough. An unset or empty $CREDENTIALS_DIRECTORY is a named
+    /// refusal, never a plaintext default (macOS custody is #227's).
+    #[test]
+    fn the_egress_secret_comes_from_credentials_directory_or_nowhere() {
+        assert_eq!(
+            resolve_egress_secret_source(Some("/run/credentials/maknae-egress.service")).unwrap(),
+            PathBuf::from("/run/credentials/maknae-egress.service/maknae-egress-secret-id")
+        );
+        assert!(matches!(
+            resolve_egress_secret_source(None),
+            Err(VaultError::CredentialSource(_))
+        ));
+        assert!(matches!(
+            resolve_egress_secret_source(Some("")),
+            Err(VaultError::CredentialSource(_))
+        ));
+    }
+
     // ---- daemon resolution ---------------------------------------------------
 
     #[test]
@@ -166,6 +227,14 @@ mod tests {
     #[test]
     fn daemon_no_source_fails_closed() {
         assert!(resolve_daemon_secret_source(None, None, None).is_err());
+        // An exported-but-empty $CREDENTIALS_DIRECTORY is a refusal — and NOT
+        // a demotion to the SEP or plaintext arm when those are available
+        // (#240b, self-review round 4).
+        assert!(resolve_daemon_secret_source(Some(""), None, None).is_err());
+        assert!(matches!(
+            resolve_daemon_secret_source(Some(""), Some(Path::new("/sep")), Some(Path::new("/x"))),
+            Err(VaultError::CredentialSource(_))
+        ));
     }
 
     /// Precedence, not fallthrough: when BOTH CredentialsDirectory and SEP are

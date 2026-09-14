@@ -8,18 +8,17 @@
 use crate::keys::KeySource;
 use zeroize::Zeroizing;
 
-// Not constructed until the Vault client is built (the AppRole login against
-// the sealed SecretID, which cannot be verified until the third plane is
-// provisioned). Kept and allowed rather than deleted: it is the production
-// source, its shape is reviewed here, and deleting it would mean writing it
-// again blind in the slice that finally wires it.
-#[allow(dead_code)]
-/// Reads through `maknae-vault`, which owns every Vault interaction.
-pub struct VaultKeys<C> {
-    pub client: C,
+/// Reads through `maknae-vault`'s deputy client, which owns the login, the KV
+/// read and the revoke (#240b: login per read, no standing token). Composes the
+/// KV v2 API path HERE because addressing is the store's business: `data/` is
+/// synthesized rather than written in configuration, which also means a
+/// configured path can never name `metadata/`, the parallel tree a `list`
+/// would enumerate.
+pub struct VaultKeys {
+    pub vault: maknae_vault::EgressVault,
 }
 
-impl<C: maknae_vault::VaultClientTrait + Sync> KeySource for VaultKeys<C> {
+impl KeySource for VaultKeys {
     /// No `block_on` and no runtime handle. An earlier version held a
     /// `runtime::Handle` and blocked on it — which PANICS, because the deputy
     /// already calls `fulfil` inside that runtime and Tokio refuses a nested
@@ -31,11 +30,8 @@ impl<C: maknae_vault::VaultClientTrait + Sync> KeySource for VaultKeys<C> {
         path: &str,
         field: &str,
     ) -> Result<Zeroizing<String>, String> {
-        // #308: compose here, in the SOURCE, because addressing is the store's
-        // business. `data/` is a KV v2 API artifact — it is synthesized rather
-        // than written in configuration, which also means a configured path can
-        // never name `metadata/`, the parallel tree a `list` would enumerate.
-        maknae_vault::read_kv_field(&self.client, &format!("{mount}/data/{path}"), field)
+        self.vault
+            .read_kv_field(&format!("{mount}/data/{path}"), field)
             .await
             .map_err(|e| e.to_string())
     }
@@ -46,6 +42,24 @@ mod tests {
     use super::*;
     use crate::keys::KeyCache;
 
+    /// A throwaway self-signed CA, generated once with
+    /// `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-384 -nodes
+    /// -subj /CN=ca.test -days 3650`. Its key was never kept: the test needs
+    /// a parseable anchor, not a trust relationship.
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBtTCCATygAwIBAgIUULDH6JmXYLo3iF5hxI4/L1j2+DYwCgYIKoZIzj0EAwIw
+EjEQMA4GA1UEAwwHY2EudGVzdDAeFw0yNjA5MTQxMjE0NDhaFw0zNjA5MTExMjE0
+NDhaMBIxEDAOBgNVBAMMB2NhLnRlc3QwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAASZ
+iOE81dyIcpd91xRH64m5BS55i8UtJCCmgFfbBtOSJ8AIl49LXXJ/n0oMJYMYTc4M
+yYiZU829p8gs804BacFPR8iVw3Y1AXZMTP6aeY5OY+W0iNAfXb8kB2fYUBHaOhmj
+UzBRMB0GA1UdDgQWBBRPCpNpo3yKdFLAJ9mDC4Q6Na1uwDAfBgNVHSMEGDAWgBRP
+CpNpo3yKdFLAJ9mDC4Q6Na1uwDAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMC
+A2cAMGQCMBIUOA0bc98jJmqncakndRWUnoFWQDYhkKiSKiDqvYS/uQFSz8CVlrDH
+GsTOHSQ/TQIwTI0QPmUvWSWEtxmnn9qj+NCmu0XZXYB4fG/FqUk/ILFGmJu7DV5u
+ampbv97Rcx9j
+-----END CERTIFICATE-----
+";
+
     /// THE composition the panic lived in, exercised for real.
     ///
     /// Reviewed finding (#296): `VaultKeys::read` was synchronous and bridged
@@ -54,48 +68,36 @@ mod tests {
     /// could never be produced. Every test used a synchronous FAKE source, so
     /// nothing touched the code that panicked.
     ///
-    /// This drives the real `VaultKeys` through the real `KeyCache`, from inside
-    /// a runtime, exactly as `main` does. A Vault at a dead address gives a
-    /// transport failure — the point is that it RETURNS one rather than
-    /// aborting the process.
+    /// This drives the real `VaultKeys` — on the real `EgressVault`, the one
+    /// `main` constructs — through the real `KeyCache`, from inside a runtime,
+    /// exactly as `main` does. A Vault at a dead address gives a transport
+    /// failure — the point is that it RETURNS one rather than aborting.
     #[test]
     fn the_real_vault_source_returns_an_error_from_inside_a_runtime() {
         maknae_vault::install_default_crypto_provider();
+        let d = tempfile::tempdir().unwrap();
+        let ca = d.path().join(maknae_vault::EGRESS_VAULT_CA_FILE);
+        std::fs::write(&ca, TEST_CA_PEM).unwrap();
+        let vault = maknae_vault::EgressVault::new(
+            "https://127.0.0.1:1",
+            &ca,
+            maknae_vault::AppRoleAuth {
+                role_id: "r".into(),
+                secret_id: Zeroizing::new("s".into()),
+                approle_mount: maknae_vault::DEFAULT_APPROLE_MOUNT.into(),
+            },
+        )
+        .expect("a parseable anchor and an https address construct");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        // A client pointed at a port nothing listens on.
-        let settings = vaultrs_settings();
-        let client = match settings {
-            Some(c) => c,
-            // If a client cannot be constructed on this host at all, the
-            // composition under test cannot be reached; say so rather than
-            // reporting a pass.
-            None => panic!("could not construct a Vault client for the composition test"),
-        };
-
-        // #308: `VaultKeys` no longer carries a field name. The field is a
-        // PER-REQUEST value from the frame, because the registry knows it and the
-        // deputy must not guess — the constant that used to live here was the
-        // only field name in the tree, and it said `api_key` while a real
-        // deployment stored `api-key`.
-        let mut keys = KeyCache::new(VaultKeys { client });
+        let mut keys = KeyCache::new(VaultKeys { vault });
 
         // INSIDE the runtime — the exact shape that used to abort.
         let out = rt.block_on(keys.get("maknae-kv", "maknae/providers/openai", "api-key"));
         let e = out.expect_err("a dead Vault address must produce an error");
         assert!(!e.is_empty(), "the error must say something");
-    }
-
-    /// A `vaultrs` client aimed at a closed loopback port.
-    fn vaultrs_settings() -> Option<vaultrs::client::VaultClient> {
-        let settings = vaultrs::client::VaultClientSettingsBuilder::default()
-            .address("http://127.0.0.1:1")
-            .token("not-a-real-token")
-            .build()
-            .ok()?;
-        vaultrs::client::VaultClient::new(settings).ok()
     }
 }

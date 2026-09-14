@@ -416,9 +416,29 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **What a prompt carries.** Text-only content blocks (any other kind is refused before
   the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
   `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
-- **Cooky refusal.** No egress process exists yet (#240): a permitted prompt is refused
-  with posture `unavailable` and reason `egress backend not ready` in the trail, and
-  `Unauthorized` on the wire, like every refusal — build state is never disclosed there.
+- **Egress deputy and a Vault outage (#240b).** The deputy probes a Vault login at
+  start and exits 1 if it fails, so during an outage every activation fails; systemd's
+  default trigger limit then stops `maknae-egress.socket` and it does NOT restart on
+  its own when Vault returns. Recovery: `systemctl reset-failed maknae-egress.socket &&
+  systemctl restart maknae-egress.socket`.
+- **A permitted prompt, and where it goes (#240).** With a `provider` registered, a
+  permitted `session.prompt` is handed to the egress deputy over `egress.socket_path`
+  (§6.2 of the configuration reference) under `egress.deadline_ms`; the trail carries the
+  intent before the send and the outcome after it. With no provider, or before the
+  deputy's socket exists, the prompt is refused with posture `unavailable` and reason
+  `egress backend not ready`, and `Unauthorized` on the wire like every refusal — build
+  state is never disclosed there. **The deputy's socket unit is preset-disabled and
+  nothing enables it for you:** after `egress-bounds.yaml` is complete, `sudo systemctl
+  enable --now maknae-egress.socket`, or every permitted prompt is refused as not ready
+  (enroll's closing hint says so; found by review round 6). The provider key the deputy
+  reads is cached for the life of its process: after rotating the key in Vault, or
+  changing the deputy's grant, `systemctl restart maknae-egress.service`. *(Rewritten
+  2026-09-15: this bullet described the `Unavailable`-only kernel.)*
+- **Boot refuses when a provider is registered but the deputy cannot be found.**
+  `maknaed: refusing to start: a provider is registered but the egress deputy's account
+  '_maknae-egress' does not exist on this host` — the package creates the account; on a
+  source-built host create it (`packaging/common/maknae.sysusers`) before registering a
+  provider.
 
 ### What it proves
 

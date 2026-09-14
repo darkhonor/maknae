@@ -9,6 +9,11 @@ use zeroize::Zeroizing;
 pub const DAEMON_ROLE: &str = "maknaed";
 /// The CLI's AppRole (Terraform `maknae`, spec §4.5).
 pub const CLI_ROLE: &str = "maknae";
+/// The egress deputy's AppRole (Terraform `maknae-egress`, #240b) — the third
+/// plane. Named once, in `maknae-vault`, and consumed here.
+pub const EGRESS_ROLE: &str = maknae_vault::EGRESS_APPROLE_ROLE;
+/// The roles enroll provisions, in the order it reads and mints them.
+pub const ROLES: [&str; 3] = [DAEMON_ROLE, CLI_ROLE, EGRESS_ROLE];
 
 /// A minted SecretID + its accessor, tagged with the role it belongs to — what
 /// `enroll-state.yaml` records and rollback/rotate destroy by.
@@ -18,15 +23,18 @@ pub struct MintedSecret {
     pub accessor: String,
 }
 
-/// Read both RoleIDs (`maknaed`, `maknae`) — non-secret identifiers, safe to
-/// write into the new deployment's config.
+/// Read all three RoleIDs (`maknaed`, `maknae`, `maknae-egress`) — non-secret
+/// identifiers, safe to write into the new deployment's config.
 pub async fn read_role_ids(
     client: &OperatorClient,
     mount: &str,
-) -> Result<(String, String), VaultError> {
-    let daemon = client.read_role_id(mount, DAEMON_ROLE).await?;
-    let cli = client.read_role_id(mount, CLI_ROLE).await?;
-    Ok((daemon, cli))
+) -> Result<(String, String, String), VaultError> {
+    let [daemon, cli, egress] = ROLES;
+    Ok((
+        client.read_role_id(mount, daemon).await?,
+        client.read_role_id(mount, cli).await?,
+        client.read_role_id(mount, egress).await?,
+    ))
 }
 
 /// Mint a new SecretID for `role`, tagged for `enroll-state.yaml`/rollback.
@@ -119,6 +127,15 @@ fn split_pem_certs(joined: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// #240b: the third role is the one `deploy/vault-pki` creates, named ONCE
+    /// in maknae-vault and consumed here — not a second literal that could
+    /// drift from the deputy's own constant.
+    #[test]
+    fn the_three_roles_are_the_terraform_roles_in_enroll_order() {
+        assert_eq!(super::ROLES, ["maknaed", "maknae", "maknae-egress"]);
+        assert_eq!(super::EGRESS_ROLE, maknae_vault::EGRESS_APPROLE_ROLE);
+    }
+
     use super::*;
 
     fn cert(tag: &str) -> String {
