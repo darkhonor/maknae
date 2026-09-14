@@ -252,6 +252,16 @@ impl Egress for SocketEgress {
             content: req.content,
         };
         let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
+        // BEFORE the first write, so an over-cap request is a pre-send failure
+        // (`Failed`, nothing left) and never "outcome unknown" (the deputy
+        // would refuse it as oversize only after reading it).
+        if buf.len() > crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES {
+            return Err(EgressFailure::Transport(format!(
+                "request frame of {} bytes over the {}-byte cap",
+                buf.len(),
+                crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES
+            )));
+        }
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
@@ -494,8 +504,9 @@ mod tests {
         let e = SocketEgress::new(path, me, Duration::from_millis(400), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let mut big = req();
+        // under the request cap, over any socket buffer
         big.content = vec![ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new("x".repeat(1 << 20))),
+            text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
         }];
         let started = std::time::Instant::now();
         let out = e.send(&intent, big);
@@ -505,6 +516,33 @@ mod tests {
             took < Duration::from_millis(900),
             "the write leg was allowed to run past the deadline: {took:?}"
         );
+    }
+
+    /// A request over the deputy's frame cap is refused BEFORE the first
+    /// write — a pre-send `Transport` (`Failed`), and the peer sees nothing —
+    /// rather than written, refused by the deputy as oversize, and recorded
+    /// "outcome unknown" for a prompt no provider ever saw.
+    #[test]
+    fn an_over_cap_request_is_refused_before_anything_is_written() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), None);
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let mut big = req();
+        big.content = vec![ContentBlock::Text {
+            text: SecretText(maknae_io::Zeroizing::new(
+                "x".repeat(crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES),
+            )),
+        }];
+        match e.send(&intent, big) {
+            Err(EgressFailure::Transport(m)) => {
+                assert!(m.contains("request frame"), "{m}")
+            }
+            other => panic!("expected a pre-send cap refusal, got {other:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "bytes reached the peer");
     }
 
     /// The client-side check is the LISTENER predicate, by name. Reverting it

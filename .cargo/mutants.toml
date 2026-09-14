@@ -104,6 +104,12 @@
 # algebraically identical. The executable bit proof passes natively on Rocky9.
 # Only | -> ^ in these named functions is exempt: & mutations remain tested.
 exclude_re = [
+  # #240: `Unavailable::deadline` returns `Duration::ZERO`, and the mutant
+  # replacing its body with `Default::default()` returns the SAME value —
+  # equivalent, not missed (measured on f69639c). The value is pinned by
+  # `unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends`;
+  # every other mutant of the file stays tested.
+  "maknae-kernel/src/egress\\.rs:[0-9]+:[0-9]+: replace <impl Egress for Unavailable>::deadline -> std::time::Duration with Default::default\\(\\)$",
   "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_writable_delegation)$",
   "^crates/maknae-io/src/audit_append\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in flags$",
   "maknae-plane.*::poll_flush",

@@ -74,6 +74,12 @@ impl Drop for CertSinkGuard {
     }
 }
 
+/// Every Vault HTTP request the kernel plane makes is bounded by this — the
+/// login, the renewals, the leaf signing, and the `revoke-self` at shutdown.
+/// Named because the shutdown chain the shipped units wait for carries it
+/// (`maknae-kernel`'s shutdown-chain test).
+pub const PLANE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     plane: Plane,
@@ -371,7 +377,7 @@ impl PlaneClient {
             // that actually sends is `http.rs`'s, pinned to the Vault CA with
             // no platform verifier on this leg at all.
             .verify(true)
-            .timeout(Some(std::time::Duration::from_secs(30)))
+            .timeout(Some(PLANE_HTTP_TIMEOUT))
             .build()
             .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
         let mut client = VaultClient::new(settings)
@@ -381,12 +387,7 @@ impl PlaneClient {
         // login body in plaintext. `http.rs`'s client (no redirects, HTTPS
         // only, no proxy) is what actually sends.
         let address = client.settings.address.to_string();
-        crate::http::harden(
-            &mut client,
-            &address,
-            &vault_ca,
-            std::time::Duration::from_secs(30),
-        )?;
+        crate::http::harden(&mut client, &address, &vault_ca, PLANE_HTTP_TIMEOUT)?;
         Ok(Self {
             plane,
             deployment_id: cfg.deployment_id,

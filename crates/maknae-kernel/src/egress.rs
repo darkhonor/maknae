@@ -46,17 +46,19 @@ pub struct EgressReply {
 pub enum EgressFailure {
     NotConfigured,
     Transport(String),
-    /// The backend's own deadline ran out AFTER the request was written —
-    /// delivery unknown, exactly as the kernel's outer timeout on the same
-    /// value. Distinguished from `Transport` so the trail records
+    /// The backend's own deadline ran out once the kernel had begun writing
+    /// the request — from that point delivery is unknown, exactly as under
+    /// the kernel's outer timeout on the same value. (Spent before the first
+    /// write it is the same variant: conservative, never "nothing left".) Distinguished from `Transport` so the trail records
     /// `DeadlineExpired` rather than `Failed` (which claims nothing left) and
     /// the egress breaker counts it as an expiry, not a success (codex on
     /// #240: the inner budget usually fires first).
     DeadlineExpired,
-    /// The request was written to the deputy and something failed AFTER
-    /// that: the deputy closed the connection (its provider call failed or
-    /// timed out — the provider may have received the prompt), the reply was
-    /// malformed, or its frame was over the cap. Recorded as
+    /// Something failed from the point the kernel began writing the request
+    /// to the deputy: the deputy closed the connection (its provider call
+    /// failed or timed out — the provider may have received the prompt), the
+    /// reply was malformed, or its frame was over the cap. Bytes may or may
+    /// not have crossed; the record is conservative. Recorded as
     /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
     /// be a false statement about content that did (codex on #240).
     AfterSend(String),
@@ -142,6 +144,24 @@ pub const EGRESS_USER: &str = "_maknae-egress";
 /// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
 /// delivered reply is bounded again by `transport.frame_max_bytes`.
 pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
+
+/// The largest request frame the kernel will WRITE to the deputy — the
+/// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte
+/// leaves. Without it a prompt that fills `transport.frame_max_bytes` at its
+/// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
+/// as oversize after reading it, and the trail says "outcome unknown" for a
+/// prompt that provably never reached a provider (review round 3). Refused
+/// here it is a pre-send failure: `Failed`, the true record.
+pub const EGRESS_MAX_REQUEST_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Which send failures the egress breaker counts as an EXPIRY (toward its
+/// trip) rather than a completed attempt: only the backend's own deadline.
+/// A pre-send failure and a post-send failure both mean the worker came back
+/// promptly; a stall is what the breaker exists to bound. Pure and T1 so the
+/// arm in `run.rs` (mutation-excluded) is pinned here.
+pub fn failure_counts_as_expiry(f: &EgressFailure) -> bool {
+    matches!(f, EgressFailure::DeadlineExpired)
+}
 
 /// Why the kernel refused to BOOT over its egress backend (#240). Only
 /// reachable with a provider registered: with none, there is nothing to send
@@ -316,8 +336,9 @@ pub enum SendOutcome {
     },
     Failed,
     DeadlineExpired,
-    /// The request left and the exchange failed afterwards, short of the
-    /// deadline: delivery to the provider is unknown (`EgressFailure::AfterSend`).
+    /// The exchange failed once the kernel had begun writing the request,
+    /// short of the deadline: delivery to the provider is unknown
+    /// (`EgressFailure::AfterSend`).
     OutcomeUnknown,
     LandedUndelivered {
         reply_length: u64,
@@ -902,6 +923,31 @@ mod tests {
             matches!(e, EgressFailure::AfterSend(_)),
             "the resolved uid did not reach the backend, or a post-send failure was not classed as one: {e:?}"
         );
+    }
+
+    /// The two frame caps are 1 MiB by VALUE, mirroring the deputy's
+    /// `MAX_REQUEST_FRAME_BYTES`; a mutant turning `1024 * 1024` into 2048
+    /// or 1 survives every test that uses them symbolically (measured: two
+    /// such mutants missed until this test).
+    #[test]
+    fn the_frame_caps_are_one_mebibyte_by_value() {
+        assert_eq!(EGRESS_MAX_REPLY_FRAME_BYTES, 1_048_576);
+        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 1_048_576);
+    }
+
+    /// Only the backend's own deadline is an expiry to the breaker; every
+    /// other failure is a completed attempt. Each arm of the table kills the
+    /// mutant that swaps it.
+    #[test]
+    fn only_the_backends_own_deadline_counts_as_an_expiry() {
+        assert!(failure_counts_as_expiry(&EgressFailure::DeadlineExpired));
+        assert!(!failure_counts_as_expiry(&EgressFailure::NotConfigured));
+        assert!(!failure_counts_as_expiry(&EgressFailure::Transport(
+            "x".into()
+        )));
+        assert!(!failure_counts_as_expiry(&EgressFailure::AfterSend(
+            "x".into()
+        )));
     }
 
     /// Both refusals render by name — the account, and the resolver's reason.

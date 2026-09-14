@@ -32,7 +32,11 @@ const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// counted the login and the read only.) Raise the deputy's bounds and this
 /// one together.
 const DEFAULT_DEADLINE_MS: u64 = 280_000;
-const DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=600_000;
+/// The ceiling on `deadline_ms`. Named and exported because the shipped units'
+/// stop timeouts are derived from it (`maknae-kernel`'s shutdown-chain test
+/// holds `TimeoutStopSec=` / `ExitTimeOut` to the chain at this ceiling).
+pub const EGRESS_DEADLINE_MS_MAX: u64 = 600_000;
+const DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=EGRESS_DEADLINE_MS_MAX as i64;
 
 /// Where the deputy is, and how long one send may take.
 #[derive(Clone, Debug, PartialEq, Eq)]

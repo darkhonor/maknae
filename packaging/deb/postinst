@@ -103,8 +103,11 @@ case "$1" in
             systemctl try-restart maknaed.service 2>/dev/null || :
             # The SOCKET first: /run/maknae-egress is its RuntimeDirectory= now
             # (#240), and an existing directory keeps the mode the old service
-            # unit gave it until the socket unit re-creates it. The service
-            # then restarts onto the re-created listener.
+            # unit gave it (0750, untraversable by _maknae) until re-created.
+            # Asserted here as well, in case the unit's setting leaves an
+            # existing directory alone. The service then restarts onto the
+            # re-created listener.
+            [ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
             systemctl try-restart maknae-egress.socket 2>/dev/null || :
             systemctl try-restart maknae-egress.service 2>/dev/null || :
         fi

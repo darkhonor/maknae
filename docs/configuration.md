@@ -477,7 +477,8 @@ egress:
   Vault token revoke and the runtime teardown that follow it.
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
-  by name if the account does not exist or cannot be looked up. With no provider the
+  by name if the account does not exist or cannot be looked up — on macOS that account
+  arrives with #227's packaging, so until then a registered provider refuses boot there. With no provider the
   backend is `Unavailable`, the account is never looked up, and the section is parsed but
   idle. Whether the deputy's socket exists is checked per request (`egress backend not
   ready` in the trail), not at boot: the socket unit and the daemon start independently.
@@ -714,10 +715,12 @@ spellings in mind at once — which is the defect this removed.)*
 > by `VaultKeys::read`; the example above uses `api-key`, and if your secret uses
 > `api_key` or anything else, write that instead. Nothing defaults.
 >
-> **Nothing stands between a registration and a live prompt any more (2026-09-15, #240):**
-> the deputy logs in and reads the key, `maknae enroll` provisions its plane, and
-> `maknaed` routes a permitted `session.prompt` to it (§6.2). What this section cannot
-> show you is the live provider call itself — that is #242's acceptance demonstration.
+> **Nothing in the daemon stands between a registration and a live prompt any more
+> (2026-09-15, #240):** the deputy logs in and reads the key, `maknae enroll` provisions
+> its plane, and `maknaed` routes a permitted `session.prompt` to it (§6.2). What does
+> still stand between them: no `session.prompt` client ships yet — the runtime loop is
+> #241's — so the first live prompt, and the live provider call itself, are #241's and
+> #242's acceptance demonstration.
 
 #### Permissions — stricter than §2.2 for this section
 

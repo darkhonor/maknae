@@ -40,8 +40,9 @@
 
   <!-- systemd TimeoutStopSec=660 (#240): the shutdown chain at the deadline
        ceiling is the handler drain (600 s + 10 s), the audit drain (5 s), the
-       Vault token revoke-self (30 s) and the runtime teardown (3 s): 648 s.
-       launchd's default is 20 s before SIGKILL. -->
+       supervisor reap (1 s), the Vault token revoke-self (30 s) and the runtime
+       teardown (3 s): 649 s. launchd's default is 20 s before SIGKILL. Held to
+       the chain by the same kernel test that reads maknaed.service. -->
   <key>ExitTimeOut</key>
   <integer>660</integer>
   <key>RunAtLoad</key>

@@ -602,7 +602,7 @@ why = "read interrupted by a signal mid-syscall: retried, as std's read_exact do
 [[exception]]
 path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "Err(e) if Self::write_is_retried(&e) => continue,"
-why = "a send timer that expired with nothing moved, or a signal mid-syscall: the loop re-asks the budget; which of the two the platform reports under SO_SNDTIMEO is not controllable from a test (the dribble test observes the partial-write path)"
+why = "a non-blocking write with no space yet (EAGAIN, a moment after poll reported writability) or a signal mid-syscall: the loop re-asks the budget; neither is controllable from a test (the write-leg dribble test observes the partial-write path)"
 
 [[exception]]
 path = "crates/maknae-kernel/src/egress_socket.rs"

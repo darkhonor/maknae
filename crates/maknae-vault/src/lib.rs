@@ -42,7 +42,7 @@ mod socket;
 mod stream;
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
-pub use client::{PlaneClient, PlaneIdentity};
+pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT};
 pub use config::{
     load_vault_config, validate_deployment_id, validate_vault_addr, vault_config_from_document,
     VaultConfig, DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,

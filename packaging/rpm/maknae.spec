@@ -118,6 +118,9 @@ restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae
 # Requires: acl. Re-asserted on every %post and by `maknae enroll`.
 setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
     echo "maknae: setfacl failed — grant _maknae-egress rx on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
+# #240: /run/maknae-egress is the socket unit's, 0751; a directory left by the
+# earlier service-unit shape (0750) is untraversable by _maknae until re-created.
+[ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
@@ -142,9 +145,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %postun
-# the socket before its service: /run/maknae-egress is the socket unit's
-# RuntimeDirectory= (#240); an existing directory keeps the old mode until it is
-# re-created, and the service restarts onto the re-created listener
+# /run/maknae-egress is the socket unit's RuntimeDirectory= (#240); an existing
+# directory keeps the old (0750) mode until re-created, so the mode is asserted
+# in %post too. One transaction: systemd orders the socket before its service
+# from maknae-egress.service's Requires=/After=, not from this argv.
 %systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
