@@ -49,12 +49,13 @@ case "$1" in
         # by `maknae enroll`), under the deputy's OWN group.
         install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
         # #240b (D3): the deputy is in neither root nor _maknae, and the loader
-        # refuses any world bit on /etc/maknae, so it traverses by a user ACL
-        # granting exactly `x`. `acl` is a Depends. Re-asserted here on every
-        # configure and by `maknae enroll`; a write-granting entry would raise
-        # the group bits into the loader's 0o022 mask and be refused.
-        setfacl -m u:_maknae-egress:x /etc/maknae 2>/dev/null || \
-            echo "maknae: setfacl failed — grant _maknae-egress x on /etc/maknae or the egress deputy cannot start" >&2
+        # refuses any world bit on /etc/maknae, so it reaches the dir by a user
+        # ACL granting `rx` — `r` because maknae-io opens the directory
+        # O_RDONLY|O_DIRECTORY (a search-only entry fails that open), `x` for
+        # traversal, never `w` (that would trip the loader's 0o022 mask). `acl`
+        # is a Depends. Re-asserted on every configure and by `maknae enroll`.
+        setfacl -m u:_maknae-egress:rx /etc/maknae 2>/dev/null || \
+            echo "maknae: setfacl failed — grant _maknae-egress rx on /etc/maknae or the egress deputy cannot start" >&2
 
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
         # The MAC policy grants `append`, not `create`, so a first boot that had to

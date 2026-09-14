@@ -99,8 +99,8 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # %post (a payload file under the chattr +a dir would fail to replace on upgrade).
 
 %pre
-# Create _maknae user + maknae operator group BEFORE payload unpack so rpm -V
-# never sees owner drift.
+# Create the _maknae and _maknae-egress accounts and the maknae operator group
+# BEFORE payload unpack so rpm -V never sees owner drift.
 %sysusers_create_compat %{SOURCE3}
 
 %post
@@ -109,11 +109,12 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
-# loader refuses any world bit on /etc/maknae, so it traverses by a user ACL
-# granting exactly `x` (Requires: acl). Re-asserted on every %post and by
-# `maknae enroll`; a write-granting entry would trip the loader's 0o022 mask.
-setfacl -m u:_maknae-egress:x %{_sysconfdir}/maknae 2>/dev/null || \
-    echo "maknae: setfacl failed — grant _maknae-egress x on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
+# loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
+# ACL granting `rx` — `r` because maknae-io opens the directory
+# O_RDONLY|O_DIRECTORY, `x` for traversal, never `w` (the loader's 0o022 mask).
+# Requires: acl. Re-asserted on every %post and by `maknae enroll`.
+setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
+    echo "maknae: setfacl failed — grant _maknae-egress rx on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.

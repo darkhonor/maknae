@@ -1179,15 +1179,18 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
     }
 }
 
-/// D3 (#240b): the deputy traverses `/etc/maknae` by a USER ACL granting
-/// exactly `x`. The directory is `root:_maknae 0750`, the deputy is in neither,
-/// and the config loader refuses any world bit on that directory — so a mode
-/// change is not available, and a group change would put the daemon's group on
-/// the deputy or vice versa. `x` only: nothing under the dir is the deputy's
-/// except `egress/` and the bounds file, which carry their own modes. A
-/// write-granting entry would raise the group bits into the loader's `0o022`
-/// mask and be refused, so the loader's check is not weakened by this.
-const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:x";
+/// D3 (#240b): the deputy reaches `/etc/maknae` by a USER ACL granting `rx`.
+/// The directory is `root:_maknae 0750`, the deputy is in neither, and the
+/// config loader refuses any world bit on that directory — so a mode change is
+/// not available, and a group change would put the daemon's group on the
+/// deputy or vice versa. `r` AND `x`, for the same reason the home grant below
+/// is `rx`: the anchored reader (`maknae-io`) opens the directory
+/// `O_RDONLY|O_DIRECTORY`, so a search-only `--x` entry fails the open with
+/// EACCES — corrected 2026-09-14 in self-review, where this constant was `x`
+/// and would have left the deputy exactly as unable to open its bounds file as
+/// before. Never `w`: a write-granting entry raises the group bits into the
+/// loader's `0o022` mask and is refused, so the loader's check is not weakened.
+const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:rx";
 
 /// Apply [`EGRESS_TRAVERSAL_ACL`] to `/etc/maknae` (Linux, root context). Warn
 /// on failure, as `grant_read_path_access` does: enrollment establishes
@@ -1202,6 +1205,22 @@ fn grant_egress_traversal(verbose: bool) {
         Ok(o) if o.status.success() => {
             if verbose {
                 eprintln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+            }
+            // `setfacl` exits 0 on a filesystem mounted without ACL support in
+            // some configurations; read the entry back rather than trust the
+            // exit status, since this entry is the only thing that makes the
+            // deputy startable.
+            let back = std::process::Command::new("getfacl")
+                .args(["-p", "/etc/maknae"])
+                .output();
+            let seen = back
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("user:_maknae-egress:r-x"))
+                .unwrap_or(false);
+            if !seen {
+                eprintln!(
+                    "maknae enroll: the ACL entry did not read back (getfacl shows no user:_maknae-egress:r-x on /etc/maknae); the egress deputy cannot start until it does"
+                );
             }
         }
         Ok(o) => eprintln!(
@@ -1604,7 +1623,7 @@ async fn finish_enrollment(
         seal_secret_linux(
             daemon_secret,
             &sealed_row.path,
-            "maknaed-secret-id",
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             args.verbose,
         )
         .await?;
@@ -1738,7 +1757,7 @@ mod tests {
     #[test]
     fn seal_argv_pins_the_credential_name_for_both_sealed_planes() {
         let (bin, args) = seal_argv(
-            "maknaed-secret-id",
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             "/etc/maknae/private/maknaed-secret-id.cred",
         );
         assert_eq!(bin, "systemd-creds");
@@ -1762,13 +1781,51 @@ mod tests {
         );
     }
 
-    /// D3: the deputy traverses /etc/maknae by a USER ACL granting exactly `x`
-    /// — never read (nothing under the dir is the deputy's except egress/ and
-    /// the bounds file, which carry their own modes), never write, never a
-    /// world entry (the loader refuses any world bit on the dir).
+    /// D3: the deputy reaches /etc/maknae by a USER ACL for its own account
+    /// granting `r` AND `x` — `r` because the anchored reader opens the dir
+    /// O_RDONLY|O_DIRECTORY (a search-only entry fails that open; this test
+    /// was born pinning `x` alone, which self-review caught) — and never `w`
+    /// (the loader refuses a group-class write bit), never a world entry.
+    /// Parsed, not compared to itself, so the next edit cannot reintroduce
+    /// `x`-only under a matching literal.
     #[test]
-    fn the_deputys_traversal_acl_grants_only_x_to_its_own_account() {
-        assert_eq!(EGRESS_TRAVERSAL_ACL, "u:_maknae-egress:x");
+    fn the_deputys_traversal_acl_grants_r_and_x_and_never_w_to_its_own_account() {
+        let (who, perms) = EGRESS_TRAVERSAL_ACL.rsplit_once(':').unwrap();
+        assert_eq!(who, "u:_maknae-egress");
+        assert!(
+            perms.contains('r'),
+            "the anchored reader opens the dir O_RDONLY: {perms}"
+        );
+        assert!(perms.contains('x'), "traversal: {perms}");
+        assert!(
+            !perms.contains('w'),
+            "a write entry trips the loader's 0o022 mask: {perms}"
+        );
+    }
+
+    /// The name each seal embeds is the name the plane's UNIT loads — read
+    /// from the shipped unit files, not from a second literal here, so an
+    /// edit to either `LoadCredentialEncrypted=` line goes red before it goes
+    /// "Name in credential doesn't match expectations" at unit start.
+    #[test]
+    fn the_seal_names_are_the_names_the_shipped_units_load() {
+        fn loaded_name(unit: &str) -> String {
+            unit.lines()
+                .find_map(|l| l.strip_prefix("LoadCredentialEncrypted="))
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(name, _)| name.to_string())
+                .expect("the unit carries a LoadCredentialEncrypted= line")
+        }
+        let maknaed = include_str!("../../../../packaging/common/maknaed.service");
+        let egress = include_str!("../../../../packaging/common/maknae-egress.service");
+        assert_eq!(
+            loaded_name(maknaed),
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME
+        );
+        assert_eq!(
+            loaded_name(egress),
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME
+        );
     }
 
     // ---- canonical_home (#216) ---------------------------------------------

@@ -365,6 +365,9 @@ mod tests {
         );
         assert!(SelfOwnerResolver.resolve(Owner::RootRoot).is_err());
         assert!(SelfOwnerResolver.resolve(Owner::RootMaknaeGroup).is_err());
+        assert!(SelfOwnerResolver
+            .resolve(Owner::RootMaknaeEgressGroup)
+            .is_err());
         assert!(SelfOwnerResolver.resolve(Owner::MaknaeMaknae).is_err());
     }
 
