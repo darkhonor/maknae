@@ -243,16 +243,22 @@ resource "vault_approle_auth_backend_role" "maknaed" {
   token_no_default_policy = true
 }
 
-# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018)
-# and a PERIODIC token — it is a long-lived service, not a per-invocation CLI.
+# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018).
+# #240b (corrected 2026-09-15): NOT a periodic token. The deputy logs in per
+# key read — login, one KV read, revoke-self — and holds no token between
+# reads, so the token it creates is bounded to exactly that: three uses (Vault
+# spends one per request; the read and the revoke are two) and a short TTL. A
+# token whose revoke failed is then usable for seconds and at most two more
+# requests, not for a token_period; the deputy still refuses on that failure.
 resource "vault_approle_auth_backend_role" "maknae_egress" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknae-egress"
   token_policies          = [vault_policy.maknae_egress.name]
-  secret_id_ttl           = 0                # ADR-0018 invariant: standing SecretID
-  secret_id_num_uses      = 0                # unlimited logins (hands-free reboots)
-  token_period            = var.token_period # PERIODIC token — renews indefinitely
-  token_max_ttl           = 0
+  secret_id_ttl           = 0  # ADR-0018 invariant: standing SecretID
+  secret_id_num_uses      = 0  # unlimited logins (hands-free reboots)
+  token_num_uses          = 3  # read + revoke, with one to spare
+  token_ttl               = 60 # seconds; the read completes in one
+  token_max_ttl           = 60
   token_no_default_policy = true
 }
 

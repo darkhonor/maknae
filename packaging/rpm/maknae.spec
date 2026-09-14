@@ -40,6 +40,9 @@ Requires:       policycoreutils-python-utils
 Requires:       selinux-policy-targeted
 # #77 read path: enroll sets the _maknae home ACL with setfacl (spec D5a).
 Requires:       acl
+# #240b: %post runs setfacl, so acl must be installed BEFORE this package's
+# scriptlet, which a plain Requires does not order.
+Requires(post): acl
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted

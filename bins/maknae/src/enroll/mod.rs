@@ -656,11 +656,13 @@ fn parse_state_accessors(text: &str) -> Result<Vec<(String, String)>, EnrollErro
 // this crate's closed dependency enumeration.
 // ============================================================================
 
-/// PURE: parse `scheme://[user@]host:port[/...]` into `(host, port)`.
+/// PURE: parse `https://[user@]host:port[/...]` into `(host, port)`. HTTPS
+/// only — an `http://` address is `None` here so enroll refuses it by name
+/// before the reachability probe, rather than carrying the operator token and
+/// three SecretIDs over plaintext (self-review round 7; the daemon and deputy
+/// clients already refused it, and `OperatorClient` now does too).
 fn parse_host_port(addr: &str) -> Option<(String, u16)> {
-    let rest = addr
-        .strip_prefix("https://")
-        .or_else(|| addr.strip_prefix("http://"))?;
+    let rest = addr.strip_prefix("https://")?;
     let hostport = rest.split(['/', '?', '#']).next()?;
     let hostport = hostport.rsplit('@').next()?;
     let (host, port) = hostport.rsplit_once(':')?;
@@ -2038,6 +2040,8 @@ mod tests {
     #[test]
     fn parse_host_port_rejects_no_port() {
         assert_eq!(parse_host_port("https://vault.example"), None);
+        // plaintext is not an address enroll will use (round 7)
+        assert_eq!(parse_host_port("http://vault.example:8200"), None);
     }
 
     #[test]
@@ -2354,7 +2358,7 @@ mod tests {
     // wraps a real `vaultrs::VaultClient` with no injectable transport, and
     // this crate has no mock-Vault harness (T3, per the task brief: the live
     // enroll flow is exercised manually, not in CI). What IS provable without
-    // a network call: `VaultClient::new` (verified against vaultrs 0.7.4's
+    // a network call: `VaultClient::new` (verified against vaultrs 0.8.0's
     // vendored source) reads+parses the CA file but makes NO request, so a
     // real `OperatorClient` can be built here to exercise
     // `destroy_previous_accessors_or_abort`'s structure for real. The
@@ -2390,7 +2394,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
         // A well-formed https:// address that is never actually connected to —
         // `OperatorClient::new` only builds settings + reads/parses the CA
-        // file; it makes no request (verified against vaultrs 0.7.4 and 0.8.0).
+        // file; it makes no request (verified against vaultrs 0.8.0).
         // Since vaultrs 0.8.0 (reqwest 0.13 under `rustls-no-provider`) building
         // the client REQUIRES a process-level crypto provider and panics without
         // one; production installs it first (`cli.rs`), so the fixture does the
