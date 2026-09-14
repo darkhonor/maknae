@@ -62,6 +62,9 @@ pub enum MsgId {
     EnrollPostureSummary,
     /// Reminder that group membership is not live in pre-existing sessions.
     EnrollReloginNote,
+    /// #240b: the one hand step enroll does not do for the egress deputy —
+    /// the `vault:` block in `egress-bounds.yaml`, and its mode.
+    EnrollEgressBoundsHint,
     /// Pointer to the operator's own `systemctl enable --now maknaed` act.
     EnrollEnableDaemonHint,
     /// A pre-existing `enroll-state.yaml` was found — rotating (spec §4.1,
@@ -109,6 +112,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollProvisioningCli,
     MsgId::EnrollPostureSummary,
     MsgId::EnrollReloginNote,
+    MsgId::EnrollEgressBoundsHint,
     MsgId::EnrollEnableDaemonHint,
     MsgId::EnrollRotating,
     MsgId::EnrollRollbackDestroyed,
@@ -276,6 +280,7 @@ mod tests {
                 | MsgId::EnrollProvisioningCli
                 | MsgId::EnrollPostureSummary
                 | MsgId::EnrollReloginNote
+                | MsgId::EnrollEgressBoundsHint
                 | MsgId::EnrollEnableDaemonHint
                 | MsgId::EnrollRotating
                 | MsgId::EnrollRollbackDestroyed
@@ -284,7 +289,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 29;
+        const VARIANT_COUNT: usize = 30;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

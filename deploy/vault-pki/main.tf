@@ -187,9 +187,9 @@ resource "vault_policy" "maknae_egress" {
 
 # ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
 # `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
-# AppRole token, so it needs its own least-privilege policy: read both RoleIDs,
-# mint/destroy both SecretIDs, and read the intermediate issuer bundle it hands to
-# the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
+# AppRole token, so it needs its own least-privilege policy: read all three
+# RoleIDs, mint/destroy all three SecretIDs, and read the intermediate issuer
+# bundle it hands to the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
 # prefix (vault_auth_backend.approle.path is the BARE mount name; vaultrs/Vault
 # addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
 # enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),

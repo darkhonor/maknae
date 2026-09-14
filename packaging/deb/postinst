@@ -7,8 +7,9 @@ set -e
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
-        # Two identities by construction: the `_maknae` daemon account (primary
-        # group `_maknae`) and the separate `maknae` OPERATOR group. Prefer
+        # THREE identities by construction (#240a added the third): the
+        # `_maknae` daemon account (primary group `_maknae`), the separate
+        # `maknae` OPERATOR group, and the `_maknae-egress` deputy. Prefer
         # systemd-sysusers (reads /usr/lib/sysusers.d/maknae.conf); fall back to
         # groupadd/useradd on hosts without it.
         #

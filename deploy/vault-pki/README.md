@@ -89,13 +89,16 @@ are present (a permissive role is still schema-valid) — that is a review conce
 
 AppRole login needs **two** things: the **RoleID** (non-secret, stable) and a
 **SecretID** (secret; **standing** under ADR-0018 — `num_uses=0`, `ttl=0`). Terraform
-provisions both roles and outputs the RoleIDs; it does not generate or deliver SecretIDs.
+provisions all three roles and outputs the RoleIDs; it does not generate or deliver
+SecretIDs.
 
-Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config):
+Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config;
+`maknae enroll` reads all three over the API and writes them for you):
 
 ```bash
-terraform output -raw maknaed_role_id   # trust plane
-terraform output -raw maknae_role_id    # CLI plane
+terraform output -raw maknaed_role_id        # trust plane
+terraform output -raw maknae_role_id         # CLI plane
+terraform output -raw maknae_egress_role_id  # egress deputy (#240b)
 ```
 
 Then issue a standing SecretID per plane (note the `auth/` mount prefix):

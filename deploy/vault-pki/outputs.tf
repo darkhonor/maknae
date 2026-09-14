@@ -52,7 +52,7 @@ output "maknae_approle_name" {
 
 # RoleID is the NON-SECRET half of the AppRole credential (a stable identifier, like a
 # username); it cannot authenticate without a SecretID, which is delivered out-of-band
-# (operational step, see README). Both planes need their RoleID to log in, so expose it.
+# (operational step, see README). Every plane needs its RoleID to log in, so expose them.
 output "maknaed_role_id" {
   description = "AppRole RoleID for the trust plane (maknaed). Non-secret; pair with an out-of-band SecretID to log in."
   value       = vault_approle_auth_backend_role.maknaed.role_id
@@ -61,4 +61,9 @@ output "maknaed_role_id" {
 output "maknae_role_id" {
   description = "AppRole RoleID for the CLI plane (maknae). Non-secret; pair with an out-of-band SecretID to log in."
   value       = vault_approle_auth_backend_role.maknae.role_id
+}
+
+output "maknae_egress_role_id" {
+  description = "AppRole RoleID for the egress deputy (maknae-egress, #240b). Non-secret; maknae enroll reads it over the API and writes /etc/maknae/egress/maknae-egress-approle-id."
+  value       = vault_approle_auth_backend_role.maknae_egress.role_id
 }

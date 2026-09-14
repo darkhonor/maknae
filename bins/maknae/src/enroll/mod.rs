@@ -1194,9 +1194,10 @@ const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:rx";
 
 /// The `getfacl` line [`EGRESS_TRAVERSAL_ACL`] must read back as — derived
 /// from the constant, never a second copy of its permissions: `u:NAME:rx`
-/// renders as `user:NAME:r-x`. Matched at line START, so a `default:user:…`
-/// entry (inheritance for new files, no access on the directory itself)
-/// cannot satisfy it.
+/// renders as `user:NAME:r-x`. Matched as a WHOLE trimmed line, so neither a
+/// `default:user:…` entry (inheritance for new files, no access on the
+/// directory itself) nor a mask-restricted rendering (`…\t#effective:r--`)
+/// can satisfy it.
 fn egress_traversal_acl_readback() -> String {
     let (who, perms) = EGRESS_TRAVERSAL_ACL
         .rsplit_once(':')
@@ -1719,8 +1720,9 @@ async fn finish_enrollment(
     let summary = msg(locale, MsgId::EnrollPostureSummary)
         .replace("{cli_dir}", &cli_dir.display().to_string());
     Ok(format!(
-        "{summary}\n{}\n{}",
+        "{summary}\n{}\n{}\n{}",
         msg(locale, MsgId::EnrollReloginNote),
+        msg(locale, MsgId::EnrollEgressBoundsHint),
         msg(locale, MsgId::EnrollEnableDaemonHint),
     ))
 }
@@ -1822,9 +1824,11 @@ mod tests {
         );
         // The read-back line is DERIVED from the constant: `rx` -> `r-x`.
         assert_eq!(egress_traversal_acl_readback(), "user:_maknae-egress:r-x");
-        // And no operator-facing string in this file tells anyone to grant a
-        // bare `x` — round 2 of self-review found two that did, after the
-        // constant had been corrected.
+        // And the two x-only operator strings round 2 of self-review found
+        // (after the constant had been corrected) cannot return under their
+        // own wording. A rephrased one could — this pins the found instances,
+        // not the class; the constant interpolated into both messages is what
+        // covers the class.
         // (Composed at runtime: `include_str!` includes THIS test, so a
         // literal pattern here would match itself.)
         let src = include_str!("mod.rs");
