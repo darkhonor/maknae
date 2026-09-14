@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 /// (systemd `LoadCredential=maknaed-secret-id:...` / `SetCredentialEncrypted`).
 const CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
 
+/// The credential name the DEPUTY's unit loads (`LoadCredentialEncrypted=
+/// maknae-egress-secret-id:…` in `maknae-egress.service`; `maknae enroll`
+/// seals with the same `--name`). #240b.
+pub const EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknae-egress-secret-id";
+
 /// The CLI's user-scoped `systemd-creds` credential file name.
 const CLI_USER_CREDS_FILE: &str = "maknae-secret-id.cred";
 
@@ -116,6 +121,26 @@ pub fn resolve_daemon_secret_source(
     ))
 }
 
+/// Resolve the egress deputy's SecretID source (#240b). ONE source and no
+/// fallthrough: `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, else a named
+/// refusal. There is deliberately no SEP arm and no plaintext arm — the deputy
+/// holds the provider credential, and its custody on macOS is #227's to
+/// design, stated as weaker rather than papered over with a plaintext file.
+pub fn resolve_egress_secret_source(
+    credentials_dir_env: Option<&str>,
+) -> Result<PathBuf, VaultError> {
+    match credentials_dir_env {
+        Some(dir) if !dir.is_empty() => {
+            Ok(Path::new(dir).join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME))
+        }
+        _ => Err(VaultError::CredentialSource(
+            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset — the unit's \
+             LoadCredentialEncrypted= is the only source (#240b; macOS custody is #227)"
+                .to_string(),
+        )),
+    }
+}
+
 /// Resolve the CLI's SecretID source. Resolution order — first match wins:
 ///
 /// 1. `<cli_dir>/maknae-secret-id.cred` (if `target_has_user_creds` — a user-scoped
@@ -146,6 +171,27 @@ pub fn resolve_cli_secret_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- egress resolution (#240b) -------------------------------------------
+
+    /// The deputy has ONE source — the unit's LoadCredentialEncrypted= — and
+    /// no fallthrough. An unset or empty $CREDENTIALS_DIRECTORY is a named
+    /// refusal, never a plaintext default (macOS custody is #227's).
+    #[test]
+    fn the_egress_secret_comes_from_credentials_directory_or_nowhere() {
+        assert_eq!(
+            resolve_egress_secret_source(Some("/run/credentials/maknae-egress.service")).unwrap(),
+            PathBuf::from("/run/credentials/maknae-egress.service/maknae-egress-secret-id")
+        );
+        assert!(matches!(
+            resolve_egress_secret_source(None),
+            Err(VaultError::CredentialSource(_))
+        ));
+        assert!(matches!(
+            resolve_egress_secret_source(Some("")),
+            Err(VaultError::CredentialSource(_))
+        ));
+    }
 
     // ---- daemon resolution ---------------------------------------------------
 

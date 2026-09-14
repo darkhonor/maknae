@@ -107,7 +107,7 @@ pub struct PlaneClient {
     secret_source_kind: CredentialSourceKind,
 }
 
-fn read_trimmed(path: &Path) -> Result<String, VaultError> {
+pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
     let bytes = crate::read_storage(path)?;
     std::str::from_utf8(&bytes)
         .map(|s| s.trim().to_string())

@@ -440,6 +440,10 @@ path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
 
 [[t3]]
+path = "crates/maknae-vault/src/egress.rs"
+why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O with no stub by design; the dead-address and fail-closed-construction paths are unit-tested, the SOURCE decision it consumes is T1 in secret_source.rs (the secret_io/secret_source split), mutation-excluded like client.rs"
+
+[[t3]]
 path = "crates/maknae-vault/src/secret_io.rs"
 why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
 
