@@ -115,6 +115,10 @@ files = [
   # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
+  # #240b: the deputy's per-read token lifecycle — login/read/revoke composed
+  # over the EgressOps seam; a failed revoke is a failed probe and a withheld
+  # secret. The vaultrs half is egress.rs (T3).
+  "crates/maknae-vault/src/egress_session.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch

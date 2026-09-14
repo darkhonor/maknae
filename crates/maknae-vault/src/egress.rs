@@ -5,22 +5,27 @@
 //! role. It authenticates through the SAME `AppRoleAuth` the two mTLS planes
 //! use; what is new here is the token LIFECYCLE and the KV read.
 //!
-//! **Login per read, revoke after.** The deputy reads a key once per
-//! destination for the life of the process (`keys.rs`'s cache). A token
-//! acquired at boot would sit unrenewed past `token_period` and fail the next
-//! uncached read with a 403; the daemon's renewal supervisor is
-//! disproportionate for a process that makes a handful of reads. So each read
-//! is login → read → best-effort `revoke-self`, and no token stands between
-//! reads. The boot probe is the same login + revoke, so a wrong SecretID
-//! refuses START rather than the first live request — the same preference the
-//! bounds boot gate records: fail at boot, not in service.
+//! **Login per read, revoke after — and revoke is NOT best-effort.** The
+//! deputy reads a key once per destination for the life of the process
+//! (`keys.rs`'s cache). A token acquired at boot would sit unrenewed past
+//! `token_period` and fail the next uncached read with a 403; the daemon's
+//! renewal supervisor is disproportionate for a process that makes a handful
+//! of reads. So each read is login → read → `revoke-self`, and no token
+//! stands between reads. How those three compose — a failed revoke is a
+//! failed probe, and a read whose revoke failed withholds its secret — is the
+//! DECISION in `egress_session.rs` (T1, over the `EgressOps` seam); this file
+//! is the vaultrs implementation of the three operations. The boot probe is
+//! login + revoke, so a wrong SecretID refuses START rather than the first
+//! live request — the same preference the bounds boot gate records.
 //!
 //! T3 and mutation-excluded like `client.rs`: this project has no Vault stub
-//! and deliberately uses none. The DECISION it consumes — which source the
-//! SecretID comes from — is T1 in `secret_source.rs`.
+//! and deliberately uses none. The DECISIONS it consumes — which source the
+//! SecretID comes from, and how a session's steps compose — are T1 in
+//! `secret_source.rs` and `egress_session.rs`.
 
 use crate::auth::AppRoleAuth;
 use crate::config::validate_vault_addr;
+use crate::egress_session::{probe, read_one, EgressOps};
 use crate::secret_source::resolve_egress_secret_source;
 use crate::{assert_fips_provider, VaultError};
 use std::path::Path;
@@ -98,6 +103,31 @@ impl EgressVault {
             .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))
     }
 
+    /// Login and revoke: proves the credential at boot without leaving a token,
+    /// and reports success only when both halves completed (`egress_session`).
+    pub async fn probe_login(&self) -> Result<(), VaultError> {
+        probe(self).await
+    }
+
+    /// One field of one KV v2 secret, under a token that exists only for this
+    /// call and is gone before the value is returned; a read whose revoke
+    /// failed is a refusal (`egress_session::read_one`). `key_vault_path` is
+    /// the full API path (`<mount>/data/<path>`): the deputy composes it,
+    /// because addressing is the store's business.
+    pub async fn read_kv_field(
+        &self,
+        key_vault_path: &str,
+        field: &str,
+    ) -> Result<Zeroizing<String>, VaultError> {
+        read_one(self, key_vault_path, field).await
+    }
+}
+
+/// The three Vault operations, over vaultrs. The session is the token-bearing
+/// client; `revoke` consumes it, so nothing can use the token afterwards.
+impl EgressOps for EgressVault {
+    type Session = VaultClient;
+
     async fn login(&self) -> Result<VaultClient, VaultError> {
         let mut client = Self::client(&self.settings)?;
         let token = self.auth.authenticate(&client).await?;
@@ -105,32 +135,19 @@ impl EgressVault {
         Ok(client)
     }
 
-    /// Login and revoke: proves the credential at boot without leaving a token.
-    pub async fn probe_login(&self) -> Result<(), VaultError> {
-        let client = self.login().await?;
-        if let Err(e) = vaultrs::token::revoke_self(&client).await {
-            eprintln!("maknae-egress: revoke-self after the login probe failed: {e}");
-        }
-        Ok(())
-    }
-
-    /// One field of one KV v2 secret, under a token that exists only for this
-    /// call. `key_vault_path` is the full API path (`<mount>/data/<path>`):
-    /// the deputy composes it, because addressing is the store's business.
-    pub async fn read_kv_field(
+    async fn read(
         &self,
+        session: &VaultClient,
         key_vault_path: &str,
         field: &str,
     ) -> Result<Zeroizing<String>, VaultError> {
-        let client = self.login().await?;
-        let out = crate::read_kv_field(&client, key_vault_path, field).await;
-        // Best-effort, but never silent: a token that outlives its read is the
-        // one thing the "no token stands between reads" invariant forbids, and
-        // it lives on until token_period if this fails.
-        if let Err(e) = vaultrs::token::revoke_self(&client).await {
-            eprintln!("maknae-egress: revoke-self after the key read failed: {e}");
-        }
-        out
+        crate::read_kv_field(session, key_vault_path, field).await
+    }
+
+    async fn revoke(&self, session: VaultClient) -> Result<(), VaultError> {
+        vaultrs::token::revoke_self(&session)
+            .await
+            .map_err(|e| VaultError::Revoke(e.to_string()))
     }
 }
 

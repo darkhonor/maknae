@@ -43,6 +43,12 @@ pub enum VaultError {
     Pem(&'static str),
     /// AppRole login failed.
     Auth(String),
+    /// #240b: a token the deputy created could not be revoked. Named on its
+    /// own because the consequence is its own: a periodic token with no
+    /// maximum TTL stays usable server-side until its period lapses, so the
+    /// probe that hit this is a failed probe and a read that hit this
+    /// withholds its secret.
+    Revoke(String),
     /// Local keypair / CSR generation failed.
     CsrGen(String),
     /// `pki/sign` was rejected (e.g. a SAN mismatch surfaced by Vault).
@@ -108,6 +114,7 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
             VaultError::Auth(msg) => write!(f, "AppRole login failed: {msg}"),
+            VaultError::Revoke(msg) => write!(f, "token revoke failed: {msg}"),
             VaultError::CsrGen(msg) => write!(f, "keypair/CSR generation failed: {msg}"),
             VaultError::Sign(msg) => write!(f, "pki/sign rejected: {msg}"),
             VaultError::RenewalExpired => write!(

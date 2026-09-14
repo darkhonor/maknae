@@ -14,6 +14,7 @@ mod csr;
 mod csr_gen;
 mod digest;
 mod egress;
+mod egress_session;
 mod error;
 mod fips;
 mod fips_glue;
@@ -50,6 +51,7 @@ pub use digest::{sha256_hex, Sha256};
 pub use egress::{
     load_egress_auth, EgressVault, EGRESS_APPROLE_ROLE, EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE,
 };
+pub use egress_session::{probe, read_one, EgressOps};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(unix)]
