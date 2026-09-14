@@ -75,9 +75,11 @@ impl EgressVault {
         let settings = VaultClientSettingsBuilder::default()
             .address(addr)
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
-            // Stated rather than defaulted: the builder fills unset fields
-            // from `VAULT_*` environment variables, and this is the process
-            // that holds the provider credential.
+            // Stated rather than defaulted: vaultrs fills an unset `verify`
+            // from VAULT_SKIP_VERIFY and turns verification OFF for any value
+            // other than 0/f/false — the empty string included. (`token` is
+            // also env-defaulted, and is overwritten by `login` before any
+            // read; the unit's environment is clean regardless.)
             .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
@@ -104,7 +106,9 @@ impl EgressVault {
     /// Login and revoke: proves the credential at boot without leaving a token.
     pub async fn probe_login(&self) -> Result<(), VaultError> {
         let client = self.login().await?;
-        let _ = vaultrs::token::revoke_self(&client).await;
+        if let Err(e) = vaultrs::token::revoke_self(&client).await {
+            eprintln!("maknae-egress: revoke-self after the login probe failed: {e}");
+        }
         Ok(())
     }
 
@@ -118,7 +122,12 @@ impl EgressVault {
     ) -> Result<Zeroizing<String>, VaultError> {
         let client = self.login().await?;
         let out = crate::read_kv_field(&client, key_vault_path, field).await;
-        let _ = vaultrs::token::revoke_self(&client).await;
+        // Best-effort, but never silent: a token that outlives its read is the
+        // one thing the "no token stands between reads" invariant forbids, and
+        // it lives on until token_period if this fails.
+        if let Err(e) = vaultrs::token::revoke_self(&client).await {
+            eprintln!("maknae-egress: revoke-self after the key read failed: {e}");
+        }
         out
     }
 }

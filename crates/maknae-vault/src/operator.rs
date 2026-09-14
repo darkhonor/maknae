@@ -54,6 +54,11 @@ impl OperatorClient {
             .address(addr)
             .ca_certs(vec![ca_path.to_string_lossy().to_string()])
             .token(token.as_str())
+            // Stated, not defaulted (#240b self-review): vaultrs fills an unset
+            // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
+            // any value other than 0/f/false — the empty string included, and
+            // `sudo -E maknae enroll` carries the operator's environment.
+            .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Operator(format!("vault client settings: {e}")))?;

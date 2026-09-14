@@ -29,6 +29,10 @@ profile maknae-egress /usr/bin/maknae-egress {
   # backed, 0400, this account only). The SEALED .cred under /etc/maknae/private
   # is deliberately NOT readable here — it is root/systemd's, exactly as the
   # SELinux maknae_secret_t carve-out denies it to maknaed.
+  # The DIRECTORY as well as its contents: maknae-io opens the parent
+  # O_RDONLY|O_DIRECTORY before the file, and `/dir/**` does not cover
+  # `/dir/` itself — the sibling maknaed profile carries both lines too.
+  @{run}/credentials/maknae-egress.service/   r,
   @{run}/credentials/maknae-egress.service/** r,
 
   # Its own socket directory (systemd creates the socket and passes the fd).

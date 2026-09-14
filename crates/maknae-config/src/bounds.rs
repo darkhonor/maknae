@@ -122,6 +122,36 @@ pub fn kv_fragment_is_acceptable(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is this a usable Vault MOUNT path (auth or secret engine)? The shape half of
+/// [`kv_fragment_is_acceptable`] — non-empty, no whitespace, no empty or
+/// `.`/`..` segment — without the KV v2 `data` rule, which is a statement
+/// about secret paths and not about where an auth method is mounted.
+pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("is empty".into());
+    }
+    if s.chars().any(char::is_whitespace) {
+        return Err("contains whitespace".into());
+    }
+    let segs: Vec<&str> = s.split('/').collect();
+    let last = segs.len() - 1;
+    for (i, seg) in segs.iter().enumerate() {
+        if seg.is_empty() {
+            return Err(if i == 0 {
+                "must not start with '/'".into()
+            } else if i == last {
+                "must not end with '/'".into()
+            } else {
+                "has an empty interior path segment".into()
+            });
+        }
+        if *seg == "." || *seg == ".." {
+            return Err("has a '.' or '..' segment".into());
+        }
+    }
+    Ok(())
+}
+
 fn err(reason: impl Into<String>) -> ConfigError {
     ConfigError::InvalidProvider(reason.into())
 }
@@ -210,7 +240,10 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     let approle_mount = match vm.iter().find(|(k, _)| k == "approle_mount") {
         None => None,
         Some((_, Value::Str(s))) => {
-            kv_fragment_is_acceptable(s)
+            // An AUTH mount, not a KV path: the `data`-segment rule is KV v2's
+            // and its message would be meaningless here, so the check is the
+            // path-shape half only.
+            mount_path_is_acceptable(s)
                 .map_err(|why| err(format!("egress-bounds.yaml: 'vault.approle_mount' {why}")))?;
             Some(s.clone())
         }
@@ -294,9 +327,32 @@ mod tests {
             .unwrap_err();
             assert!(e.to_string().contains("'vault.addr'"), "{bad:?}: {e}");
         }
-        // an approle_mount that is not a usable path fragment: refused by name
-        let e = ok(Some("/approle")).unwrap_err();
-        assert!(e.to_string().contains("'vault.approle_mount'"), "{e}");
+        // an approle_mount that is not a usable path is refused by name, each
+        // shape for its own reason; a nested mount is legal; and `data` is NOT
+        // refused here — that rule is KV v2's, not an auth mount's
+        for (bad, want) in [
+            ("", "is empty"),
+            ("/approle", "must not start with '/'"),
+            ("approle/", "must not end with '/'"),
+            ("app role", "contains whitespace"),
+            ("a//b", "empty interior"),
+            ("a/../b", "'.' or '..'"),
+        ] {
+            let e = ok(Some(bad)).unwrap_err();
+            let m = e.to_string();
+            assert!(
+                m.contains("'vault.approle_mount'") && m.contains(want),
+                "{bad:?}: {m}"
+            );
+        }
+        assert_eq!(
+            ok(Some("auth/data")).unwrap().approle_mount.as_deref(),
+            Some("auth/data")
+        );
+        assert_eq!(
+            ok(Some("team/approle")).unwrap().approle_mount.as_deref(),
+            Some("team/approle")
+        );
         // the block must be a mapping
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str("maknae-kv".into())),

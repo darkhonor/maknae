@@ -150,7 +150,9 @@ Additional file rules:
 - A config file that is **not a regular file** (FIFO, socket, device, directory) is
   refused *before* it is opened.
 - The group is a **trusted boundary** (group-readable/writable `660`/`770` are valid) —
-  only *world* access is refused.
+  only *world* access is refused. **One named exception:** `egress-bounds.yaml` is a
+  root artifact read by two accounts and is `0644` by design — see §9.3 before "fixing"
+  its mode.
 - **Non-Unix platforms** refuse to load (the permission model is unavailable there;
   Maknae fails closed rather than run unchecked).
 
@@ -614,6 +616,10 @@ vault:
 > loader's `0o022` mask and be refused, so the root-artifact check is not weakened; this
 > is the named exception to §2.2's "keep the config tree free of world ACLs", and it is a
 > user ACL, not a world one.
+
+On an SELinux host, `restorecon /etc/maknae/egress-bounds.yaml` after creating it by hand:
+a new file inherits the directory's `maknae_etc_t`, and the deputy is granted the file's
+own type (`maknae_egress_bounds_t`, `packaging/common/maknae.fc`), not the directory's.
 
 **The deputy's credential set, `/etc/maknae/egress/`** (`0750 root:_maknae-egress`;
 written by `maknae enroll` once its third-plane provisioning lands — the next change on

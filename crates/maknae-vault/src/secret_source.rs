@@ -103,7 +103,9 @@ pub fn resolve_daemon_secret_source(
     sep_blob: Option<&Path>,
     insecure_plaintext_secret_path: Option<&Path>,
 ) -> Result<DaemonSecretSource, VaultError> {
-    if let Some(dir) = credentials_dir_env {
+    // `Some("")` is treated as unset, as the egress resolver does: an exported
+    // but empty $CREDENTIALS_DIRECTORY must not resolve to `/maknaed-secret-id`.
+    if let Some(dir) = credentials_dir_env.filter(|d| !d.is_empty()) {
         return Ok(DaemonSecretSource::CredentialsDirectory(
             Path::new(dir).join(DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME),
         ));
@@ -212,6 +214,9 @@ mod tests {
     #[test]
     fn daemon_no_source_fails_closed() {
         assert!(resolve_daemon_secret_source(None, None, None).is_err());
+        // An exported-but-empty $CREDENTIALS_DIRECTORY is not a source either
+        // (#240b: aligned with the egress resolver).
+        assert!(resolve_daemon_secret_source(Some(""), None, None).is_err());
     }
 
     /// Precedence, not fallthrough: when BOTH CredentialsDirectory and SEP are

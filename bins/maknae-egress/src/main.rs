@@ -108,9 +108,9 @@ fn main() {
     // Boot probe BEFORE the listener is adopted: one login and one revoke. A
     // wrong SecretID, or a Vault the deputy cannot reach, refuses START — not
     // the first live request (the same preference the kernel's bounds boot
-    // gate records) — and refuses it before an activation fd is consumed, so a
-    // transient Vault outage is a plain failed start rather than one that also
-    // burns the socket unit's start limit.
+    // gate records) — and refuses it before the listener is adopted, so the
+    // connections already queued on the activation socket are not accepted
+    // and dropped by a process that is about to exit.
     if let Err(e) = rt.block_on(vault.probe_login()) {
         fail(format!("vault login probe: {e}"));
     }
