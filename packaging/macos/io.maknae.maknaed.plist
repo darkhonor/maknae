@@ -38,13 +38,15 @@
   <key>ThrottleInterval</key>
   <integer>5</integer>
 
-  <!-- systemd TimeoutStopSec=660 (#240): the shutdown chain at the deadline
-       ceiling is the handler drain (600 s + 10 s), the audit drain (5 s), the
-       supervisor reap (1 s), the Vault token revoke-self (30 s) and the runtime
-       teardown (3 s): 649 s. launchd's default is 20 s before SIGKILL. Held to
-       the chain by the same kernel test that reads maknaed.service. -->
+  <!-- systemd TimeoutStopSec=690 (#240): the shutdown chain at the deadline
+       ceiling, in execution order: the supervisor abort-reap (1 s), the handler
+       drain (600 s + 10 s) and the reap of what it aborts (1 s), the audit
+       drain (5 s), the plane client's shutdown (a 30 s lock wait bound, then
+       revoke-self under 30 s) and the runtime teardown (3 s): 680 s. launchd's
+       default is 20 s before SIGKILL. Held to the chain, two-sided within
+       10 s, by the same kernel test that reads maknaed.service. -->
   <key>ExitTimeOut</key>
-  <integer>660</integer>
+  <integer>690</integer>
   <key>RunAtLoad</key>
   <true/>
 

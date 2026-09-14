@@ -73,6 +73,13 @@ pub struct EgressFrameReply {
     pub reply: crate::PromptReply,
 }
 
+/// The largest request frame that crosses the kernel→deputy socket, stated
+/// ONCE for both ends (#240, review round 4): the kernel refuses to WRITE a
+/// larger one (a pre-send failure, so the trail says nothing left), and the
+/// deputy refuses to READ one (checked against the declared length before
+/// any allocation). Two copies of `1024 * 1024` drifted apart in review.
+pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
+
 /// Shape admission, applied by the kernel before a byte reaches the socket.
 /// Deliberately shape-only: whether this subject may reach this destination
 /// was decided by the PDP long before the frame existed.
@@ -90,6 +97,13 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
 mod tests {
     use super::*;
     use zeroize::Zeroizing;
+
+    /// By VALUE: a mutant turning `1024 * 1024` into 2048 or 1 survives every
+    /// symbolic use on both ends.
+    #[test]
+    fn the_request_frame_cap_is_one_mebibyte_by_value() {
+        assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 1_048_576);
+    }
 
     fn text(s: &str) -> crate::ContentBlock {
         crate::ContentBlock::Text {

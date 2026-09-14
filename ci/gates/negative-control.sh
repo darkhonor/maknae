@@ -914,6 +914,7 @@ const TRANSPORT_SECTION: &str = "transport";
 const AUDIT_SECTION: &str = "audit";
 const PRINCIPAL_SECTION: &str = "principal";
 const PROVIDER_SECTION: &str = "provider";
+const EGRESS_SECTION: &str = "egress";
     let specs = [
         SectionSpec { name: LAKE_SECTION.to_string(), required: false },
         SectionSpec { name: VAULT_SECTION.to_string(), required: false },
@@ -921,6 +922,7 @@ const PROVIDER_SECTION: &str = "provider";
         SectionSpec { name: AUDIT_SECTION.to_string(), required: false },
         SectionSpec { name: PRINCIPAL_SECTION.to_string(), required: false },
         SectionSpec { name: PROVIDER_SECTION.to_string(), required: false },
+        SectionSpec { name: EGRESS_SECTION.to_string(), required: false },
     ];
 FIX
   cp "$here/config-disclosure-drift.sh" "$fixture/ci/gates/"
@@ -936,6 +938,8 @@ const DISCLOSABLE: &[&str] = &[
     "vault.deployment_id",
     "audit.jsonl_path",
     "principal",
+    "egress.socket_path",
+    "egress.deadline_ms",
     ${3:-}
 ];
 const SUPPRESSED: &[&str] = &[
@@ -987,6 +991,15 @@ pub struct ProviderConfig {
     pub key_field: String,
 }
 FIX
+  # #240: the egress section -- two disclosed leaves; the SURFACE row's count is
+  # exact, so a fixture without this file fails "missing ... (declared in
+  # SURFACE)" FIRST and masks every probe's own reason (22 at once, measured).
+  cat > "$fixture/crates/maknae-config/src/egress_cfg.rs" <<'FIX'
+pub struct EgressConfig {
+    pub socket_path: PathBuf,
+    pub deadline_ms: u64,
+}
+FIX
   cat > "$fixture/crates/maknae-config/src/ceiling.rs" <<'FIX'
 pub struct Ceiling {
     pub classification: String,
@@ -1026,6 +1039,8 @@ disclose	provider.model	the model identifier
 omit	provider.key_vault_path	secret-store layout
 omit	provider.key_field	the field inside that secret (#308)
 disclose	audit.jsonl_path	the log the operator is looking for
+disclose	egress.socket_path	the socket the daemon connects to for egress
+disclose	egress.deadline_ms	the outer bound on a provider call
 omit	vault.insecure_plaintext_secret_path	presence is the finding
 omit	core.handling	presence says an above-baseline ceiling is configured
 always	status.version	ships by construction

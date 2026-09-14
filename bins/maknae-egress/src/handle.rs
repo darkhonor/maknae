@@ -3,6 +3,13 @@
 //! Pure and mutation-visible. `serve.rs` owns the socket; this owns what the
 //! deputy is willing to do with a frame once it has one. The split is the
 //! crate convention — `peercred`/`peer_identity`, `secret_io`/`secret_source`.
+//!
+//! What is re-checked here and what is not: the key path is held inside the
+//! deputy's own bounds (the one thing the deputy alone knows); the endpoint's
+//! scheme and host are NOT re-checked — that decision is the kernel's, the
+//! PDP, over root-owned configuration (`maknae-config`'s
+//! `endpoint_is_acceptable`: HTTPS anywhere, HTTP to loopback only), and the
+//! deputy originates nothing (ADR-0023 decision 3).
 
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;

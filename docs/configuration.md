@@ -473,8 +473,13 @@ egress:
   bound raised and this one with it. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by this value plus ten
   seconds so the outcome record is written, and the shipped units' stop timeouts
-  (`TimeoutStopSec=660`, launchd `ExitTimeOut`) cover the ceiling plus the audit drain, the
-  Vault token revoke and the runtime teardown that follow it.
+  (`TimeoutStopSec=690`, launchd `ExitTimeOut`) cover the ceiling plus every other term of
+  the shutdown chain — the credential supervisor's abort and reap, the reap of aborted
+  handlers, the audit drain, the plane client's bounded lock wait and token revoke, and the
+  runtime teardown — and a kernel test holds the unit values to that chain, two-sided. One
+  more bound at the ceiling: a prompt that fills `transport.frame_max_bytes` at its own
+  1 MiB maximum re-wraps into an egress frame larger than the deputy's 1 MiB request cap
+  and is refused before it is sent (`send failed` in the trail, nothing left the host).
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
   by name if the account does not exist or cannot be looked up — on macOS that account

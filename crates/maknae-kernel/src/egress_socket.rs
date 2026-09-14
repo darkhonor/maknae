@@ -255,7 +255,17 @@ impl Egress for SocketEgress {
         // BEFORE the first write, so an over-cap request is a pre-send failure
         // (`Failed`, nothing left) and never "outcome unknown" (the deputy
         // would refuse it as oversize only after reading it).
-        if buf.len() > crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES {
+        // The comparison is the T1 predicate's (`frame_len_within_cap`, proven
+        // at the boundary), the same one the reply cap uses below.
+        if !crate::egress::frame_len_within_cap(
+            buf.len(),
+            crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES,
+        ) {
+            eprintln!(
+                "maknaed: egress request frame of {} bytes over the {}-byte cap — refused before sending",
+                buf.len(),
+                crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES
+            );
             return Err(EgressFailure::Transport(format!(
                 "request frame of {} bytes over the {}-byte cap",
                 buf.len(),

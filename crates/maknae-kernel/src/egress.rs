@@ -151,8 +151,9 @@ pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
 /// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
 /// as oversize after reading it, and the trail says "outcome unknown" for a
 /// prompt that provably never reached a provider (review round 3). Refused
-/// here it is a pre-send failure: `Failed`, the true record.
-pub const EGRESS_MAX_REQUEST_FRAME_BYTES: usize = 1024 * 1024;
+/// here it is a pre-send failure: `Failed`, the true record. The VALUE is
+/// `maknae-proto`'s, shared with the deputy so the two ends cannot drift.
+pub const EGRESS_MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MAX_BYTES;
 
 /// Which send failures the egress breaker counts as an EXPIRY (toward its
 /// trip) rather than a completed attempt: only the backend's own deadline.

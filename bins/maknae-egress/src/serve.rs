@@ -18,7 +18,9 @@ use std::os::unix::net::UnixStream;
 /// declared length BEFORE allocation: the kernel is trusted, but a bug there
 /// must not be able to make the deputy reserve four gigabytes on a four-byte
 /// prefix. Defence in depth, in the direction the kernel already applies to us.
-pub const MAX_REQUEST_FRAME_BYTES: usize = 1024 * 1024;
+/// The VALUE is `maknae-proto`'s, shared with the kernel's pre-send check so
+/// the two ends cannot drift (#240, review round 4).
+pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MAX_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {

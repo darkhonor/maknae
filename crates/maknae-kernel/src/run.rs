@@ -218,6 +218,12 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 /// any held guard; the reap is bounded like every other drain here.
 const SUPERVISOR_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Bound on reaping the handlers `drain_handlers_bounded` aborts on elapse. A
+/// term of the shutdown chain in its own right (review round 4 found it
+/// unnamed and uncounted): the drain's bound plus this is what a handler
+/// drain can take.
+const DRAIN_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Close `stream` (TLS close_notify + FIN) within [`STREAM_CLOSE_TIMEOUT`], abandoning
 /// the close on elapse (the stream is dropped regardless, which closes the fd). Every
 /// exit path of [`handle`] funnels through this so no path can hang on a peer that
@@ -272,7 +278,7 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
             // Reap the aborted tasks; each resolves promptly with a cancellation
             // JoinError unless it is pinned inside non-abortable blocking I/O — which
             // the runtime-level shutdown bound then caps.
-            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            let _ = tokio::time::timeout(DRAIN_ABORT_REAP_TIMEOUT, async {
                 while handlers.join_next().await.is_some() {}
             })
             .await;
@@ -1510,15 +1516,15 @@ pub async fn handle<S, E, P>(
                         ),
                     }
                 }
-                // The backend's own deadline ran out after the request was
-                // written: delivery unknown, the same class as the outer
-                // expiry below.
+                // The backend's own deadline ran out once the kernel had begun
+                // writing the request: delivery unknown, the same class as the
+                // outer expiry below.
                 Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
                     (crate::egress::SendOutcome::DeadlineExpired, None)
                 }
-                // The request was written and the exchange failed after it:
-                // the deputy hung up or answered with something unusable.
-                // Delivery unknown — the provider may have the prompt.
+                // The exchange failed once the kernel had begun writing the
+                // request: the deputy hung up or answered with something
+                // unusable. Delivery unknown — the provider may have the prompt.
                 Ok(Ok(Err(crate::egress::EgressFailure::AfterSend(_)))) => {
                     (crate::egress::SendOutcome::OutcomeUnknown, None)
                 }
@@ -2467,7 +2473,23 @@ where
     // completion and must not be polled again.
     if !matches!(outcome, ServeOutcome::SupervisorExited(_)) {
         supervisor.abort();
-        let _ = tokio::time::timeout(SUPERVISOR_ABORT_REAP_TIMEOUT, &mut supervisor).await;
+        match tokio::time::timeout(SUPERVISOR_ABORT_REAP_TIMEOUT, &mut supervisor).await {
+            // The expected outcome of an abort; anything else is an exit the
+            // select above did not get to report (both ready in one wakeup).
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(joined) => {
+                let reason = supervisor_exit_reason(joined);
+                eprintln!(
+                    "maknaed: credential supervisor had already exited at shutdown ({reason})"
+                );
+            }
+            Err(_elapsed) => {
+                eprintln!(
+                    "maknaed: credential supervisor did not stop within {}s of abort; the plane token revoke may wait on its lock (bounded)",
+                    SUPERVISOR_ABORT_REAP_TIMEOUT.as_secs()
+                );
+            }
+        }
     }
 
     // Stopped accepting (done — we broke the loop, either way). Drain in-flight
@@ -3084,6 +3106,11 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // daemon instead of leaving the accept loop running as a zombie against a listener
     // whose cert slot the supervisor already cleared.
     let supervisor = client.spawn_supervisor();
+    // #240 (review round 4): the abort that MUST precede `client.shutdown()`
+    // lives here, on the one path every exit takes — the accept loop's own
+    // abort-and-reap covers the graceful path and the ordering; this covers
+    // the post-mint `?` exits (gid, bind, signal install) that never reach it.
+    let supervisor_abort = supervisor.abort_handle();
 
     // Once `mint()` succeeds the privileged kernel-plane Vault token is LIVE until
     // lease expiry — so EVERY post-mint startup step (bind, and anything before the
@@ -3153,6 +3180,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
 
     // Retire the plane credential (revoke token, clear leaf) on the way out — on the
     // graceful-shutdown path AND on any post-mint startup failure (e.g. bind).
+    // The supervisor is aborted first, on EVERY path (idempotent on the
+    // graceful one): detached, it could hold the client lock across a Vault
+    // call while `shutdown()` waits, or re-install a leaf after retirement.
+    supervisor_abort.abort();
     client.shutdown().await;
     outcome.map_err(RunError::Other)
 }
@@ -3398,21 +3429,30 @@ mod tests {
         );
     }
 
-    /// #240 (review rounds 2 and 3): the shipped units' stop timeouts are held
-    /// to the shutdown chain at the deadline CEILING, term by term — the
-    /// handler drain (deadline + its own bound), the audit drain, the
-    /// supervisor reap, the plane token's revoke-self under the plane's HTTP
-    /// timeout, and the runtime teardown. Three rounds found a term this
-    /// chain had skipped; this is the test that makes the next skipped term a
-    /// red build instead of a review finding.
+    /// How far above the walked shutdown chain the shipped units' stop
+    /// timeouts may sit. Two-sided on purpose: a unit BELOW the chain
+    /// SIGKILLs inside the token revoke; a unit far ABOVE it means a term
+    /// was dropped from the chain expression while the unit kept the old
+    /// sum — the failure four review rounds found in a row.
+    const STOP_TIMEOUT_SLACK: Duration = Duration::from_secs(10);
+
+    /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
+    /// the shutdown chain at the deadline CEILING, term by term and in the
+    /// order `accept_loop` and `run_inner` execute them — the supervisor
+    /// abort-reap, the handler drain (deadline + its own bound) and the reap
+    /// of what it aborts, the audit drain, the plane client's shutdown (a
+    /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
+    /// four rounds each found a term the expression had skipped while the
+    /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
+    /// the chain is as red as one below it.
     #[test]
     fn the_units_stop_timeouts_cover_the_shutdown_chain_at_the_deadline_ceiling() {
-        let chain =
-            handler_drain_bound(Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX))
-                + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
-                + SUPERVISOR_ABORT_REAP_TIMEOUT
-                + maknae_vault::PLANE_HTTP_TIMEOUT
-                + RUNTIME_SHUTDOWN_TIMEOUT;
+        let chain = SUPERVISOR_ABORT_REAP_TIMEOUT
+            + handler_drain_bound(Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX))
+            + DRAIN_ABORT_REAP_TIMEOUT
+            + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
+            + maknae_vault::PLANE_SHUTDOWN_BOUND
+            + RUNTIME_SHUTDOWN_TIMEOUT;
         let unit = include_str!("../../../packaging/common/maknaed.service");
         let stop: u64 = unit
             .lines()
@@ -3421,9 +3461,14 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
+        let stop = Duration::from_secs(stop);
         assert!(
-            Duration::from_secs(stop) >= chain,
-            "TimeoutStopSec={stop}s is below the shutdown chain at the ceiling, {chain:?}"
+            stop >= chain,
+            "TimeoutStopSec={stop:?} is below the shutdown chain at the ceiling, {chain:?}"
+        );
+        assert!(
+            stop <= chain + STOP_TIMEOUT_SLACK,
+            "TimeoutStopSec={stop:?} is more than {STOP_TIMEOUT_SLACK:?} above the chain {chain:?}: a term was dropped from the expression"
         );
         let plist = include_str!("../../../packaging/macos/io.maknae.maknaed.plist");
         let after = &plist[plist
@@ -3432,9 +3477,14 @@ mod tests {
         let s = after.find("<integer>").unwrap() + "<integer>".len();
         let e = s + after[s..].find("</integer>").unwrap();
         let exit: u64 = after[s..e].parse().unwrap();
+        let exit = Duration::from_secs(exit);
         assert!(
-            Duration::from_secs(exit) >= chain,
-            "ExitTimeOut={exit}s is below the shutdown chain at the ceiling, {chain:?}"
+            exit >= chain,
+            "ExitTimeOut={exit:?} is below the shutdown chain at the ceiling, {chain:?}"
+        );
+        assert!(
+            exit <= chain + STOP_TIMEOUT_SLACK,
+            "ExitTimeOut={exit:?} is more than {STOP_TIMEOUT_SLACK:?} above the chain {chain:?}: a term was dropped from the expression"
         );
     }
 

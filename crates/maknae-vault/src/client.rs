@@ -80,6 +80,15 @@ impl Drop for CertSinkGuard {
 /// (`maknae-kernel`'s shutdown-chain test).
 pub const PLANE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The bound on [`PlaneClient::shutdown`]: the wait for the client lock (which
+/// the credential supervisor may hold across one Vault request, and which is
+/// bounded at `PLANE_HTTP_TIMEOUT` and then skipped) plus the `revoke-self`
+/// itself under `PLANE_HTTP_TIMEOUT`. Named because the kernel's shutdown
+/// chain carries it and the shipped units' stop timeouts are held to that
+/// chain (#240, review round 4).
+pub const PLANE_SHUTDOWN_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(PLANE_HTTP_TIMEOUT.as_secs() * 2);
+
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     plane: Plane,
@@ -606,7 +615,23 @@ impl PlaneClient {
             }
             *guard = None;
         }
-        let client = self.client.lock().await;
+        // BOUNDED (#240, review round 4): the kernel aborts the credential
+        // supervisor before this on every path, so the lock is free in
+        // practice — an aborted task is dropped at its next poll, a moment.
+        // If it is not, the wait is bounded by the same timeout as the revoke
+        // itself, and a token whose revoke could not start lives to its TTL,
+        // logged; `PLANE_SHUTDOWN_BOUND` is the sum, and the unit files'
+        // stop timeouts are derived from it.
+        let client = match tokio::time::timeout(PLANE_HTTP_TIMEOUT, self.client.lock()).await {
+            Ok(c) => c,
+            Err(_elapsed) => {
+                eprintln!(
+                    "maknae-vault: token revoke-self on shutdown skipped: the client was busy for {}s (the token lives to its TTL)",
+                    PLANE_HTTP_TIMEOUT.as_secs()
+                );
+                return;
+            }
+        };
         if let Err(e) = vaultrs::token::revoke_self(&*client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
         }
