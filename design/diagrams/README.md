@@ -9,20 +9,30 @@ Issue [#196](https://github.com/darkhonor/maknae/issues/196) carries the require
 ## Regenerate
 
 ```bash
-cargo auditable build -p maknaed -p maknae -p maknae-spifc -p maknae-egress --release
-python3 design/diagrams/generate.py
+python3 design/diagrams/generate.py                                  # all of them
+python3 design/diagrams/generate.py generated-agentic-patterns.svg   # just one
 ```
 
-> **Corrected 2026-09-14.** This command named three binaries while `generate.py` derives its
-> required set from `cargo metadata`, so it has demanded four since `maknae-egress` landed in
-> #288 — and following the documented command has failed with
-> `missing target/release/maknae-egress` ever since. Nobody noticed because nobody regenerated.
-> `check_catalog` guards the README against the *catalog*; nothing guarded it against the
-> *build command*.
+> **Corrected 2026-09-14 (#314), and this is the correction that matters.** This block used
+> to begin with `cargo auditable build … --release` for four binaries, because `linkage()`
+> read `rust-audit-info` off `target/release/<bin>` and `sys.exit`ed when one was absent.
+> That made **every** diagram — including ones whose only inputs are a TOML file and a git
+> sha — require a release build of the whole shipping set. On this project that is a **FIPS
+> cryptographic module build**, and on a host whose gcc the module's delocate step cannot
+> handle it is not merely slow, it is impossible.
+>
+> **The code does not require a binary to map.** These diagrams map what the crates deliver
+> and where; that question is answered by `cargo metadata`'s resolve graph, from source.
+> `linkage()` now walks `resolve.nodes` from each bin over normal-kind edges only, filtered
+> to the host triple — the same closure, no compilation, no artifacts. **A diagram is not
+> mission-critical code and must never inherit its build.**
+>
+> The proof this was real rather than theoretical: `maknae-egress` landed in #288 and had
+> **never** appeared in the crate×binary matrix, because it had never been compiled on the
+> box that last regenerated. Deriving from source put it there immediately.
 
-Python 3 and nothing else — no Mermaid, no Graphviz, no npm, no `xtask`. The build step
-is what `rust-audit-info` reads; both tools are already CI tooling
-(`.github/workflows/ci.yml`).
+Python 3 and nothing else — no Mermaid, no Graphviz, no npm, no `xtask`, **and no build**.
+`cargo metadata` reads the manifests and the lockfile; it compiles nothing.
 
 Generated diagrams are refreshed **on demand** and **at release, alongside the
 documentation site**, so a published image is current as of the release it ships with.

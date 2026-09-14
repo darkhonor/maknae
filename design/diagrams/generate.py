@@ -8,7 +8,7 @@ WHAT THIS DERIVES, AND FROM WHAT. Every fact rendered comes from something that
 ENFORCES it, never from something that merely describes it:
 
   TCB membership   ci/gates/lib.sh   — the list P1 actually polices
-  binary linkage   rust-audit-info   — the real transitive closure in the artifact
+  binary linkage   cargo metadata    — the resolved closure per bin, from source
   members/bins     cargo metadata    — the workspace itself
 
 `packaging/isolation-contract.md` is deliberately NOT a source: it mirrors
@@ -85,14 +85,51 @@ def workspace() -> dict:
 
 
 def linkage(binaries: list[str]) -> dict:
-    """The REAL closure per artifact, from the cargo-auditable inventory."""
+    """The closure per artifact, from cargo's RESOLVE GRAPH -- not from a
+    compiled binary.
+
+    The failure this fixes (maintainer, #314): this read `rust-audit-info` off
+    `target/release/<bin>` and `sys.exit`ed when one was absent, so EVERY
+    diagram -- including ones whose only inputs are a TOML file and a git sha
+    -- required a release build of all four binaries. On this project that is
+    a FIPS cryptographic module build, and on a host whose gcc the module's
+    delocate step cannot handle it is not merely slow but impossible. **The
+    code does not require a binary to map.** A diagram is not mission-critical
+    code and must never inherit its build.
+
+    Same question, answered from source: walk `resolve.nodes` from each bin
+    package over normal-kind edges only. dev- and build-dependencies are
+    excluded for the reason `crate_graph` excludes them -- they are in no
+    shipped artifact, so they are not part of what these diagrams claim.
+    `--filter-platform` keeps the answer to the host triple rather than the
+    union of every platform's deps, which is the fidelity the SBOM had and a
+    naive metadata read would lose.
+    """
+    triple = sh("rustc", "-vV").split("host: ")[1].split("\n")[0].strip()
+    meta = json.loads(sh("cargo", "metadata", "--format-version", "1",
+                         "--filter-platform", triple))
+    by_id = {p["id"]: p["name"] for p in meta["packages"]}
+    roots = {p["name"]: p["id"] for p in meta["packages"]
+             if p["id"] in set(meta["workspace_members"])}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+
+    def closure(root: str) -> set:
+        seen, stack = {root}, [root]
+        while stack:
+            for d in nodes[stack.pop()]["deps"]:
+                kinds = {k.get("kind") for k in d.get("dep_kinds", [])}
+                if kinds and not kinds & {None, "null"}:
+                    continue  # dev- or build-only edge
+                if d["pkg"] not in seen:
+                    seen.add(d["pkg"])
+                    stack.append(d["pkg"])
+        return seen
+
     out = {}
     for b in binaries:
-        art = ROOT / "target" / "release" / b
-        if not art.exists():
-            sys.exit(f"missing {art} — run:  cargo auditable build -p {b} --release")
-        inv = json.loads(sh("rust-audit-info", str(art)))
-        out[b] = sorted({p["name"] for p in inv.get("packages", [])})
+        if b not in roots:
+            sys.exit(f"{b} is not a workspace member -- cargo metadata knows nothing of it")
+        out[b] = sorted({by_id[i] for i in closure(roots[b])})
     return out
 
 
@@ -334,8 +371,8 @@ def d2_matrix(gates, ws, links, prov) -> str:
 
     p = [box(24, 24, w - 48, h - 64, "#FFFFFF", MUTED, rx=16),
          text(44, 52, "Crate × binary linkage, and what the gates refuse", 15, "600"),
-         text(44, 72, "Derived from the cargo-auditable inventory of each built artifact — the real "
-                      "transitive closure, not declared dependencies.", 11, fill=MUTED),
+         text(44, 72, "Derived from cargo's resolve graph for the host triple — the full "
+                      "transitive closure, not just declared dependencies.", 11, fill=MUTED),
          text(44, 88, "«» denotes a UML stereotype. A refused cell is refused by gate P1's "
                       "per-consumer allowlist, not merely absent today.", 11, fill=MUTED)]
 
@@ -388,7 +425,7 @@ def d2_matrix(gates, ws, links, prov) -> str:
     p.append(text(130, ly, "● linked (privileged)", 10, fill=TRUST_LINE))
     p.append(text(285, ly, "✕ refused by gate", 10, fill=WARN))
     p.append(text(410, ly, "· not linked", 10, fill=MUTED))
-    p.append(footer(w, h, f"generated from ci/gates/lib.sh + rust-audit-info · {prov}"))
+    p.append(footer(w, h, f"generated from ci/gates/lib.sh + cargo metadata · {prov}"))
     return svg(w, h, "\n  ".join(p),
                "Maknae crate to binary linkage matrix",
                "Which workspace crates and key external dependencies each Maknae binary "
@@ -467,7 +504,7 @@ def d1_tcb(gates, ws, links, prov) -> str:
     y += bh
 
     h = y + 60
-    p.append(footer(w, h, f"generated from ci/gates/lib.sh + rust-audit-info · {prov}"))
+    p.append(footer(w, h, f"generated from ci/gates/lib.sh + cargo metadata · {prov}"))
     return svg(w, h, "\n  ".join(p),
                "Maknae trusted computing base",
                "UML component view of Maknae's TCB: privileged crates inside the trust "
@@ -1611,31 +1648,69 @@ def d11_patterns(prov: str) -> str:
                "deny path the published diagrams have nowhere to show.")
 
 
-def main() -> None:
+# Which products derive from the BUILT ARTIFACTS and so need release binaries
+# on disk. Everything else derives from source, a TOML file and a git sha.
+ARTIFACT_DERIVED = frozenset({
+    "generated-tcb-components.svg",
+    "generated-crate-binary-matrix.svg",
+})
+
+
+def main(argv: list) -> None:
+    """Generate every catalogued diagram, or only the ones named on argv.
+
+    `linkage()` is resolved on FIRST USE, never at startup. The failure that
+    motivated it (maintainer, #314): it ran unconditionally and `sys.exit`s on
+    a missing `target/release/<bin>`, so regenerating a diagram whose only
+    inputs are a TOML file and a git sha demanded a release build of all four
+    binaries -- which on this project is a FIPS cryptographic module build,
+    and on a host whose gcc the module's delocate step cannot handle it is not
+    possible at all. **A diagram is not mission-critical code and must not
+    inherit its build.** Only the two products in `ARTIFACT_DERIVED` may
+    require binaries, and only when they are actually being generated.
+    """
     gates, ws = gate_facts(), workspace()
-    links = linkage(ws["bins"])
     cg = crate_graph()
     prov = provenance()
-    written: list = []
-    for name, content in [
-        ("generated-tcb-components.svg", d1_tcb(gates, ws, links, prov)),
-        ("generated-crate-binary-matrix.svg", d2_matrix(gates, ws, links, prov)),
-        ("generated-standards-profile.svg", stdv1(prov)),
-        ("generated-workspace-packages.svg", d4_packages(gates, cg, prov)),
-        ("generated-read-path.svg", d5_readpath(prov)),
-        ("generated-decision-cycle.svg", d6_decision(prov)),
-        ("generated-data-model.svg", d7_datamodel(prov)),
-        ("generated-system-interfaces.svg", d8_interfaces(prov)),
-        ("generated-operational-concept.svg", d9_opconcept(prov)),
-        ("generated-container-architecture.svg", d10_containers(prov)),
-        ("generated-agentic-patterns.svg", d11_patterns(prov)),
-    ]:
-        (OUT / name).write_text(content)
-        print(f"  wrote design/diagrams/{name}")
-        written.append(name)
-    check_catalog(written)
+
+    cached: list = []
+
+    def links():
+        if not cached:
+            cached.append(linkage(ws["bins"]))
+        return cached[0]
+
+    products = [
+        ("generated-tcb-components.svg", lambda: d1_tcb(gates, ws, links(), prov)),
+        ("generated-crate-binary-matrix.svg", lambda: d2_matrix(gates, ws, links(), prov)),
+        ("generated-standards-profile.svg", lambda: stdv1(prov)),
+        ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
+        ("generated-read-path.svg", lambda: d5_readpath(prov)),
+        ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
+        ("generated-data-model.svg", lambda: d7_datamodel(prov)),
+        ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
+        ("generated-operational-concept.svg", lambda: d9_opconcept(prov)),
+        ("generated-container-architecture.svg", lambda: d10_containers(prov)),
+        ("generated-agentic-patterns.svg", lambda: d11_patterns(prov)),
+    ]
+    names = [n for n, _ in products]
+
+    want = set(argv) if argv else set(names)
+    unknown = sorted(want - set(names))
+    if unknown:
+        sys.exit("unknown diagram(s): " + ", ".join(unknown)
+                 + "\nknown: " + "\n       ".join(names))
+
+    for name, build in products:
+        if name in want:
+            (OUT / name).write_text(build())
+            print(f"  wrote design/diagrams/{name}")
+
+    # Always the FULL catalogue, never just this run's subset: a partial
+    # regeneration must not be able to skip the drift check.
+    check_catalog(names)
     print(f"  provenance: {prov}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
