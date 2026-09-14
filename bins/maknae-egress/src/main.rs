@@ -41,6 +41,15 @@ fn main() {
         }
     }
 
+    // FIRST, before any client exists: the process-default CryptoProvider.
+    // `maknae-llm` and `maknae-vault` both assert `.fips()` at the moment a
+    // credential rides TLS; without this install every call would refuse.
+    // The same ordering as `maknae_kernel::run`.
+    maknae_vault::install_default_crypto_provider();
+    if let Err(e) = maknae_vault::assert_fips_provider() {
+        fail(e);
+    }
+
     let bounds = match maknae_config::load_egress_bounds(&bounds_path) {
         Ok(b) => b,
         Err(e) => fail(format!("{}: {e}", bounds_path.display())),
@@ -53,6 +62,37 @@ fn main() {
         Ok(Some(u)) => u.uid.as_raw(),
         Ok(None) => fail(format!("no such account '{KERNEL_USER}'")),
         Err(e) => fail(format!("cannot resolve '{KERNEL_USER}': {e}")),
+    };
+
+    // The third plane's credential (#240b): the RoleID and the Vault CA sit
+    // beside the bounds file under `egress/`, the SecretID comes from
+    // $CREDENTIALS_DIRECTORY (the unit's LoadCredentialEncrypted=). Resolved
+    // ONCE, fail-closed, and the SecretID is `Zeroizing` from the read. The
+    // AppRole mount defaults to the packaged Terraform's, resolved HERE rather
+    // than in the config crate so there is one place for that default.
+    let egress_dir = bounds_path
+        .parent()
+        .map(|p| p.join("egress"))
+        .unwrap_or_else(|| PathBuf::from("/etc/maknae/egress"));
+    let approle_mount = bounds
+        .approle_mount
+        .clone()
+        .unwrap_or_else(|| maknae_vault::DEFAULT_APPROLE_MOUNT.to_string());
+    let auth = match maknae_vault::load_egress_auth(
+        &egress_dir,
+        approle_mount,
+        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+    ) {
+        Ok(a) => a,
+        Err(e) => fail(format!("egress credential: {e}")),
+    };
+    let vault = match maknae_vault::EgressVault::new(
+        &bounds.vault_addr,
+        &egress_dir.join(maknae_vault::EGRESS_VAULT_CA_FILE),
+        auth,
+    ) {
+        Ok(v) => v,
+        Err(e) => fail(format!("vault client: {e}")),
     };
 
     let listener = match listen::from_init_system() {
@@ -93,7 +133,14 @@ fn main() {
     // connections concurrently, this becomes shared state and must gain one;
     // the `&mut` borrow here is what will force that decision rather than
     // letting it pass silently.
-    let mut keys = keys::KeyCache::new(keys::NoCredentialSource);
+    //
+    // Boot probe first: one login and one revoke. A wrong SecretID, or a
+    // Vault the deputy cannot reach, refuses START — not the first live
+    // request (the same preference the kernel's bounds boot gate records).
+    if let Err(e) = rt.block_on(vault.probe_login()) {
+        fail(format!("vault login probe: {e}"));
+    }
+    let mut keys = keys::KeyCache::new(keys_vault::VaultKeys { vault });
 
     // Accept forever. A failed connection is refused and the loop continues:
     // one bad or hostile peer must not take the deputy down. This is wiring,
@@ -103,10 +150,10 @@ fn main() {
         match conn {
             Ok(s) => {
                 if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
-                    // The REAL fulfilment path, on a credential source that has
-                    // nothing to give yet. Constructing the Vault client means
-                    // an AppRole login against the sealed SecretID, and none of
-                    // it can be verified until the third plane is provisioned.
+                    // The real fulfilment path: the key is read through the
+                    // cache on first use per destination (#240b), then the
+                    // provider call is made under the FIPS provider installed
+                    // above.
                     rt.block_on(call::fulfil(
                         admitted,
                         &mut keys,

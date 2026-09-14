@@ -36,28 +36,6 @@ pub trait KeySource {
     ) -> impl std::future::Future<Output = Result<Zeroizing<String>, String>> + Send;
 }
 
-/// The source in use until a Vault client is constructed.
-///
-/// Deliberately a `KeySource` and not a special case upstream: the deputy runs
-/// its REAL path — admit, ask for the credential, refuse — so the refusal comes
-/// from the layer that owns credentials and names itself accordingly. A closure
-/// short-circuiting `fulfil` would have left the whole fulfilment path unbuilt
-/// and unexercised, which is what `dead_code` caught.
-pub struct NoCredentialSource;
-
-impl KeySource for NoCredentialSource {
-    async fn read(
-        &self,
-        mount: &str,
-        path: &str,
-        field: &str,
-    ) -> Result<Zeroizing<String>, String> {
-        Err(format!(
-            "no Vault client is configured; cannot read field '{field}' of '{mount}/data/{path}'"
-        ))
-    }
-}
-
 /// First-use, per-destination cache.
 pub struct KeyCache<S> {
     source: S,
@@ -193,24 +171,5 @@ mod tests {
             c.get("maknae-kv", "a/data/one", "api-key").await.is_err(),
             "a failure must not be cached"
         );
-    }
-
-    /// The source the deputy runs on until a Vault client exists. It refuses,
-    /// names the PATH it was asked for, and is never cached as a success —
-    /// this is the deputy's real behaviour right now, not a placeholder.
-    #[tokio::test]
-    async fn the_no_credential_source_refuses_and_names_the_path() {
-        let mut c = KeyCache::new(NoCredentialSource);
-        let e = c
-            .get("maknae-kv", "maknae/providers/openai", "api-key")
-            .await
-            .unwrap_err();
-        assert!(e.contains("no Vault client is configured"), "{e}");
-        assert!(e.contains("maknae/providers/openai"), "{e}");
-        // Still refuses on a second ask — a refusal is not cached as a value.
-        assert!(c
-            .get("maknae-kv", "maknae/providers/openai", "api-key")
-            .await
-            .is_err());
     }
 }
