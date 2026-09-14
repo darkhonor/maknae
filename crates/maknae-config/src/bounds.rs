@@ -28,9 +28,10 @@ pub const MAX_KEY_VAULT_PREFIX_BYTES: usize = 256;
 
 /// What the deputy is allowed to do, and nothing more.
 ///
-/// The two fields together mirror the Vault grant's own shape,
-/// `<mount>/data/<prefix>/*` — so this document is the host-side statement of
-/// exactly what Terraform granted, in the file the granted process reads.
+/// `kv_mount` and `key_vault_path_prefix` together mirror the Vault grant's own
+/// shape, `<mount>/data/<prefix>/*` — so this document is the host-side
+/// statement of exactly what Terraform granted, in the file the granted
+/// process reads. The `vault` block (#240b) says where that grant is redeemed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressBounds {
     /// The KV v2 mount the provider keys live in (Terraform `kv_mount_path`;
@@ -55,6 +56,19 @@ pub struct EgressBounds {
     /// each other and disagreed with the grant, and the boot gate compares only
     /// the two host-side values, never the grant.
     pub key_vault_path_prefix: String,
+    /// `vault.addr` — where the deputy logs in (#240b). Declared in THIS file
+    /// because the deputy reads its own bounds and nothing else: the AppArmor
+    /// profile and the SELinux type carve-out grant it exactly this document,
+    /// and `maknae.yaml` is denied to it by design. The same address appears in
+    /// `maknae.yaml`'s `vault` block for `maknaed`; the two are used
+    /// independently and never compared, so this is not #308's
+    /// two-coordinate-systems-required-to-match shape. The scheme is validated
+    /// where the client is built (`maknae-vault`), not here — one validator.
+    pub vault_addr: String,
+    /// `vault.approle_mount`, or `None` for the packaged Terraform default.
+    /// `None` is resolved by the DEPUTY from `maknae_vault::DEFAULT_APPROLE_MOUNT`;
+    /// this crate carries no Vault default, so there is one place for it.
+    pub approle_mount: Option<String>,
 }
 
 /// Is this a usable mount-relative Vault path fragment? `Err` names the reason,
@@ -140,7 +154,7 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
         ));
     };
     for (k, _) in m.iter() {
-        if k != "key_vault_path_prefix" && k != "kv_mount" {
+        if k != "key_vault_path_prefix" && k != "kv_mount" && k != "vault" {
             return Err(err(format!(
                 "egress-bounds.yaml: unknown key '{k}' (no registered spec)"
             )));
@@ -161,9 +175,56 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
             .map_err(|why| err(format!("egress-bounds.yaml: '{name}' {why}")))?;
         Ok(v.clone())
     };
+    let kv_mount = required("kv_mount")?;
+    let key_vault_path_prefix = required("key_vault_path_prefix")?;
+    // #240b: the deputy's Vault connection. Required — a deployment that
+    // registers a provider needs the deputy to log in, and an absent block is
+    // a refusal here rather than a first-request failure. Every key inside it
+    // is enumerated: a `token` or a `secret_id` written here would be a
+    // credential in configuration, and nothing may accept one silently.
+    let Some((_, vault)) = m.iter().find(|(k, _)| k == "vault") else {
+        return Err(err(
+            "egress-bounds.yaml: 'vault' is required (addr, and optionally approle_mount)",
+        ));
+    };
+    let Value::Map(vm) = vault else {
+        return Err(err("egress-bounds.yaml: 'vault' must be a mapping"));
+    };
+    for (k, _) in vm.iter() {
+        if k != "addr" && k != "approle_mount" {
+            return Err(err(format!(
+                "egress-bounds.yaml: unknown key '{k}' under 'vault' (no registered spec)"
+            )));
+        }
+    }
+    let Some((_, Value::Str(addr))) = vm.iter().find(|(k, _)| k == "addr") else {
+        return Err(err(
+            "egress-bounds.yaml: 'vault.addr' is required and must be a string",
+        ));
+    };
+    if addr.is_empty() || addr.chars().any(char::is_whitespace) {
+        return Err(err(
+            "egress-bounds.yaml: 'vault.addr' must be a non-empty URL without whitespace",
+        ));
+    }
+    let approle_mount = match vm.iter().find(|(k, _)| k == "approle_mount") {
+        None => None,
+        Some((_, Value::Str(s))) => {
+            kv_fragment_is_acceptable(s)
+                .map_err(|why| err(format!("egress-bounds.yaml: 'vault.approle_mount' {why}")))?;
+            Some(s.clone())
+        }
+        Some(_) => {
+            return Err(err(
+                "egress-bounds.yaml: 'vault.approle_mount' must be a string",
+            ))
+        }
+    };
     Ok(EgressBounds {
-        kv_mount: required("kv_mount")?,
-        key_vault_path_prefix: required("key_vault_path_prefix")?,
+        kv_mount,
+        key_vault_path_prefix,
+        vault_addr: addr.clone(),
+        approle_mount,
     })
 }
 
@@ -175,10 +236,112 @@ mod tests {
     /// single-field builder, so the tests that assert a missing `kv_mount` is
     /// refused keep working.
     fn doc2(mount: &str, prefix: &str) -> Value {
-        Value::Map(vec![
+        doc2_vault(mount, prefix, Some("https://vault.example:8200"), None)
+    }
+
+    /// The full document shape (#240b). `addr: None` omits the `vault` block
+    /// entirely; `approle_mount: None` omits that one key.
+    fn doc2_vault(
+        mount: &str,
+        prefix: &str,
+        addr: Option<&str>,
+        approle_mount: Option<&str>,
+    ) -> Value {
+        let mut m = vec![
             ("kv_mount".into(), Value::Str(mount.into())),
             ("key_vault_path_prefix".into(), Value::Str(prefix.into())),
-        ])
+        ];
+        if let Some(a) = addr {
+            let mut v = vec![("addr".to_string(), Value::Str(a.into()))];
+            if let Some(am) = approle_mount {
+                v.push(("approle_mount".into(), Value::Str(am.into())));
+            }
+            m.push(("vault".into(), Value::Map(v)));
+        }
+        Value::Map(m)
+    }
+
+    /// #240b: the deputy's Vault address is declared in ITS file, because the
+    /// deputy may read nothing else. The AppRole mount is optional, and `None`
+    /// is the packaged Terraform default — resolved by the deputy, never here.
+    #[test]
+    fn the_vault_block_is_required_and_its_mount_is_optional() {
+        let ok = |am: Option<&str>| {
+            bounds_from_document(&doc2_vault(
+                "maknae-kv",
+                "maknae/providers",
+                Some("https://v:8200"),
+                am,
+            ))
+        };
+        let b = ok(None).unwrap();
+        assert_eq!(b.vault_addr, "https://v:8200");
+        assert_eq!(b.approle_mount, None);
+        let b = ok(Some("alt-approle")).unwrap();
+        assert_eq!(b.approle_mount.as_deref(), Some("alt-approle"));
+        // absent block: refused, naming it
+        let e = bounds_from_document(&doc2_vault("maknae-kv", "maknae/providers", None, None))
+            .unwrap_err();
+        assert!(e.to_string().contains("'vault'"), "{e}");
+        // addr empty or whitespace-bearing: refused for its own reason
+        for bad in ["", " ", "https://v :8200"] {
+            let e = bounds_from_document(&doc2_vault(
+                "maknae-kv",
+                "maknae/providers",
+                Some(bad),
+                None,
+            ))
+            .unwrap_err();
+            assert!(e.to_string().contains("'vault.addr'"), "{bad:?}: {e}");
+        }
+        // an approle_mount that is not a usable path fragment: refused by name
+        let e = ok(Some("/approle")).unwrap_err();
+        assert!(e.to_string().contains("'vault.approle_mount'"), "{e}");
+        // the block must be a mapping
+        assert!(bounds_from_document(&Value::Map(vec![
+            ("kv_mount".into(), Value::Str("maknae-kv".into())),
+            (
+                "key_vault_path_prefix".into(),
+                Value::Str("maknae/providers".into())
+            ),
+            ("vault".into(), Value::Str("https://v:8200".into())),
+        ]))
+        .is_err());
+        // an unknown key INSIDE it is refused by name — a `token` here would be
+        // a credential in configuration, which nothing may accept silently
+        let e = bounds_from_document(&Value::Map(vec![
+            ("kv_mount".into(), Value::Str("maknae-kv".into())),
+            (
+                "key_vault_path_prefix".into(),
+                Value::Str("maknae/providers".into()),
+            ),
+            (
+                "vault".into(),
+                Value::Map(vec![
+                    ("addr".into(), Value::Str("https://v:8200".into())),
+                    ("token".into(), Value::Str("x".into())),
+                ]),
+            ),
+        ]))
+        .unwrap_err();
+        assert!(e.to_string().contains("'token'"), "{e}");
+        // a non-string addr or approle_mount is refused
+        for (k, v) in [("addr", Value::Int(1)), ("approle_mount", Value::Int(1))] {
+            let mut vm = vec![("addr".to_string(), Value::Str("https://v:8200".into()))];
+            if k == "addr" {
+                vm = vec![];
+            }
+            vm.push((k.into(), v));
+            assert!(bounds_from_document(&Value::Map(vec![
+                ("kv_mount".into(), Value::Str("maknae-kv".into())),
+                (
+                    "key_vault_path_prefix".into(),
+                    Value::Str("maknae/providers".into())
+                ),
+                ("vault".into(), Value::Map(vm)),
+            ]))
+            .is_err());
+        }
     }
 
     fn doc(prefix: &str) -> Value {
@@ -246,7 +409,9 @@ mod tests {
             bounds_from_document(&doc2("maknae-kv", "maknae/providers")).unwrap(),
             EgressBounds {
                 kv_mount: "maknae-kv".into(),
-                key_vault_path_prefix: "maknae/providers".into()
+                key_vault_path_prefix: "maknae/providers".into(),
+                vault_addr: "https://vault.example:8200".into(),
+                approle_mount: None,
             }
         );
     }
