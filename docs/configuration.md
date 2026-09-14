@@ -610,10 +610,9 @@ vault:
 > refuses any world bit on `<config-dir>` (`mode & 0o007`, §2.2). The fix is a POSIX ACL
 > `u:_maknae-egress:rx` on `/etc/maknae` — `r` as well as `x`, because the anchored
 > reader opens the directory `O_RDONLY|O_DIRECTORY` and a search-only entry fails that
-> open; to be set by the package's `postinst`/`%post` and re-asserted by `maknae enroll`
-> (the same `rx` mechanism enroll already uses for the daemon's home grant; that
-> provisioning is the next change on #240 and is **not in the tree yet**) — and `0644`
-> on this file. A *write*-granting ACL would raise the group bits into the
+> open; set by the package's `postinst`/`%post` and re-asserted by `maknae enroll` (the
+> same `rx` mechanism enroll already uses for the daemon's home grant) — and `0644` on
+> this file. A *write*-granting ACL would raise the group bits into the
 > loader's `0o022` mask and be refused, so the root-artifact check is not weakened. §2.2's
 > "keep the config tree free of world ACLs" still holds: this is a user entry for one named
 > account, not a world one.
@@ -622,9 +621,8 @@ On an SELinux host, `restorecon /etc/maknae/egress-bounds.yaml` after creating i
 a new file inherits the directory's `maknae_etc_t`, and the deputy is granted the file's
 own type (`maknae_egress_bounds_t`, `packaging/common/maknae.fc`), not the directory's.
 
-**The deputy's credential set, `/etc/maknae/egress/`** (`0750 root:_maknae-egress`;
-written by `maknae enroll` once its third-plane provisioning lands — the next change on
-#240 — never by hand):
+**The deputy's credential set, `/etc/maknae/egress/`** (`0750 root:_maknae-egress`,
+created by the package; the files are written by `maknae enroll`, never by hand):
 
 ```
 /etc/maknae/egress/
@@ -674,7 +672,8 @@ spellings in mind at once — which is the defect this removed.)*
 > **What you still cannot finish today (updated 2026-09-14, #240b):** the deputy now
 > logs in and reads the key — `NoCredentialSource` is gone — so a registration is
 > checkable end-to-end **through the credential read** once `maknae enroll` has
-> provisioned the third plane. What remains is on the kernel side: `production_egress()`
+> provisioned the third plane (it does, since this change: three RoleIDs, three sealed
+> SecretIDs). What remains is on the kernel side: `production_egress()`
 > still selects the `Unavailable` backend, so no `session.prompt` reaches the deputy
 > until that last item on #240 lands.
 

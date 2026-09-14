@@ -44,6 +44,9 @@ impl OwnerResolver for RealOwnerResolver {
             )),
             Owner::RootRoot => Ok((Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))),
             Owner::RootMaknaeGroup => Ok((Some(Uid::from_raw(0)), Some(group_gid("_maknae")?))),
+            Owner::RootMaknaeEgressGroup => {
+                Ok((Some(Uid::from_raw(0)), Some(group_gid("_maknae-egress")?)))
+            }
             Owner::MaknaeMaknae => {
                 let (uid, gid) = user_uid_gid("_maknae")?;
                 Ok((Some(uid), Some(gid)))

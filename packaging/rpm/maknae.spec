@@ -92,6 +92,8 @@ install -D -m 0644 %{SOURCE6} %{buildroot}%{_sysconfdir}/fapolicyd/trust.d/makna
 install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
+# #240b: the deputy's credential set dir (files written by `maknae enroll`).
+install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # audit.jsonl is NOT a payload file — it is %ghost, created first-install-only in
 # %post (a payload file under the chattr +a dir would fail to replace on upgrade).
@@ -106,6 +108,12 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
+# #240b (D3): the egress deputy is in neither root nor _maknae, and the config
+# loader refuses any world bit on /etc/maknae, so it traverses by a user ACL
+# granting exactly `x` (Requires: acl). Re-asserted on every %post and by
+# `maknae enroll`; a write-granting entry would trip the loader's 0o022 mask.
+setfacl -m u:_maknae-egress:x %{_sysconfdir}/maknae 2>/dev/null || \
+    echo "maknae: setfacl failed — grant _maknae-egress x on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
@@ -150,6 +158,7 @@ fi
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
+%dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 

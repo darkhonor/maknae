@@ -988,28 +988,41 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
 // Daemon credential sealing (spec §4.1 step 5)
 // ============================================================================
 
-async fn seal_daemon_secret_linux(
+/// The argv for sealing one plane's SecretID under `cred_name` — the name the
+/// plane's unit `LoadCredentialEncrypted=` pins. Factored so a unit test holds
+/// both sealed planes' names (`maknaed-secret-id`, `maknae-egress-secret-id`)
+/// against the units: a mismatch is "Name in credential doesn't match
+/// expectations" at unit start, found once already on live hardware for the
+/// CLI's credential (secret_io.rs).
+fn seal_argv(cred_name: &str, out_str: &str) -> (&'static str, Vec<String>) {
+    (
+        "systemd-creds",
+        vec![
+            "encrypt".into(),
+            "--with-key=tpm2".into(),
+            format!("--name={cred_name}"),
+            "-".into(),
+            out_str.to_string(),
+        ],
+    )
+}
+
+async fn seal_secret_linux(
     secret: &Zeroizing<String>,
     out_path: &Path,
+    cred_name: &str,
     verbose: bool,
 ) -> Result<(), EnrollError> {
     use tokio::io::AsyncWriteExt;
     let out_str = out_path
         .to_str()
         .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
+    let (bin, argv) = seal_argv(cred_name, out_str);
     if verbose {
-        eprintln!(
-            "exec: systemd-creds encrypt --with-key=tpm2 --name=maknaed-secret-id - {out_str}"
-        );
+        eprintln!("exec: {bin} {}", argv.join(" "));
     }
-    let mut child = tokio::process::Command::new("systemd-creds")
-        .args([
-            "encrypt",
-            "--with-key=tpm2",
-            "--name=maknaed-secret-id",
-            "-",
-            out_str,
-        ])
+    let mut child = tokio::process::Command::new(bin)
+        .args(&argv)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1045,10 +1058,9 @@ async fn seal_daemon_secret_linux(
     Ok(())
 }
 
-fn seal_daemon_secret_macos(
-    _secret: &Zeroizing<String>,
-    _out_path: &Path,
-) -> Result<(), EnrollError> {
+/// Both sealed planes (the daemon's and, since #240b, the deputy's) refuse
+/// here for the same reason; the deputy's custody on macOS is #227's.
+fn seal_secret_macos(_secret: &Zeroizing<String>, _out_path: &Path) -> Result<(), EnrollError> {
     // TODO(spec §6.2/§11): SEP envelope encryption — a non-exportable EC key
     // with an access policy usable by `_maknae`, ECIES-encrypting the
     // SecretID. Flagged as a real, unresolved risk in the spec itself ("SEP
@@ -1164,6 +1176,42 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
             eprintln!("{}: {e}", msg(locale, MsgId::EnrollFailed));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// D3 (#240b): the deputy traverses `/etc/maknae` by a USER ACL granting
+/// exactly `x`. The directory is `root:_maknae 0750`, the deputy is in neither,
+/// and the config loader refuses any world bit on that directory — so a mode
+/// change is not available, and a group change would put the daemon's group on
+/// the deputy or vice versa. `x` only: nothing under the dir is the deputy's
+/// except `egress/` and the bounds file, which carry their own modes. A
+/// write-granting entry would raise the group bits into the loader's `0o022`
+/// mask and be refused, so the loader's check is not weakened by this.
+const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:x";
+
+/// Apply [`EGRESS_TRAVERSAL_ACL`] to `/etc/maknae` (Linux, root context). Warn
+/// on failure, as `grant_read_path_access` does: enrollment establishes
+/// identity; without the entry the deputy refuses to start, naming its bounds
+/// file, until the operator grants it by hand. The package scriptlets set the
+/// same entry at install; this re-asserts it on every enroll.
+fn grant_egress_traversal(verbose: bool) {
+    let acl = std::process::Command::new("setfacl")
+        .args(["-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"])
+        .output();
+    match acl {
+        Ok(o) if o.status.success() => {
+            if verbose {
+                eprintln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+            }
+        }
+        Ok(o) => eprintln!(
+            "maknae enroll: setfacl failed ({}); the egress deputy cannot open /etc/maknae/egress-bounds.yaml until /etc/maknae grants _maknae-egress x: {}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!(
+            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or grant _maknae-egress x on /etc/maknae — the egress deputy refuses to start until then"
+        ),
     }
 }
 
@@ -1344,7 +1392,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             .await?;
     }
 
-    let (daemon_role_id, cli_role_id) =
+    let (daemon_role_id, cli_role_id, egress_role_id) =
         vault_ops::read_role_ids(&client, &args.approle_mount).await?;
 
     let daemon_secret =
@@ -1356,6 +1404,19 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
 
     let cli_secret =
         match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::CLI_ROLE).await {
+            Ok(s) => {
+                minted.push((s.role.to_string(), s.accessor.clone()));
+                s
+            }
+            Err(e) => {
+                destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
+                return Err(e.into());
+            }
+        };
+
+    // #240b: the third plane's SecretID, same rollback contract as the CLI's.
+    let egress_secret =
+        match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::EGRESS_ROLE).await {
             Ok(s) => {
                 minted.push((s.role.to_string(), s.accessor.clone()));
                 s
@@ -1406,8 +1467,10 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         macos,
         &daemon_role_id,
         &cli_role_id,
+        &egress_role_id,
         &daemon_secret.secret,
         &cli_secret.secret,
+        &egress_secret.secret,
         &vault_ca_bytes,
         &root_ca_pem,
         &int_ca_pem,
@@ -1432,8 +1495,10 @@ async fn finish_enrollment(
     macos: bool,
     daemon_role_id: &str,
     cli_role_id: &str,
+    egress_role_id: &str,
     daemon_secret: &Zeroizing<String>,
     cli_secret: &Zeroizing<String>,
+    egress_secret: &Zeroizing<String>,
     vault_ca_pem: &[u8],
     root_ca_pem: &str,
     int_ca_pem: &str,
@@ -1484,6 +1549,16 @@ async fn finish_enrollment(
         daemon_role_id.as_bytes().to_vec(),
     );
     contents.insert(etc.join("tls/vault-ca.crt"), vault_ca_pem.to_vec());
+    // #240b: the deputy's own credential set. Its RoleID, and its own copy of
+    // the Vault CA — `tls/` is root:_maknae 0750 and the deputy cannot enter it.
+    contents.insert(
+        etc.join("egress").join(maknae_vault::EGRESS_ROLE_ID_FILE),
+        egress_role_id.as_bytes().to_vec(),
+    );
+    contents.insert(
+        etc.join("egress").join(maknae_vault::EGRESS_VAULT_CA_FILE),
+        vault_ca_pem.to_vec(),
+    );
     contents.insert(
         etc.join("tls/maknae-root-ca.crt"),
         root_ca_pem.as_bytes().to_vec(),
@@ -1511,6 +1586,7 @@ async fn finish_enrollment(
         .iter()
         .filter(|a| {
             a.content != artifact_table::ContentKind::SealedDaemonSecret
+                && a.content != artifact_table::ContentKind::SealedEgressSecret
                 && a.content != artifact_table::ContentKind::SealedCliSecret
                 && !a.path.starts_with(cli_dir)
         })
@@ -1523,11 +1599,36 @@ async fn finish_enrollment(
     // `sealed_row` was already looked up above (posture-marker `target`) —
     // reused here rather than re-derived, so both consumers share one lookup.
     if macos {
-        seal_daemon_secret_macos(daemon_secret, &sealed_row.path)?;
+        seal_secret_macos(daemon_secret, &sealed_row.path)?;
     } else {
-        seal_daemon_secret_linux(daemon_secret, &sealed_row.path, args.verbose).await?;
+        seal_secret_linux(
+            daemon_secret,
+            &sealed_row.path,
+            "maknaed-secret-id",
+            args.verbose,
+        )
+        .await?;
     }
     artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
+
+    // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
+    // The same mechanism under the name maknae-egress.service loads.
+    let egress_sealed_row = table
+        .iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
+        .expect("artifact_table always emits exactly one SealedEgressSecret row");
+    if macos {
+        seal_secret_macos(egress_secret, &egress_sealed_row.path)?;
+    } else {
+        seal_secret_linux(
+            egress_secret,
+            &egress_sealed_row.path,
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+            args.verbose,
+        )
+        .await?;
+    }
+    artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
 
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
@@ -1573,6 +1674,7 @@ async fn finish_enrollment(
     // closed (read-verb-unavailable) and ping/whoami are unaffected.
     if !macos {
         grant_read_path_access(&operator.home, args.verbose);
+        grant_egress_traversal(args.verbose);
     }
 
     // ---- Step 8: posture summary -------------------------------------------
@@ -1624,6 +1726,49 @@ mod tests {
             !args.iter().any(|a| a == "has-tpm2"),
             "has-tpm2 verb is v253+, absent on el9 (#93)"
         );
+    }
+
+    // ---- #240b: the third plane's seal name and traversal ACL --------------
+
+    /// The sealed credential's embedded NAME must match what the unit loads:
+    /// `LoadCredentialEncrypted=maknae-egress-secret-id:…` in
+    /// maknae-egress.service. A mismatch is "Name in credential doesn't match
+    /// expectations" at unit start — the runtime seam bug secret_io.rs records
+    /// for the CLI. One argv builder, two names, both pinned.
+    #[test]
+    fn seal_argv_pins_the_credential_name_for_both_sealed_planes() {
+        let (bin, args) = seal_argv(
+            "maknaed-secret-id",
+            "/etc/maknae/private/maknaed-secret-id.cred",
+        );
+        assert_eq!(bin, "systemd-creds");
+        assert_eq!(
+            args,
+            vec![
+                "encrypt",
+                "--with-key=tpm2",
+                "--name=maknaed-secret-id",
+                "-",
+                "/etc/maknae/private/maknaed-secret-id.cred"
+            ]
+        );
+        let (_, args) = seal_argv(
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+            "/etc/maknae/private/maknae-egress-secret-id.cred",
+        );
+        assert!(
+            args.iter().any(|a| a == "--name=maknae-egress-secret-id"),
+            "{args:?}"
+        );
+    }
+
+    /// D3: the deputy traverses /etc/maknae by a USER ACL granting exactly `x`
+    /// — never read (nothing under the dir is the deputy's except egress/ and
+    /// the bounds file, which carry their own modes), never write, never a
+    /// world entry (the loader refuses any world bit on the dir).
+    #[test]
+    fn the_deputys_traversal_acl_grants_only_x_to_its_own_account() {
+        assert_eq!(EGRESS_TRAVERSAL_ACL, "u:_maknae-egress:x");
     }
 
     // ---- canonical_home (#216) ---------------------------------------------
@@ -1955,6 +2100,7 @@ mod tests {
             &[
                 ("maknaed".to_string(), "acc-1".to_string()),
                 ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
             ],
         );
         let parsed = parse_state_accessors(&text).unwrap();
@@ -1963,6 +2109,7 @@ mod tests {
             vec![
                 ("maknaed".to_string(), "acc-1".to_string()),
                 ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
             ]
         );
     }

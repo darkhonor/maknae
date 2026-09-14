@@ -30,6 +30,14 @@ case "$1" in
             useradd --system -g _maknae -d /nonexistent -s /usr/sbin/nologin \
                     --comment "Maknae trust-plane daemon" _maknae
         fi
+        # #240b: the egress deputy's account, its own group (sysusers `u` line).
+        if ! getent group _maknae-egress >/dev/null 2>&1; then
+            groupadd --system _maknae-egress
+        fi
+        if ! getent passwd _maknae-egress >/dev/null 2>&1; then
+            useradd --system -g _maknae-egress -d /nonexistent -s /usr/sbin/nologin \
+                    --comment "Maknae egress deputy" _maknae-egress
+        fi
 
         # --- §4.6 directory ownership + modes (no %attr on deb) ------------------
         # The loader fail-closes on any world bit for config paths, so directory
@@ -37,6 +45,16 @@ case "$1" in
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
         install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+        # #240b: the deputy's credential set (RoleID + Vault CA copy, written
+        # by `maknae enroll`), under the deputy's OWN group.
+        install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
+        # #240b (D3): the deputy is in neither root nor _maknae, and the loader
+        # refuses any world bit on /etc/maknae, so it traverses by a user ACL
+        # granting exactly `x`. `acl` is a Depends. Re-asserted here on every
+        # configure and by `maknae enroll`; a write-granting entry would raise
+        # the group bits into the loader's 0o022 mask and be refused.
+        setfacl -m u:_maknae-egress:x /etc/maknae 2>/dev/null || \
+            echo "maknae: setfacl failed — grant _maknae-egress x on /etc/maknae or the egress deputy cannot start" >&2
 
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
         # The MAC policy grants `append`, not `create`, so a first boot that had to
