@@ -416,7 +416,10 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **What a prompt carries.** Text-only content blocks (any other kind is refused before
   the decision, `BadRequest` on the wire) and a conversation id of at most 32 bytes in
   `[A-Za-z0-9._-]`. The trail records the text's length and a 32-hex digest, never the text.
-- **Cooky refusal.** No egress process exists yet (#240): a permitted prompt is refused
+- **Cooky refusal.** The kernel's egress backend is still `Unavailable` — the deputy
+  exists and logs in to Vault (#240b), but `maknaed` does not route to it until #240's
+  last item lands *(corrected 2026-09-14: this said "no egress process exists yet")*: a
+  permitted prompt is refused
   with posture `unavailable` and reason `egress backend not ready` in the trail, and
   `Unauthorized` on the wire, like every refusal — build state is never disclosed there.
 

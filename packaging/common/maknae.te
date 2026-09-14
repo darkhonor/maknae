@@ -46,6 +46,14 @@ allow init_t maknae_egress_t:process2 { nnp_transition nosuid_transition };
 type maknae_egress_bounds_t;
 files_config_file(maknae_egress_bounds_t)
 
+# #240b: the deputy's credential dir (/etc/maknae/egress: its RoleID and its
+# copy of the Vault TLS anchor). Its own type, so the grant is by TYPE and the
+# maknae_etc_t wildcard (maknae.yaml, maknaed-approle-id, tls/) stays
+# unreadable to the deputy. The sealed SecretID is maknae_secret_t and stays
+# neverallow'd below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
+type maknae_egress_etc_t;
+files_config_file(maknae_egress_etc_t)
+
 # Config (/etc/maknae) + private (/etc/maknae/private) + audit (/var/log/maknae)
 # + runtime (/run/maknae) types.
 type maknae_etc_t;
@@ -95,14 +103,47 @@ allow maknaed_t maknae_etc_t:file { read open getattr };
 allow maknaed_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_etc_t:dir { open read search getattr };
+allow maknae_egress_t maknae_egress_etc_t:dir { open read search getattr };
+allow maknae_egress_t maknae_egress_etc_t:file { read open getattr };
 # The deputy's own entrypoint.
 allow maknae_egress_t maknae_egress_exec_t:file { read execute execute_no_trans open getattr };
-# NO network rules yet, deliberately. In #240a the deputy answers with a canned
-# reply and opens no socket outward at all; provider egress and the Vault KV
-# read arrive with #240b. When they do they follow this file's existing idiom —
-# a dedicated labeled port type plus `name_connect`, as maknae_vault_port_t
-# does for maknaed — never a blanket corenet_tcp_connect_*_port, which would
-# grant every port of that class.
+# #240b: the decrypted SecretID in $CREDENTIALS_DIRECTORY — the same label
+# split as maknaed's (el10 init_var_run_t, el9 tmpfs_t; see the maknaed block
+# below for the probe that established it). Required here as well as there:
+# checkmodule is single-pass, and this block comes first in the file.
+gen_require(`
+    type var_run_t;
+    type init_var_run_t;
+    type tmpfs_t;
+')
+allow maknae_egress_t var_run_t:dir { search getattr open read };
+allow maknae_egress_t init_var_run_t:dir { search getattr open read };
+allow maknae_egress_t init_var_run_t:file { read open getattr };
+allow maknae_egress_t tmpfs_t:file { read open getattr };
+# #240b: the two network legs. Vault: the SAME operator-labeled port as
+# maknaed (maknae_vault_port_t, maknae-selinux-ports.sh). Provider:
+# corenet_tcp_connect_http_port.
+#
+# CORRECTED 2026-09-14. The #240a comment here promised the provider leg "a
+# dedicated labeled port type plus name_connect, never a blanket
+# corenet_tcp_connect_*_port". That is not expressible for the port every
+# provider listens on: tcp/443 is http_port_t in base policy, and the shipped
+# ports helper refuses (by design) to relabel a foreign label. The interface
+# is therefore the narrowest grant the policy language offers for 443; WHICH
+# endpoint is reached is decided by the kernel over root-owned configuration,
+# not by the port label. UNVERIFIED on an enforcing host in this change — the
+# packaged-Rocky evidence is #242's.
+allow maknae_egress_t self:tcp_socket { create connect setopt getopt read write getattr shutdown };
+allow maknae_egress_t maknae_vault_port_t:tcp_socket name_connect;
+corenet_tcp_connect_http_port(maknae_egress_t)
+corenet_tcp_sendrecv_generic_node(maknae_egress_t)
+sysnet_dns_name_resolve(maknae_egress_t)
+# The provider leg verifies against the system trust store.
+miscfiles_read_generic_certs(maknae_egress_t)
+# Resolves `_maknae` by name at start (nsswitch); urandom for TLS.
+auth_use_nsswitch(maknae_egress_t)
+dev_read_urand(maknae_egress_t)
+miscfiles_read_localization(maknae_egress_t)
 # DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };

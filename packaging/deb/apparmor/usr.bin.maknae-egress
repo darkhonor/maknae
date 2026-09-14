@@ -35,9 +35,23 @@ profile maknae-egress /usr/bin/maknae-egress {
   @{run}/maknae-egress/                  r,
   @{run}/maknae-egress/egress.sock       rw,
 
-  # NO network rules yet. In #240a the deputy answers with a canned reply and
-  # opens no socket outward; provider egress and the Vault KV read arrive with
-  # #240b, and get a network stanza then — narrowed, not blanket.
+  # #240b: the deputy's own credential set — the RoleID and its copy of the
+  # Vault TLS anchor — written by `maknae enroll` as root:_maknae-egress 0640
+  # under a 0750 dir. The sealed SecretID stays under /etc/maknae/private,
+  # denied below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
+  /etc/maknae/egress/                    r,
+  /etc/maknae/egress/**                  r,
+
+  # #240b: the two network legs. Vault (the AppRole login and the KV read,
+  # with the CA pinned to /etc/maknae/egress/vault-ca.crt) and the provider
+  # (TLS verified against the SYSTEM trust store — reqwest's platform verifier
+  # reads the distribution bundle on Linux, which is what abstractions/ssl_certs
+  # grants). WHICH endpoint is reached is the kernel's decision over root-owned
+  # configuration; the deputy originates nothing — the same division as
+  # maknaed's Vault leg.
+  network inet stream,
+  network inet6 stream,
+  #include <abstractions/ssl_certs>
 
   # Explicitly denied, so the intent is legible rather than merely absent:
   # the deputy never reads user files and never touches the audit trail.

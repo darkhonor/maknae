@@ -71,6 +71,7 @@ the credential mint retires the credential on the way out.
 ├── maknae.yaml           # the base file (required)
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
 ├── egress-bounds.yaml    # required WHEN a `provider` section is registered (§6.1)
+├── egress/               # the deputy's credential set, written by `maknae enroll` (§9.3)
 └── config.d/             # optional overlay directory of SECTION files
     ├── 10-provider.yaml  # the `provider` section (§6.1, worked example in §9.3)
     └── …
@@ -436,8 +437,8 @@ provider:
   *Strictly beneath* means **at least one further segment**: `maknae/providers/openai` is inside `maknae/providers`, and a path **equal** to the prefix is **outside** it — so setting `key_vault_path: maknae/providers` is refused at boot. The comparison is segment-aware, so `maknae/providers-evil/x` is not within `maknae/providers` either.
 
   What #308 did fix is the *vocabulary*: all three are now mount-relative and `data/`-free, so the first relation is a plain string comparison instead of a transformation between two coordinate systems. What it did **not** fix, and cannot, is that **a Terraform-versus-host mismatch still boots clean and becomes a 403 at the credential read** — that is #307's mechanism and it survives this change, because nothing in the boot path reads the grant.
-- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has exactly **two** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*` — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
-- **No Vault client is constructed yet — and that is now the ONLY gap.** `bins/maknae-egress/src/main.rs` uses `NoCredentialSource`, so an otherwise-valid registration refuses at the credential layer with a named error (one that reports the composed path and the field it would have asked for). Configuring this block is correct and checkable end-to-end **up to the credential read**; the read itself needs the remaining wiring, tracked on [#240](https://github.com/darkhonor/maknae/issues/240). *(Corrected 2026-09-13: this bullet also said the field name was "not fixed in production code (only a test names `api_key`)". That stopped being true in #308 — `key_field` is required, carried per request, and read by `VaultKeys::read`, so the name you configure is the name used. The same stale claim in §9.3 was reported in review; this copy was found by sweeping the file rather than the reported line, which is the discipline that should have applied the first time.)*
+- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has **three** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*`, and since #240b a `vault` block (`addr`, and optionally `approle_mount`) saying where the deputy redeems that grant *(corrected 2026-09-14: this said "exactly two")* — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`) or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
+- **The deputy logs in to Vault and reads the key (#240b, 2026-09-14).** *(Superseded: this bullet said "No Vault client is constructed yet — and that is now the ONLY gap", that `main.rs` used `NoCredentialSource`, and that the read waited on #240. All three stopped being true in #240b.)* `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID from `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. There is **no plaintext fallback and no SEP path** for the deputy: without `$CREDENTIALS_DIRECTORY` it refuses to start, naming the reason (macOS custody is #227's). **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **What still stands between a registration and a live prompt:** `production_egress()` in `maknaed` still selects the `Unavailable` backend — that is the last item on [#240](https://github.com/darkhonor/maknae/issues/240) and lands separately, so `main` stays fail-closed until it does.
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
 ---
@@ -586,12 +587,45 @@ provider:
 > **Corrected again 2026-09-13, and this one would have produced the exact failure the design tries to prevent.** The examples in this section and in §6.1 used `maknae/provider/…` — **singular** — while `deploy/vault-pki`'s `provider_key_prefix` defaults to **`maknae/providers`** (plural), which is also what every fixture in the code uses. Following this section verbatim against the shipped Terraform therefore produced a host-side pair that agreed with *itself* — `key_vault_path` under `key_vault_path_prefix`, so **boot passed** — while the Vault policy granted a read on `maknae-kv/data/maknae/providers/*` and the deputy asked for `.../provider/openai`. That is **a silent 403 at request time**, which `variables.tf` then named as the thing boot validation exists to avoid: *"A mismatch is a boot refusal, not a silent 403 at request time."* The boot gate cannot catch it, because it compares the two host-side values to each other and never to Vault. **That quoted sentence was itself too broad and has since been corrected** (2026-09-13): it holds for the host-side containment check and not for the Terraform-versus-bounds equality, which nothing enforces — see the invariant table in §6.1. **Whenever you change one, change all three: the Terraform variable, `egress-bounds.yaml`, and every `provider.key_vault_path`.**
 
 **And `/etc/maknae/egress-bounds.yaml`, which a `provider` block makes mandatory**
-(`640`, root-owned — it is read by the deputy, not by this loader):
+(`0644 root:root` — read by BOTH daemons through the root-artifact rule, root-owned and
+not group- or other-writable; world-readable because nothing in it is a secret, and
+because the deputy is in neither `root` nor `_maknae`):
 
 ```yaml
 kv_mount: maknae-kv
 key_vault_path_prefix: maknae/providers
+vault:
+  addr: https://vault.example:8200   # where the deputy logs in; https only
+  # approle_mount: maknae-approle    # optional — the packaged Terraform default
 ```
+
+> **Corrected 2026-09-14 (#240b), and this one was a defect on every packaged host.**
+> This passage said `640, root-owned`. The deputy runs as `_maknae-egress`, which is in
+> neither `root` nor `_maknae`, so a `640` file was unreadable to the only process it
+> exists for — and `/etc/maknae` itself is `root:_maknae 0750`, so the deputy could not
+> even traverse to it. The directory cannot simply gain a world `x` bit: the loader
+> refuses any world bit on `<config-dir>` (`mode & 0o007`, §2.2). The fix is a POSIX ACL
+> `u:_maknae-egress:x` on `/etc/maknae` — to be set by the package's `postinst`/`%post`
+> and by `maknae enroll` (the same mechanism enroll already uses for the daemon's home
+> grant; that provisioning is the next change on #240 and is **not in the tree yet**) —
+> and `0644` on this file. A *write*-granting ACL would raise the group bits into the
+> loader's `0o022` mask and be refused, so the root-artifact check is not weakened; this
+> is the named exception to §2.2's "keep the config tree free of world ACLs", and it is a
+> user ACL, not a world one.
+
+**The deputy's credential set, `/etc/maknae/egress/`** (`0750 root:_maknae-egress`;
+written by `maknae enroll` once its third-plane provisioning lands — the next change on
+#240 — never by hand):
+
+```
+/etc/maknae/egress/
+├── maknae-egress-approle-id   # 0640 root:_maknae-egress — the RoleID (not a secret)
+└── vault-ca.crt               # 0640 root:_maknae-egress — the Vault TLS anchor, a copy
+```
+
+The SecretID is not here: enroll seals it to `/etc/maknae/private/maknae-egress-secret-id.cred`
+(`0400 root:root`), and `maknae-egress.service`'s `LoadCredentialEncrypted=` has systemd
+decrypt it into `$CREDENTIALS_DIRECTORY` at unit start.
 
 The `provider` path must be **strictly beneath** that prefix — at least one further
 segment, compared segment-aware — or boot refuses with `OutsideBounds` naming both. A
@@ -628,13 +662,12 @@ spellings in mind at once — which is the defect this removed.)*
 > by `VaultKeys::read`; the example above uses `api-key`, and if your secret uses
 > `api_key` or anything else, write that instead. Nothing defaults.
 >
-> **What you still cannot finish today, and it is narrower than it was:**
-> `bins/maknae-egress/src/main.rs` constructs `NoCredentialSource`, so **no Vault client
-> exists** and the credential read refuses with a named error — one that now reports the
-> composed path and the field it would have asked for. Everything else is checkable now:
-> the block parses, the bounds gate runs at boot, the ownership and permission rules
-> apply, and the deputy admits the frame and refuses only at the credential layer. The
-> read itself waits on #240.
+> **What you still cannot finish today (updated 2026-09-14, #240b):** the deputy now
+> logs in and reads the key — `NoCredentialSource` is gone — so a registration is
+> checkable end-to-end **through the credential read** once `maknae enroll` has
+> provisioned the third plane. What remains is on the kernel side: `production_egress()`
+> still selects the `Unavailable` backend, so no `session.prompt` reaches the deputy
+> until that last item on #240 lands.
 
 #### Permissions — stricter than §2.2 for this section
 
