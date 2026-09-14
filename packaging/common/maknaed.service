@@ -1,7 +1,13 @@
 [Unit]
 Description=maknae trust-plane daemon (maknaed)
 Documentation=https://github.com/darkhonor/maknae
-After=network-online.target
+# #240: ordered AFTER the deputy's socket and service, so that at shutdown —
+# units stop in the reverse of their start order — the deputy outlives this
+# daemon's handler drain (TimeoutStopSec below): a deputy killed mid-provider-
+# call would cut the very exchange the drain waits for. Ordering only, no
+# dependency: a host with no provider registered need not have the deputy
+# enabled, and an inactive unit imposes no ordering.
+After=network-online.target maknae-egress.socket maknae-egress.service
 Wants=network-online.target
 
 [Service]

@@ -65,6 +65,17 @@ impl SocketEgress {
         EgressFailure::Transport(e.to_string())
     }
 
+    /// Every failure from the first written byte on is `AfterSend`: the
+    /// request has left the kernel, so "nothing left" (`Transport` →
+    /// `Failed`) would be a false record. The budget's own refusal passes
+    /// through — it already means delivery-unknown.
+    fn after_send(e: EgressFailure) -> EgressFailure {
+        match e {
+            EgressFailure::Transport(m) => EgressFailure::AfterSend(m),
+            other => other,
+        }
+    }
+
     /// What is left of the wall-clock budget, as the next socket timeout —
     /// a refusal once it is spent. (`None` would tell the socket to block
     /// forever and a zero timeout is refused by the platform; neither can
@@ -244,12 +255,19 @@ impl Egress for SocketEgress {
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
-        Self::write_all_by(&mut s, &(buf.len() as u32).to_be_bytes(), deadline_at)?;
-        Self::write_all_by(&mut s, &buf, deadline_at)?;
-        s.flush().map_err(Self::transport)?;
+        // FROM HERE ON the request is leaving: every failure below is
+        // `AfterSend`, recorded as delivery-unknown (codex on #240 — the
+        // deputy closes the connection when its provider call fails or times
+        // out, and the provider may already have the prompt).
+        Self::write_all_by(&mut s, &(buf.len() as u32).to_be_bytes(), deadline_at)
+            .map_err(Self::after_send)?;
+        Self::write_all_by(&mut s, &buf, deadline_at).map_err(Self::after_send)?;
+        s.flush()
+            .map_err(Self::transport)
+            .map_err(Self::after_send)?;
 
         let mut len = [0u8; 4];
-        Self::read_exact_by(&mut s, &mut len, deadline_at)?;
+        Self::read_exact_by(&mut s, &mut len, deadline_at).map_err(Self::after_send)?;
         let n = u32::from_be_bytes(len) as usize;
         // BEFORE the allocation. The deputy is authenticated but untrusted (see
         // this module's header), so a four-byte length prefix must not be able
@@ -264,7 +282,7 @@ impl Egress for SocketEgress {
         // zeroized 4 GiB, timing the mutation lane out instead of failing an
         // assertion. Do not inline it back.
         if !crate::egress::frame_len_within_cap(n, self.max_frame_bytes) {
-            return Err(EgressFailure::Transport(format!(
+            return Err(EgressFailure::AfterSend(format!(
                 "deputy declared a {n}-byte reply frame over the {}-byte cap",
                 self.max_frame_bytes
             )));
@@ -276,8 +294,10 @@ impl Egress for SocketEgress {
         // decode drops this buffer just the same. Matches
         // `maknae_proto::read_frame_zeroizing`.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
-        Self::read_exact_by(&mut s, &mut body, deadline_at)?;
-        let reply = decode_egress_frame_reply(&body).map_err(Self::transport)?;
+        Self::read_exact_by(&mut s, &mut body, deadline_at).map_err(Self::after_send)?;
+        let reply = decode_egress_frame_reply(&body)
+            .map_err(Self::transport)
+            .map_err(Self::after_send)?;
         Ok(EgressReply { reply: reply.reply })
     }
 }
@@ -568,7 +588,7 @@ mod tests {
     /// failure, never a silent empty success. The kernel does not trust the
     /// process on the other end of the socket.
     #[test]
-    fn a_deputy_that_answers_with_garbage_is_a_transport_failure() {
+    fn a_deputy_that_answers_with_garbage_is_a_post_send_failure_outcome_unknown() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
@@ -590,14 +610,14 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
-            Err(EgressFailure::Transport(_))
+            Err(EgressFailure::AfterSend(_))
         ));
     }
 
     /// A deputy that hangs up before answering is a transport failure too —
     /// the content left, and the kernel must not invent a reply.
     #[test]
-    fn a_deputy_that_hangs_up_is_a_transport_failure() {
+    fn a_deputy_that_hangs_up_is_a_post_send_failure_outcome_unknown() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
@@ -613,7 +633,7 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
-            Err(EgressFailure::Transport(_))
+            Err(EgressFailure::AfterSend(_))
         ));
     }
 
@@ -657,10 +677,10 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let out = e.send(&intent, req());
         match out {
-            Err(EgressFailure::Transport(m)) => {
-                // The CAP message specifically, not merely any transport
+            Err(EgressFailure::AfterSend(m)) => {
+                // The CAP message specifically, not merely any post-send
                 // failure: a kernel that allocated first and then hit EOF also
-                // returns Transport, and that is exactly the defect.
+                // returns AfterSend, and that is exactly the defect.
                 assert!(
                     m.contains("over the") && m.contains("cap"),
                     "expected the frame-cap refusal, got: {m}"
@@ -713,7 +733,7 @@ mod tests {
             cap,
         );
         match e1.send(&crate::egress::DurableEgressIntent::canned_for_test(), req()) {
-            Err(EgressFailure::Transport(m)) => assert!(
+            Err(EgressFailure::AfterSend(m)) => assert!(
                 !m.contains("over the"),
                 "a frame EXACTLY at the cap was refused as over-cap — the check is `>=`, not `>`: {m}"
             ),
@@ -732,7 +752,7 @@ mod tests {
             &crate::egress::DurableEgressIntent::canned_for_test(),
             req(),
         ) {
-            Err(EgressFailure::Transport(m)) => assert!(
+            Err(EgressFailure::AfterSend(m)) => assert!(
                 m.contains("over the"),
                 "a frame one byte over the cap was NOT refused as over-cap: {m}"
             ),

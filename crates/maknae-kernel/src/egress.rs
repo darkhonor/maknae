@@ -34,9 +34,12 @@ pub struct EgressReply {
     pub reply: PromptReply,
 }
 
-/// Why a backend did not send. Deadline expiry is NOT a variant: the kernel
-/// bounds the call and maps expiry to [`SendOutcome::DeadlineExpired`]
-/// (delivery unknown); [`SendOutcome::LandedUndelivered`] is the kernel's own
+/// Why a send did not complete — and, the part the trail depends on, WHEN.
+/// `Transport` is a failure BEFORE the request left (nothing sent);
+/// `AfterSend` is a failure after it left, so delivery is unknown;
+/// `DeadlineExpired` is the backend's own budget running out after the
+/// request left (the kernel's outer timeout maps to the same outcome).
+/// [`SendOutcome::LandedUndelivered`] is the kernel's own
 /// refusal to deliver a reply that DID arrive, for one of [`ReplyRefusal`]'s
 /// reasons (over the cap, non-text, empty).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +53,13 @@ pub enum EgressFailure {
     /// the egress breaker counts it as an expiry, not a success (codex on
     /// #240: the inner budget usually fires first).
     DeadlineExpired,
+    /// The request was written to the deputy and something failed AFTER
+    /// that: the deputy closed the connection (its provider call failed or
+    /// timed out — the provider may have received the prompt), the reply was
+    /// malformed, or its frame was over the cap. Recorded as
+    /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
+    /// be a false statement about content that did (codex on #240).
+    AfterSend(String),
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -306,6 +316,9 @@ pub enum SendOutcome {
     },
     Failed,
     DeadlineExpired,
+    /// The request left and the exchange failed afterwards, short of the
+    /// deadline: delivery to the provider is unknown (`EgressFailure::AfterSend`).
+    OutcomeUnknown,
     LandedUndelivered {
         reply_length: u64,
         refusal: ReplyRefusal,
@@ -313,8 +326,9 @@ pub enum SendOutcome {
 }
 
 /// The outcome record derived from the intent: same identity, new seq and ts,
-/// `result`/`reason`/`posture` per outcome. A send that did NOT go out
-/// (`Failed`, `DeadlineExpired`) is a `deny`, never a `permit` that reads
+/// `result`/`reason`/`posture` per outcome. A send that did NOT go out, or
+/// whose delivery is unknown (`Failed`, `DeadlineExpired`, `OutcomeUnknown`),
+/// is a `deny`, never a `permit` that reads
 /// "send failed"; a reply the kernel refused to deliver (`LandedUndelivered`)
 /// stays `permit`, because the content DID leave and the trail must say so
 /// (the `refused-oversize` pairing of `read_refusal_disposition`). Every
@@ -350,6 +364,13 @@ pub fn outcome_for(
             None,
             "deny",
             "send deadline expired",
+            "unavailable",
+        ),
+        SendOutcome::OutcomeUnknown => (
+            EgressStatus::OutcomeUnknown,
+            None,
+            "deny",
+            "send outcome unknown",
             "unavailable",
         ),
         // `permit` + `refused-oversize`: the pairing ADR-0019 pins for a permit
@@ -877,10 +898,9 @@ mod tests {
         }
         let mine = production_egress_with(Some(&p), &cfg, |_| Ok(Some(me))).unwrap();
         let e = mine.send(&intent, req()).unwrap_err();
-        assert_ne!(
-            e,
-            EgressFailure::Transport("egress peer is not the expected uid".into()),
-            "the resolved uid did not reach the backend"
+        assert!(
+            matches!(e, EgressFailure::AfterSend(_)),
+            "the resolved uid did not reach the backend, or a post-send failure was not classed as one: {e:?}"
         );
     }
 
@@ -1184,6 +1204,14 @@ mod tests {
                 EgressStatus::DeadlineExpired,
                 "deny",
                 "send deadline expired",
+                "unavailable",
+                None,
+            ),
+            (
+                SendOutcome::OutcomeUnknown,
+                EgressStatus::OutcomeUnknown,
+                "deny",
+                "send outcome unknown",
                 "unavailable",
                 None,
             ),

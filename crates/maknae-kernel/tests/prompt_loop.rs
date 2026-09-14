@@ -21,6 +21,8 @@ pub struct Recording {
     /// #240: the backend reports its OWN deadline expiry (the socket's
     /// wall-clock budget), after the request left.
     pub fail_deadline: bool,
+    /// #240: the backend reports a failure AFTER the request left.
+    pub fail_after_send: bool,
     pub sleep: Option<Duration>,
     /// #240: the backend states its own outer deadline; `None` is a
     /// generous default so only the deadline test sets one.
@@ -69,6 +71,11 @@ impl maknae_kernel::Egress for Recording {
         }
         if self.fail_deadline {
             return Err(maknae_kernel::EgressFailure::DeadlineExpired);
+        }
+        if self.fail_after_send {
+            return Err(maknae_kernel::EgressFailure::AfterSend(
+                "deputy hung up".into(),
+            ));
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
@@ -544,6 +551,41 @@ async fn a_backend_reported_deadline_is_deadline_expired_delivery_unknown_too() 
             outcome.outcome.reason.as_str()
         ),
         ("deny", "send deadline expired")
+    );
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
+}
+
+/// #240 (codex): a failure AFTER the request left the kernel — the deputy
+/// hung up because its provider call failed or timed out, or answered with
+/// garbage — is `OutcomeUnknown`, never `Failed`: the provider may have the
+/// prompt, and "nothing left" would be a false record.
+#[tokio::test]
+async fn a_failure_after_the_request_left_is_outcome_unknown_never_failed() {
+    let fx = Fixture::with_policy("prompt-after-send", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        fail_after_send: true,
+        ..Default::default()
+    });
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let outcome = last_prompt_record(&records);
+    assert_eq!(outcome.egress.unwrap().status, EgressStatus::OutcomeUnknown);
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str(),
+            outcome.outcome.posture.as_str()
+        ),
+        ("deny", "send outcome unknown", "unavailable")
     );
     assert_eq!(eg.calls(), vec!["ready", "send"]);
 }

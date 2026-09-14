@@ -1501,7 +1501,13 @@ pub async fn handle<S, E, P>(
                 Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
                     (crate::egress::SendOutcome::DeadlineExpired, None)
                 }
-                // The backend reported failure: nothing left.
+                // The request was written and the exchange failed after it:
+                // the deputy hung up or answered with something unusable.
+                // Delivery unknown — the provider may have the prompt.
+                Ok(Ok(Err(crate::egress::EgressFailure::AfterSend(_)))) => {
+                    (crate::egress::SendOutcome::OutcomeUnknown, None)
+                }
+                // The backend reported failure BEFORE the request left: nothing left.
                 Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
