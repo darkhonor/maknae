@@ -86,8 +86,7 @@ pub const PLANE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// itself under `PLANE_HTTP_TIMEOUT`. Named because the kernel's shutdown
 /// chain carries it and the shipped units' stop timeouts are held to that
 /// chain (#240, review round 4).
-pub const PLANE_SHUTDOWN_BOUND: std::time::Duration =
-    std::time::Duration::from_secs(PLANE_HTTP_TIMEOUT.as_secs() * 2);
+pub const PLANE_SHUTDOWN_BOUND: std::time::Duration = PLANE_HTTP_TIMEOUT.saturating_mul(2);
 
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {

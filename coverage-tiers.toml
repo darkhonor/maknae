@@ -580,10 +580,11 @@ anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
 why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds body by transport.frame_max_bytes (<=1 MiB, config.rs range-enforced), never by this defensive cap. The Io error paths on the same function (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
 
-# #240: the egress socket's read budget (egress_socket.rs). Four arms that are
-# errno passthroughs with no decision, or an EINTR retry that needs a signal to
-# land mid-syscall; the decisions around them (a spent budget, a poll timeout, a
-# peer closing mid-frame) are each provoked for real by the module's tests.
+# #240: the egress socket's budget, both legs (egress_socket.rs). Six arms that
+# are errno passthroughs with no decision, or a retry that needs a signal or a
+# transient EAGAIN mid-loop; the decisions around them (a spent budget, a poll
+# timeout, a peer closing mid-frame, a dribbling peer on either leg) are each
+# provoked for real by the module's tests.
 [[exception]]
 path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "Err(nix::errno::Errno::EINTR) => continue,"

@@ -113,6 +113,26 @@ mod tests {
     /// even in principle. (Redirects are also disabled outright; that half is
     /// asserted by construction — `Policy::none()` — since proving it needs a
     /// TLS server, and reqwest exposes no getter.)
+    /// The four hardening calls, pinned at the source: this file is T3 and
+    /// mutation-excluded, so nothing else holds `tls_certs_only` (once
+    /// `tls_certs_merge`, the regression the comment above records),
+    /// `redirect(none)`, `https_only(true)` and `no_proxy()` in place on the
+    /// leg that carries the AppRole SecretID. Patterns composed at runtime so
+    /// this test does not match itself.
+    #[test]
+    fn the_four_hardening_calls_are_present_and_the_merge_is_not() {
+        let src = include_str!("http.rs");
+        for call in [
+            format!(".{}(certs)", "tls_certs_only"),
+            format!(".{}(reqwest::redirect::Policy::none())", "redirect"),
+            format!(".{}(true)", "https_only"),
+            format!(".{}()", "no_proxy"),
+        ] {
+            assert!(src.contains(&call), "hardening call missing: {call}");
+        }
+        assert!(!src.contains(&format!(".{}(", "tls_certs_merge")));
+    }
+
     #[test]
     fn a_plaintext_url_is_refused_by_the_client_itself() {
         crate::install_default_crypto_provider();

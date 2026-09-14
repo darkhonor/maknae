@@ -221,7 +221,13 @@ mod tests {
                 "key_vault_path",
                 EgressFrameRequest {
                     key_vault_path: String::new(),
-                    key_field: "api-key".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "key_field",
+                EgressFrameRequest {
+                    key_field: String::new(),
                     ..base.clone()
                 },
             ),

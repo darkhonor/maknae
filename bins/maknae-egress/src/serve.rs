@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn a_key_path_outside_bounds_is_refused() {
         let me = nix::unistd::getuid().as_raw();
-        let f = frame("secret/data/maknae/providers-evil/key");
+        let f = frame("maknae/providers-evil/key");
         let mut bytes = (f.len() as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(&f);
         assert_eq!(

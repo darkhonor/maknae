@@ -144,6 +144,8 @@ pub const EGRESS_USER: &str = "_maknae-egress";
 /// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
 /// delivered reply is bounded again by `transport.frame_max_bytes`.
 pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
+// (The REQUEST cap below is `maknae-proto`'s, shared with the deputy; this
+// reply cap is the kernel's own and is pinned by value in the tests.)
 
 /// The largest request frame the kernel will WRITE to the deputy — the
 /// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte

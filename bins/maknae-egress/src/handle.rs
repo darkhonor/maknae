@@ -22,6 +22,11 @@ pub enum Refusal {
     /// Vault policy is the real bound; this turns a kernel BUG into a named
     /// refusal instead of a confusing Vault 403.
     KeyPathOutsideBounds,
+    /// The frame's Vault path is not a well-formed KV fragment — a `.` or `..`
+    /// segment, whitespace, an empty segment. The prefix test alone accepts
+    /// `<prefix>/../../x` (review round 5); the kernel's config path refuses
+    /// it, and this is the same predicate, so a kernel bug is named here too.
+    KeyPathMalformed,
     /// Shape admission failed — an empty field, an over-long conversation.
     MalformedFrame,
 }
@@ -56,6 +61,9 @@ pub fn decide<'a>(
 ) -> Result<Admitted<'a>, Refusal> {
     if !maknae_proto::egress_frame_request_is_acceptable(req) {
         return Err(Refusal::MalformedFrame);
+    }
+    if maknae_config::kv_fragment_is_acceptable(&req.key_vault_path).is_err() {
+        return Err(Refusal::KeyPathMalformed);
     }
     if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
@@ -100,13 +108,29 @@ mod tests {
     /// merely begins with the prefix is refused BY NAME.
     #[test]
     fn a_key_path_outside_the_prefix_is_refused_by_name() {
-        for bad in [
-            "secret/data/maknae/providers-evil/key",
-            "secret/data/other/key",
-        ] {
+        // well-formed fragments (the malformed ones are refused by name
+        // first, in their own test) that merely begin with, or miss, the prefix
+        for bad in ["maknae/providers-evil/key", "other/key"] {
             assert_eq!(
                 decide(&req(bad), &bounds()).unwrap_err(),
                 Refusal::KeyPathOutsideBounds
+            );
+        }
+    }
+
+    /// A dot-segment under the prefix passes the prefix test and would reach
+    /// Vault as `<prefix>/../../x`; it is refused by name first.
+    #[test]
+    fn a_dot_segment_under_the_prefix_is_refused_as_malformed_not_admitted() {
+        for bad in [
+            "maknae/providers/../../secret",
+            "maknae/providers/./x",
+            "maknae/providers//x",
+        ] {
+            assert_eq!(
+                decide(&req(bad), &bounds()).map(|_| ()),
+                Err(Refusal::KeyPathMalformed),
+                "{bad}"
             );
         }
     }

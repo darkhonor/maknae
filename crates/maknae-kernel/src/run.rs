@@ -157,28 +157,42 @@ const ATCAP_AUDIT_QUEUE_DEPTH: usize = 256;
 /// aborted so shutdown can proceed; the normal (fast) case still drains fully.
 const AUDIT_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on draining IN-FLIGHT connection handlers at the end of the accept loop.
-/// Same class as `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`: each handler performs audit appends
-/// (`spawn_blocking` write+fsync under the hood), so a wedged audit filesystem can
-/// block a handler indefinitely — an unbounded `join_next()` drain would then hang
-/// shutdown BEFORE the at-capacity drain bound is even reached. Sized above the
-/// per-connection work bounds (handshake_timeout + read_timeout + response write
-/// bound, each ≤ 60s only in pathological configs; defaults total ≤ ~15s) — and,
-/// since #240, ADDED to the egress backend's deadline by `handler_drain_bound`,
-/// because a permitted prompt's handler holds for the provider call as well.
+/// The MARGIN on draining IN-FLIGHT connection handlers at the end of the accept
+/// loop, on top of the per-connection bounds `handler_drain_bound` adds up
+/// explicitly. Same class as `AUDIT_DRAIN_SHUTDOWN_TIMEOUT`: each handler performs
+/// audit appends (`spawn_blocking` write+fsync under the hood), so a wedged audit
+/// filesystem can block a handler indefinitely — an unbounded `join_next()` drain
+/// would then hang shutdown BEFORE the at-capacity drain bound is even reached.
+/// (Corrected 2026-09-15, review round 5: this constant used to BE the whole
+/// drain bound, with a comment that said the per-connection work "totals ≤ ~15s"
+/// — it is 26 s at the defaults and 191 s at the transport ceiling, and the
+/// handshake runs inside the handler. Those terms are now named below.)
 const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The bound actually used for that drain: the constant above PLUS the egress
-/// backend's own deadline (#240). A permitted `session.prompt` holds its
-/// handler for up to `egress.deadline_ms` (280 s by default, 600 s at most)
-/// while the provider answers, so a 10 s drain would abort a handler mid-call
-/// on every restart that races a prompt — content left, `IntentOnly` in the
-/// trail, no outcome record. With no provider the backend is `Unavailable`
-/// and its deadline is zero, so this is the old bound unchanged. The units
-/// give the supervisor the matching patience (`TimeoutStopSec=`, launchd's
-/// `ExitTimeOut`).
-fn handler_drain_bound(egress_deadline: Duration) -> Duration {
-    HANDLER_DRAIN_SHUTDOWN_TIMEOUT + egress_deadline
+/// The bound actually used for that drain: every per-connection bound the
+/// transport configuration sets, the egress backend's own deadline (#240 — a
+/// permitted `session.prompt` holds its handler for up to `egress.deadline_ms`,
+/// 280 s by default and 600 s at most, while the provider answers; with no
+/// provider the backend is `Unavailable` and its deadline is zero), and the
+/// margin above. A drain shorter than this aborts a handler mid-work on a
+/// restart that races it — for a prompt: content left, `IntentOnly` in the
+/// trail, no outcome record. The units give the supervisor the matching
+/// patience (`TimeoutStopSec=`, launchd's `ExitTimeOut`), held to this sum at
+/// both ceilings by a test.
+fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
+    // One connection's bounded work, in the order the handler performs it:
+    // the mTLS handshake (inside the handler, not on the loop), the peer's
+    // group lookup, the frame read, the PDP decision, the provider call, the
+    // response write (bounded by the read timeout), the close — then the
+    // margin for the audit appends.
+    Duration::from_millis(cfg.handshake_timeout_ms)
+        + GROUP_LOOKUP_TIMEOUT
+        + Duration::from_millis(cfg.read_timeout_ms)
+        + crate::handler::AUTHZ_DECIDE_TIMEOUT
+        + egress_deadline
+        + Duration::from_millis(cfg.read_timeout_ms)
+        + STREAM_CLOSE_TIMEOUT
+        + HANDLER_DRAIN_SHUTDOWN_TIMEOUT
 }
 
 /// Bound on the final TLS close (`AsyncWriteExt::shutdown` → close_notify write) of a
@@ -2498,7 +2512,7 @@ where
     // than dropping them mid-flight. BOUNDED (same class as the audit drain below): a
     // handler stuck in a wedged audit append would otherwise hang shutdown here before
     // the at-capacity drain bound is even reached.
-    let handler_drain = handler_drain_bound(egress.deadline());
+    let handler_drain = handler_drain_bound(&cfg, egress.deadline());
     if drain_handlers_bounded(&mut handlers, handler_drain).await == DrainOutcome::Aborted {
         eprintln!(
             "maknaed: in-flight handler drain did not complete within {}s during shutdown; aborting remaining handlers to allow exit",
@@ -3419,13 +3433,16 @@ mod tests {
     /// `Unavailable` backend's zero deadline) the bound is the old one.
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
+        // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
+        // + 0 + 5 + 1 + 10 = 36 s with no provider, plus the deadline with one
+        let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
-            handler_drain_bound(Duration::ZERO),
-            HANDLER_DRAIN_SHUTDOWN_TIMEOUT
+            handler_drain_bound(&cfg, Duration::ZERO),
+            Duration::from_secs(36)
         );
         assert_eq!(
-            handler_drain_bound(Duration::from_secs(120)),
-            HANDLER_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_secs(120)
+            handler_drain_bound(&cfg, Duration::from_secs(120)),
+            Duration::from_secs(156)
         );
     }
 
@@ -3447,8 +3464,19 @@ mod tests {
     /// the chain is as red as one below it.
     #[test]
     fn the_units_stop_timeouts_cover_the_shutdown_chain_at_the_deadline_ceiling() {
+        // BOTH ceilings: the transport timeouts at their maximum and the
+        // egress deadline at its maximum — the configuration the units must
+        // survive, not the defaults (review round 5).
+        let ceiling = maknae_config::TransportConfig {
+            handshake_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+            read_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+            ..maknae_config::transport_from_section(None).unwrap()
+        };
         let chain = SUPERVISOR_ABORT_REAP_TIMEOUT
-            + handler_drain_bound(Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX))
+            + handler_drain_bound(
+                &ceiling,
+                Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
+            )
             + DRAIN_ABORT_REAP_TIMEOUT
             + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
             + maknae_vault::PLANE_SHUTDOWN_BOUND

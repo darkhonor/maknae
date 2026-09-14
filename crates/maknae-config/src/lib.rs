@@ -81,7 +81,9 @@ pub use provider::{
     provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_PROVIDER_NAME_BYTES,
     PROVIDER_SECTION,
 };
-pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
+pub use transport::{
+    transport_from_section, TransportConfig, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+};
 pub use value::Value;
 
 use builder::Builder;

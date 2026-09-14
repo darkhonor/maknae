@@ -23,15 +23,19 @@ ExecStart=/usr/bin/maknaed
 # (600 s at the configured ceiling) while the provider answers, and the shutdown
 # drain waits that long plus 10 s to write the outcome record rather than abort
 # a call whose content already left. systemd's default 90 s would SIGKILL that
-# wait. The chain at the ceiling, walked in execution order: the credential
-# supervisor's abort and reap 1 s + the handler drain 610 s + the reap of what
-# it aborts 1 s + the audit drain 5 s + the plane client's shutdown 60 s (a
-# lock wait bounded at 30 s — the supervisor is aborted first, so it is free
-# in practice — then revoke-self under the same 30 s) + runtime teardown 3 s
-# = 680 s. A SIGKILL inside that revoke leaves a live token until its TTL.
-# Held to the chain, two-sided within 10 s, by a kernel test that reads this
-# line (run.rs: the_units_stop_timeouts_cover_the_shutdown_chain_...).
-TimeoutStopSec=690
+# wait. The chain at BOTH ceilings (transport timeouts 60 s, egress deadline
+# 600 s), walked in execution order: the credential supervisor's abort and reap
+# 1 s + the handler drain 801 s (handshake 60 + group lookup 5 + frame read 60
+# + PDP decision 5 + provider call 600 + response write 60 + close 1 + a 10 s
+# margin for the audit appends) + the reap of what it aborts 1 s + the audit
+# drain 5 s + the plane client's shutdown 60 s (a lock wait bounded at 30 s —
+# the supervisor is aborted first, so it is free in practice — then revoke-self
+# under the same 30 s) + runtime teardown 3 s = 871 s. A SIGKILL inside that
+# revoke leaves a live token until its TTL. At the DEFAULTS the same chain is
+# 1 + 316 + 1 + 5 + 60 + 3 = 386 s, and a stop with nothing in flight exits in
+# milliseconds. Held to the chain, two-sided within 10 s, by a kernel test that
+# reads this line (run.rs: the_units_stop_timeouts_cover_the_shutdown_chain_...).
+TimeoutStopSec=880
 # systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
 # (0400, _maknae-only, memory-backed). Name pinned: enroll seals
 # --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.

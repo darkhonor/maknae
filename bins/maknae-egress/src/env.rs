@@ -94,6 +94,60 @@ mod tests {
         assert!(!SCRUBBED_ENV.contains(&"CREDENTIALS_DIRECTORY"));
     }
 
+    /// The deputy's unit carries EVERY hardening line maknaed's unit carries
+    /// (ProtectHome differs by design: `yes` here, `read-only` there), and
+    /// NEITHER carries the two directives maknaed's unit records as a
+    /// measured SIGSYS crash-loop for aws-lc-fips — the module both binaries
+    /// install at start. Review round 5 found this unit with
+    /// MemoryDenyWriteExecute=yes and five of maknaed's lines missing.
+    #[test]
+    fn the_units_confinement_is_maknaeds_and_never_the_two_fips_incompatible_directives() {
+        let deputy = include_str!("../../../packaging/common/maknae-egress.service");
+        let daemon = include_str!("../../../packaging/common/maknaed.service");
+        for unit in [deputy, daemon] {
+            assert!(
+                !unit
+                    .lines()
+                    .any(|l| l.starts_with("MemoryDenyWriteExecute=")),
+                "MemoryDenyWriteExecute= crash-loops aws-lc-fips (measured)"
+            );
+            assert!(
+                !unit.lines().any(|l| l.starts_with("SystemCallFilter=~")),
+                "a subtractive SystemCallFilter crash-loops aws-lc-fips (measured)"
+            );
+        }
+        const HARDENING: &[&str] = &[
+            "ProtectSystem=",
+            "NoNewPrivileges=",
+            "CapabilityBoundingSet=",
+            "PrivateTmp=",
+            "PrivateDevices=",
+            "ProtectKernelTunables=",
+            "ProtectKernelModules=",
+            "ProtectKernelLogs=",
+            "ProtectControlGroups=",
+            "ProtectClock=",
+            "ProtectHostname=",
+            "RestrictNamespaces=",
+            "RestrictRealtime=",
+            "RestrictSUIDSGID=",
+            "LockPersonality=",
+            "SystemCallFilter=",
+            "SystemCallArchitectures=",
+        ];
+        let daemon_lines: Vec<&str> = daemon
+            .lines()
+            .filter(|l| HARDENING.iter().any(|p| l.starts_with(p)))
+            .collect();
+        assert!(daemon_lines.len() >= HARDENING.len(), "{daemon_lines:?}");
+        for line in daemon_lines {
+            assert!(
+                deputy.lines().any(|l| l == line),
+                "maknaed.service's `{line}` is missing from maknae-egress.service"
+            );
+        }
+    }
+
     /// The unit's `UnsetEnvironment=` is the SAME list — read from the shipped
     /// unit, so adding a name to one half and not the other goes red here.
     #[test]

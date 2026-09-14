@@ -30,13 +30,21 @@ UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_prox
 # still-listening activation socket with it, and at 0750 under this User= the
 # daemon could not traverse it (codex and critical review of #240).
 
-# STRICTLY MORE CONFINED THAN maknaed, deliberately (#240a §5). The deputy
-# holds a credential and a route out and nothing else: it reads no user files,
-# writes no audit (the kernel does), and parses no policy.
+# maknaed's confinement, plus three tightenings and nothing looser (#240a §5;
+# corrected 2026-09-15 in review round 5: this said "strictly more confined"
+# while carrying NONE of maknaed's ProtectHostname/RestrictNamespaces/
+# RestrictRealtime/SystemCallFilter/SystemCallArchitectures — and DID carry
+# MemoryDenyWriteExecute=, which maknaed records as a measured SIGSYS crash-loop
+# for aws-lc-fips; the deputy installs that same FIPS provider since #240b).
+# A test in src/env.rs holds every hardening line maknaed's unit carries to
+# this one, and refuses the two FIPS-incompatible directives in both. The
+# deputy holds a credential and a route out and nothing else: it reads no
+# user files, writes no audit (the kernel does), and parses no policy.
 #   ProtectHome=yes    — not `read-only`: unlike maknaed (#77's read path) the
 #                        deputy has no business in any home directory at all.
 #   no ReadWritePaths  — maknaed needs /var/log/maknae for the audit sink; the
 #                        deputy writes nothing to disk.
+#   RestrictAddressFamilies — below; maknaed does not restrict families.
 ProtectHome=yes
 ProtectSystem=strict
 NoNewPrivileges=yes
@@ -49,9 +57,19 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+# MemoryDenyWriteExecute= and SystemCallFilter=~@privileged @resources are
+# DELIBERATELY OMITTED, as in maknaed.service: measured there on Rocky 10 /
+# systemd 257 (2026-08-17), aws-lc-fips needs W^X memory and @resources
+# syscalls for its power-on integrity self-test and either directive raises
+# SIGSYS. The deputy is built on the same module and installs it at start;
+# #242's enforcing-host run is where this unit is first observed live.
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
 # #240b: the only process with a route out gets exactly the families its two
 # legs use — the activation socket and TCP to Vault and the provider.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
