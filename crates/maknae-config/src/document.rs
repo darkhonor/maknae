@@ -1019,6 +1019,10 @@ mod tests {
         assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
+        // #240: the egress fold is asserted, not just passed — deleting the
+        // merge passed every other test and the disclosure gate.
+        assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
+        assert_eq!(v["egress"]["deadline_ms"], "190000");
     }
 
     /// A suppressed path stays suppressed on the RESOLVED lane too. Without

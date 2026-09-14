@@ -13,6 +13,12 @@ User=_maknae
 # Superseded by systemd socket activation, #92.
 SupplementaryGroups=maknae
 ExecStart=/usr/bin/maknaed
+# #240: a permitted session.prompt holds its handler for up to egress.deadline_ms
+# (600 s at the configured ceiling) while the provider answers, and the shutdown
+# drain waits that long plus 10 s to write the outcome record rather than abort
+# a call whose content already left. systemd's default 90 s would SIGKILL that
+# wait. Covers the ceiling plus the audit and runtime drains (5 s + 3 s).
+TimeoutStopSec=630
 # systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
 # (0400, _maknae-only, memory-backed). Name pinned: enroll seals
 # --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.

@@ -184,16 +184,20 @@ pub fn production_egress_with(
     )))
 }
 
+/// The real resolver over NSS: the account's uid, `None` when no such
+/// account exists, and the library's error text when NSS itself fails.
+pub(crate) fn resolve_account_uid(name: &str) -> Result<Option<u32>, String> {
+    nix::unistd::User::from_name(name)
+        .map(|u| u.map(|u| u.uid.as_raw()))
+        .map_err(|e| e.to_string())
+}
+
 /// The one production choice, in one place: the real resolver over NSS.
 pub fn production_egress(
     provider: Option<&maknae_config::ProviderConfig>,
     cfg: &maknae_config::EgressConfig,
 ) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
-    production_egress_with(provider, cfg, |name| {
-        nix::unistd::User::from_name(name)
-            .map(|u| u.map(|u| u.uid.as_raw()))
-            .map_err(|e| e.to_string())
-    })
+    production_egress_with(provider, cfg, resolve_account_uid)
 }
 
 /// Text only in Cooky (#153, #229). Names the FIRST non-text kind; an empty
@@ -833,8 +837,38 @@ mod tests {
         .unwrap();
         assert_eq!(b.ready(), Err(EgressFailure::NotConfigured));
         assert_eq!(b.deadline(), std::time::Duration::from_millis(7_000));
-        let _l = std::os::unix::net::UnixListener::bind(&cfg.socket_path).unwrap();
+        let l = std::os::unix::net::UnixListener::bind(&cfg.socket_path).unwrap();
         assert_eq!(b.ready(), Ok(()));
+        // and the RESOLVED uid is the one the backend checks the listener
+        // against: a listener under this test's uid refuses the 4242 backend
+        // by identity, and a backend resolved to this uid gets past the check
+        // (to fail on the closed connection instead). A mutant handing the
+        // backend 0 — root, which the listener check accepts — fails here.
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                if let Ok((c, _)) = l.accept() {
+                    drop(c);
+                }
+            }
+        });
+        let intent = DurableEgressIntent {
+            record: intent_record(),
+        };
+        let me = nix::unistd::getuid().as_raw();
+        if me != 0 {
+            let e = b.send(&intent, req()).unwrap_err();
+            assert_eq!(
+                e,
+                EgressFailure::Transport("egress peer is not the expected uid".into())
+            );
+        }
+        let mine = production_egress_with(Some(&p), &cfg, |_| Ok(Some(me))).unwrap();
+        let e = mine.send(&intent, req()).unwrap_err();
+        assert_ne!(
+            e,
+            EgressFailure::Transport("egress peer is not the expected uid".into()),
+            "the resolved uid did not reach the backend"
+        );
     }
 
     /// Both refusals render by name — the account, and the resolver's reason.
@@ -846,6 +880,44 @@ mod tests {
         assert!(m.contains("nss down"), "{m}");
     }
 
+    /// The real resolver, over NSS, with values this host actually has: the
+    /// running account resolves to the running uid, and a name no host has
+    /// resolves to `None` — the arm `production_egress` refuses on by name.
+    /// Then the production entry point itself: on a host without the deputy's
+    /// account the refusal names it; on a packaged host it is the socket
+    /// backend under that account, with the configured deadline.
+    #[test]
+    fn the_account_resolver_finds_the_running_account_and_not_an_invented_one() {
+        let me = nix::unistd::getuid();
+        let name = nix::unistd::User::from_uid(me).unwrap().unwrap().name;
+        assert_eq!(resolve_account_uid(&name), Ok(Some(me.as_raw())));
+        assert_eq!(
+            resolve_account_uid("no-such-account-maknae-240-test"),
+            Ok(None)
+        );
+        let p = provider();
+        let cfg = maknae_config::EgressConfig::default();
+        match production_egress(Some(&p), &cfg) {
+            Err(EgressBootRefusal::NoSuchAccount(n)) => {
+                assert_eq!(n, EGRESS_USER);
+                assert_eq!(resolve_account_uid(EGRESS_USER), Ok(None));
+            }
+            Ok(b) => {
+                assert!(resolve_account_uid(EGRESS_USER).unwrap().is_some());
+                assert_eq!(
+                    b.deadline(),
+                    std::time::Duration::from_millis(cfg.deadline_ms)
+                );
+            }
+            Err(EgressBootRefusal::Resolve(m)) => panic!("NSS is expected to answer here: {m}"),
+        }
+        // and no provider never resolves, through the real entry point too
+        assert_eq!(
+            production_egress(None, &cfg).unwrap().ready(),
+            Err(EgressFailure::NotConfigured)
+        );
+    }
+
     #[test]
     fn unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends() {
         assert_eq!(Unavailable.ready(), Err(EgressFailure::NotConfigured));
@@ -853,6 +925,9 @@ mod tests {
             unavailable_egress().ready(),
             Err(EgressFailure::NotConfigured)
         );
+        // never consulted, and zero so nothing could wait on it if it were
+        assert_eq!(Unavailable.deadline(), std::time::Duration::ZERO);
+        assert_eq!(unavailable_egress().deadline(), std::time::Duration::ZERO);
         // same module: the private constructor is reachable here only
         let i = DurableEgressIntent {
             record: intent_record(),
@@ -1134,6 +1209,17 @@ mod tests {
                 "reply refused: empty",
                 "unauthorized",
                 Some(0),
+            ),
+            (
+                SendOutcome::LandedUndelivered {
+                    reply_length: 3,
+                    refusal: ReplyRefusal::ToolCallUnacceptable,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: tool call",
+                "unauthorized",
+                Some(3),
             ),
         ] {
             let o = outcome_for(&i, 9, "2026-09-08T00:00:00Z".into(), outcome);

@@ -58,7 +58,7 @@ pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
-pub use peer_identity::{creds_match_uid, peer_uid_is};
+pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use secret_source::{

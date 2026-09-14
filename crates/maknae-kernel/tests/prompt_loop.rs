@@ -434,6 +434,37 @@ async fn a_failed_send_is_an_outcome_deny_after_a_real_intent() {
     assert_eq!(eg.calls(), vec!["ready", "send"]);
 }
 
+/// #240 (critical review): the egress breaker's OTHER half. Admission takes
+/// an in-flight slot on every send; a send that returns must give it back,
+/// or the daemon refuses every prompt after its first thirty-two — for the
+/// rest of its life, with no diagnostic. One more sequential send than the
+/// cap, through the real handler: every one must reach the backend.
+#[tokio::test]
+async fn every_returned_send_releases_its_breaker_slot_so_sequential_sends_never_hit_the_cap() {
+    // its own fixture name: the directory is keyed by name and pid, and a
+    // sibling test's Drop would remove a shared one mid-loop
+    let fx = Fixture::with_policy("prompt-breaker", "Read", GRANTED);
+    let eg = Arc::new(Recording::default());
+    let n = usize::from(maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT) + 1;
+    for i in 0..n {
+        let records = Records::new(0);
+        let resp = fx
+            .roundtrip(
+                prompt("hello world"),
+                Arc::clone(&records),
+                Some("openai"),
+                eg.clone(),
+            )
+            .await
+            .expect("a reply frame");
+        assert!(
+            matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
+            "send {i} of {n}: {resp:?}"
+        );
+    }
+    assert_eq!(eg.seen().len(), n);
+}
+
 #[tokio::test]
 async fn a_send_past_the_egress_deadline_is_deadline_expired_delivery_unknown() {
     let fx = Fixture::with_policy("prompt-deadline", "Read", GRANTED);

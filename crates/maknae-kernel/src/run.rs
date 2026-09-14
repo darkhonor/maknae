@@ -163,8 +163,23 @@ const AUDIT_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// block a handler indefinitely — an unbounded `join_next()` drain would then hang
 /// shutdown BEFORE the at-capacity drain bound is even reached. Sized above the
 /// per-connection work bounds (handshake_timeout + read_timeout + response write
-/// bound, each ≤ 60s only in pathological configs; defaults total ≤ ~15s).
+/// bound, each ≤ 60s only in pathological configs; defaults total ≤ ~15s) — and,
+/// since #240, ADDED to the egress backend's deadline by `handler_drain_bound`,
+/// because a permitted prompt's handler holds for the provider call as well.
 const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bound actually used for that drain: the constant above PLUS the egress
+/// backend's own deadline (#240). A permitted `session.prompt` holds its
+/// handler for up to `egress.deadline_ms` (190 s by default, 600 s at most)
+/// while the provider answers, so a 10 s drain would abort a handler mid-call
+/// on every restart that races a prompt — content left, `IntentOnly` in the
+/// trail, no outcome record. With no provider the backend is `Unavailable`
+/// and its deadline is zero, so this is the old bound unchanged. The units
+/// give the supervisor the matching patience (`TimeoutStopSec=`, launchd's
+/// `ExitTimeOut`).
+fn handler_drain_bound(egress_deadline: Duration) -> Duration {
+    HANDLER_DRAIN_SHUTDOWN_TIMEOUT + egress_deadline
+}
 
 /// Bound on the final TLS close (`AsyncWriteExt::shutdown` → close_notify write) of a
 /// connection stream. A peer that stops reading can otherwise block the close on a
@@ -1357,47 +1372,71 @@ pub async fn handle<S, E, P>(
                     return;
                 }
             };
-            // 3. the send, on a blocking worker, under the transport's per-peer
-            //    permit bound (the same bound the response write uses). The
-            //    intent is shared by Arc so the outcome record can be derived
-            //    from it even if the worker is abandoned on expiry.
-            //    NO BlockingBreaker here, unlike the four sibling offloads
-            //    (decide, subject list, read PEP, group lookup): in Cooky
-            //    `ready()` fails before any send, so no blocking thread can be
-            //    held; the breaker belongs with #240's egress-specific deadline
-            //    (#240 is handed this by name).
+            // 3. the send, on a blocking worker, under the BACKEND's own
+            //    deadline (`egress.deadline()`, #240 — the transport read
+            //    timeout was never a provider bound) and the egress breaker.
+            //    The intent is shared by Arc so the outcome record can be
+            //    derived from it even if the worker is abandoned on expiry.
             let intent = Arc::new(intent);
             // #240a: admitted BEFORE the spawn, matching the four siblings.
             // `run.rs` handed #240 this obligation by name; the ordering is the
             // whole control, not the presence of a breaker.
             let egress_breaker = egress_send_breaker();
             let egress_admission = { egress_breaker.lock().await.begin_attempt_at(Instant::now()) };
-            let sent = if !matches!(egress_admission, BreakerAdmission::Admit) {
+            let sent = match egress_admission {
                 // Refused without spawning anything. Delivery did not happen,
                 // so this is a `Failed` — the content never left.
-                Ok(Ok(Err(crate::egress::EgressFailure::Transport(
-                    "egress blocking worker budget exhausted".into(),
-                ))))
-            } else {
-                let egress = Arc::clone(&egress);
-                let intent = Arc::clone(&intent);
-                let req = crate::egress::EgressRequest {
-                    destination: destination.clone(),
-                    endpoint: pcfg.endpoint.clone(),
-                    model: pcfg.model.clone(),
-                    key_vault_path: pcfg.key_vault_path.clone(),
-                    key_field: pcfg.key_field.clone(),
-                    conversation: conversation.clone(),
-                    content: content.clone(),
-                };
-                // #240: the backend's own deadline (`egress.deadline_ms`), not
-                // the transport read timeout — 5 s was never a provider bound.
-                let deadline = egress.deadline();
-                tokio::time::timeout(
-                    deadline,
-                    tokio::task::spawn_blocking(move || egress.send(&intent, req)),
-                )
-                .await
+                BreakerAdmission::RefuseOpen => Ok(Ok(Err(
+                    crate::egress::EgressFailure::Transport("egress circuit breaker open".into()),
+                ))),
+                BreakerAdmission::RefuseAtCapacity => {
+                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
+                        "egress blocking worker budget exhausted".into(),
+                    ))))
+                }
+                BreakerAdmission::Admit => {
+                    let egress = Arc::clone(&egress);
+                    let intent = Arc::clone(&intent);
+                    let req = crate::egress::EgressRequest {
+                        destination: destination.clone(),
+                        endpoint: pcfg.endpoint.clone(),
+                        model: pcfg.model.clone(),
+                        key_vault_path: pcfg.key_vault_path.clone(),
+                        key_field: pcfg.key_field.clone(),
+                        conversation: conversation.clone(),
+                        content: content.clone(),
+                    };
+                    let deadline = egress.deadline();
+                    let sent = tokio::time::timeout(
+                        deadline,
+                        tokio::task::spawn_blocking(move || egress.send(&intent, req)),
+                    )
+                    .await;
+                    // The OTHER half of admission (#240, critical review): a
+                    // worker that returned — reply, failure or panic — gives its
+                    // slot back; an expired one counts toward the trip, so a
+                    // stalled deputy opens the breaker after three orphaned
+                    // workers instead of pinning one per prompt. Without this
+                    // the daemon refused every prompt after its first
+                    // thirty-two, for the rest of its life.
+                    match &sent {
+                        Ok(_) => egress_breaker.lock().await.record_success(),
+                        Err(_elapsed) => {
+                            if egress_breaker
+                                .lock()
+                                .await
+                                .record_timeout_at(Instant::now())
+                                == BreakerTransition::Tripped
+                            {
+                                eprintln!(
+                                    "maknaed: egress circuit breaker tripped after repeated {}s send deadlines — failing closed without spawning more egress work",
+                                    deadline.as_secs()
+                                );
+                            }
+                        }
+                    }
+                    sent
+                }
             };
             let (send_outcome, reply) = match sent {
                 Ok(Ok(Ok(r))) => {
@@ -2375,12 +2414,11 @@ where
     // than dropping them mid-flight. BOUNDED (same class as the audit drain below): a
     // handler stuck in a wedged audit append would otherwise hang shutdown here before
     // the at-capacity drain bound is even reached.
-    if drain_handlers_bounded(&mut handlers, HANDLER_DRAIN_SHUTDOWN_TIMEOUT).await
-        == DrainOutcome::Aborted
-    {
+    let handler_drain = handler_drain_bound(egress.deadline());
+    if drain_handlers_bounded(&mut handlers, handler_drain).await == DrainOutcome::Aborted {
         eprintln!(
             "maknaed: in-flight handler drain did not complete within {}s during shutdown; aborting remaining handlers to allow exit",
-            HANDLER_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
+            handler_drain.as_secs()
         );
     }
 
@@ -2802,21 +2840,22 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
                     // refused — is the pure classifier's decision, tested over
                     // the loader's real error values (boot_gate.rs).
                     let refusal = crate::boot_gate::classify_bounds_load_error(e);
-                    RunError::Other(format!("refusing to start: {refusal}"))
+                    // main() prints "maknaed: refusing to start: {e}" — no prefix here
+                    RunError::Other(refusal.to_string())
                 })?,
         ),
     };
     if let Err(e) =
         crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
     {
-        return Err(RunError::Other(format!("refusing to start: {e}")));
+        return Err(RunError::Other(e.to_string()));
     }
     // #240: THE egress backend, chosen here — PRE-MINT, like the bounds gate,
     // because a missing `_maknae-egress` account has nothing minted to revoke.
     // No provider → `Unavailable`; a provider → the deputy's socket under its
     // uid, resolved once on this blocking path and never per request.
     let egress = crate::egress::production_egress(boot.provider(), &egress_cfg)
-        .map_err(|e| RunError::Other(format!("refusing to start: {e}")))?;
+        .map_err(|e| RunError::Other(e.to_string()))?;
 
     let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
@@ -3278,6 +3317,22 @@ mod tests {
         assert!(
             handlers.is_empty(),
             "aborted handlers must be reaped so shutdown proceeds"
+        );
+    }
+
+    /// #240: the drain must outlast a provider call in flight, or a restart
+    /// that races a prompt aborts the handler before its outcome record —
+    /// content left, `IntentOnly` in the trail. With no provider (the
+    /// `Unavailable` backend's zero deadline) the bound is the old one.
+    #[test]
+    fn the_handler_drain_bound_covers_the_egress_deadline() {
+        assert_eq!(
+            handler_drain_bound(Duration::ZERO),
+            HANDLER_DRAIN_SHUTDOWN_TIMEOUT
+        );
+        assert_eq!(
+            handler_drain_bound(Duration::from_secs(120)),
+            HANDLER_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_secs(120)
         );
     }
 

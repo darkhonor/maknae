@@ -150,15 +150,18 @@ dev_read_urand(maknae_egress_t)
 miscfiles_read_localization(maknae_egress_t)
 kernel_read_system_state(maknae_egress_t)
 allow maknae_egress_t self:process { signal sigchld };
-# The listening socket is NOT the deputy's own: systemd creates it
-# (maknae-egress.socket) and hands the fd over, so it carries init_t's label
-# and the accept/read/write on it is a different access from maknaed_t's
-# self-bound socket. Inherited from #240a, closed here; the accepted
-# connection's socket is the deputy's own. Which vectors el9/el10 actually
-# demand is #242's enforcing-host shakeout — these are the ones the code path
-# performs.
+# The listening socket is NOT bound by the deputy: systemd creates it
+# (maknae-egress.socket) and hands the fd over. systemd labels a socket
+# unit's listener with the domain its service's entrypoint transitions to
+# (socket_determine_selinux_label: maknae_egress_t here), falling back to
+# its own init_t when that computation is unavailable; both are granted so
+# the accept/read/write on the inherited fd works either way, and #242's
+# enforcing-host shakeout drops the one that never fires. The accepted
+# connection's socket is the deputy's own. (Corrected 2026-09-15: #240a's
+# text said the fd "carries init_t's label" — that is the fallback, not the
+# rule; the daemon's connectto grant below names the same two labels.)
 allow maknae_egress_t init_t:unix_stream_socket { accept listen getattr getopt setopt read write shutdown };
-allow maknae_egress_t self:unix_stream_socket { create getattr getopt setopt read write shutdown };
+allow maknae_egress_t self:unix_stream_socket { create accept listen getattr getopt setopt read write shutdown };
 # DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };
@@ -242,6 +245,19 @@ allow maknaed_t maknae_runtime_t:sock_file { create setattr getattr unlink };
 allow maknaed_t var_run_t:dir { add_name write remove_name };
 allow maknaed_t var_run_t:sock_file { create setattr getattr unlink };
 allow maknaed_t self:unix_stream_socket { create bind listen accept read write getattr setopt getopt shutdown connectto };
+# #240: the daemon is the CLIENT of the deputy's activation socket
+# (/run/maknae-egress/egress.sock — maknae_runtime_t by the .fc, in a dir the
+# grant above already lets it search). A connect is `write` on the sock_file
+# plus `connectto` on the LISTENING socket's label: the label systemd
+# computed for maknae-egress.socket from the deputy's entrypoint
+# (maknae_egress_t; see the deputy's accept grant) or init_t as the
+# fallback. Without these the newly selected SocketEgress is denied before a
+# frame is exchanged (found by codex review of #240). What bounds it: the
+# only sock_files the daemon may write are maknae_runtime_t ones, so the
+# connectto reaches nothing outside /run/maknae and /run/maknae-egress; no
+# bind, listen or accept is granted on the deputy's socket.
+allow maknaed_t maknae_runtime_t:sock_file write;
+allow maknaed_t { maknae_egress_t init_t }:unix_stream_socket connectto;
 
 # #189 journald audit mirror: the appender writes the systemd native journal
 # protocol as a DATAGRAM. Nothing above grants unix_dgram_socket at all --

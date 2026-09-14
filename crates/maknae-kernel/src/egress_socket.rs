@@ -20,9 +20,10 @@ use maknae_proto::{decode_egress_frame_reply, encode_egress_frame_request, Egres
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// The deputy's socket, and the uid it must be running as.
+/// The deputy's socket, and the uid its listener must have been created
+/// under — the deputy's own, or root's on its behalf (socket activation).
 pub struct SocketEgress {
     path: PathBuf,
     /// Resolved ONCE at construction, on the blocking path, fail-closed if
@@ -59,11 +60,86 @@ impl SocketEgress {
     fn transport(e: impl std::fmt::Display) -> EgressFailure {
         EgressFailure::Transport(e.to_string())
     }
+
+    /// What is left of the wall-clock budget, as the next socket timeout —
+    /// a refusal once it is spent. (`None` would tell the socket to block
+    /// forever and a zero timeout is refused by the platform; neither can
+    /// reach it from here.)
+    fn remaining(deadline_at: Instant) -> Result<Duration, EgressFailure> {
+        let left = deadline_at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(EgressFailure::Transport("egress deadline exhausted".into()));
+        }
+        Ok(left)
+    }
+
+    fn arm(s: &UnixStream, deadline_at: Instant) -> Result<(), EgressFailure> {
+        let left = Self::remaining(deadline_at)?;
+        s.set_read_timeout(Some(left))
+            .map_err(|e| Self::transport(format!("set_read_timeout({left:?}): {e}")))?;
+        s.set_write_timeout(Some(left))
+            .map_err(|e| Self::transport(format!("set_write_timeout({left:?}): {e}")))?;
+        Ok(())
+    }
+
+    /// Wait for readability within what is left of the budget; a timeout is
+    /// the deadline refusal. `poll` rather than a re-armed `SO_RCVTIMEO`:
+    /// macOS refuses `setsockopt` (EINVAL) on a socket whose peer has
+    /// already disconnected even while its buffered bytes are still
+    /// readable, and `poll` reports exactly those as readable at once.
+    fn wait_readable(s: &UnixStream, deadline_at: Instant) -> Result<(), EgressFailure> {
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        use std::os::fd::AsFd;
+        loop {
+            let left = Self::remaining(deadline_at)?;
+            let timeout = PollTimeout::try_from(left.max(Duration::from_millis(1)))
+                .unwrap_or(PollTimeout::MAX);
+            let mut fds = [PollFd::new(s.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, timeout) {
+                Ok(0) => return Err(EgressFailure::Transport("egress deadline exhausted".into())),
+                Ok(_) => return Ok(()),
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => return Err(Self::transport(e)),
+            }
+        }
+    }
+
+    /// `read_exact` under the budget: readability is awaited before EVERY
+    /// read. std's own loops over reads that each get the full socket
+    /// timeout, so a deputy dribbling one byte per interval would never be
+    /// cut off by it — the deputy is authenticated but untrusted (this
+    /// module's header).
+    fn read_exact_by(
+        s: &mut UnixStream,
+        buf: &mut [u8],
+        deadline_at: Instant,
+    ) -> Result<(), EgressFailure> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            Self::wait_readable(s, deadline_at)?;
+            match s.read(&mut buf[filled..]) {
+                Ok(0) => {
+                    return Err(EgressFailure::Transport(
+                        "deputy closed the connection mid-frame".into(),
+                    ))
+                }
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(Self::transport(e)),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Egress for SocketEgress {
-    /// The configured `egress.deadline_ms`; the socket read and write
-    /// timeouts below are set to the same value, so it is the bound.
+    /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
+    /// exchange — the socket timeouts are set to it once, and every read is
+    /// preceded by a `poll` for what is left of it (`read_exact_by`), so
+    /// per-operation timers cannot be strung together past it. The one step outside it is `connect`, which on a Unix socket
+    /// completes or fails at once unless the listener's backlog is full; the
+    /// kernel's outer `tokio::time::timeout` on the same value then abandons
+    /// the worker and the egress breaker counts the expiry.
     fn deadline(&self) -> Duration {
         self.timeout
     }
@@ -80,23 +156,21 @@ impl Egress for SocketEgress {
         _intent: &DurableEgressIntent,
         req: EgressRequest,
     ) -> Result<EgressReply, EgressFailure> {
+        let deadline_at = Instant::now() + self.timeout;
         let stream = UnixStream::connect(&self.path).map_err(Self::transport)?;
 
         // BEFORE the first write. Moving this below the write hands prompt
         // content and a Vault path to an unauthenticated peer. A capture error
-        // refuses too: a peer we cannot identify cannot be policed.
-        if !maknae_vault::peer_uid_is(&stream, self.expected_uid).map_err(Self::transport)? {
+        // refuses too: a peer we cannot identify cannot be policed. The
+        // credentials seen here are the LISTENER's at listen(2): the deputy's
+        // own for a self-bound listener, or root's for the one the init
+        // system creates and hands over (ADR-0023 correction 1, prototyped
+        // here) — `listener_uid_is` accepts exactly those two.
+        if !maknae_vault::listener_uid_is(&stream, self.expected_uid).map_err(Self::transport)? {
             return Err(EgressFailure::Transport(
                 "egress peer is not the expected uid".into(),
             ));
         }
-
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(Self::transport)?;
-        stream
-            .set_write_timeout(Some(self.timeout))
-            .map_err(Self::transport)?;
 
         let frame = EgressFrameRequest {
             destination: req.destination,
@@ -110,13 +184,14 @@ impl Egress for SocketEgress {
         let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
 
         let mut s = stream;
+        Self::arm(&s, deadline_at)?;
         s.write_all(&(buf.len() as u32).to_be_bytes())
             .map_err(Self::transport)?;
         s.write_all(&buf).map_err(Self::transport)?;
         s.flush().map_err(Self::transport)?;
 
         let mut len = [0u8; 4];
-        s.read_exact(&mut len).map_err(Self::transport)?;
+        Self::read_exact_by(&mut s, &mut len, deadline_at)?;
         let n = u32::from_be_bytes(len) as usize;
         // BEFORE the allocation. The deputy is authenticated but untrusted (see
         // this module's header), so a four-byte length prefix must not be able
@@ -143,7 +218,7 @@ impl Egress for SocketEgress {
         // decode drops this buffer just the same. Matches
         // `maknae_proto::read_frame_zeroizing`.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
-        s.read_exact(&mut body).map_err(Self::transport)?;
+        Self::read_exact_by(&mut s, &mut body, deadline_at)?;
         let reply = decode_egress_frame_reply(&body).map_err(Self::transport)?;
         Ok(EgressReply { reply: reply.reply })
     }
@@ -215,6 +290,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (path, seen) = fake_deputy(d.path(), None);
         let me = nix::unistd::getuid().as_raw();
+        if me == 0 {
+            // A root-created listener is the init system's delegation and is
+            // accepted by design (`listener_uid_is`); the refusal cannot be
+            // shown from under root. The pure predicate is pinned in
+            // maknae-vault's peer_identity tests regardless of the runner.
+            eprintln!("skipped: running as root");
+            return;
+        }
         let e = SocketEgress::new(path, me.wrapping_add(1), Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let out = e.send(&intent, req());
@@ -227,6 +310,51 @@ mod tests {
             seen.load(Ordering::SeqCst),
             0,
             "bytes reached an unauthenticated peer — the peercred check is after the write"
+        );
+    }
+
+    /// The deadline is a WALL-CLOCK budget over the whole exchange, not a
+    /// per-`recv` timer: a deputy that dribbles one byte at a time, each
+    /// inside the socket timeout, must still be cut off at the deadline.
+    /// (Authenticated but untrusted — this module's header.) The listener
+    /// here answers a valid length prefix and then one body byte per 150 ms
+    /// against a 400 ms deadline.
+    #[test]
+    fn a_dribbling_deputy_is_cut_off_at_the_deadline_not_per_read() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                if c.read_exact(&mut len).is_ok() {
+                    let n = u32::from_be_bytes(len) as usize;
+                    let mut body = vec![0u8; n];
+                    if c.read_exact(&mut body).is_ok() {
+                        let _ = c.write_all(&8u32.to_be_bytes());
+                        for _ in 0..8 {
+                            std::thread::sleep(Duration::from_millis(150));
+                            if c.write_all(&[0u8]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_millis(400), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let started = std::time::Instant::now();
+        let out = e.send(&intent, req());
+        let took = started.elapsed();
+        assert!(
+            matches!(out, Err(EgressFailure::Transport(_))),
+            "expected a deadline refusal, got {out:?}"
+        );
+        assert!(
+            took < Duration::from_millis(900),
+            "the dribble was allowed to run past the deadline: {took:?}"
         );
     }
 

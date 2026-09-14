@@ -19,6 +19,7 @@ mod mutation_exchange;
 mod posture;
 mod run;
 pub use authz::*;
+pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, BootConfig};
 pub use boot_gate::{
     authz_boot_gate, classify_bounds_load_error, egress_bounds_boot_gate, AuthzBootRefusal,

@@ -13,6 +13,17 @@ SocketUser=_maknae-egress
 SocketGroup=_maknae
 SocketMode=0660
 RemoveOnStop=yes
+# The directory belongs to the SOCKET unit, which creates the path in it.
+# With RuntimeDirectory= on the service instead, stopping the service (a
+# crash, a restart) removed the directory out from under the still-listening
+# activation socket, and the daemon found no path to connect to until the
+# socket unit itself was restarted (critical review of #240). 0751, as
+# maknaed.service's own: the daemon connects in here as `_maknae`, which is
+# in neither of the deputy's groups, so others may traverse (x) but not list
+# — the socket's 0660 _maknae-egress:_maknae above gates the connect. Owned
+# by root (this unit has no User=); the deputy never writes here.
+RuntimeDirectory=maknae-egress
+RuntimeDirectoryMode=0751
 
 [Install]
 WantedBy=sockets.target

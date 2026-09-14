@@ -6,9 +6,12 @@
 //! `deadline_ms`, the kernel's outer bound on one `session.prompt` send — the
 //! egress-specific deadline #172 handed to #240 by name. Before this section
 //! the outer bound was `transport.read_timeout_ms`, five seconds by default,
-//! which was never a provider deadline. The default matches the deputy's own
-//! `CallBounds` timeout so the two ends agree; an operator with a slower
-//! provider raises both. Fail-closed like `transport`: a present field is
+//! which was never a provider deadline. The default EXCEEDS the deputy's own
+//! worst-case budget for one request (its Vault login and read before the
+//! provider call) by a margin, because at "equal" the kernel expires first
+//! and records delivery-unknown for a call the deputy would have answered;
+//! an operator with a slower provider raises the deputy's bound and this one
+//! with it. Fail-closed like `transport`: a present field is
 //! range-checked, a present-but-non-map section is refused, an unknown key is
 //! refused by name.
 
@@ -19,8 +22,13 @@ use std::path::PathBuf;
 pub const EGRESS_SECTION: &str = "egress";
 
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
-/// Matches `bins/maknae-egress`'s `CallBounds::default().timeout`.
-const DEFAULT_DEADLINE_MS: u64 = 120_000;
+/// The deputy's worst-case wall time on one request, plus a margin. On a cold
+/// key cache the deputy performs a Vault login and a KV read
+/// (`maknae-vault`'s `VAULT_HTTP_TIMEOUT`, 30 s each) BEFORE the provider
+/// call (`bins/maknae-egress`'s `CallBounds::default().timeout`, 120 s):
+/// 180 s. Ten seconds more for framing and scheduling. Raise the deputy's
+/// bound and this one together.
+const DEFAULT_DEADLINE_MS: u64 = 190_000;
 const DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=600_000;
 
 /// Where the deputy is, and how long one send may take.
@@ -118,7 +126,7 @@ mod tests {
             c.socket_path,
             PathBuf::from("/run/maknae-egress/egress.sock")
         );
-        assert_eq!(c.deadline_ms, 120_000);
+        assert_eq!(c.deadline_ms, 190_000);
         assert_eq!(c, EgressConfig::default());
     }
 
