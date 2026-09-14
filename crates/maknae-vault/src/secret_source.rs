@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The credential name `$CREDENTIALS_DIRECTORY` always carries for the daemon
 /// (systemd `LoadCredential=maknaed-secret-id:...` / `SetCredentialEncrypted`).
-const CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
+pub const DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
 
 /// The credential name the DEPUTY's unit loads (`LoadCredentialEncrypted=
 /// maknae-egress-secret-id:…` in `maknae-egress.service`; `maknae enroll`
@@ -105,7 +105,7 @@ pub fn resolve_daemon_secret_source(
 ) -> Result<DaemonSecretSource, VaultError> {
     if let Some(dir) = credentials_dir_env {
         return Ok(DaemonSecretSource::CredentialsDirectory(
-            Path::new(dir).join(CREDENTIALS_DIRECTORY_CRED_NAME),
+            Path::new(dir).join(DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME),
         ));
     }
     if let Some(blob) = sep_blob {

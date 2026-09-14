@@ -140,10 +140,13 @@ corenet_tcp_sendrecv_generic_node(maknae_egress_t)
 sysnet_dns_name_resolve(maknae_egress_t)
 # The provider leg verifies against the system trust store.
 miscfiles_read_generic_certs(maknae_egress_t)
-# Resolves `_maknae` by name at start (nsswitch); urandom for TLS.
+# Resolves `_maknae` by name at start (nsswitch); urandom for TLS; the same
+# daemon basics maknaed_t carries (tokio + reqwest read /proc and signal).
 auth_use_nsswitch(maknae_egress_t)
 dev_read_urand(maknae_egress_t)
 miscfiles_read_localization(maknae_egress_t)
+kernel_read_system_state(maknae_egress_t)
+allow maknae_egress_t self:process { signal sigchld };
 # DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };

@@ -95,6 +95,26 @@ fn main() {
         Err(e) => fail(format!("vault client: {e}")),
     };
 
+    // One current-thread runtime for the process: the provider call and the
+    // Vault read are futures, and the serving path is otherwise blocking.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => fail(format!("cannot start a runtime: {e}")),
+    };
+
+    // Boot probe BEFORE the listener is adopted: one login and one revoke. A
+    // wrong SecretID, or a Vault the deputy cannot reach, refuses START — not
+    // the first live request (the same preference the kernel's bounds boot
+    // gate records) — and refuses it before an activation fd is consumed, so a
+    // transient Vault outage is a plain failed start rather than one that also
+    // burns the socket unit's start limit.
+    if let Err(e) = rt.block_on(vault.probe_login()) {
+        fail(format!("vault login probe: {e}"));
+    }
+
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
         Ok(None) => match bind {
@@ -105,16 +125,6 @@ fn main() {
             None => fail("no socket from the init system and no --bind path"),
         },
         Err(e) => fail(e),
-    };
-
-    // One current-thread runtime for the process: the provider call and the
-    // Vault read are futures, and the serving path is otherwise blocking.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(r) => r,
-        Err(e) => fail(format!("cannot start a runtime: {e}")),
     };
 
     // ONE cache for the PROCESS, outside the accept loop.
@@ -133,13 +143,6 @@ fn main() {
     // connections concurrently, this becomes shared state and must gain one;
     // the `&mut` borrow here is what will force that decision rather than
     // letting it pass silently.
-    //
-    // Boot probe first: one login and one revoke. A wrong SecretID, or a
-    // Vault the deputy cannot reach, refuses START — not the first live
-    // request (the same preference the kernel's bounds boot gate records).
-    if let Err(e) = rt.block_on(vault.probe_login()) {
-        fail(format!("vault login probe: {e}"));
-    }
     let mut keys = keys::KeyCache::new(keys_vault::VaultKeys { vault });
 
     // Accept forever. A failed connection is refused and the loop continues:

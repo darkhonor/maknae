@@ -2780,9 +2780,23 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // right answer is not to revoke afterwards but to never acquire the
     // credential when the deployment is already unstartable. A pre-mint
     // failure has nothing minted to revoke.
-    let egress_bounds = boot.provider().and_then(|_| {
-        maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE)).ok()
-    });
+    // The read's OWN error is carried into the refusal, never collapsed to
+    // "absent or unreadable" (#240b self-review): a bounds file that is
+    // present, root-owned and readable but refused by the parser — a missing
+    // `vault` block, an unknown key — must name the parser's reason, or the
+    // operator is sent to check permissions on a file whose permissions are fine.
+    let egress_bounds = match boot.provider() {
+        None => None,
+        Some(_) => Some(
+            maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
+                .map_err(|e| {
+                    RunError::Other(format!(
+                        "refusing to start: {}",
+                        crate::boot_gate::EgressBoundsRefusal::Undeclared(e.to_string())
+                    ))
+                })?,
+        ),
+    };
     if let Err(e) =
         crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
     {

@@ -62,7 +62,7 @@ pub use plane::Plane;
 pub use secret_source::{
     resolve_cli_secret_source, resolve_daemon_secret_source, resolve_egress_secret_source,
     CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
 };
 #[cfg(unix)]
 pub use stream::{

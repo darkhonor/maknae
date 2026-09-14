@@ -75,6 +75,10 @@ impl EgressVault {
         let settings = VaultClientSettingsBuilder::default()
             .address(addr)
             .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
+            // Stated rather than defaulted: the builder fills unset fields
+            // from `VAULT_*` environment variables, and this is the process
+            // that holds the provider credential.
+            .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Auth(format!("egress vault client settings: {e}")))?;
@@ -82,6 +86,9 @@ impl EgressVault {
         Ok(Self { settings, auth })
     }
 
+    /// A fresh client per login. `VaultClient::new` reads and parses the CA
+    /// file again each time — the honest cost of holding no client between
+    /// reads, paid once per destination for the life of the process.
     fn client(settings: &VaultClientSettings) -> Result<VaultClient, VaultError> {
         VaultClient::new(settings.clone())
             .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))

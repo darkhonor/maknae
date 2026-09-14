@@ -560,7 +560,7 @@ override the base **section-by-section**. Example directory:
 ```
 /etc/maknae/                 # 750, root-owned
 ├── maknae.yaml              # 640, root-owned — core (+ inline sections)
-├── egress-bounds.yaml       # 640, root-owned — NOT a config.d member; read by the deputy
+├── egress-bounds.yaml       # 0644 root:root — NOT a config.d member; read by BOTH daemons (see the banner below)
 └── config.d/                # 750, root-owned
     └── 10-provider.yaml     # 640, root-owned — the `provider` section (§6.1)
 ```
@@ -605,10 +605,12 @@ vault:
 > exists for — and `/etc/maknae` itself is `root:_maknae 0750`, so the deputy could not
 > even traverse to it. The directory cannot simply gain a world `x` bit: the loader
 > refuses any world bit on `<config-dir>` (`mode & 0o007`, §2.2). The fix is a POSIX ACL
-> `u:_maknae-egress:x` on `/etc/maknae` — to be set by the package's `postinst`/`%post`
-> and by `maknae enroll` (the same mechanism enroll already uses for the daemon's home
-> grant; that provisioning is the next change on #240 and is **not in the tree yet**) —
-> and `0644` on this file. A *write*-granting ACL would raise the group bits into the
+> `u:_maknae-egress:rx` on `/etc/maknae` — `r` as well as `x`, because the anchored
+> reader opens the directory `O_RDONLY|O_DIRECTORY` and a search-only entry fails that
+> open; to be set by the package's `postinst`/`%post` and re-asserted by `maknae enroll`
+> (the same `rx` mechanism enroll already uses for the daemon's home grant; that
+> provisioning is the next change on #240 and is **not in the tree yet**) — and `0644`
+> on this file. A *write*-granting ACL would raise the group bits into the
 > loader's `0o022` mask and be refused, so the root-artifact check is not weakened; this
 > is the named exception to §2.2's "keep the config tree free of world ACLs", and it is a
 > user ACL, not a world one.
