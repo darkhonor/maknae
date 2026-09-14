@@ -46,7 +46,7 @@ profile maknae-egress /usr/bin/maknae-egress {
   /etc/maknae/egress/                    r,
   /etc/maknae/egress/**                  r,
 
-  # #240b: the two network legs. Vault (the AppRole login and the KV read,
+  # #240b: the two OUTBOUND legs (the inbound one, AF_UNIX, is below). Vault (the AppRole login and the KV read,
   # with /etc/maknae/egress/vault-ca.crt added as an EXTRA trust anchor beside
   # the system store — vaultrs merges, it cannot pin) and the provider
   # (TLS verified against the SYSTEM trust store — reqwest's platform verifier
@@ -57,6 +57,14 @@ profile maknae-egress /usr/bin/maknae-egress {
   network inet stream,
   network inet6 stream,
   #include <abstractions/ssl_certs>
+  # And the family the deputy is BUILT on: it accepts on the systemd-passed
+  # AF_UNIX fd, reads, writes and captures peer credentials there. Once a
+  # profile carries any network rule, a family without one is denied; the
+  # unit's RestrictAddressFamilies and the SELinux module both list AF_UNIX,
+  # and this profile did not (self-review round 5). Both spellings, for
+  # kernels with and without fine-grained unix mediation.
+  network unix stream,
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setopt, getopt, shutdown) type=stream,
 
   # Explicitly denied, so the intent is legible rather than merely absent:
   # the deputy never reads user files and never touches the audit trail.

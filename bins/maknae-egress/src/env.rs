@@ -91,15 +91,40 @@ mod tests {
     #[test]
     fn the_units_unset_environment_is_exactly_the_scrub_list() {
         let unit = include_str!("../../../packaging/common/maknae-egress.service");
-        let line = unit
+        // Every UnsetEnvironment= line, not the first: a second one would
+        // otherwise be silently unchecked.
+        let mut in_unit: Vec<&str> = unit
             .lines()
-            .find_map(|l| l.strip_prefix("UnsetEnvironment="))
-            .expect("the unit carries an UnsetEnvironment= line");
-        let mut in_unit: Vec<&str> = line.split_whitespace().collect();
+            .filter_map(|l| l.strip_prefix("UnsetEnvironment="))
+            .flat_map(str::split_whitespace)
+            .collect();
+        assert!(
+            !in_unit.is_empty(),
+            "the unit carries an UnsetEnvironment= line"
+        );
         let mut here: Vec<&str> = SCRUBBED_ENV.to_vec();
         in_unit.sort_unstable();
         here.sort_unstable();
         assert_eq!(in_unit, here, "env.rs and maknae-egress.service disagree");
+    }
+
+    /// `main` runs the scrub before anything else, and the boot probe before
+    /// the listener is adopted — fail-closed ORDERINGS asserted in comments,
+    /// pinned here by source order the way the kernel's boot gate pins its
+    /// gate-before-mint (a behavioural test cannot reach a T3 main).
+    #[test]
+    fn main_scrubs_first_and_probes_before_adopting_the_listener() {
+        let src = include_str!("main.rs");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("{needle} not in main.rs"))
+        };
+        let scrub = at("env::scrub_env()");
+        let fips = at("install_default_crypto_provider()");
+        let probe = at("vault.probe_login()");
+        let listener = at("listen::from_init_system()");
+        assert!(scrub < fips, "the scrub must precede the FIPS install");
+        assert!(probe < listener, "the probe must precede the listener");
     }
 
     /// The shipped unit socket-activates: its ExecStart carries no --bind.

@@ -2783,17 +2783,23 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // The read's OWN error is carried into the refusal, never collapsed to
     // "absent or unreadable" (#240b self-review): a bounds file that is
     // present, root-owned and readable but refused by the parser — a missing
-    // `vault` block, an unknown key — must name the parser's reason, or the
-    // operator is sent to check permissions on a file whose permissions are fine.
+    // `vault` block, an unknown key — is `Refused`, naming the parser's
+    // reason; only an I/O failure is `Undeclared`. Otherwise the operator is
+    // sent to check permissions on a file whose permissions are fine.
     let egress_bounds = match boot.provider() {
         None => None,
         Some(_) => Some(
             maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
                 .map_err(|e| {
-                    RunError::Other(format!(
-                        "refusing to start: {}",
-                        crate::boot_gate::EgressBoundsRefusal::Undeclared(e.to_string())
-                    ))
+                    let refusal = match e {
+                        maknae_config::ConfigError::InvalidEgressBounds(_) => {
+                            crate::boot_gate::EgressBoundsRefusal::Refused(e.to_string())
+                        }
+                        other => {
+                            crate::boot_gate::EgressBoundsRefusal::Undeclared(other.to_string())
+                        }
+                    };
+                    RunError::Other(format!("refusing to start: {refusal}"))
                 })?,
         ),
     };

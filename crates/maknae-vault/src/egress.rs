@@ -105,7 +105,9 @@ impl EgressVault {
 
     /// A fresh client per login. `VaultClient::new` reads and parses the CA
     /// file again each time — the honest cost of holding no client between
-    /// reads, paid once per destination for the life of the process.
+    /// reads, paid once per destination for the life of the process. It also
+    /// means a CA file replaced between reads is picked up by the next one,
+    /// which is the behaviour a rotated Vault CA wants.
     fn client(settings: &VaultClientSettings) -> Result<VaultClient, VaultError> {
         VaultClient::new(settings.clone())
             .map_err(|e| VaultError::Auth(format!("egress vault client: {e}")))
@@ -132,7 +134,9 @@ impl EgressVault {
 }
 
 /// The three Vault operations, over vaultrs. The session is the token-bearing
-/// client; `revoke` consumes it, so nothing can use the token afterwards.
+/// client; `revoke` consumes it, so nothing can use the token afterwards. The
+/// trait is crate-private: outside this crate only the composed
+/// `probe_login`/`read_kv_field` exist.
 impl EgressOps for EgressVault {
     type Session = VaultClient;
 

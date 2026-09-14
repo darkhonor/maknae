@@ -139,9 +139,14 @@ impl std::fmt::Display for SiemOffloadUnsupported {
 /// Why a registered provider's Vault path is not startable.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EgressBoundsRefusal {
-    /// A provider is registered but the deputy's grant is not declared. The
-    /// content path exists with no stated bound on it, so the daemon refuses.
+    /// A provider is registered but the deputy's grant is not declared: the
+    /// bounds file is absent or could not be read. The content path exists
+    /// with no stated bound on it, so the daemon refuses.
     Undeclared(String),
+    /// The bounds file WAS read and its parser refused it (#240b) — a missing
+    /// `vault` block, an unknown key. Its own variant so the refusal says so,
+    /// rather than sending the operator to check permissions that are fine.
+    Refused(String),
     /// The registered path sits outside the prefix the deputy's Vault policy
     /// grants. Discovering this at BOOT is the point: the alternative is a
     /// successful start and a refusal on the first live request, long after
@@ -156,6 +161,10 @@ impl std::fmt::Display for EgressBoundsRefusal {
                 f,
                 "a provider is registered but {} could not be read: {e}",
                 maknae_config::EGRESS_BOUNDS_FILE
+            ),
+            EgressBoundsRefusal::Refused(e) => write!(
+                f,
+                "a provider is registered but the egress bounds were refused — {e}"
             ),
             EgressBoundsRefusal::OutsideBounds { path, prefix } => write!(
                 f,

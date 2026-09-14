@@ -93,8 +93,9 @@ impl From<&CliSecretSource> for CredentialSourceKind {
 /// wins, no fallthrough once a source is chosen:
 ///
 /// 1. `$CREDENTIALS_DIRECTORY/maknaed-secret-id` (if `credentials_dir_env` is `Some`
-///    — the systemd HRoT-sealed boot path; ALWAYS preferred when present, regardless
-///    of what else is configured).
+///    and non-empty — the systemd HRoT-sealed boot path; ALWAYS preferred when
+///    present, regardless of what else is configured. `Some("")`, an exported
+///    but empty variable, is a REFUSAL, never a fallthrough to 2 or 3).
 /// 2. The SEP-sealed blob (if `sep_blob` is `Some`).
 /// 3. The configured plaintext path (if `insecure_plaintext_secret_path` is `Some`).
 /// 4. Else `Err` — fail closed. There is no silent plaintext default.

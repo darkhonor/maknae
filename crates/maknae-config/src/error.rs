@@ -61,6 +61,11 @@ pub enum ConfigError {
     /// outside the exact set, a missing or empty field, an endpoint that is not
     /// `https://` (or loopback `http://`), or a Vault path with whitespace.
     InvalidProvider(String),
+    /// `egress-bounds.yaml` was read and refused by its parser (#240b). Its
+    /// own variant, so the daemon's boot refusal says "refused", never
+    /// "could not be read", and never routes a bounds error through the
+    /// `provider` section's message.
+    InvalidEgressBounds(String),
     /// The `provider` section carries a key under a spelling that means the API
     /// key itself was pasted into the config. Credentials are delivered via Vault,
     /// never plaintext (ADR-0005 decision 8); refused by the field's name so the
@@ -156,6 +161,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidProvider(reason) => {
                 write!(f, "invalid provider config: {reason}")
+            }
+            ConfigError::InvalidEgressBounds(reason) => {
+                write!(f, "egress-bounds.yaml: {reason}")
             }
             ConfigError::ProviderPlaintextKey { field } => {
                 write!(f, "provider config carries a plaintext credential under '{field}': keys are delivered via Vault (key_vault_path), never in the config")

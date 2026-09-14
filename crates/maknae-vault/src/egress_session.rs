@@ -24,7 +24,9 @@ use zeroize::Zeroizing;
 /// One authenticated session's three operations. `Session` is whatever the
 /// implementation needs to carry between them (a token-bearing client);
 /// `revoke` consumes it, so a session cannot be used after its token is gone.
-pub trait EgressOps {
+/// Crate-private, deliberately: the only way OUT of this crate is through
+/// `probe`/`read_one`, so no caller can login and skip the revoke.
+pub(crate) trait EgressOps {
     type Session;
     fn login(&self) -> impl Future<Output = Result<Self::Session, VaultError>> + Send;
     fn read(
@@ -39,7 +41,7 @@ pub trait EgressOps {
 
 /// Login and revoke. Proves the credential without leaving a token — and says
 /// so only when BOTH halves completed.
-pub async fn probe<O: EgressOps>(ops: &O) -> Result<(), VaultError>
+pub(crate) async fn probe<O: EgressOps>(ops: &O) -> Result<(), VaultError>
 where
     O::Session: Send,
 {
@@ -54,7 +56,7 @@ where
 /// Login, read one field, revoke. The secret is returned only when the token
 /// that read it is gone; a read whose revoke failed is a refusal that names
 /// the leftover token, never a value.
-pub async fn read_one<O: EgressOps>(
+pub(crate) async fn read_one<O: EgressOps>(
     ops: &O,
     key_vault_path: &str,
     field: &str,

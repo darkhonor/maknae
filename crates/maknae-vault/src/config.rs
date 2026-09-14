@@ -124,12 +124,19 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         .to_string();
     validate_deployment_id(&deployment_id)?;
     // Mount paths are OPTIONAL — absent keys fall back to the Terraform-default mounts.
+    // Shape-checked like the deputy's (#240b self-review): `auth/maknae-approle`
+    // — the spelling `vault write` needs — composes to /auth/auth/… and would
+    // otherwise fail the daemon's login as an opaque 404 rather than here.
     let approle_mount = get_str(vault, "approle_mount")
         .unwrap_or(DEFAULT_APPROLE_MOUNT)
         .to_string();
+    maknae_config::mount_path_is_acceptable(&approle_mount)
+        .map_err(|why| VaultError::InvalidAddr(format!("vault.approle_mount {why}")))?;
     let pki_int_mount = get_str(vault, "pki_int_mount")
         .unwrap_or(DEFAULT_PKI_INT_MOUNT)
         .to_string();
+    maknae_config::mount_path_is_acceptable(&pki_int_mount)
+        .map_err(|why| VaultError::InvalidAddr(format!("vault.pki_int_mount {why}")))?;
     // Optional — absent (or non-string, since get_str only matches Value::Str) means
     // None, i.e. no plaintext fallback source at all (fail-closed default).
     let insecure_plaintext_secret_path =

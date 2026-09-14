@@ -56,9 +56,10 @@ impl<S: KeySource> KeyCache<S> {
 
     /// The key for one destination, read on first use.
     ///
-    /// Keyed on the VAULT PATH, not the provider name: two providers sharing a
-    /// path share a key, and the path is what the deputy's grant is expressed
-    /// over. The error carries the path — never the value.
+    /// Keyed on (mount, path, field), never the provider name: two providers
+    /// naming the same secret and field share a key, and the path is what the
+    /// deputy's grant is expressed over. The error carries the path — never
+    /// the value.
     /// The source, for tests that need to observe how often it was asked.
     /// `cfg(test)` rather than `#[allow(dead_code)]`: it exists only to let a
     /// test count reads, and production has no business reaching past the cache
@@ -153,23 +154,46 @@ mod tests {
         );
     }
 
-    struct Failing;
-    impl KeySource for Failing {
-        async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
-            Err(format!("permission denied on {p}"))
+    /// Fails the FIRST read of every triple and succeeds after — so a second
+    /// ask of the SAME triple distinguishes "not cached" (it retries and
+    /// succeeds) from "cached" (it would still be the error).
+    struct FailsOnce {
+        seen: Mutex<Vec<String>>,
+    }
+    impl KeySource for FailsOnce {
+        async fn read(&self, m: &str, p: &str, f: &str) -> Result<Zeroizing<String>, String> {
+            let k = format!("{m}|{p}|{f}");
+            let mut seen = self.seen.lock().unwrap();
+            if seen.contains(&k) {
+                Ok(Zeroizing::new(format!("key-for-{p}")))
+            } else {
+                seen.push(k);
+                Err(format!("permission denied on {p}"))
+            }
         }
     }
 
     /// A failed read is a refusal that names the PATH and nothing else, and is
     /// not cached — a transient Vault failure must not poison the destination.
+    /// Proven by re-asking the SAME triple: the second ask reaches the source
+    /// again and succeeds. (An earlier version asked a different path against
+    /// a source that always failed, which proved nothing about caching.)
     #[tokio::test]
     async fn a_failed_read_names_the_path_and_is_not_cached() {
-        let mut c = KeyCache::new(Failing);
+        let mut c = KeyCache::new(FailsOnce {
+            seen: Mutex::new(vec![]),
+        });
         let e = c.get("maknae-kv", "one", "api-key").await.unwrap_err();
         assert!(e.contains("one"));
         assert!(
-            c.get("maknae-kv", "a/data/one", "api-key").await.is_err(),
-            "a failure must not be cached"
+            !e.contains("key-for"),
+            "the error names the path, never a value"
         );
+        assert_eq!(
+            &**c.get("maknae-kv", "one", "api-key").await.unwrap(),
+            "key-for-one",
+            "the failure was not cached: the same triple was asked of the source again"
+        );
+        assert_eq!(c.source.seen.lock().unwrap().len(), 1);
     }
 }

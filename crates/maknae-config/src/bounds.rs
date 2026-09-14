@@ -173,7 +173,7 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
 }
 
 fn err(reason: impl Into<String>) -> ConfigError {
-    ConfigError::InvalidProvider(reason.into())
+    ConfigError::InvalidEgressBounds(reason.into())
 }
 
 /// Is `path` genuinely CONTAINED by `prefix`?
@@ -199,30 +199,23 @@ pub fn path_is_within_prefix(path: &str, prefix: &str) -> bool {
 /// silent absence.
 pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     let Value::Map(m) = v else {
-        return Err(err(
-            "egress-bounds.yaml: expected a mapping at the top level",
-        ));
+        return Err(err("expected a mapping at the top level"));
     };
     for (k, _) in m.iter() {
         if k != "key_vault_path_prefix" && k != "kv_mount" && k != "vault" {
-            return Err(err(format!(
-                "egress-bounds.yaml: unknown key '{k}' (no registered spec)"
-            )));
+            return Err(err(format!("unknown key '{k}' (no registered spec)")));
         }
     }
     let required = |name: &str| -> Result<String, ConfigError> {
         let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
-            return Err(err(format!(
-                "egress-bounds.yaml: '{name}' is required and must be a string"
-            )));
+            return Err(err(format!("'{name}' is required and must be a string")));
         };
         if v.len() > MAX_KEY_VAULT_PREFIX_BYTES {
             return Err(err(format!(
-                "egress-bounds.yaml: '{name}' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
+                "'{name}' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
             )));
         }
-        kv_fragment_is_acceptable(v)
-            .map_err(|why| err(format!("egress-bounds.yaml: '{name}' {why}")))?;
+        kv_fragment_is_acceptable(v).map_err(|why| err(format!("'{name}' {why}")))?;
         Ok(v.clone())
     };
     let kv_mount = required("kv_mount")?;
@@ -234,32 +227,30 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     // credential in configuration, and nothing may accept one silently.
     let Some((_, vault)) = m.iter().find(|(k, _)| k == "vault") else {
         return Err(err(
-            "egress-bounds.yaml: 'vault' is required (addr, and optionally approle_mount)",
+            "'vault' is required (addr, and optionally approle_mount)",
         ));
     };
     let Value::Map(vm) = vault else {
-        return Err(err("egress-bounds.yaml: 'vault' must be a mapping"));
+        return Err(err("'vault' must be a mapping"));
     };
     for (k, _) in vm.iter() {
         if k != "addr" && k != "approle_mount" {
             return Err(err(format!(
-                "egress-bounds.yaml: unknown key '{k}' under 'vault' (no registered spec)"
+                "unknown key '{k}' under 'vault' (no registered spec)"
             )));
         }
     }
     let Some((_, Value::Str(addr))) = vm.iter().find(|(k, _)| k == "addr") else {
-        return Err(err(
-            "egress-bounds.yaml: 'vault.addr' is required and must be a string",
-        ));
+        return Err(err("'vault.addr' is required and must be a string"));
     };
     if addr.is_empty() || addr.chars().any(char::is_whitespace) {
         return Err(err(
-            "egress-bounds.yaml: 'vault.addr' must be a non-empty URL without whitespace",
+            "'vault.addr' must be a non-empty URL without whitespace",
         ));
     }
     if addr.len() > MAX_KEY_VAULT_PREFIX_BYTES {
         return Err(err(format!(
-            "egress-bounds.yaml: 'vault.addr' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
+            "'vault.addr' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
         )));
     }
     let approle_mount = match vm.iter().find(|(k, _)| k == "approle_mount") {
@@ -269,14 +260,10 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
             // and its message would be meaningless here, so the check is the
             // path-shape half only.
             mount_path_is_acceptable(s)
-                .map_err(|why| err(format!("egress-bounds.yaml: 'vault.approle_mount' {why}")))?;
+                .map_err(|why| err(format!("'vault.approle_mount' {why}")))?;
             Some(s.clone())
         }
-        Some(_) => {
-            return Err(err(
-                "egress-bounds.yaml: 'vault.approle_mount' must be a string",
-            ))
-        }
+        Some(_) => return Err(err("'vault.approle_mount' must be a string")),
     };
     Ok(EgressBounds {
         kv_mount,

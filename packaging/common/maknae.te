@@ -104,6 +104,9 @@ allow maknaed_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_etc_t:dir { open read search getattr };
 allow maknae_egress_t maknae_egress_etc_t:dir { open read search getattr };
+# maknaed enumerates /etc/maknae at boot; on a filesystem without d_type it
+# stats each entry, so it needs getattr (and only that) on the deputy's dir.
+allow maknaed_t maknae_egress_etc_t:dir { getattr search };
 allow maknae_egress_t maknae_egress_etc_t:file { read open getattr };
 # The deputy's own entrypoint.
 allow maknae_egress_t maknae_egress_exec_t:file { read execute execute_no_trans open getattr };

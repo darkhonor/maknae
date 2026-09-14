@@ -348,7 +348,7 @@ why = "opens a ROOT-owned artifact through maknae-io; no unit test can create on
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: arg parse + bounds load + uid resolve + socket acquire; every decision it makes is fail-closed exit-1, and the behaviour lives in handle.rs (T1), serve.rs and listen.rs (T2) — same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs/env.rs (T1), serve.rs and listen.rs (T2) and maknae-vault's egress_session.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in env.rs — same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
