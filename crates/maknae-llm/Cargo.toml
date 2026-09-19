@@ -26,7 +26,8 @@ maknae-vault = { path = "../maknae-vault" }
 # this prevents is the one maknae-vault names: a provider HTTPS leg running on a
 # non-FIPS provider with every test still green (corrected 2026-09-19, #320: this
 # said "non-validated module", which now reads as a claim about the CMVP list —
-# the property the control defends is the FIPS provider, not the certificate; decision of record is design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md).
+# the property the control defends is the FIPS provider, not the certificate).
+# Decision of record: design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md
 #
 # Pinned EXACTLY and to the version vaultrs 0.8.0 already resolves, so the tree
 # carries ONE reqwest. A second, differently-pinned HTTP stack in the process
