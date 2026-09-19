@@ -132,6 +132,23 @@ phase1() {
         fail "Team ID MISMATCH: maknaed='${tid_d:-none}' maknae='${tid_c:-none}'"
     fi
 
+    # Notarization is only assertable once a ticket exists. This reports a NOTE
+    # rather than ok when absent — an "ok" on an un-notarized package would be the
+    # ok-on-nothing class this file refuses elsewhere.
+    if [ -n "$PKG" ]; then
+        if xcrun stapler validate "$PKG" >/dev/null 2>&1; then
+            ok "package carries a stapled notarization ticket (first launch works offline)"
+            local asses; asses="$(spctl --assess -t install -vv "$PKG" 2>&1)"
+            case "$asses" in
+                *"source=Notarized Developer ID"*) ok "Gatekeeper accepts the package as Notarized Developer ID" ;;
+                *accepted*) fail "Gatekeeper accepts but NOT as notarized: $asses" ;;
+                *) fail "Gatekeeper REJECTS the package despite a stapled ticket: $asses" ;;
+            esac
+        else
+            echo "  note — package is not notarized; set MAKNAE_NOTARY_PROFILE to produce a Gatekeeper-clean artifact"
+        fi
+    fi
+
     if [ -n "$PKG" ]; then
         ok "package present: $(basename "$PKG")"
         local x; x="$(mktemp -d)"

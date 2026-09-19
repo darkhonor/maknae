@@ -257,4 +257,10 @@ else
     echo "Code signature: AD-HOC (set MAKNAE_SIGN_IDENTITY for Developer ID)"
 fi
 echo "Installer signature: ${INST_ID:-none}"
-echo "Notarization: ${NOTARY:+submitted and stapled via profile '$NOTARY'}${NOTARY:-not requested}"
+# NOT a ${x:+a}${x:-b} pair: when x is SET, :+ emits a AND :- emits x's VALUE, so
+# both arms fire and the line reads "...profile 'maknae'maknae". Observed 2026-09-19.
+if [ -n "$NOTARY" ]; then
+    echo "Notarization: submitted and stapled via profile '$NOTARY'"
+else
+    echo "Notarization: not requested"
+fi
