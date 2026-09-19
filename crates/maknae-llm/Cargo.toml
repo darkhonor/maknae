@@ -21,7 +21,9 @@ maknae-vault = { path = "../maknae-vault" }
 # control, not a preference. (Disambiguated 2026-09-19, #320: this is about
 # reqwest's feature selection and its exact version, never about a crypto-crate
 # VERSION pin — that pin is struck, and per ADR-0025 dependency-tree hygiene was
-# never the control; the runtime assertion is.) `rustls-no-provider`, NEVER `rustls`: reqwest's `rustls` feature
+# never the control; the runtime assertion is.)
+#
+# `rustls-no-provider`, NEVER `rustls`: reqwest's `rustls` feature
 # is `["__rustls-aws-lc-rs", …]`, which installs the NON-FIPS aws-lc-rs provider
 # as the process default and would race the `.fips()`-asserted install the
 # deputy inherits. `rustls-no-provider` is `["dep:rustls-platform-verifier",
