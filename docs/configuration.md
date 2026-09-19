@@ -62,6 +62,66 @@ the credential mint retires the credential on the way out.
   external-lake model) is **ignored** — the instance boots at Public. Put the ceiling
   under `core`.
 
+### 1.2 What the three binaries read from the environment — and what they refuse to
+
+**Read this as a snapshot, not a contract.** The tables below were **measured on
+2026-09-19** against `main` at `35897fe` (#318). Nothing scans the tree to keep them
+true: a new environment read added later will not appear here by itself, and **no gate
+requires a pull request to re-verify them**. That is a deliberate trade — the
+alternative is re-auditing every change — so treat this as a map of the terrain rather
+than a guarantee about it. The two mechanisms that *are* enforced are named at the end.
+
+ADR-0005 decision 8 stands and this does not qualify it: **configuration is YAML files,
+never ENV values.** Nothing in either table configures Maknae. The first table is what
+Maknae *removes* from its own environment; the second is the small set of variables that
+are the mechanism by which a shipped feature works.
+
+**Refused — removed in-process before any client exists, on all three binaries**
+(`maknae_vault::SCRUBBED_ENV`; `maknaed.service` and `maknae-egress.service` carry the
+same list as `UnsetEnvironment=`):
+
+| family | names | what an inherited value would do |
+|---|---|---|
+| proxy | `HTTP_PROXY` `HTTPS_PROXY` `ALL_PROXY` `NO_PROXY` and the four lowercase spellings | reqwest honours these by default, which would move a connection somewhere the decision never covered. Exactly the same shape as the root-store row below: the client vaultrs builds **does** resolve them at construction, and the client that actually **sends** states `no_proxy()` and is not the one that read them. The scrub is the second line here, not the only one |
+| Vault settings | `VAULT_ADDR` `VAULT_TOKEN` `VAULT_SKIP_VERIFY` `VAULT_CACERT` `VAULT_CAPATH` `VAULT_CLIENT_CERT` `VAULT_CLIENT_KEY` `VAULT_NAMESPACE` | `vaultrs` fills unset settings from these. `VAULT_TOKEN` is the one that was reachable: it became the daemon's client token and rode on the AppRole login |
+| root store | `SSL_CERT_FILE` `SSL_CERT_DIR` | these **replace** the trust store the platform verifier builds, so setting either changes who Maknae will trust. On Linux all three binaries read them when a Vault client is constructed; nothing is exposed on that leg, because the CA-pinned client replaces the constructed one before any request. Live and unmediated on the deputy's provider leg. The exact chain, and why the scrub still earns its place, is stated once in `maknae_vault::env`'s module documentation rather than repeated here |
+
+**You do not configure any of these.** The Vault address comes from `vault.addr` in
+`maknae.yaml` (the daemon), `vault.addr` in `egress-bounds.yaml` (the deputy), or
+`--vault-addr` (`maknae enroll`) — all three **required**, none defaulted. Authentication
+is **AppRole only** (`AuthMethod` has one variant): the machine planes log in with a
+RoleID artifact plus a sealed SecretID, and the one token in the system is the
+*operator's own* during `maknae enroll`, supplied by `--token-file` or a no-echo prompt.
+An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/runbook.md`
+uses it; it never reaches ours.
+
+**Relied on — never scrubbed** (`maknae_vault::NEVER_SCRUB_ENV`). The scope is *every variable any workspace code these three binaries link reads, plus those their child processes need* — `LC_MESSAGES`/`LANG` are read in `maknae-msgs` and `HOSTNAME` in `maknae-kernel`, not in the binaries' own source, so the narrower phrasing would have let a future crate-level read look out of scope — `XDG_RUNTIME_DIR` is on the list for the second reason, not the first. A fourth binary, `maknae-spifc`, is a scaffold stub that reads nothing and is not covered here:
+
+
+| variable | who reads it | why removing it would break something |
+|---|---|---|
+| `CREDENTIALS_DIRECTORY` | `maknaed`, `maknae-egress` | the directory systemd decrypts the sealed SecretID into. The deputy has no fallback and refuses to start without it |
+| `LISTEN_FDS` `LISTEN_PID` `LISTEN_FDNAMES` | `maknae-egress` | socket activation — the listening fd itself, read *after* the scrub runs |
+| `MAKNAE_CONFIG_DIR` | `maknae` | relocates the CLI's config directory; documented operator workflow |
+| `XDG_RUNTIME_DIR` | `maknae enroll`'s helper | `systemd-creds --user` locates the user runtime directory through it. The parent *constructs* it for the child rather than passing its own through — and the helper is itself a `maknae` process, so it runs the scrub |
+| `HOME` | `maknae` | the config-directory fallback. Note it degrades to `.` when unset |
+| `SUDO_UID` `SUDO_USER` | `maknae enroll` | the operator identity enroll provisions **for**, cross-checked against `passwd` and refused on mismatch. Without them every enroll fails preflight |
+| `LC_MESSAGES` `LANG` | `maknae`, `maknaed` | message locale (en-US / ko-KR) |
+| `PATH` | `maknae`, `maknae enroll` | selects which `systemd-creds`, `setfacl`, `apparmor_parser` … actually runs, including on the CLI's credential-read path. **That dependency is a defect, tracked as #327** — the fix is to stop relying on `PATH`, not to scrub it |
+| `HOSTNAME` | `maknaed` | the AU-3c host label, which is correlation only and falls back to `maknaed`. Listed so inheriting it is a decision rather than an oversight |
+
+**The two things that are enforced,** as opposed to documented here:
+
+- the two lists are held **disjoint** by a test, so a name cannot be added to the scrub
+  list if a binary depends on it; and
+- both shipped systemd units are held **equal** to the scrub list by a test, so adding a
+  name in one place and forgetting the other is a red build.
+
+**macOS carries a real delta.** `UnsetEnvironment=` is a systemd directive with no
+launchd equivalent, and launchd offers no way to *remove* inherited variables at all. On
+macOS the in-process scrub is therefore the **whole** control; `io.maknae.maknaed.plist`
+records that in place.
+
 ---
 
 ## 2. Directory layout

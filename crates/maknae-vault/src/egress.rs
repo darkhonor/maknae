@@ -88,10 +88,15 @@ impl EgressVault {
             // Stated rather than defaulted: vaultrs fills an unset `verify`
             // from VAULT_SKIP_VERIFY and turns verification OFF for any value
             // other than 0/f/false — the empty string included. The other
-            // env-defaulted settings (token, identity, proxy) are handled by
-            // the deputy scrubbing those variables before this runs
-            // (`bins/maknae-egress/src/env.rs`); a unit's environment is NOT
-            // clean by default — DefaultEnvironment= reaches every service.
+            // env-defaulted settings (token and identity — NOT proxy, whose
+            // vaultrs field is a plain `Option<Url>` default with no
+            // `VAULT_PROXY`; the ambient proxy is reqwest's, answered by
+            // `http.rs`'s `no_proxy()`) are handled by the deputy scrubbing
+            // those variables before this runs — `maknae_vault::SCRUBBED_ENV`,
+            // shared by all three binaries since #318 (this said
+            // `bins/maknae-egress/src/env.rs`, which that change deleted).
+            // A unit's environment is NOT clean by default —
+            // DefaultEnvironment= reaches every service.
             .verify(true)
             // Stated too, so this constructor is safe on its own and not only
             // under the deputy's scrub: no inherited token (login supplies

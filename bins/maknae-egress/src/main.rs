@@ -10,7 +10,6 @@
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
 mod call;
-mod env;
 mod handle;
 mod keys;
 mod keys_vault;
@@ -30,9 +29,14 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 
 fn main() {
     // FIRST of all, while single-threaded: nothing inherited from the
-    // environment may choose where a connection goes or how it is verified
-    // (`env.rs` says why "the unit's environment is clean" is not true).
-    env::scrub_with(|k| std::env::remove_var(k));
+    // environment may choose where a connection goes or how it is verified.
+    // "The unit's environment is clean" is not true — `DefaultEnvironment=`
+    // and `systemctl set-environment` reach every service. The list, and the
+    // names deliberately KEPT (`CREDENTIALS_DIRECTORY` and the `LISTEN_*` this
+    // process exists to read), are `maknae_vault::{SCRUBBED_ENV,
+    // NEVER_SCRUB_ENV}` — shared with `maknaed` and `maknae` since #318, held
+    // disjoint by a test there.
+    maknae_vault::scrub_with(|k| std::env::remove_var(k));
 
     let mut args = std::env::args().skip(1);
     let mut bind: Option<PathBuf> = None;
@@ -184,5 +188,126 @@ fn main() {
             }
             Err(e) => eprintln!("maknae-egress: accept failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// The deputy's unit carries EVERY `[Service]` line maknaed's unit
+    /// carries, except a NAMED set that differs by design, and NEITHER carries
+    /// the two directives maknaed's unit records as a measured SIGSYS
+    /// crash-loop for aws-lc-fips — the module both binaries install at start.
+    /// Derived from the daemon's file, not an allowlist: a directive added to
+    /// maknaed.service is held to the deputy by default (review round 6; the
+    /// first version of this test was an allowlist that already missed
+    /// `AmbientCapabilities=`). Lines are trimmed, as systemd trims them.
+    #[test]
+    fn the_units_confinement_is_maknaeds_and_never_the_two_fips_incompatible_directives() {
+        let deputy = include_str!("../../../packaging/common/maknae-egress.service");
+        let daemon = include_str!("../../../packaging/common/maknaed.service");
+        fn service_lines(unit: &str) -> Vec<&str> {
+            let mut in_service = false;
+            let mut out = Vec::new();
+            for raw in unit.lines() {
+                let l = raw.trim();
+                if l.starts_with('[') {
+                    in_service = l == "[Service]";
+                    continue;
+                }
+                if in_service && !l.is_empty() && !l.starts_with('#') {
+                    out.push(l);
+                }
+            }
+            out
+        }
+        for unit in [deputy, daemon] {
+            for l in service_lines(unit) {
+                assert!(
+                    !l.starts_with("MemoryDenyWriteExecute="),
+                    "MemoryDenyWriteExecute= crash-loops aws-lc-fips (measured)"
+                );
+                assert!(
+                    !l.starts_with("SystemCallFilter=~"),
+                    "a subtractive SystemCallFilter crash-loops aws-lc-fips (measured)"
+                );
+            }
+        }
+        // Differ by design — each named, each with its reason in the units.
+        const DEPUTY_DIFFERS: &[&str] = &[
+            "ExecStart=",               // its own binary
+            "LoadCredentialEncrypted=", // its own sealed SecretID
+            "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
+            "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
+            "Restart=",
+            "RestartSec=",
+            "RuntimeDirectory=", // the deputy's is the socket unit's
+            "RuntimeDirectoryMode=",
+            "StandardError=",
+            "StandardOutput=",
+            "SupplementaryGroups=", // the daemon's socket-group gate
+            "SyslogIdentifier=",
+            "TimeoutStopSec=", // the daemon's drain chain; the deputy has no handler
+            "Type=",
+            "User=",
+        ];
+        let deputy_lines = service_lines(deputy);
+        let mut held = 0;
+        for line in service_lines(daemon) {
+            if DEPUTY_DIFFERS.iter().any(|p| line.starts_with(p)) {
+                continue;
+            }
+            assert!(
+                deputy_lines.contains(&line),
+                "maknaed.service's `{line}` is missing from maknae-egress.service"
+            );
+            held += 1;
+        }
+        assert!(
+            held >= 17,
+            "only {held} hardening lines were held to the deputy"
+        );
+    }
+
+    /// `main` runs the scrub before anything else, and the boot probe before
+    /// the listener is adopted — fail-closed ORDERINGS asserted in comments,
+    /// pinned here by source order the way the kernel's boot gate pins its
+    /// gate-before-mint (a behavioural test cannot reach a T3 main).
+    #[test]
+    fn main_scrubs_first_and_probes_before_adopting_the_listener() {
+        let src = include_str!("main.rs");
+        let at = |needle: &str| {
+            src.find(needle)
+                .unwrap_or_else(|| panic!("{needle} not in main.rs"))
+        };
+        // The WHOLE call site, remover included: `scrub_with(|_| {})` would
+        // keep every other assertion here green while the deputy inherited
+        // HTTPS_PROXY again.
+        let scrub = at(concat!(
+            "maknae_vault::scrub_with(|k| ",
+            "std::env::remove_var(k))"
+        ));
+        let fips = at("install_default_crypto_provider()");
+        let client = at("EgressVault::new(");
+        let probe = at("vault.probe_login()");
+        let listener = at("listen::from_init_system()");
+        assert!(scrub < fips, "the scrub must precede the FIPS install");
+        assert!(scrub < client, "the scrub must precede any client");
+        assert!(fips < client, "the FIPS install must precede any client");
+        assert!(probe < listener, "the probe must precede the listener");
+    }
+
+    /// The shipped unit socket-activates: its ExecStart carries no --bind.
+    /// (main.rs and listen.rs both said "a packaging test asserts that"; until
+    /// now none did.)
+    #[test]
+    fn the_shipped_unit_passes_no_bind_path() {
+        let unit = include_str!("../../../packaging/common/maknae-egress.service");
+        let exec = unit
+            .lines()
+            .find_map(|l| l.strip_prefix("ExecStart="))
+            .expect("ExecStart=");
+        assert!(!exec.contains("--bind"), "{exec}");
+        assert!(!exec.contains("--bounds"), "{exec}");
     }
 }
