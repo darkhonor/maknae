@@ -67,7 +67,7 @@ phase1() {
         || fail "config staged into /etc — upgrades would clobber enrollment"
     grep -q 'install_name_tool -change' "$HERE/build-pkg.sh" \
         && ok "FIPS dylib pinned by absolute install name" \
-        || fail "no install_name_tool — an unresolved @rpath can load a NON-VALIDATED libcrypto"
+        || fail "no install_name_tool — an unresolved @rpath can load SOME OTHER libcrypto"
 
     local B="$REPO/target/aarch64-apple-darwin/release"
     for b in maknaed maknae; do

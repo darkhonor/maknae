@@ -17,14 +17,22 @@ maknae-proto = { path = "../maknae-proto" }
 # the single implementation of that control; re-deriving the three-line rustls
 # check here would be two sites for one property — the `maknae-io` failure.
 maknae-vault = { path = "../maknae-vault" }
-# FIPS POSTURE, MIRRORED FROM maknae-vault — the pinning is the control, not a
-# preference. `rustls-no-provider`, NEVER `rustls`: reqwest's `rustls` feature
+# FIPS POSTURE, MIRRORED FROM maknae-vault — the FEATURE pinning below is the
+# control, not a preference. (Disambiguated 2026-09-19, #320: this is about
+# reqwest's feature selection and its exact version, never about a crypto-crate
+# VERSION pin — that pin is struck, and per ADR-0025 dependency-tree hygiene was
+# never the control; the runtime assertion is.)
+#
+# `rustls-no-provider`, NEVER `rustls`: reqwest's `rustls` feature
 # is `["__rustls-aws-lc-rs", …]`, which installs the NON-FIPS aws-lc-rs provider
 # as the process default and would race the `.fips()`-asserted install the
 # deputy inherits. `rustls-no-provider` is `["dep:rustls-platform-verifier",
 # "__rustls"]` — TLS with provider selection left to the process. The failure
 # this prevents is the one maknae-vault names: a provider HTTPS leg running on a
-# non-validated module with every test still green.
+# non-FIPS provider with every test still green (corrected 2026-09-19, #320: this
+# said "non-validated module", which now reads as a claim about the CMVP list —
+# the property the control defends is the FIPS provider, not the certificate).
+# Decision of record: design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md
 #
 # Pinned EXACTLY and to the version vaultrs 0.8.0 already resolves, so the tree
 # carries ONE reqwest. A second, differently-pinned HTTP stack in the process

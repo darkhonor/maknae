@@ -97,7 +97,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
 
 - FIPS: the process runs the aws-lc-rs FIPS provider (`.fips()==true`, asserted
   fail-closed before the Vault client is built — so vaultrs's reqwest rides the FIPS
-  provider, not its ring fallback).
+  provider, not its ring fallback — corrected 2026-09-19 (#320): `ring` is no longer
+  in the graph at all, so there is no fallback to ride past; the assertion is unchanged).
 - The AppRole login used a response-wrapped **standing** SecretID (the wrap is single-use —
   unwrapped once — for interception detection; the SecretID itself does not expire).
 - The CSR is empty-subject, URI-SAN-only, EC P-384; the leaf's only SAN is

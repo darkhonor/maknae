@@ -1,0 +1,144 @@
+# Agentic design patterns, drawn as the field draws them, with what Maknae
+# inserts made visible inside the same graph.
+#
+# Node `origin` is the whole point of the diagram:
+#   "published" — the node appears in the pattern as the field publishes it
+#   "maknae"    — the node exists only because the runtime is untrusted
+# so a reader sees the published pattern and, in the same picture, exactly what
+# the trust boundary adds to it.
+#
+# `lane` places a node in a UML 2.5.1 activity partition (15.6): "loop" is the
+# untrusted runtime, "plane" is maknaed. A partition denotes WHO performs an
+# action, which is the trust question, so the notation already means what is
+# needed.
+#
+# `crossings` is a cost model: each is a PDP evaluation, an audit append and a
+# socket round trip — the first place to look for performance work.
+#
+# Every `evidence` string is checked by check_evidence(); an unresolvable
+# citation fails generation.
+
+[[pattern]]
+id = "react"
+name = "Tool Use / ReAct"
+flow = "Reason → request → decide → act → observe → respond"
+source = "Anthropic: agents · OpenAI: single-agent loop with tools"
+status = "decided"
+delta = "The tool call is a REQUEST, never an action. The loop names an object; the kernel decides, and the subject's own descriptor is what opens it."
+evidence = "ADR-0005; ADR-0009; crates/maknae-kernel/src/handler.rs"
+crossings = 2
+records = 2
+nodes = [
+  { id = "req",  title = "User request",   caption = "goal + context",      lane = "loop",  col = 0, origin = "published" },
+  { id = "ag",   title = "Agent",          caption = "think + choose tool", lane = "loop",  col = 1, origin = "published" },
+  { id = "pdp",  title = "PDP",            caption = "composed verdict",    lane = "plane", col = 2, origin = "maknae" },
+  { id = "tool", title = "Tool / fd read", caption = "subject's descriptor",lane = "plane", col = 3, origin = "published" },
+  { id = "obs",  title = "Observation",    caption = "tool result",         lane = "loop",  col = 4, origin = "published" },
+  { id = "rec",  title = "Audit record",   caption = "verdict + object",    lane = "plane", col = 4, origin = "maknae" },
+]
+edges = [
+  { from = "req",  to = "ag",   label = "request", kind = "flow" },
+  { from = "ag",   to = "pdp",  label = "fs.read", kind = "cross" },
+  { from = "pdp",  to = "tool", label = "permit",  kind = "flow" },
+  { from = "tool", to = "obs",  label = "result",  kind = "cross" },
+  { from = "pdp",  to = "rec",  label = "always",  kind = "flow" },
+  { from = "pdp",  to = "",     label = "deny → refusal, recorded", kind = "deny" },
+]
+
+[[pattern]]
+id = "routing"
+name = "Routing"
+flow = "Classify → propose → decide → dispatch"
+source = "Anthropic: routing · OpenAI: classify then dispatch"
+status = "decided"
+delta = "The classifier may PROPOSE a destination; it cannot grant one. An absent or empty allowlist refuses every role, so routing is deny-by-default rather than best-effort."
+evidence = "crates/maknae-config/src/authz.rs; crates/maknae-security/src/compose.rs"
+crossings = 1
+records = 1
+nodes = [
+  { id = "in",  title = "Incoming request", caption = "intent unknown",      lane = "loop",  col = 0, origin = "published" },
+  { id = "rt",  title = "Router",           caption = "classify + propose",  lane = "loop",  col = 1, origin = "published" },
+  { id = "acl", title = "destinations:",    caption = "per-role allowlist",  lane = "plane", col = 2, origin = "maknae" },
+  { id = "sp",  title = "Specialist",       caption = "provider:<name>",     lane = "plane", col = 3, origin = "published" },
+  { id = "rec", title = "Audit record",     caption = "destination decided", lane = "plane", col = 4, origin = "maknae" },
+]
+edges = [
+  { from = "in",  to = "rt",  label = "request",        kind = "flow" },
+  { from = "rt",  to = "acl", label = "session.prompt", kind = "cross" },
+  { from = "acl", to = "sp",  label = "permit",         kind = "flow" },
+  { from = "acl", to = "rec", label = "always",         kind = "flow" },
+  { from = "acl", to = "",    label = "absent allowlist → deny", kind = "deny" },
+]
+
+[[pattern]]
+id = "reflection"
+name = "Reflection / Critic"
+flow = "Generate → evaluate → revise until the output passes"
+source = "Anthropic: evaluator-optimiser · the reel's Reflection / Critic"
+status = "decided differently"
+delta = "The field lets the model grade itself. Maknae's critic is an ORACLE the model cannot influence — a gate that must be observed FAILING before it is trusted to pass."
+evidence = "ADR-0016; ci/gates/negative-control.sh; coverage-tiers.toml"
+crossings = 0
+records = 0
+nodes = [
+  { id = "dr",  title = "Draft",          caption = "first attempt",        lane = "loop",  col = 0, origin = "published" },
+  { id = "cr",  title = "Critic",         caption = "same model, no oracle",lane = "loop",  col = 1, origin = "published" },
+  { id = "gt",  title = "Gates",          caption = "tests · mutation",     lane = "plane", col = 2, origin = "maknae" },
+  { id = "nc",  title = "Negative control",caption = "proves the gate fails",lane = "plane", col = 3, origin = "maknae" },
+  { id = "out", title = "Final output",   caption = "threshold met",        lane = "loop",  col = 4, origin = "published" },
+]
+edges = [
+  { from = "dr", to = "cr",  label = "review",   kind = "flow" },
+  { from = "cr", to = "gt",  label = "no authority here", kind = "cross" },
+  { from = "gt", to = "nc",  label = "must go red", kind = "flow" },
+  { from = "nc", to = "out", label = "approved",  kind = "cross" },
+  { from = "gt", to = "",    label = "fails → not shipped", kind = "deny" },
+]
+
+[[pattern]]
+id = "orchestrator"
+name = "Multi-Agent (supervisor / worker)"
+flow = "Delegate → specialise → combine"
+source = "Anthropic: orchestrator-workers · OpenAI: manager pattern"
+status = "candidate only"
+delta = "CANDIDATE, not decided. Delegation transmits intent, never authority: the child is decided as if the user typed the task, on its OWN conduit, and the return hop is a release decision. Neither loop's grant bounds the other's."
+evidence = "design/model-conduit-policy.md"
+crossings = 4
+records = 4
+nodes = [
+  { id = "sup", title = "Supervisor",   caption = "assigns work",        lane = "loop",  col = 0, origin = "published" },
+  { id = "d1",  title = "Decide (out)", caption = "child's own conduit", lane = "plane", col = 1, origin = "maknae" },
+  { id = "wk",  title = "Worker agent", caption = "specialised loop",    lane = "loop",  col = 2, origin = "published" },
+  { id = "d2",  title = "Decide (back)",caption = "return is a release", lane = "plane", col = 3, origin = "maknae" },
+  { id = "int", title = "Integrator",   caption = "combines outputs",    lane = "loop",  col = 4, origin = "published" },
+]
+edges = [
+  { from = "sup", to = "d1",  label = "task",        kind = "cross" },
+  { from = "d1",  to = "wk",  label = "as the user", kind = "cross" },
+  { from = "wk",  to = "d2",  label = "result",      kind = "cross" },
+  { from = "d2",  to = "int", label = "released",    kind = "cross" },
+  { from = "d2",  to = "",    label = "return hop may be denied", kind = "deny" },
+]
+
+[[pattern]]
+id = "handoff"
+name = "Handoff / Decentralised"
+flow = "Agent A → transfers control → Agent B owns the conversation"
+source = "OpenAI: handoffs — execution transfers to the receiving agent"
+status = "NOT MODELLED — a gap"
+delta = "A GAP, not a decision. Upstream's own contract: input guardrails apply to the FIRST agent only, output guardrails to the LAST. Everything between runs unguarded — the failure this architecture exists to prevent."
+evidence = "design/model-conduit-policy.md"
+crossings = -1
+records = -1
+nodes = [
+  { id = "a",   title = "Agent A",       caption = "input guardrail here", lane = "loop",  col = 0, origin = "published" },
+  { id = "h",   title = "Handoff",       caption = "control transfers",    lane = "loop",  col = 1, origin = "published" },
+  { id = "b",   title = "Agent B",       caption = "owns the conversation",lane = "loop",  col = 2, origin = "published" },
+  { id = "gap", title = "no decision",   caption = "nothing to draw yet",  lane = "plane", col = 2, origin = "maknae" },
+  { id = "out", title = "Reply",         caption = "output guardrail here",lane = "loop",  col = 4, origin = "published" },
+]
+edges = [
+  { from = "a", to = "h",   label = "hands off", kind = "flow" },
+  { from = "h", to = "b",   label = "unguarded", kind = "flow" },
+  { from = "b", to = "out", label = "unguarded", kind = "flow" },
+]
