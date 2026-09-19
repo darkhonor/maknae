@@ -201,11 +201,16 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     let Value::Map(m) = v else {
         return Err(err("expected a mapping at the top level"));
     };
-    for (k, _) in m.iter() {
-        if k != "key_vault_path_prefix" && k != "kv_mount" && k != "vault" {
-            return Err(err(format!("unknown key '{k}' (no registered spec)")));
-        }
-    }
+    // #210: `egress-bounds.yaml` is operator-authored, root-owned and read by
+    // BOTH daemons, so a typo here is the same defect as one in `maknae.yaml`
+    // and now raises the same error. It kept its own spelling until round-1
+    // review pointed out that "one sentence for a wrong key, wherever it
+    // appears" was false while these two sites survived.
+    crate::reject_unknown_keys(
+        EGRESS_BOUNDS_FILE,
+        m,
+        &["key_vault_path_prefix", "kv_mount", "vault"],
+    )?;
     let required = |name: &str| -> Result<String, ConfigError> {
         let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
             return Err(err(format!("'{name}' is required and must be a string")));
@@ -233,13 +238,11 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     let Value::Map(vm) = vault else {
         return Err(err("'vault' must be a mapping"));
     };
-    for (k, _) in vm.iter() {
-        if k != "addr" && k != "approle_mount" {
-            return Err(err(format!(
-                "unknown key '{k}' under 'vault' (no registered spec)"
-            )));
-        }
-    }
+    crate::reject_unknown_keys(
+        &format!("{EGRESS_BOUNDS_FILE}/vault"),
+        vm,
+        &["addr", "approle_mount"],
+    )?;
     let Some((_, Value::Str(addr))) = vm.iter().find(|(k, _)| k == "addr") else {
         return Err(err("'vault.addr' is required and must be a string"));
     };
@@ -633,12 +636,19 @@ mod tests {
         // optional and has no default, so an old file fails closed rather than
         // composing against a guessed mount.
         assert!(bounds_from_document(&doc("maknae/providers")).is_err());
-        // an unknown key is refused BY NAME rather than ignored
-        assert!(bounds_from_document(&Value::Map(vec![
+        // an unknown key is refused BY NAME rather than ignored — asserted as
+        // the name, not merely as `is_err()`, which is what this comment has
+        // always claimed and never checked (#210 round-1 review).
+        match bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str(OK_MOUNT.into())),
             ("key_vault_path_prefix".into(), Value::Str("a/b".into())),
             ("mystery".into(), Value::Bool(true)),
-        ]))
-        .is_err());
+        ])) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, "egress-bounds.yaml");
+                assert_eq!(key, "mystery");
+            }
+            other => panic!("expected UnknownKey, got {other:?}"),
+        }
     }
 }

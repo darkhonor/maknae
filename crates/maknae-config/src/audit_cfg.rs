@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 /// The registered section name for `audit` (spec/task-brief §Interfaces).
 pub const AUDIT_SECTION: &str = "audit";
 
+/// #210: the keys this section's parser reads — the closed vocabulary.
+pub(crate) const AUDIT_KEYS: [&str; 3] = ["jsonl_path", "siem", "au3_1"];
+
 /// The audit-sink configuration (ADR-0019).
 #[derive(Clone, Debug)]
 pub struct AuditConfig {
@@ -87,11 +90,14 @@ pub fn audit_from_section(
         }
         Some(section) => section,
     };
-    if !matches!(section, Value::Map(_)) {
+    let Value::Map(entries) = section else {
         return Err(ConfigError::InvalidAudit(
             "audit section must be a map".into(),
         ));
-    }
+    };
+    // #210: closed vocabulary. Every key below is one this function reads; a
+    // transposed one refuses rather than leaving its field at the default.
+    crate::reject_unknown_keys(AUDIT_SECTION, entries, &AUDIT_KEYS)?;
 
     let jsonl_path = get(section, "jsonl_path")
         .and_then(as_str)
@@ -136,6 +142,42 @@ mod tests {
         assert_eq!(c.jsonl_path, PathBuf::from("/var/lib/maknae/audit.jsonl"));
         assert_eq!(c.siem, None);
         assert_eq!(c.au3_1, serde_json::json!({}));
+    }
+
+    /// #210: a TRANSPOSED key must refuse the load, not take the default. The
+    /// issue's own example — `jsonl_pth` for `jsonl_path` — where the shipped
+    /// `maknae.yaml` comment says the path is "pinned here so it is never
+    /// defaulted", and silently defaulting it lands the sink in a directory
+    /// `_maknae` cannot write.
+    #[test]
+    fn a_transposed_key_refuses_rather_than_defaulting() {
+        let v = Value::Map(vec![(
+            "jsonl_pth".into(),
+            Value::Str("/var/log/maknae/audit.jsonl".into()),
+        )]);
+        match audit_from_section(Some(&v), &rt()) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, AUDIT_SECTION);
+                assert_eq!(key, "jsonl_pth");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
+    /// The companion to the above: every key the parser DOES read still loads.
+    /// Without this, closing the vocabulary could silently reject a valid config
+    /// and the test above would still pass.
+    #[test]
+    fn every_key_the_parser_reads_is_accepted() {
+        let v = Value::Map(vec![
+            (
+                "jsonl_path".into(),
+                Value::Str("/var/log/maknae/audit.jsonl".into()),
+            ),
+            ("siem".into(), Value::Str("udp://127.0.0.1:514".into())),
+            ("au3_1".into(), Value::Map(vec![])),
+        ]);
+        assert!(audit_from_section(Some(&v), &rt()).is_ok());
     }
 
     #[test]

@@ -150,6 +150,28 @@ fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
     // build does not carry refuses boot before any level is read, and a
     // level the selected system does not rank refuses it in the reader.
     let core = document.section("core");
+    // #210: core's own vocabulary, closed HERE because this is where core is
+    // consumed — `loader.rs` reserves the section but is deliberately
+    // schema-agnostic, and `ceiling_from_core` owns the ceiling, not core.
+    //
+    // This is the one level whose typo the ceiling subtree cannot catch:
+    // `handling` and `handling.ceiling` each close their own keys, but a
+    // mistyped `handling` means neither ever runs, the block is invisible, and
+    // the instance boots at BASELINE with the operator believing otherwise.
+    // Measured as exactly that before this line existed.
+    if let Some(maknae_config::Value::Map(entries)) = core {
+        maknae_config::reject_unknown_keys(
+            "core",
+            entries,
+            // DERIVED, not invented: `handling` is what `ceiling_from_core`
+            // reads; `deployment_id` is read by `maknae-vault`'s
+            // `vault_config_from_document`; `identity` and the version field are
+            // carried verbatim for their consumers, as `docs/configuration.md`
+            // §4 documents — admitted here because the section legitimately
+            // holds them, not because anything in this crate reads them.
+            &["deployment_id", "schema_version", "identity", "handling"],
+        )?;
+    }
     let name = policy_name_from_core(core)?;
     let policy = crate::classification::select(&name)
         .ok_or(ConfigError::UnknownClassificationPolicy { name })?;
@@ -228,6 +250,60 @@ mod tests {
     // A full, conformant, above-baseline (SECRET) core ceiling block.
     #[cfg(unix)]
     const SECRET_CORE: &str = "core:\n  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+
+    /// #210: a key `core` does not carry must refuse the boot rather than be
+    /// silently ignored. `handling` mistyped means the whole ceiling block is
+    /// invisible and the instance boots at BASELINE — the one route to a
+    /// silently-weakened ceiling that the `handling`/`ceiling` blocks' own
+    /// closed vocabularies cannot catch, because they never run.
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_core_key_refuses_the_boot() {
+        let d = new_dir("core-unknown");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  handlng:\n    accreditation_ref: null\n",
+            0o640,
+        );
+        match boot(&d.0) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, "core");
+                assert_eq!(key, "handlng");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
+    /// #210 round-3 review: `core`'s allow-list had a refusal test but no
+    /// acceptance companion, and `schema_version` — which `docs/configuration.md`
+    /// §4 and its minimal example both use — was exercised by NO test, so a typo
+    /// in that one entry would have refused the documented minimal config with
+    /// nothing going red. All four accepted keys, loaded together.
+    #[cfg(unix)]
+    #[test]
+    fn every_core_key_the_boot_accepts_is_accepted() {
+        let d = new_dir("core-accept");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  schema_version: 1\n  deployment_id: dev-01\n  \
+             identity:\n    name: t\n  handling:\n    accreditation_ref: null\n    \
+             ceiling:\n      classification: UNCLASSIFIED\n      sci: false\n      \
+             releasable_to: []\n      cui_permitted: false\n      \
+             cui_categories_permitted: []\n      \
+             dissemination_permitted: [\"Distribution Statement A\"]\n",
+            0o640,
+        );
+        match boot(&d.0) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                panic!("a key core accepts was refused: '{key}' in '{section}'")
+            }
+            other => {
+                other.expect("every accepted core key loads");
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -476,7 +552,7 @@ mod tests {
             "core:\n  deployment_id: dev-01\n  identity:\n    name: t\n\
              vault:\n  addr: https://v.example:8200\n\
              transport:\n  socket_path: /run/maknae/maknaed.sock\n\
-             audit:\n  path: /var/log/maknae/audit.jsonl\n",
+             audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\n",
             0o640,
         );
         let cfg = boot(&d.0).expect("combined config boots");

@@ -20,6 +20,16 @@ pub const VAULT_SECTION: &str = "vault";
 pub const DEFAULT_APPROLE_MOUNT: &str = "maknae-approle";
 pub const DEFAULT_PKI_INT_MOUNT: &str = "maknae-pki-int";
 
+/// #210: the keys this section's parser reads — the closed vocabulary, held
+/// EQUAL to `VaultConfig`'s fields by a test below.
+pub(crate) const VAULT_KEYS: [&str; 5] = [
+    "addr",
+    "approle_mount",
+    "pki_int_mount",
+    "deployment_id",
+    "insecure_plaintext_secret_path",
+];
+
 /// The non-sensitive Vault settings.
 pub struct VaultConfig {
     pub addr: String,
@@ -112,6 +122,12 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
     let vault = doc
         .section(VAULT_SECTION)
         .ok_or(VaultError::MissingKey("vault"))?;
+    // #210: closed vocabulary. `vault` is the one maknae.yaml section parsed
+    // outside maknae-config, and it raises the SAME error as the rest —
+    // `VaultError::Config` carries it through the existing `From<ConfigError>`.
+    if let maknae_config::Value::Map(entries) = vault {
+        maknae_config::reject_unknown_keys(VAULT_SECTION, entries, &VAULT_KEYS)?;
+    }
     let addr = get_str(vault, "addr")
         .ok_or(VaultError::MissingKey("vault.addr"))?
         .to_string();
@@ -393,7 +409,7 @@ mod tests {
             "core:\n  deployment_id: dev-01\n\
              vault:\n  addr: https://v.example:8200\n\
              transport:\n  socket_path: /run/maknae/maknaed.sock\n\
-             audit:\n  path: /var/log/maknae/audit.jsonl\n",
+             audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\n",
         );
         let doc = load_config(
             &d.0,
@@ -416,6 +432,74 @@ mod tests {
         let c = vault_config_from_document(&doc).expect("vault parses from the shared document");
         assert_eq!(c.addr, "https://v.example:8200");
         assert_eq!(c.deployment_id, "dev-01");
+    }
+
+    /// #210 round-3 review: `vault`'s allow-list is the other hand-written one,
+    /// outside `maknae-config`'s derived equality, so it gets the same guard.
+    /// Mirrors `document.rs`'s test: the expected set is parsed out of this
+    /// struct's own source at run time and compared for EQUALITY, so adding a
+    /// field and forgetting the list refuses a valid `maknae.yaml` and goes red
+    /// HERE. Loud, not lossy — an unparsed field-shaped line panics.
+    #[test]
+    fn the_vault_allow_list_equals_vault_configs_fields() {
+        let src = include_str!("config.rs");
+        let needle = concat!("pub struct ", "VaultConfig {");
+        let at = src.find(needle).expect("VaultConfig in source");
+        let body = &src[at..][..src[at..].find("\n}").expect("struct closes")];
+        let mut from_struct: Vec<String> = body
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                let l = l.trim();
+                if l.is_empty() || l.starts_with("//") || l.starts_with("#[") {
+                    return None;
+                }
+                let rest = l
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| l.strip_prefix("pub "))
+                    .unwrap_or(l);
+                let (ident, _) = rest.split_once(':').unwrap_or_else(|| {
+                    panic!("cannot parse field-shaped line `{l}` — teach the extractor")
+                });
+                Some(ident.to_string())
+            })
+            .collect();
+        let mut from_list: Vec<String> = VAULT_KEYS.iter().map(|k| k.to_string()).collect();
+        from_struct.sort();
+        from_list.sort();
+        assert_eq!(
+            from_struct, from_list,
+            "VaultConfig's fields and its allow-list disagree — one was edited alone"
+        );
+    }
+
+    /// #210: a key the vault parser does not read must refuse rather than leave
+    /// its field at the default. `vault` is the one maknae.yaml section parsed
+    /// OUTSIDE maknae-config, and it reaches the same standard because
+    /// `VaultError::Config` and its `From<ConfigError>` already existed.
+    #[test]
+    fn an_unknown_vault_key_refuses() {
+        let d = TempDir::new("vaultunknown");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n  approle_mnt: x\n",
+        );
+        let doc = load_config(
+            &d.0,
+            &[SectionSpec {
+                name: VAULT_SECTION.to_string(),
+                required: true,
+            }],
+        )
+        .expect("loads");
+        match vault_config_from_document(&doc) {
+            Err(VaultError::Config(maknae_config::ConfigError::UnknownKey { section, key })) => {
+                assert_eq!(section, VAULT_SECTION);
+                assert_eq!(key, "approle_mnt");
+            }
+            Err(e) => panic!("expected Err(Config(UnknownKey)), got Err({e:?})"),
+            Ok(_) => panic!("expected Err(Config(UnknownKey)), got Ok — the typo was IGNORED"),
+        }
     }
 
     #[test]

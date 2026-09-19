@@ -40,7 +40,7 @@
 //! variant to a `MsgId` is the daemon call site's job (`run.rs`), not this
 //! crate's — keeps `maknae-config` off the `maknae-msgs` dependency (spec §4.3).
 
-use crate::Value;
+use crate::{ConfigError, Value};
 use std::path::Path;
 
 // ============================================================================
@@ -433,8 +433,13 @@ fn component_matches(pattern: &str, text: &str) -> bool {
 pub enum AuthzError {
     /// `schema_version` is missing, not an integer, or not `1`.
     UnknownSchemaVersion(i64),
-    /// A key not defined by the grammar appeared at some level of the document.
-    UnknownKey(String),
+    /// A shared `maknae-config` refusal raised on the authz path — today that is
+    /// [`ConfigError::UnknownKey`] (#210). This variant replaced a private
+    /// `UnknownKey(String)` of its own: an unknown key is the SAME defect
+    /// wherever it appears, so there is one error for it and one sentence, not a
+    /// per-file lookalike. Nothing outside this module ever matched the old
+    /// variant, so the convergence cost no caller.
+    Config(ConfigError),
     /// A pattern specifier failed to parse (bad shape, unknown capability,
     /// non-absolute `Read` glob, unknown capability name, …).
     BadPattern(String),
@@ -473,7 +478,7 @@ impl std::fmt::Display for AuthzError {
             AuthzError::UnknownSchemaVersion(v) => {
                 write!(f, "unknown authz schema_version: {v}")
             }
-            AuthzError::UnknownKey(k) => write!(f, "unknown authz policy key: '{k}'"),
+            AuthzError::Config(e) => write!(f, "{e}"),
             AuthzError::BadPattern(p) => write!(f, "malformed authz pattern: '{p}'"),
             AuthzError::TildeWithoutPrincipal(p) => write!(
                 f,
@@ -506,13 +511,16 @@ fn get<'a>(map: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
 /// Fail-closed unknown-key gate (spec §7: "unknown keys at ANY level →
 /// refuse"). Applied to the top-level map and separately to the `permissions`
 /// map, so a typo like `denny:` is caught wherever it appears.
-fn check_known_keys(map: &[(String, Value)], allowed: &[&str]) -> Result<(), AuthzError> {
-    for (k, _) in map {
-        if !allowed.contains(&k.as_str()) {
-            return Err(AuthzError::UnknownKey(k.clone()));
-        }
-    }
-    Ok(())
+/// #210: the authz grammar's closed-vocabulary check, now a thin adapter over
+/// the shared [`crate::reject_unknown_keys`]. `level` is the DOTTED path being
+/// checked (`authz`, `authz.permissions`, `authz.roles.<role>`), so a nested
+/// typo names where it appeared instead of just which token was wrong.
+fn check_known_keys(
+    level: &str,
+    map: &[(String, Value)],
+    allowed: &[&str],
+) -> Result<(), AuthzError> {
+    crate::reject_unknown_keys(level, map, allowed).map_err(AuthzError::Config)
 }
 
 fn str_seq(v: &Value) -> Result<Vec<String>, AuthzError> {
@@ -630,6 +638,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
     check_known_keys(
+        "authz",
         &map,
         &[
             "schema_version",
@@ -653,7 +662,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
     let (allow_raw, deny_raw) = match get(&map, "permissions") {
         None => (Vec::new(), Vec::new()),
         Some(Value::Map(pm)) => {
-            check_known_keys(pm, &["allow", "deny"])?;
+            check_known_keys("authz.permissions", pm, &["allow", "deny"])?;
             let allow = get(pm, "allow")
                 .map(str_seq)
                 .transpose()?
@@ -708,7 +717,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
                         ))
                     }
                 };
-                check_known_keys(rb, &["allow", "deny"])?;
+                check_known_keys(&format!("authz.roles.{role}"), rb, &["allow", "deny"])?;
                 let allow = get(rb, "allow")
                     .map(roles_term_list)
                     .transpose()?
@@ -748,7 +757,7 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
                         "destinations: role `{role}` must be a map with `allow`"
                     )));
                 };
-                check_known_keys(rb, &["allow"])?;
+                check_known_keys(&format!("authz.destinations.{role}"), rb, &["allow"])?;
                 let allow = get(rb, "allow")
                     .map(destination_list)
                     .transpose()?
@@ -1107,7 +1116,9 @@ mod tests {
     fn unknown_key_refused_naming_key() {
         let yaml = "schema_version: 1\npermissions:\n  allow: []\n  denny: []\n";
         match parse_policy(yaml, Some(&home())) {
-            Err(AuthzError::UnknownKey(k)) => assert_eq!(k, "denny"),
+            Err(AuthzError::Config(ConfigError::UnknownKey { key, .. })) => {
+                assert_eq!(key, "denny")
+            }
             other => panic!("expected UnknownKey(\"denny\"), got {other:?}"),
         }
     }
@@ -1116,7 +1127,9 @@ mod tests {
     fn unknown_top_level_key_refused() {
         let yaml = "schema_version: 1\nextra_top_key: 1\n";
         match parse_policy(yaml, Some(&home())) {
-            Err(AuthzError::UnknownKey(k)) => assert_eq!(k, "extra_top_key"),
+            Err(AuthzError::Config(ConfigError::UnknownKey { key, .. })) => {
+                assert_eq!(key, "extra_top_key")
+            }
             other => panic!("expected UnknownKey(\"extra_top_key\"), got {other:?}"),
         }
     }
@@ -1596,7 +1609,10 @@ mod tests {
     fn display_covers_every_variant() {
         let cases = vec![
             AuthzError::UnknownSchemaVersion(2),
-            AuthzError::UnknownKey("denny".into()),
+            AuthzError::Config(ConfigError::UnknownKey {
+                section: "authz.permissions".into(),
+                key: "denny".into(),
+            }),
             AuthzError::BadPattern("WebSearch(x)".into()),
             AuthzError::TildeWithoutPrincipal("~/x".into()),
             AuthzError::InsecurePermissions,
@@ -2049,7 +2065,7 @@ mod tests {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n    allow: []\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
-            matches!(&e, AuthzError::UnknownKey(k) if k == "permissions"),
+            matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "permissions"),
             "must name the offending key: {e:?}"
         );
     }
@@ -2059,7 +2075,7 @@ mod tests {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allwo: [\"admin.status\"]\n");
         let e = parse_authz(&body, None).unwrap_err();
         assert!(
-            matches!(&e, AuthzError::UnknownKey(k) if k == "allwo"),
+            matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "allwo"),
             "a typo'd allow must refuse, not parse to an empty grant: {e:?}"
         );
     }
