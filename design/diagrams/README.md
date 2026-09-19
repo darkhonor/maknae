@@ -9,13 +9,39 @@ Issue [#196](https://github.com/darkhonor/maknae/issues/196) carries the require
 ## Regenerate
 
 ```bash
-cargo auditable build -p maknaed -p maknae -p maknae-spifc --release
-python3 design/diagrams/generate.py
+python3 design/diagrams/generate.py                                  # all of them
+python3 design/diagrams/generate.py generated-agentic-patterns.svg   # just one
 ```
 
-Python 3 and nothing else — no Mermaid, no Graphviz, no npm, no `xtask`. The build step
-is what `rust-audit-info` reads; both tools are already CI tooling
-(`.github/workflows/ci.yml`).
+> **Corrected 2026-09-14 (#314), and this is the correction that matters.** This block used
+> to begin with `cargo auditable build … --release` for four binaries, because `dep_closure()`
+> — then named `linkage()`, renamed on the second review because the old name asserted an
+> artifact read it no longer performs — read `rust-audit-info` off `target/release/<bin>` and
+> `sys.exit`ed when one was absent.
+> That made **every** diagram — including ones whose only inputs are a TOML file and a git
+> sha — require a release build of the whole shipping set. On this project that is a **FIPS
+> cryptographic module build**, and on a host whose gcc the module's delocate step cannot
+> handle it is not merely slow, it is impossible.
+>
+> **The code does not require a binary to map.** These diagrams map what the crates deliver
+> and where; that question is answered by `cargo metadata`'s resolve graph, from source.
+> `dep_closure()` walks `resolve.nodes` from each bin over normal-kind edges only, filtered to
+> the host triple. No compilation, no artifacts. **A diagram is not mission-critical code and
+> must never inherit its build.**
+>
+> **This is not the same closure the artifact read produced, and the wording that said so has
+> been struck (2026-09-14, second review).** A host-triple resolve is not the per-build
+> resolution of a specific release artifact — features, target and profile can differ. It is the
+> *intended* source graph, which is what a diagram should show; it is not a substitute for
+> per-artifact evidence. See the note under the source-of-truth table for where that evidence
+> lives.
+>
+> The proof this was real rather than theoretical: `maknae-egress` landed in #288 and had
+> **never** appeared in the crate×binary matrix, because it had never been compiled on the
+> box that last regenerated. Deriving from source put it there immediately.
+
+Python 3 and nothing else — no Mermaid, no Graphviz, no npm, no `xtask`, **and no build**.
+`cargo metadata` reads the manifests and the lockfile; it compiles nothing.
 
 Generated diagrams are refreshed **on demand** and **at release, alongside the
 documentation site**, so a published image is current as of the release it ships with.
@@ -55,7 +81,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | File | Notation | Question it answers | Reader | Kind |
 |---|---|---|---|---|
 | `generated-tcb-components.svg` | UML component | *What is in the TCB and where does the boundary run?* | security assessor | generated |
-| `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What does each shipped artifact actually link, and what do the gates refuse?* | security assessor, release reviewer | generated |
+| `generated-crate-binary-matrix.svg` | UML deployment / DoDAF SV-6 matrix | *What can each shipped artifact reach through its dependency graph, and what do the gates refuse?* | security assessor, release reviewer | generated |
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
@@ -64,6 +90,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
 | `generated-container-architecture.svg` | UML deployment | *What containers exist, in which plane, with what trust and which volumes?* | contributor, security assessor | generated |
+| `generated-agentic-patterns.svg` | UML activity partitions | *For each published agentic pattern, what does the trust boundary insert — and where is the deny path the field's diagrams omit?* | contributor, reviewer new to the project | generated — **intent, NOT authoritative** (see [`../intent/`](../intent/)) |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
@@ -98,9 +125,53 @@ merely describes it:
 | Content | Source | Deliberately not |
 |---|---|---|
 | TCB membership | `ci/gates/lib.sh` — the list P1 polices | `packaging/isolation-contract.md`, a mirror that can agree with itself while both drift |
-| Binary linkage | `rust-audit-info` on the built artifact — the real transitive closure | `cargo depgraph` — declared dependencies are not what a binary links |
+| Binary dependency reachability | `cargo metadata`'s resolve graph — normal-kind edges, host triple, transitive | a hand-kept list, and `cargo depgraph`'s *declared* (non-transitive) edges |
 | Members, binaries | `cargo metadata` | a hardcoded list |
 | Standards claims | `standards-profile.toml` — curated, reviewable, every row citing evidence | prose scattered across ADRs |
+
+> **What the matrix claims, and what it does not — narrowed 2026-09-14 on #314 review.** The
+> cells are **source-level dependency reachability**: the crate is in that binary's resolved
+> dependency closure. They are **not** evidence that the linker retained it. Dead-code
+> elimination and features that resolve on but contribute nothing mean a reachable crate may
+> put no bytes in the shipped artifact. The stronger claim — what a specific built binary
+> actually links — requires `rust-audit-info` on that artifact, and this generator
+> deliberately no longer makes it, because no diagram may require a FIPS cryptographic module
+> build to draw.
+>
+> **This costs the assessor nothing, because the matrix was never the enforcement surface.**
+> The refused cells come from `TRUST_CONSUMER_ALLOW` in [`ci/gates/lib.sh`](../../ci/gates/lib.sh),
+> and that allowlist is policed by [`p1-manifest-lint.sh`](../../ci/gates/p1-manifest-lint.sh) —
+> the sole consumer of it — on every run. The adjacent isolation claim, that no
+> `PRIVILEGED_CRATES` member is reachable from `UNTRUSTED_BIN`, is decided by
+> [`p2-invert-tree.sh`](../../ci/gates/p2-invert-tree.sh).
+>
+> **Worth noting, because it settles the question rather than conceding it:** `p2-invert-tree.sh`
+> reaches its verdict with `cargo tree -i -e normal,build` — *source-level reachability*, failing
+> closed on any cargo error. The gate that actually enforces privileged-crate isolation already
+> reasons exactly the way this matrix now does. Deriving the picture from the resolve graph brings
+> it into agreement with its own enforcement surface; the artifact read was the odd one out.
+> **What none of these decide, stated plainly because the earlier wording of this note got it
+> wrong (2026-09-14, second review):** neither P1 nor `p2-invert-tree.sh` decides what the linker
+> retained. P1 polices manifest membership; P2 runs `cargo tree`. Both are source-level, like this
+> matrix. Sending a reader to them "for the linker-level fact" was wrong, and it quietly
+> reintroduced the equivalence the rest of this note disclaims.
+>
+> **Per-artifact evidence has its own path:** [`p2-artifact-witness.sh`](../../ci/gates/p2-artifact-witness.sh),
+> run in CI right after the auditable builds. It builds `UNTRUSTED_BIN` with
+> `CARGO_PROFILE_RELEASE_STRIP=false`, requires a non-empty `rust-audit-info` inventory
+> (fail-closed if absent), and asserts the inventory names no `PRIVILEGED_CRATES` member — plus a
+> symbol scan its own comment marks **best-effort and not load-bearing**, because release
+> optimization can strip a symbol.
+>
+> **And even that is resolver metadata**, as the gate's own comment says — embedded at build time
+> and optimization-proof *because* it is not a symbol table. So nothing in this repository asserts
+> linker retention as such. What `p2-artifact-witness.sh` adds over this matrix is that its
+> inventory belongs to **one specific built artifact**, with that build's features and target,
+> rather than a host-triple resolve. That is the real difference, and it is the reason the
+> per-artifact gate exists alongside the source-level ones. The earlier row in this table asserted
+> the opposite and
+> was wrong the moment the implementation changed; a source-of-truth table that disagrees with
+> its generator is the precise drift this catalog exists to prevent.
 
 ### Generation is a manual step, by standing operator decision
 

@@ -45,7 +45,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 # MemoryDenyWriteExecute= and SystemCallFilter=~@privileged @resources are
 # DELIBERATELY OMITTED (empirically confirmed on Rocky 10 / systemd 257,
-# 2026-08-17). Both are seccomp-enforced, and aws-lc-fips (the BoringCrypto FIPS
+# 2026-08-17). Both are seccomp-enforced, and aws-lc-fips (the AWS-LC-FIPS
 # module) needs W^X memory and @resources syscalls (mlock of secret material) for
 # its power-on integrity self-test — either directive raises SIGSYS (status=31/SYS)
 # and crash-loops the daemon. The daemon serves cleanly with @system-service +

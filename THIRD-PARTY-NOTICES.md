@@ -23,16 +23,17 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | anyhow | 1.0.104 | MIT OR Apache-2.0 |
 | arc-swap | 1.9.2 | MIT OR Apache-2.0 |
 | arraydeque | 0.5.1 | MIT OR Apache-2.0 |
-| asn1-rs | 0.6.2 | MIT OR Apache-2.0 |
-| asn1-rs-derive | 0.5.1 | MIT OR Apache-2.0 |
+| asn1-rs | 0.7.2 | MIT OR Apache-2.0 |
+| asn1-rs-derive | 0.6.0 | MIT OR Apache-2.0 |
 | asn1-rs-impl | 0.2.0 | MIT OR Apache-2.0 |
 | async-trait | 0.1.92 | MIT OR Apache-2.0 |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT |
-| aws-lc-fips-sys | 0.14.1 | ISC OR Apache-2.0 OR OpenSSL |
-| aws-lc-rs | 1.18.0 | ISC OR Apache-2.0 |
-| aws-lc-sys | 0.44.0 | ISC OR Apache-2.0 OR MIT OR BSD-3-Clause OR MIT-0 |
+| aws-lc-fips-sys | 0.14.2 | ISC OR Apache-2.0 OR OpenSSL |
+| aws-lc-rs | 1.18.1 | ISC OR Apache-2.0 |
+| aws-lc-sys | 0.45.0 | ISC OR Apache-2.0 OR MIT OR BSD-3-Clause OR MIT-0 |
 | base64 | 0.22.1 | MIT OR Apache-2.0 |
+| base64 | 0.23.1 | MIT OR Apache-2.0 |
 | bindgen | 0.72.1 | BSD-3-Clause |
 | bitflags | 2.13.1 | MIT OR Apache-2.0 |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 |
@@ -51,18 +52,19 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | clap_lex | 1.1.0 | MIT OR Apache-2.0 |
 | cmake | 0.1.58 | MIT OR Apache-2.0 |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 |
+| combine | 4.6.8 | MIT |
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 |
 | crunchy | 0.2.4 | MIT |
-| darling | 0.14.4 | MIT |
-| darling_core | 0.14.4 | MIT |
-| darling_macro | 0.14.4 | MIT |
+| darling | 0.20.11 | MIT |
+| darling_core | 0.20.11 | MIT |
+| darling_macro | 0.20.11 | MIT |
 | data-encoding | 2.11.1 | MIT |
-| der-parser | 9.0.0 | MIT OR Apache-2.0 |
+| der-parser | 10.0.0 | MIT OR Apache-2.0 |
 | deranged | 0.5.8 | MIT OR Apache-2.0 |
-| derive_builder | 0.12.0 | MIT OR Apache-2.0 |
-| derive_builder_core | 0.12.0 | MIT OR Apache-2.0 |
-| derive_builder_macro | 0.12.0 | MIT OR Apache-2.0 |
+| derive_builder | 0.20.2 | MIT OR Apache-2.0 |
+| derive_builder_core | 0.20.2 | MIT OR Apache-2.0 |
+| derive_builder_macro | 0.20.2 | MIT OR Apache-2.0 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | either | 1.17.0 | MIT OR Apache-2.0 |
@@ -77,12 +79,11 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | futures-core | 0.3.33 | MIT OR Apache-2.0 |
 | futures-task | 0.3.33 | MIT OR Apache-2.0 |
 | futures-util | 0.3.33 | MIT OR Apache-2.0 |
-| getrandom | 0.2.17 | MIT OR Apache-2.0 |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 |
 | glob | 0.3.4 | MIT OR Apache-2.0 |
 | half | 2.7.1 | MIT OR Apache-2.0 |
-| hashbrown | 0.16.1 | MIT OR Apache-2.0 |
-| hashlink | 0.11.1 | MIT OR Apache-2.0 |
+| hashbrown | 0.17.1 | MIT OR Apache-2.0 |
+| hashlink | 0.12.2 | MIT OR Apache-2.0 |
 | heck | 0.5.0 | MIT OR Apache-2.0 |
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | http-body | 1.1.0 | MIT |
@@ -105,35 +106,41 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 |
 | itertools | 0.13.0 | MIT OR Apache-2.0 |
 | itoa | 1.0.18 | MIT OR Apache-2.0 |
+| jni | 0.22.4 | MIT OR Apache-2.0 |
+| jni-macros | 0.22.4 | MIT OR Apache-2.0 |
+| jni-sys | 0.4.1 | MIT OR Apache-2.0 |
+| jni-sys-macros | 0.4.1 | MIT OR Apache-2.0 |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 |
 | js-sys | 0.3.104 | MIT OR Apache-2.0 |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 |
 | libc | 0.2.189 | MIT OR Apache-2.0 |
 | libloading | 0.8.9 | ISC |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| listenfd | 1.0.2 | Apache-2.0 |
 | litemap | 0.8.2 | Unicode-3.0 |
 | log | 0.4.33 | MIT OR Apache-2.0 |
-| maknae 0.0.0 maknae | Apache-2.0 |
-| maknae-audit 0.0.0 maknae-audit | Apache-2.0 |
-| maknae-audit-append 0.0.0 maknae-audit-append | Apache-2.0 |
-| maknae-authz-basic 0.0.0 maknae-authz-basic | Apache-2.0 |
-| maknae-classification-aus 0.0.0 maknae-classification-aus | Apache-2.0 |
-| maknae-config 0.0.0 maknae-config | Apache-2.0 |
-| maknae-io 0.0.0 maknae-io | Apache-2.0 |
-| maknae-kernel 0.0.0 maknae-kernel | Apache-2.0 |
-| maknae-llm 0.0.0 maknae-llm | Apache-2.0 |
-| maknae-mcp 0.0.0 maknae-mcp | Apache-2.0 |
-| maknae-msgs 0.0.0 maknae-msgs | Apache-2.0 |
-| maknae-plane 0.0.0 maknae-plane | Apache-2.0 |
-| maknae-proto 0.0.0 maknae-proto | Apache-2.0 |
-| maknae-security 0.0.0 maknae-security | Apache-2.0 |
-| maknae-spif 0.0.0 maknae-spif | Apache-2.0 |
-| maknae-spif-compile 0.0.0 maknae-spif-compile | Apache-2.0 |
-| maknae-spifc 0.0.0 maknae-spifc | Apache-2.0 |
-| maknae-subject-ctx 0.0.0 maknae-subject-ctx | Apache-2.0 |
-| maknae-subject-ctx-mint 0.0.0 maknae-subject-ctx-mint | Apache-2.0 |
-| maknae-vault 0.0.0 maknae-vault | Apache-2.0 |
-| maknaed 0.0.0 maknaed | Apache-2.0 |
+| maknae | 0.0.0 | Apache-2.0 |
+| maknae-audit | 0.0.0 | Apache-2.0 |
+| maknae-audit-append | 0.0.0 | Apache-2.0 |
+| maknae-authz-basic | 0.0.0 | Apache-2.0 |
+| maknae-classification-aus | 0.0.0 | Apache-2.0 |
+| maknae-config | 0.0.0 | Apache-2.0 |
+| maknae-egress | 0.0.0 | Apache-2.0 |
+| maknae-io | 0.0.0 | Apache-2.0 |
+| maknae-kernel | 0.0.0 | Apache-2.0 |
+| maknae-llm | 0.0.0 | Apache-2.0 |
+| maknae-mcp | 0.0.0 | Apache-2.0 |
+| maknae-msgs | 0.0.0 | Apache-2.0 |
+| maknae-plane | 0.0.0 | Apache-2.0 |
+| maknae-proto | 0.0.0 | Apache-2.0 |
+| maknae-security | 0.0.0 | Apache-2.0 |
+| maknae-spif | 0.0.0 | Apache-2.0 |
+| maknae-spif-compile | 0.0.0 | Apache-2.0 |
+| maknae-spifc | 0.0.0 | Apache-2.0 |
+| maknae-subject-ctx | 0.0.0 | Apache-2.0 |
+| maknae-subject-ctx-mint | 0.0.0 | Apache-2.0 |
+| maknae-vault | 0.0.0 | Apache-2.0 |
+| maknaed | 0.0.0 | Apache-2.0 |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | memoffset | 0.9.1 | MIT |
 | minimal-lexical | 0.2.1 | MIT OR Apache-2.0 |
@@ -144,10 +151,11 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | num-conv | 0.2.2 | MIT OR Apache-2.0 |
 | num-integer | 0.1.46 | MIT OR Apache-2.0 |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 |
-| oid-registry | 0.7.1 | MIT OR Apache-2.0 |
+| oid-registry | 0.8.1 | MIT OR Apache-2.0 |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
 | once_cell_polyfill | 1.70.2 | MIT OR Apache-2.0 |
-| pem | 3.0.6 | MIT |
+| openssl-probe | 0.2.1 | MIT OR Apache-2.0 |
+| pem | 4.0.0 | MIT |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT |
 | pkg-config | 0.3.33 | MIT OR Apache-2.0 |
@@ -157,26 +165,32 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
-| rcgen | 0.13.2 | MIT OR Apache-2.0 |
+| rcgen | 0.14.10 | MIT OR Apache-2.0 |
 | regex | 1.13.1 | MIT OR Apache-2.0 |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 |
-| reqwest | 0.12.28 | MIT OR Apache-2.0 |
-| ring | 0.17.14 | Apache-2.0 OR ISC |
+| reqwest | 0.13.5 | MIT OR Apache-2.0 |
 | rpassword | 7.5.4 | Apache-2.0 |
 | rtoolbox | 0.0.5 | Apache-2.0 |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
+| rustc_version | 0.4.1 | MIT OR Apache-2.0 |
 | rusticata-macros | 4.1.0 | MIT OR Apache-2.0 |
-| rustify | 0.6.1 | MIT |
+| rustify | 0.7.0 | MIT |
 | rustify_derive | 0.5.5 | MIT |
 | rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| rustls | 0.23.43 | Apache-2.0 OR ISC OR MIT |
+| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
+| rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
-| rustls-webpki | 0.103.13 | ISC |
+| rustls-platform-verifier | 0.7.0 | MIT OR Apache-2.0 |
+| rustls-platform-verifier-android | 0.1.1 | MIT OR Apache-2.0 |
+| rustls-webpki | 0.103.15 | ISC |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
+| same-file | 1.0.6 | Unlicense OR MIT |
+| schannel | 0.1.29 | MIT |
 | security-framework | 3.7.0 | MIT OR Apache-2.0 |
 | security-framework-sys | 2.17.0 | MIT OR Apache-2.0 |
+| semver | 1.0.28 | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 |
@@ -185,11 +199,12 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | shlex | 1.3.0 | MIT OR Apache-2.0 |
 | shlex | 2.0.1 | MIT OR Apache-2.0 |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 |
+| simd_cesu8 | 1.2.0 | Apache-2.0 OR MIT |
+| simdutf8 | 0.1.5 | MIT OR Apache-2.0 |
 | slab | 0.4.12 | MIT |
 | smallvec | 1.15.2 | MIT OR Apache-2.0 |
 | socket2 | 0.6.5 | MIT OR Apache-2.0 |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 |
-| strsim | 0.10.0 | MIT |
 | strsim | 0.11.1 | MIT |
 | subtle | 2.6.1 | BSD-3-Clause |
 | syn | 1.0.109 | MIT OR Apache-2.0 |
@@ -199,14 +214,16 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | synstructure | 0.12.6 | MIT |
 | synstructure | 0.13.2 | MIT |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 |
+| thiserror | 2.0.20 | MIT OR Apache-2.0 |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 |
+| thiserror-impl | 2.0.20 | MIT OR Apache-2.0 |
 | time | 0.3.55 | MIT OR Apache-2.0 |
 | time-core | 0.1.9 | MIT OR Apache-2.0 |
 | time-macros | 0.2.32 | MIT OR Apache-2.0 |
 | tinystr | 0.8.3 | Unicode-3.0 |
 | tokio | 1.53.1 | MIT |
 | tokio-macros | 2.7.2 | MIT |
-| tokio-rustls | 0.26.4 | MIT OR Apache-2.0 |
+| tokio-rustls | 0.26.5 | MIT OR Apache-2.0 |
 | tower | 0.5.3 | MIT |
 | tower-http | 0.6.11 | MIT |
 | tower-layer | 0.3.3 | MIT |
@@ -217,11 +234,14 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | try-lock | 0.2.5 | MIT |
 | unicode-ident | 1.0.24 | MIT OR Apache-2.0 OR Unicode-3.0 |
 | unicode-xid | 0.2.6 | MIT OR Apache-2.0 |
+| untrusted | 0.7.1 | ISC |
 | untrusted | 0.9.0 | ISC |
 | url | 2.5.8 | MIT OR Apache-2.0 |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT |
-| vaultrs | 0.7.4 | MIT |
+| uuid | 1.26.1 | Apache-2.0 OR MIT |
+| vaultrs | 0.8.0 | MIT |
+| walkdir | 2.5.0 | Unlicense OR MIT |
 | want | 0.3.1 | MIT |
 | wasi | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | wasm-bindgen | 0.2.127 | MIT OR Apache-2.0 |
@@ -230,9 +250,12 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | wasm-bindgen-macro-support | 0.2.127 | MIT OR Apache-2.0 |
 | wasm-bindgen-shared | 0.2.127 | MIT OR Apache-2.0 |
 | web-sys | 0.3.104 | MIT OR Apache-2.0 |
-| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
+| webpki-root-certs | 1.0.9 | CDLA-Permissive-2.0 |
+| winapi | 0.3.9 | MIT OR Apache-2.0 |
+| winapi-i686-pc-windows-gnu | 0.4.0 | MIT OR Apache-2.0 |
+| winapi-util | 0.1.11 | Unlicense OR MIT |
+| winapi-x86_64-pc-windows-gnu | 0.4.0 | MIT OR Apache-2.0 |
 | windows-link | 0.2.1 | MIT OR Apache-2.0 |
-| windows-sys | 0.52.0 | MIT OR Apache-2.0 |
 | windows-sys | 0.59.0 | MIT OR Apache-2.0 |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 |
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 |
@@ -245,9 +268,9 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | windows_x86_64_gnullvm | 0.52.6 | MIT OR Apache-2.0 |
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 |
 | writeable | 0.6.3 | Unicode-3.0 |
-| x509-parser | 0.16.0 | MIT OR Apache-2.0 |
-| yaml-rust2 | 0.11.0 | MIT OR Apache-2.0 |
-| yasna | 0.5.2 | MIT OR Apache-2.0 |
+| x509-parser | 0.18.1 | MIT OR Apache-2.0 |
+| yaml-rust2 | 0.13.0 | MIT OR Apache-2.0 |
+| yasna | 0.6.0 | MIT OR Apache-2.0 |
 | yoke | 0.8.3 | Unicode-3.0 |
 | yoke-derive | 0.8.2 | Unicode-3.0 |
 | zerocopy | 0.8.56 | BSD-2-Clause OR Apache-2.0 OR MIT |

@@ -1,4 +1,4 @@
-//! SHA-256 through the pinned FIPS module (aws-lc-rs, the provider the TLS
+//! SHA-256 through the asserted FIPS module (aws-lc-rs, the provider the TLS
 //! stack asserts). Used for audit content digests (#172): the trail holds a
 //! digest of what was sent, never the content. Incremental so callers need
 //! not concatenate secret text into a second buffer.

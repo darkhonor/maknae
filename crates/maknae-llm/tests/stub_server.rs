@@ -3,8 +3,13 @@
 //!
 //! HTTP over loopback, no TLS — `ProviderConfig` already permits `http://` to
 //! loopback for exactly this, and a TLS stub would test rustls rather than the
-//! client. The FIPS posture is a DEPENDENCY PINNING property, asserted in the
-//! manifest and by the deputy's provider install, not by a test fixture.
+//! client. The FIPS posture is a RUNTIME-ASSERTION property, enforced by the
+//! deputy's provider install and `assert_fips_provider`, not by a test fixture.
+//!
+//! *Corrected 2026-09-19 (#320): this said "a DEPENDENCY PINNING property".
+//! ADR-0025 and `maknae-vault`'s `fips.rs` both strike that framing — the pin was
+//! never the control, and dependency-tree hygiene never was either; the runtime
+//! assertion is. What the fixture does and does not prove is unchanged.*
 #![cfg(unix)]
 
 use maknae_llm::{CallError, ChatMessage, ChatRequest, ReplyError};
