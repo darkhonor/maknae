@@ -35,8 +35,7 @@ rustify_derive = "=0.5.5"                                          # the #[deriv
 # that a bound records the failure it prevents.)
 #
 # See the aws-lc-rs posture comment below for the ruling and the module-line facts,
-# which are not
-# restated here so there is one place to correct. The ceiling here was never
+# which are not restated here so there is one place to correct. The ceiling here was never
 # about rcgen: `>=0.14.9, <0.14.10` existed because rcgen 0.14.10 raises its OWN
 # aws-lc-rs requirement to ^1.18, which the old FIPS bound excluded, so the two
 # were unsatisfiable and cargo refused the pair. With that bound lifted, 0.14.10

@@ -290,10 +290,11 @@ jobs:
     # re-measured with it: maknae-config and maknae-authz-basic each declare
     # hermetic-test-seam.
     #
-    # "Seventeen / four / ten" is a FAMILY of #198-era measurements, not one
-    # number, and this note does not pretend to have moved them: the same figures
-    # live at ci.yml:45-46, the timeout comment below, ci/gates/darwin-cross-check.sh
-    # (its header), ci/gates/negative-control.sh, and CONTRIBUTING.md. They are ALL
+    # "Seventeen / four / ten" is a FAMILY of six #198-era measurements, not one
+    # number, and this note does not pretend to have moved them. All six: the
+    # sentence directly above this note; ci.yml:45-46; the timeout comment below;
+    # ci/gates/darwin-cross-check.sh (its header); ci/gates/negative-control.sh;
+    # and CONTRIBUTING.md. They are ALL
     # left in place as the measurements they were, the way darwin-cross-check.sh's
     # own version note is -- they are stale on `main` too, so none of this is a #320
     # regression. It is recorded here because #320 touches the gate this comment

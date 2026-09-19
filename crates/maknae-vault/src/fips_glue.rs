@@ -7,6 +7,12 @@
 //! constructing any Vault client, because `vaultrs`'s reqwest reads the same
 //! process-default provider and would otherwise fall back to `ring` (non-FIPS).
 //!
+//! *Corrected 2026-09-19 (#320): `ring` is no longer in the build graph on any target
+//! (`cargo tree -i ring --target all` prints no tree), so it is not what a missing install
+//! would fall back TO. **The ordering requirement is unchanged and still load-bearing** —
+//! an absent process default is fail-closed either way, and the point of installing before
+//! any TLS construction is that nothing else gets to choose. See this crate's `fips.rs`.*
+//!
 //! T3 (a process-global default is not deterministically coverable) + mutation-
 //! excluded (`mutants.toml`). The pure `fips::fips_result` carries the T1 logic.
 use crate::{fips::fips_result, VaultError};
@@ -15,7 +21,7 @@ use crate::{fips::fips_result, VaultError};
 /// Idempotent: a pre-existing default (or a second call) is a no-op. The daemon `main`
 /// (via `maknae_kernel::run`) MUST call this before [`assert_fips_provider`] and before
 /// constructing any Vault client, so `vaultrs`'s reqwest + rustls read the FIPS default
-/// rather than falling back to `ring` (spec §6.1). The subsequent `assert_fips_provider`
+/// rather than falling back to `ring` (spec §6.1; ring left the graph 2026-09-19, #320 — see the module note above, the ordering requirement is unchanged). The subsequent `assert_fips_provider`
 /// remains the authoritative gate: this installer only makes a FIPS build's default
 /// available; it never masks a non-FIPS build (whose `.fips()` is false → refuse).
 pub fn install_default_crypto_provider() {
