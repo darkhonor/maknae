@@ -100,6 +100,38 @@ phase1() {
                                                 || fail "no embedded SBOM in $b"
     done
 
+    # --- #227 item 3: the Developer ID signing seam --------------------------
+    # MEASURED 2026-09-19 on Wrathion: Hardened Runtime library validation requires
+    # the process and the loaded FIPS dylib to carry the SAME Team ID. Developer ID
+    # on both satisfies it with NO entitlement; ad-hoc on both fails rc 134
+    # ("different Team IDs"). The dangerous middle case is an identity applied to
+    # the binaries but NOT the dylib — that is invisible until an installed binary
+    # runs outside cargo, which is the worst possible moment to find it.
+    grep -q 'MAKNAE_SIGN_IDENTITY' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh carries a signing-identity seam" \
+        || fail "no signing seam — Developer ID signing cannot be requested (#227 item 3)"
+
+    # A NAMED identity that is absent must REFUSE, never fall back to ad-hoc. A
+    # silent downgrade ships an artifact the operator believes is signed.
+    grep -q 'security find-identity' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh proves the named identity exists before signing" \
+        || fail "a named-but-absent identity could silently fall back to ad-hoc"
+
+    grep -q 'productsign' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh can productsign the distribution" \
+        || fail "no productsign — the .pkg cannot carry a Developer ID Installer signature"
+
+    # Team ID CONSISTENCY holds in BOTH modes, so this never passes on nothing:
+    # ad-hoc carries no Team ID, Developer ID carries one, and a MIX is the defect.
+    local tid_d tid_c
+    tid_d="$(codesign -dv --verbose=4 "$B/maknaed" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    tid_c="$(codesign -dv --verbose=4 "$B/maknae"  2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [ "$tid_d" = "$tid_c" ]; then
+        ok "maknaed and maknae carry the same Team ID (${tid_d:-none — ad-hoc})"
+    else
+        fail "Team ID MISMATCH: maknaed='${tid_d:-none}' maknae='${tid_c:-none}'"
+    fi
+
     if [ -n "$PKG" ]; then
         ok "package present: $(basename "$PKG")"
         local x; x="$(mktemp -d)"
