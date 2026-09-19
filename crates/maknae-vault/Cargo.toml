@@ -70,9 +70,10 @@ rustls = { version = "0.23", default-features = false, features = ["fips"] }
 # design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md, which is
 # the DECISION OF RECORD; this comment mirrors it and never outranks it
 # (AGENTS.md authority order: code -> KLC -> current ADRs -> everything else).
-# Maknae moves to the AWS-LC-FIPS 4.x module line. In their words: *"Maknae does NOT have the same compliance
-# posture as Microkosmos and it's silly to try and justify it otherwise. The
-# design goal is the same (FIPS Validated), but it's a goal not a constraint."*
+# Maknae moves to the AWS-LC-FIPS 4.x module line. In their words: *"Maknae does
+# NOT have the same compliance posture as Microkosmos and it's silly to try and
+# justify it otherwise. The design goal is the same (FIPS Validated), but it's a
+# goal not a constraint."*
 # Maknae is a personal project — no authorization boundary, no ATO, no assessor
 # (AGENTS.md). FIPS 140-3 validation is a DESIGN TARGET so the system CAN be
 # fielded; when a DoD deployment is genuinely pursued, the deploying

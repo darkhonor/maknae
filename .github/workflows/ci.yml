@@ -288,7 +288,11 @@ jobs:
     # (maknae, maknae-egress, maknae-kernel, maknae-llm, maknae-vault, maknaed).
     # The "+ 2 feature passes" in the timeout comment below is CORRECT and was
     # re-measured with it: maknae-config and maknae-authz-basic each declare
-    # hermetic-test-seam.
+    # hermetic-test-seam AND are cross-checked. maknae-kernel declares it too --
+    # three declarers, not two -- but it is one of the six SDK-blocked members, so
+    # its pass is reported blocked and never counted (the gate only increments
+    # feature_passes on a pass that succeeds). The count is 2 for that reason, not
+    # because only two crates declare the feature.
     #
     # "Seventeen / four / ten" is a FAMILY of six #198-era measurements, not one
     # number, and this note does not pretend to have moved them. All six: the

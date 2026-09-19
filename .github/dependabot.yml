@@ -63,8 +63,7 @@ updates:
     # is design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; the
     # posture comment in crates/maknae-vault/Cargo.toml mirrors it with the
     # dependency facts. A Dependabot bump of aws-lc-rs or rcgen is now an
-    # ordinary bump: review it
-    # against that comment, which must stay true.
+    # ordinary bump: review it against that comment, which must stay true.
 
   # ---------------------------------------------------------------------------
   # GitHub Actions

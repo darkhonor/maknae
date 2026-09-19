@@ -328,8 +328,17 @@ impl PlaneClient {
     /// CA pins / Vault CA), read from disk, not the document.
     ///
     /// **LOAD-BEARING ordering:** `assert_fips_provider()` runs first — before the Vault
-    /// client is built — so reqwest reads the FIPS default (§6.1), never falling back to
-    /// ring. Fail-closed throughout.
+    /// client is built — so reqwest reads the FIPS default (§6.1) and nothing else gets
+    /// to choose. Fail-closed throughout.
+    ///
+    /// *Corrected 2026-09-19 (#320): this said "never falling back to `ring`". `ring` is
+    /// no longer in the build graph on any target (`cargo tree -i ring --target all`
+    /// prints no tree), so it is not what a missing install would fall back TO. **The
+    /// ordering requirement is unchanged and still load-bearing** — an absent process
+    /// default is fail-closed either way, and the point is that the FIPS install happens
+    /// before anything can read a default. Same correction as `fips_glue.rs`; this file is
+    /// what `design/references/2026-08-30-fips-supply-chain-visibility.md` cites as the
+    /// ordering's evidence site, which is why the rationale here has to be true.*
     ///
     /// The returned client's `secret_source()` defaults to `PlaintextPath` (the most
     /// conservative placeholder) since this constructor has no resolution info of its
