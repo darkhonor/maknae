@@ -40,8 +40,9 @@ rustify_derive = "=0.5.5"                                          # the #[deriv
 # cargo's caret requirement, i.e. `>=0.14.0`, which would have silently dropped
 # the floor eight patch versions below anything measured here, in a manifest
 # whose own rule is that a bound records the failure it prevents. Nothing below
-# 0.14.9 has ever been resolved or tested against the `Issuer::from_params`
-# usage this crate depends on (see the API note below).
+# 0.14.9 has ever been resolved or tested against this crate's rcgen usage --
+# `csr_gen.rs` in production, plus the `Issuer::from_params` test issuers the
+# API note below describes.
 #
 # 0.13 -> 0.14 was an API break, not a routine bump: `CertificateParams::signed_by`
 # takes an `Issuer` instead of (issuer certificate, issuer key). Test issuers

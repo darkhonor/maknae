@@ -281,6 +281,14 @@ jobs:
     # #198: the gate checks EVERY member, one at a time, and lets cargo say
     # which are SDK-blocked from a Linux runner (a build-script failure inside
     # aws-lc-sys / aws-lc-fips-sys / ring — and only that). Seventeen check,
+    # (Corrected 2026-09-19, #320: MEASURED today on both `main` and the #320
+    # branch — 22 workspace members, 16 cross-checked, 6 SDK-blocked by name
+    # (maknae, maknae-egress, maknae-kernel, maknae-llm, maknae-vault, maknaed).
+    # The "seventeen / four" below predates several crates and is stale on both
+    # trees, so this is not a #320 regression; it is corrected here because #320
+    # touches the gate this comment describes and a stale count next to a swept
+    # file is exactly the drift AGENTS.md names. `ring` is also no longer in the
+    # graph on any target, though the gate still matches it by name harmlessly.)
     # four are reported blocked by name. `negative-control` proves it fires.
     runs-on: ubuntu-latest
     timeout-minutes: 30  # per-pass cold cache: 116 s measured on Rocky 9 x86_64 (17 members + 2 feature passes), ~2.5 min on Apple Silicon (#198)

@@ -15,13 +15,28 @@
 # `evidence` must name a file, gate or ADR a reader can open. A claim with no
 # evidence does not belong in this file.
 
+# CORRECTED 2026-09-19 (#320, ADR-0025). This row read `version = "aws-lc-fips
+# (BoringCrypto module)"` with no CMVP qualifier, which is the overstatement that
+# ADR-0025 exists to remove — and this file, not the ADR prose, is what
+# README.md names as the register standards claims live in, so it was the one
+# place the claim most needed fixing. Two things were wrong: the module is
+# AWS-LC-FIPS, not BoringCrypto; and Maknae now builds on the 4.x line, which is
+# SUBMITTED and under CMVP review, never validated.
+#
+# `status` stays "enforced" and that is deliberate, per this file's own
+# definitions: what is enforced is that the process runs the FIPS provider or
+# refuses to start — the runtime .fips() assertion is fail-closed and mechanically
+# checked. What is NOT claimed, and never was by that assertion, is a CMVP
+# certificate: .fips() proves the FIPS BUILD and returns the same value on a
+# validated module and on one in review. The certificate state belongs in
+# `version`, where a reader of the rendered StdV-1 sees it.
 [[standard]]
 name = "FIPS 140-3"
-version = "aws-lc-fips (BoringCrypto module)"
+version = "AWS-LC-FIPS 4.x — in CMVP review"
 category = "Cryptography"
 applies_to = "all crypto operations; Vault leg, plane mTLS"
 status = "enforced"
-evidence = "crates/maknae-vault/src/fips.rs — runtime .fips() assertion; ci/gates/feature-resolution-pin.sh"
+evidence = "crates/maknae-vault/src/fips.rs — runtime .fips() assertion (proves the FIPS build, not a certificate); design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md"
 
 [[standard]]
 name = "TLS"

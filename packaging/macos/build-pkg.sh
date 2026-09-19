@@ -75,7 +75,7 @@ done
 #
 # The hazard is FAIL-OPEN, not fail-closed. Upstream warns that an unresolved
 # @rpath means "a different libcrypto may be loaded" — it SEARCHES. Running on a
-# NON-VALIDATED crypto module while the posture claims otherwise is far worse than
+# crypto module nobody chose, self-tested or shipped, while the posture claims otherwise is far worse than
 # a clean startup failure.
 #
 # So pin it by ABSOLUTE install name and ship no rpath at all — the pattern Cisco
