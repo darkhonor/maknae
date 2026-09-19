@@ -32,6 +32,13 @@
 # `ring` have build scripts that need a macOS SDK. From Rocky 9:
 #   error: failed to run custom build command for `aws-lc-fips-sys v0.13.17`
 #   CMake Error ... CMakeDetermineCCompiler   (rc 101)
+# (Version note 2026-09-19, #320: the quote is kept at the value it was measured
+# at; a run today reports `aws-lc-sys v0.45.0` first instead. Which of the three
+# crates cargo names first is NOT a consequence of the FIPS module move --
+# `aws-lc-sys` 0.45.0 predates it and is untouched by that change; corrected in
+# review, an earlier draft of this note claimed the causal link. The gate matches
+# on the crate NAMES below, never on a version, so nothing here changes either
+# way.)
 # That exact shape -- cargo's "failed to run custom build command for `<one of
 # the three>`" -- is the ONLY failure this gate classifies as blocked. A build
 # script of any OTHER crate failing, or any compile error, is a FAIL. On a
