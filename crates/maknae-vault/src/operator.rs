@@ -43,6 +43,11 @@ impl OperatorClient {
         ca_path: &std::path::Path,
         token: Zeroizing<String>,
     ) -> Result<Self, VaultError> {
+        // The same scheme guard as the two plane clients (self-review round 7
+        // found this the one constructor without it): a plaintext address is
+        // refused by NAME here, before the operator token and three SecretIDs
+        // would ride it. vaultrs's `address()` setter unwraps a URL parse.
+        crate::config::validate_vault_addr(addr)?;
         // A HARD per-request HTTP timeout on every Vault operation this client makes
         // during `maknae enroll` (role-id read, secret-id mint/destroy, CA-chain
         // fetch) — matches `client.rs`'s `from_document_with_secret` exactly (same
@@ -54,11 +59,24 @@ impl OperatorClient {
             .address(addr)
             .ca_certs(vec![ca_path.to_string_lossy().to_string()])
             .token(token.as_str())
+            // Stated, not defaulted (#240b self-review): vaultrs fills an unset
+            // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
+            // any value other than 0/f/false — the empty string included, and
+            // `sudo -E maknae enroll` carries the operator's environment.
+            .verify(true)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Operator(format!("vault client settings: {e}")))?;
-        let inner = VaultClient::new(settings)
+        let mut inner = VaultClient::new(settings)
             .map_err(|e| VaultError::Operator(format!("vault client: {e}")))?;
+        // #240b (codex review): same downgrade protection as the two planes'
+        // clients — no redirects, HTTPS only, no proxy (`http.rs`).
+        crate::http::harden(
+            &mut inner,
+            addr,
+            ca_path,
+            std::time::Duration::from_secs(30),
+        )?;
         Ok(Self { inner })
     }
 

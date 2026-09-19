@@ -636,6 +636,16 @@ mod tests {
                 "send failed",
                 "unavailable",
             ),
+            // #240: the EXACT string `outcome_for` emits when the request
+            // left and the exchange failed after it.
+            (
+                "unknown",
+                EgressStatus::OutcomeUnknown,
+                None,
+                "deny",
+                "send outcome unknown",
+                "unavailable",
+            ),
             (
                 "undelivered",
                 EgressStatus::LandedUndelivered,

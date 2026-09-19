@@ -19,15 +19,19 @@ mod mutation_exchange;
 mod posture;
 mod run;
 pub use authz::*;
+pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, BootConfig};
 pub use boot_gate::{
-    authz_boot_gate, egress_bounds_boot_gate, AuthzBootRefusal, EgressBoundsRefusal,
+    authz_boot_gate, classify_bounds_load_error, egress_bounds_boot_gate, AuthzBootRefusal,
+    EgressBoundsRefusal,
 };
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
 pub use egress::{
-    admitted_reply, production_egress, reply_capacity, reply_text_length, DurableEgressIntent,
-    Egress, EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
+    admitted_reply, production_egress, production_egress_with, reply_capacity, reply_text_length,
+    unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal, EgressFailure, EgressReply,
+    EgressRequest, ReplyRefusal, SendOutcome, Unavailable, EGRESS_MAX_REPLY_FRAME_BYTES,
+    EGRESS_USER,
 };
 pub use egress_socket::SocketEgress;
 pub use groupres::*;

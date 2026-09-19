@@ -7,6 +7,8 @@
 # #240a: more-specific than the /etc/maknae wildcard above, so the deputy's
 # bounds file carries its own type. Both daemons read it (see maknae.te).
 /etc/maknae/egress-bounds\.yaml  gen_context(system_u:object_r:maknae_egress_bounds_t,s0)
+# #240b: the deputy's credential dir (RoleID + Vault CA copy), its own type.
+/etc/maknae/egress(/.*)?        gen_context(system_u:object_r:maknae_egress_etc_t,s0)
 /etc/maknae/private(/.*)?       gen_context(system_u:object_r:maknae_private_t,s0)
 # Root/systemd-only secrets (daemon has NO SELinux access) — more specific rules
 # win over the maknae_private_t wildcard above.

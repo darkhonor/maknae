@@ -81,6 +81,11 @@ sudo maknae enroll --deployment-id <id>
 
 # 5. Enable and start the daemon.
 sudo systemctl enable --now maknaed
+
+# 6. With a provider registered (#240): the egress deputy's SOCKET unit is
+#    preset-disabled, and without it every permitted prompt is refused as
+#    "egress backend not ready". Enable it once egress-bounds.yaml is complete.
+sudo systemctl enable --now maknae-egress.socket
 ```
 
 ### Why step 2 (the Vault port label) is required on SELinux hosts

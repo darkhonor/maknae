@@ -6,6 +6,12 @@
 //! in for. It is exercised by a hermetic OpenAI-compatible stub server, which
 //! is what #240's scope specifies.
 //!
+//! **No `https_only` here, unlike the Vault leg** (`maknae-vault`'s hardened
+//! client): `provider.endpoint` admits `http://` to loopback only, for a
+//! hermetic stub, and refuses it anywhere else by name (`maknae-config`'s
+//! `endpoint_is_acceptable`) — the scheme decision is the kernel's, over
+//! root-owned configuration, before the request reaches this client.
+//!
 //! **TLS provider selection is the process's, never this crate's.** `reqwest`
 //! is pinned with `rustls-no-provider` precisely so nothing here installs a
 //! default; the deputy's `.fips()`-asserted provider is the one used. Building
@@ -68,6 +74,12 @@ pub async fn chat_completion(
         // destination is what the PDP decided on. Following one silently would
         // move the egress to somewhere the verdict never covered.
         .redirect(reqwest::redirect::Policy::none())
+        // No ambient proxy, for the same reason: reqwest honours
+        // HTTPS_PROXY/ALL_PROXY by default, and an inherited one would move
+        // the egress somewhere the verdict never covered — with the bearer key
+        // in cleartext if the endpoint is a loopback `http://` stub. The deputy
+        // also scrubs those variables at start; this is the client's own half.
+        .no_proxy()
         .build()
         .map_err(|e| CallError::Transport(e.to_string()))?;
 

@@ -114,6 +114,13 @@ pub(crate) fn read_daemon_secret(
     }
 }
 
+/// Read the egress deputy's SecretID from its already-resolved path (#240b).
+/// The sealed branch, no permission gate — systemd's credentials directory is
+/// the trust boundary, exactly as for the daemon's `CredentialsDirectory` arm.
+pub(crate) fn read_egress_secret(path: &Path) -> Result<Zeroizing<String>, VaultError> {
+    read_sealed_trimmed(path)
+}
+
 /// Read the CLI's SecretID from an already-resolved source. Same single-source
 /// contract as [`read_daemon_secret`].
 pub(crate) fn read_cli_secret(src: &CliSecretSource) -> Result<Zeroizing<String>, VaultError> {

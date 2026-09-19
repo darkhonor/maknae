@@ -86,6 +86,10 @@ pub enum EnrollError {
     MissingToken,
     /// `--vault-addr` could not be parsed into a host:port to reachability-probe.
     InvalidVaultAddr(String),
+    /// `--approle-mount` / `--pki-int-mount` failed the mount shape check
+    /// (#240b). Its own variant: the message names the flag, never
+    /// `--vault-addr`.
+    InvalidVaultMount(String),
     /// The reachability probe (spec §4.1 step 1) could not reach Vault.
     VaultUnreachable { addr: String, detail: String },
     /// The fetched issuer chain was empty/malformed, or omitted the root with
@@ -150,6 +154,7 @@ impl std::fmt::Display for EnrollError {
             EnrollError::InvalidVaultAddr(addr) => {
                 write!(f, "cannot parse --vault-addr {addr:?} as host:port")
             }
+            EnrollError::InvalidVaultMount(msg) => write!(f, "invalid Vault mount: {msg}"),
             EnrollError::VaultUnreachable { addr, detail } => {
                 write!(f, "cannot reach Vault at {addr}: {detail}")
             }
@@ -651,11 +656,13 @@ fn parse_state_accessors(text: &str) -> Result<Vec<(String, String)>, EnrollErro
 // this crate's closed dependency enumeration.
 // ============================================================================
 
-/// PURE: parse `scheme://[user@]host:port[/...]` into `(host, port)`.
+/// PURE: parse `https://[user@]host:port[/...]` into `(host, port)`. HTTPS
+/// only — an `http://` address is `None` here so enroll refuses it by name
+/// before the reachability probe, rather than carrying the operator token and
+/// three SecretIDs over plaintext (self-review round 7; the daemon and deputy
+/// clients already refused it, and `OperatorClient` now does too).
 fn parse_host_port(addr: &str) -> Option<(String, u16)> {
-    let rest = addr
-        .strip_prefix("https://")
-        .or_else(|| addr.strip_prefix("http://"))?;
+    let rest = addr.strip_prefix("https://")?;
     let hostport = rest.split(['/', '?', '#']).next()?;
     let hostport = hostport.rsplit('@').next()?;
     let (host, port) = hostport.rsplit_once(':')?;
@@ -988,28 +995,41 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
 // Daemon credential sealing (spec §4.1 step 5)
 // ============================================================================
 
-async fn seal_daemon_secret_linux(
+/// The argv for sealing one plane's SecretID under `cred_name` — the name the
+/// plane's unit `LoadCredentialEncrypted=` pins. Factored so a unit test holds
+/// both sealed planes' names (`maknaed-secret-id`, `maknae-egress-secret-id`)
+/// against the units: a mismatch is "Name in credential doesn't match
+/// expectations" at unit start, found once already on live hardware for the
+/// CLI's credential (secret_io.rs).
+fn seal_argv(cred_name: &str, out_str: &str) -> (&'static str, Vec<String>) {
+    (
+        "systemd-creds",
+        vec![
+            "encrypt".into(),
+            "--with-key=tpm2".into(),
+            format!("--name={cred_name}"),
+            "-".into(),
+            out_str.to_string(),
+        ],
+    )
+}
+
+async fn seal_secret_linux(
     secret: &Zeroizing<String>,
     out_path: &Path,
+    cred_name: &str,
     verbose: bool,
 ) -> Result<(), EnrollError> {
     use tokio::io::AsyncWriteExt;
     let out_str = out_path
         .to_str()
         .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
+    let (bin, argv) = seal_argv(cred_name, out_str);
     if verbose {
-        eprintln!(
-            "exec: systemd-creds encrypt --with-key=tpm2 --name=maknaed-secret-id - {out_str}"
-        );
+        eprintln!("exec: {bin} {}", argv.join(" "));
     }
-    let mut child = tokio::process::Command::new("systemd-creds")
-        .args([
-            "encrypt",
-            "--with-key=tpm2",
-            "--name=maknaed-secret-id",
-            "-",
-            out_str,
-        ])
+    let mut child = tokio::process::Command::new(bin)
+        .args(&argv)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1045,10 +1065,9 @@ async fn seal_daemon_secret_linux(
     Ok(())
 }
 
-fn seal_daemon_secret_macos(
-    _secret: &Zeroizing<String>,
-    _out_path: &Path,
-) -> Result<(), EnrollError> {
+/// Both sealed planes (the daemon's and, since #240b, the deputy's) refuse
+/// here for the same reason; the deputy's custody on macOS is #227's.
+fn seal_secret_macos(_secret: &Zeroizing<String>, _out_path: &Path) -> Result<(), EnrollError> {
     // TODO(spec §6.2/§11): SEP envelope encryption — a non-exportable EC key
     // with an access policy usable by `_maknae`, ECIES-encrypting the
     // SecretID. Flagged as a real, unresolved risk in the spec itself ("SEP
@@ -1164,6 +1183,81 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
             eprintln!("{}: {e}", msg(locale, MsgId::EnrollFailed));
             ExitCode::FAILURE
         }
+    }
+}
+
+/// D3 (#240b): the deputy reaches `/etc/maknae` by a USER ACL granting `rx`.
+/// The directory is `root:_maknae 0750`, the deputy is in neither, and the
+/// config loader refuses any world bit on that directory — so a mode change is
+/// not available, and a group change would put the daemon's group on the
+/// deputy or vice versa. `r` AND `x`, for the same reason the home grant below
+/// is `rx`: the anchored reader (`maknae-io`) opens the directory
+/// `O_RDONLY|O_DIRECTORY`, so a search-only `--x` entry fails the open with
+/// EACCES — corrected 2026-09-14 in self-review, where this constant was `x`
+/// and would have left the deputy exactly as unable to open its bounds file as
+/// before. Never `w`: a write-granting entry raises the group bits into the
+/// loader's `0o022` mask and is refused, so the loader's check is not weakened.
+const EGRESS_TRAVERSAL_ACL: &str = "u:_maknae-egress:rx";
+
+/// The `getfacl` line [`EGRESS_TRAVERSAL_ACL`] must read back as — derived
+/// from the constant, never a second copy of its permissions: `u:NAME:rx`
+/// renders as `user:NAME:r-x`. Matched as a WHOLE trimmed line, so neither a
+/// `default:user:…` entry (inheritance for new files, no access on the
+/// directory itself) nor a mask-restricted rendering (`…\t#effective:r--`)
+/// can satisfy it.
+fn egress_traversal_acl_readback() -> String {
+    let (who, perms) = EGRESS_TRAVERSAL_ACL
+        .rsplit_once(':')
+        .expect("the ACL constant is u:NAME:PERMS");
+    let name = who.strip_prefix("u:").expect("a user entry");
+    let bit = |c: char| if perms.contains(c) { c } else { '-' };
+    format!("user:{name}:{}{}{}", bit('r'), bit('w'), bit('x'))
+}
+
+/// Apply [`EGRESS_TRAVERSAL_ACL`] to `/etc/maknae` (Linux, root context). Warn
+/// on failure, as `grant_read_path_access` does: enrollment establishes
+/// identity; without the entry the deputy refuses to start, naming its bounds
+/// file, until the operator grants it by hand. The package scriptlets set the
+/// same entry at install; this re-asserts it on every enroll.
+fn grant_egress_traversal(verbose: bool) {
+    let acl = std::process::Command::new("setfacl")
+        .args(["-m", EGRESS_TRAVERSAL_ACL, "/etc/maknae"])
+        .output();
+    match acl {
+        Ok(o) if o.status.success() => {
+            if verbose {
+                eprintln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+            }
+            // `setfacl` exits 0 on a filesystem mounted without ACL support in
+            // some configurations; read the entry back rather than trust the
+            // exit status, since this entry is the only thing that makes the
+            // deputy startable.
+            let back = std::process::Command::new("getfacl")
+                .args(["-p", "/etc/maknae"])
+                .output();
+            let want = egress_traversal_acl_readback();
+            let seen = back
+                .as_ref()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l.trim() == want)
+                })
+                .unwrap_or(false);
+            if !seen {
+                eprintln!(
+                    "maknae enroll: the ACL entry did not read back (getfacl shows no `{want}` on /etc/maknae); the egress deputy cannot start until it does"
+                );
+            }
+        }
+        Ok(o) => eprintln!(
+            "maknae enroll: setfacl failed ({}); the egress deputy cannot open /etc/maknae/egress-bounds.yaml until /etc/maknae carries the ACL entry `{EGRESS_TRAVERSAL_ACL}` (r-x: the anchored reader opens the directory): {}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!(
+            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or apply `setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae` by hand (r-x: the anchored reader opens the directory) — the egress deputy refuses to start until then"
+        ),
     }
 }
 
@@ -1317,6 +1411,13 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let token = intake_token(args, locale)?;
 
     // ---- Step 3: Vault operations ------------------------------------------
+    // The mount names go into three Vault paths and both written configs; an
+    // `auth/` prefix or a malformed path is refused HERE by name, not as a
+    // 404 on the first RoleID read (#240b self-review).
+    maknae_config::mount_path_is_acceptable(&args.approle_mount)
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
+    maknae_config::mount_path_is_acceptable(&args.pki_int_mount)
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("--pki-int-mount {why}")))?;
     let vault_ca_path = resolve_vault_ca_path(args);
     let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
         path: vault_ca_path.clone(),
@@ -1344,7 +1445,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             .await?;
     }
 
-    let (daemon_role_id, cli_role_id) =
+    let (daemon_role_id, cli_role_id, egress_role_id) =
         vault_ops::read_role_ids(&client, &args.approle_mount).await?;
 
     let daemon_secret =
@@ -1356,6 +1457,19 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
 
     let cli_secret =
         match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::CLI_ROLE).await {
+            Ok(s) => {
+                minted.push((s.role.to_string(), s.accessor.clone()));
+                s
+            }
+            Err(e) => {
+                destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
+                return Err(e.into());
+            }
+        };
+
+    // #240b: the third plane's SecretID, same rollback contract as the CLI's.
+    let egress_secret =
+        match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::EGRESS_ROLE).await {
             Ok(s) => {
                 minted.push((s.role.to_string(), s.accessor.clone()));
                 s
@@ -1406,8 +1520,10 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         macos,
         &daemon_role_id,
         &cli_role_id,
+        &egress_role_id,
         &daemon_secret.secret,
         &cli_secret.secret,
+        &egress_secret.secret,
         &vault_ca_bytes,
         &root_ca_pem,
         &int_ca_pem,
@@ -1432,8 +1548,10 @@ async fn finish_enrollment(
     macos: bool,
     daemon_role_id: &str,
     cli_role_id: &str,
+    egress_role_id: &str,
     daemon_secret: &Zeroizing<String>,
     cli_secret: &Zeroizing<String>,
+    egress_secret: &Zeroizing<String>,
     vault_ca_pem: &[u8],
     root_ca_pem: &str,
     int_ca_pem: &str,
@@ -1484,6 +1602,16 @@ async fn finish_enrollment(
         daemon_role_id.as_bytes().to_vec(),
     );
     contents.insert(etc.join("tls/vault-ca.crt"), vault_ca_pem.to_vec());
+    // #240b: the deputy's own credential set. Its RoleID, and its own copy of
+    // the Vault CA — `tls/` is root:_maknae 0750 and the deputy cannot enter it.
+    contents.insert(
+        etc.join("egress").join(maknae_vault::EGRESS_ROLE_ID_FILE),
+        egress_role_id.as_bytes().to_vec(),
+    );
+    contents.insert(
+        etc.join("egress").join(maknae_vault::EGRESS_VAULT_CA_FILE),
+        vault_ca_pem.to_vec(),
+    );
     contents.insert(
         etc.join("tls/maknae-root-ca.crt"),
         root_ca_pem.as_bytes().to_vec(),
@@ -1511,6 +1639,7 @@ async fn finish_enrollment(
         .iter()
         .filter(|a| {
             a.content != artifact_table::ContentKind::SealedDaemonSecret
+                && a.content != artifact_table::ContentKind::SealedEgressSecret
                 && a.content != artifact_table::ContentKind::SealedCliSecret
                 && !a.path.starts_with(cli_dir)
         })
@@ -1523,11 +1652,36 @@ async fn finish_enrollment(
     // `sealed_row` was already looked up above (posture-marker `target`) —
     // reused here rather than re-derived, so both consumers share one lookup.
     if macos {
-        seal_daemon_secret_macos(daemon_secret, &sealed_row.path)?;
+        seal_secret_macos(daemon_secret, &sealed_row.path)?;
     } else {
-        seal_daemon_secret_linux(daemon_secret, &sealed_row.path, args.verbose).await?;
+        seal_secret_linux(
+            daemon_secret,
+            &sealed_row.path,
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+            args.verbose,
+        )
+        .await?;
     }
     artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
+
+    // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
+    // The same mechanism under the name maknae-egress.service loads.
+    let egress_sealed_row = table
+        .iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
+        .expect("artifact_table always emits exactly one SealedEgressSecret row");
+    if macos {
+        seal_secret_macos(egress_secret, &egress_sealed_row.path)?;
+    } else {
+        seal_secret_linux(
+            egress_secret,
+            &egress_sealed_row.path,
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+            args.verbose,
+        )
+        .await?;
+    }
+    artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
 
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
@@ -1573,14 +1727,16 @@ async fn finish_enrollment(
     // closed (read-verb-unavailable) and ping/whoami are unaffected.
     if !macos {
         grant_read_path_access(&operator.home, args.verbose);
+        grant_egress_traversal(args.verbose);
     }
 
     // ---- Step 8: posture summary -------------------------------------------
     let summary = msg(locale, MsgId::EnrollPostureSummary)
         .replace("{cli_dir}", &cli_dir.display().to_string());
     Ok(format!(
-        "{summary}\n{}\n{}",
+        "{summary}\n{}\n{}\n{}",
         msg(locale, MsgId::EnrollReloginNote),
+        msg(locale, MsgId::EnrollEgressBoundsHint),
         msg(locale, MsgId::EnrollEnableDaemonHint),
     ))
 }
@@ -1624,6 +1780,122 @@ mod tests {
             !args.iter().any(|a| a == "has-tpm2"),
             "has-tpm2 verb is v253+, absent on el9 (#93)"
         );
+    }
+
+    // ---- #240b: the third plane's seal name and traversal ACL --------------
+
+    /// The sealed credential's embedded NAME must match what the unit loads:
+    /// `LoadCredentialEncrypted=maknae-egress-secret-id:…` in
+    /// maknae-egress.service. A mismatch is "Name in credential doesn't match
+    /// expectations" at unit start — the runtime seam bug secret_io.rs records
+    /// for the CLI. One argv builder, two names, both pinned.
+    #[test]
+    fn seal_argv_pins_the_credential_name_for_both_sealed_planes() {
+        let (bin, args) = seal_argv(
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+            "/etc/maknae/private/maknaed-secret-id.cred",
+        );
+        assert_eq!(bin, "systemd-creds");
+        assert_eq!(
+            args,
+            vec![
+                "encrypt",
+                "--with-key=tpm2",
+                "--name=maknaed-secret-id",
+                "-",
+                "/etc/maknae/private/maknaed-secret-id.cred"
+            ]
+        );
+        let (_, args) = seal_argv(
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+            "/etc/maknae/private/maknae-egress-secret-id.cred",
+        );
+        assert!(
+            args.iter().any(|a| a == "--name=maknae-egress-secret-id"),
+            "{args:?}"
+        );
+    }
+
+    /// D3: the deputy reaches /etc/maknae by a USER ACL for its own account
+    /// granting `r` AND `x` — `r` because the anchored reader opens the dir
+    /// O_RDONLY|O_DIRECTORY (a search-only entry fails that open; this test
+    /// was born pinning `x` alone, which self-review caught) — and never `w`
+    /// (the loader refuses a group-class write bit), never a world entry.
+    /// Parsed, not compared to itself, so the next edit cannot reintroduce
+    /// `x`-only under a matching literal.
+    #[test]
+    fn the_deputys_traversal_acl_grants_r_and_x_and_never_w_to_its_own_account() {
+        let (who, perms) = EGRESS_TRAVERSAL_ACL.rsplit_once(':').unwrap();
+        assert_eq!(who, "u:_maknae-egress");
+        assert!(
+            perms.contains('r'),
+            "the anchored reader opens the dir O_RDONLY: {perms}"
+        );
+        assert!(perms.contains('x'), "traversal: {perms}");
+        assert!(
+            !perms.contains('w'),
+            "a write entry trips the loader's 0o022 mask: {perms}"
+        );
+        // The read-back line is DERIVED from the constant: `rx` -> `r-x`.
+        assert_eq!(egress_traversal_acl_readback(), "user:_maknae-egress:r-x");
+        // And the two x-only operator strings round 2 of self-review found
+        // (after the constant had been corrected) cannot return under their
+        // own wording. A rephrased one could — this pins the found instances,
+        // not the class; the constant interpolated into both messages is what
+        // covers the class.
+        // (Composed at runtime: `include_str!` includes THIS test, so a
+        // literal pattern here would match itself.)
+        let src = include_str!("mod.rs");
+        let x = 'x';
+        for bad in [
+            format!("grant _maknae-egress {x} "),
+            format!("grants _maknae-egress {x}:"),
+            format!("egress {x} on"),
+        ] {
+            assert!(
+                !src.contains(&bad),
+                "an operator message still says x-only: {bad:?}"
+            );
+        }
+    }
+
+    /// The name each seal embeds is the name the plane's UNIT loads — read
+    /// from the shipped unit files, not from a second literal here, so an
+    /// edit to either `LoadCredentialEncrypted=` line goes red before it goes
+    /// "Name in credential doesn't match expectations" at unit start.
+    #[test]
+    fn the_seal_names_are_the_names_the_shipped_units_load() {
+        fn loaded_name(unit: &str) -> String {
+            unit.lines()
+                .find_map(|l| l.strip_prefix("LoadCredentialEncrypted="))
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(name, _)| name.to_string())
+                .expect("the unit carries a LoadCredentialEncrypted= line")
+        }
+        let maknaed = include_str!("../../../../packaging/common/maknaed.service");
+        let egress = include_str!("../../../../packaging/common/maknae-egress.service");
+        assert_eq!(
+            loaded_name(maknaed),
+            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME
+        );
+        assert_eq!(
+            loaded_name(egress),
+            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME
+        );
+    }
+
+    /// The mount refusal renders under its OWN identity, naming the flag —
+    /// round 6 of self-review found it rendering as "cannot parse
+    /// --vault-addr … as host:port" for an --approle-mount defect.
+    #[test]
+    fn a_mount_refusal_names_the_flag_and_never_vault_addr() {
+        let why = maknae_config::mount_path_is_acceptable("auth/maknae-approle").unwrap_err();
+        let m = EnrollError::InvalidVaultMount(format!("--approle-mount {why}")).to_string();
+        assert!(
+            m.starts_with("invalid Vault mount: --approle-mount starts with 'auth'"),
+            "{m}"
+        );
+        assert!(!m.contains("vault-addr") && !m.contains("host:port"), "{m}");
     }
 
     // ---- canonical_home (#216) ---------------------------------------------
@@ -1768,6 +2040,8 @@ mod tests {
     #[test]
     fn parse_host_port_rejects_no_port() {
         assert_eq!(parse_host_port("https://vault.example"), None);
+        // plaintext is not an address enroll will use (round 7)
+        assert_eq!(parse_host_port("http://vault.example:8200"), None);
     }
 
     #[test]
@@ -1955,6 +2229,7 @@ mod tests {
             &[
                 ("maknaed".to_string(), "acc-1".to_string()),
                 ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
             ],
         );
         let parsed = parse_state_accessors(&text).unwrap();
@@ -1963,6 +2238,7 @@ mod tests {
             vec![
                 ("maknaed".to_string(), "acc-1".to_string()),
                 ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
             ]
         );
     }
@@ -2082,7 +2358,7 @@ mod tests {
     // wraps a real `vaultrs::VaultClient` with no injectable transport, and
     // this crate has no mock-Vault harness (T3, per the task brief: the live
     // enroll flow is exercised manually, not in CI). What IS provable without
-    // a network call: `VaultClient::new` (verified against vaultrs 0.7.4's
+    // a network call: `VaultClient::new` (verified against vaultrs 0.8.0's
     // vendored source) reads+parses the CA file but makes NO request, so a
     // real `OperatorClient` can be built here to exercise
     // `destroy_previous_accessors_or_abort`'s structure for real. The
@@ -2118,7 +2394,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         std::fs::write(&ca_path, FIXTURE_CA_PEM).unwrap();
         // A well-formed https:// address that is never actually connected to —
         // `OperatorClient::new` only builds settings + reads/parses the CA
-        // file; it makes no request (verified against vaultrs 0.7.4 and 0.8.0).
+        // file; it makes no request (verified against vaultrs 0.8.0).
         // Since vaultrs 0.8.0 (reqwest 0.13 under `rustls-no-provider`) building
         // the client REQUIRES a process-level crypto provider and panics without
         // one; production installs it first (`cli.rs`), so the fixture does the

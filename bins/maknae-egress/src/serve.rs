@@ -18,7 +18,9 @@ use std::os::unix::net::UnixStream;
 /// declared length BEFORE allocation: the kernel is trusted, but a bug there
 /// must not be able to make the deputy reserve four gigabytes on a four-byte
 /// prefix. Defence in depth, in the direction the kernel already applies to us.
-pub const MAX_REQUEST_FRAME_BYTES: usize = 1024 * 1024;
+/// The VALUE is `maknae-proto`'s, shared with the kernel's pre-send check so
+/// the two ends cannot drift (#240, review round 4).
+pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MAX_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
@@ -124,6 +126,8 @@ mod tests {
         EgressBounds {
             kv_mount: "maknae-kv".into(),
             key_vault_path_prefix: "maknae/providers".into(),
+            vault_addr: "https://vault.example:8200".into(),
+            approle_mount: None,
         }
     }
 
@@ -144,6 +148,40 @@ mod tests {
             .to_vec()
     }
 
+    /// Serve one connection from a peer that writes `bytes`, optionally
+    /// half-closes its write side, and STAYS CONNECTED until `serve_one` has
+    /// returned.
+    ///
+    /// The earlier shape — a spawned thread that wrote and returned — dropped
+    /// the peer's end before `serve_one` captured its credentials. On macOS
+    /// LOCAL_PEERCRED fails once the peer has closed, so the refusal under
+    /// test came back as `WrongPeer` instead: measured 1–2 failures in 40 runs
+    /// on the dev host, and macOS is a production target. The same
+    /// hazard was already fixed once, by hand, in
+    /// `a_peer_that_is_not_the_kernel_is_refused_before_its_bytes_are_read`;
+    /// this helper is that fix applied to the pattern rather than the instance.
+    fn served_by_a_peer_that_stays_connected(
+        bytes: Vec<u8>,
+        half_close: bool,
+        expected_uid: u32,
+    ) -> Result<(), ServeError> {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let h = std::thread::spawn(move || {
+            let mut c = a;
+            let _ = c.write_all(&bytes);
+            if half_close {
+                let _ = c.shutdown(std::net::Shutdown::Write);
+            }
+            // Hold the socket open until the reader is done with it.
+            let _ = done_rx.recv();
+        });
+        let out = serve_one(b, expected_uid, &bounds(), canned);
+        let _ = done_tx.send(());
+        h.join().unwrap();
+        out
+    }
+
     /// A peer that is not the kernel is refused, and — the part that matters —
     /// refused BEFORE its bytes are consumed.
     ///
@@ -153,6 +191,26 @@ mod tests {
     /// CONSUMPTION: the client writes a full frame, the deputy refuses, and the
     /// frame is still sitting unread in the socket afterwards. A deputy that
     /// read first would have drained it.
+    /// The deputy's check of the CONNECTING daemon is the exact-uid one, by
+    /// name: an accepted connection reports the connecting process's own
+    /// credentials, so the listener predicate (which also accepts root) has
+    /// no place here. Pinned at the source, patterns composed so this test
+    /// does not match itself.
+    #[test]
+    fn the_accept_path_checks_the_exact_uid_not_the_listener_predicate() {
+        let src = include_str!("serve.rs");
+        let exact = format!("maknae_vault::{}(&stream,", "peer_uid_is");
+        let listener = format!("{}(&stream", "listener_uid_is");
+        assert!(
+            src.contains(&exact),
+            "the accept path must check the exact uid"
+        );
+        assert!(
+            !src.contains(&listener),
+            "root is not the kernel; the listener predicate must not be used here"
+        );
+    }
+
     #[test]
     fn a_peer_that_is_not_the_kernel_is_refused_before_its_bytes_are_read() {
         let (a, b) = UnixStream::pair().unwrap();
@@ -205,16 +263,12 @@ mod tests {
 
     #[test]
     fn a_key_path_outside_bounds_is_refused() {
-        let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        std::thread::spawn(move || {
-            let mut c = a;
-            let f = frame("secret/data/maknae/providers-evil/key");
-            let _ = c.write_all(&(f.len() as u32).to_be_bytes());
-            let _ = c.write_all(&f);
-        });
+        let f = frame("maknae/providers-evil/key");
+        let mut bytes = (f.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&f);
         assert_eq!(
-            serve_one(b, me, &bounds(), canned),
+            served_by_a_peer_that_stays_connected(bytes, false, me),
             Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
     }
@@ -223,14 +277,9 @@ mod tests {
     /// other direction: a four-byte prefix must not become a 4 GiB allocation.
     #[test]
     fn an_enormous_declared_frame_is_refused_before_allocating() {
-        let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        std::thread::spawn(move || {
-            let mut c = a;
-            let _ = c.write_all(&u32::MAX.to_be_bytes());
-        });
         assert_eq!(
-            serve_one(b, me, &bounds(), canned),
+            served_by_a_peer_that_stays_connected(u32::MAX.to_be_bytes().to_vec(), false, me),
             Err(ServeError::OversizeFrame(u32::MAX as usize))
         );
     }
@@ -240,34 +289,23 @@ mod tests {
     /// a request.
     #[test]
     fn a_body_that_is_not_a_frame_is_refused() {
-        let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        std::thread::spawn(move || {
-            let mut c = a;
-            let junk = [0xffu8, 0xff, 0xff];
-            let _ = c.write_all(&(junk.len() as u32).to_be_bytes());
-            let _ = c.write_all(&junk);
-        });
-        assert!(matches!(
-            serve_one(b, me, &bounds(), canned),
-            Err(ServeError::Io(_))
-        ));
+        let junk = [0xffu8, 0xff, 0xff];
+        let mut bytes = (junk.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&junk);
+        let e = served_by_a_peer_that_stays_connected(bytes, false, me).unwrap_err();
+        assert!(matches!(e, ServeError::Io(_)), "{e:?}");
     }
 
     /// A peer that hangs up mid-frame is a refusal, not a hang.
     #[test]
     fn a_peer_that_hangs_up_mid_frame_is_refused() {
-        let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        std::thread::spawn(move || {
-            let mut c = a;
-            let _ = c.write_all(&64u32.to_be_bytes());
-            drop(c);
-        });
-        assert!(matches!(
-            serve_one(b, me, &bounds(), canned),
-            Err(ServeError::Io(_))
-        ));
+        // Half-close after the length: the reader sees EOF mid-frame while the
+        // peer's credentials are still capturable.
+        let e = served_by_a_peer_that_stays_connected(64u32.to_be_bytes().to_vec(), true, me)
+            .unwrap_err();
+        assert!(matches!(e, ServeError::Io(_)), "{e:?}");
     }
 
     /// The accept loop survives a bad connection and keeps serving: one hostile
@@ -338,14 +376,10 @@ mod tests {
         let me = nix::unistd::getuid().as_raw();
 
         // n == MAX: past the cap, so the failure comes from decoding junk.
-        let (a, b) = UnixStream::pair().unwrap();
-        std::thread::spawn(move || {
-            let mut c = a;
-            let n = MAX_REQUEST_FRAME_BYTES as u32;
-            let _ = c.write_all(&n.to_be_bytes());
-            let _ = c.write_all(&vec![0u8; n as usize]);
-        });
-        match serve_one(b, me, &bounds(), canned) {
+        let n = MAX_REQUEST_FRAME_BYTES as u32;
+        let mut bytes = n.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&vec![0u8; n as usize]);
+        match served_by_a_peer_that_stays_connected(bytes, false, me) {
             Err(ServeError::Io(_)) => {}
             Err(ServeError::OversizeFrame(n)) => panic!(
                 "a frame EXACTLY at the cap ({n}) was refused as oversize — the check is `>=`, not `>`"
@@ -354,13 +388,14 @@ mod tests {
         }
 
         // n == MAX + 1: refused by the cap, before any allocation.
-        let (a2, b2) = UnixStream::pair().unwrap();
-        std::thread::spawn(move || {
-            let mut c = a2;
-            let _ = c.write_all(&((MAX_REQUEST_FRAME_BYTES + 1) as u32).to_be_bytes());
-        });
         assert_eq!(
-            serve_one(b2, me, &bounds(), canned),
+            served_by_a_peer_that_stays_connected(
+                ((MAX_REQUEST_FRAME_BYTES + 1) as u32)
+                    .to_be_bytes()
+                    .to_vec(),
+                false,
+                me
+            ),
             Err(ServeError::OversizeFrame(MAX_REQUEST_FRAME_BYTES + 1))
         );
     }

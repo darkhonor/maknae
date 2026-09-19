@@ -37,6 +37,7 @@ mod bounds_io;
 mod builder;
 mod ceiling;
 mod document;
+mod egress_cfg;
 mod error;
 mod loader;
 mod policy;
@@ -61,14 +62,15 @@ pub use authz::{
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
 pub use bounds::{
-    bounds_from_document, kv_fragment_is_acceptable, path_is_within_prefix, EgressBounds,
-    EGRESS_BOUNDS_FILE, MAX_KEY_VAULT_PREFIX_BYTES,
+    bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
+    path_is_within_prefix, EgressBounds, EGRESS_BOUNDS_FILE, MAX_KEY_VAULT_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
     effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
 };
+pub use egress_cfg::{egress_from_section, EgressConfig, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION};
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
@@ -76,10 +78,12 @@ pub use maknae_security::{ClassificationPolicy, Level};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
 pub use provider::{
-    provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_PROVIDER_NAME_BYTES,
-    PROVIDER_SECTION,
+    provider_from_section, refuse_plaintext_keys, ProviderConfig, MAX_KEY_FIELD_BYTES,
+    MAX_PROVIDER_NAME_BYTES, PROVIDER_SECTION,
 };
-pub use transport::{transport_from_section, TransportConfig, TRANSPORT_SECTION};
+pub use transport::{
+    transport_from_section, TransportConfig, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+};
 pub use value::Value;
 
 use builder::Builder;

@@ -29,15 +29,51 @@ profile maknae-egress /usr/bin/maknae-egress {
   # backed, 0400, this account only). The SEALED .cred under /etc/maknae/private
   # is deliberately NOT readable here — it is root/systemd's, exactly as the
   # SELinux maknae_secret_t carve-out denies it to maknaed.
+  # The DIRECTORY as well as its contents: maknae-io opens the parent
+  # O_RDONLY|O_DIRECTORY before the file, and `/dir/**` does not cover
+  # `/dir/` itself — the sibling maknaed profile carries both lines too.
+  @{run}/credentials/maknae-egress.service/   r,
   @{run}/credentials/maknae-egress.service/** r,
 
   # Its own socket directory (systemd creates the socket and passes the fd).
   @{run}/maknae-egress/                  r,
   @{run}/maknae-egress/egress.sock       rw,
 
-  # NO network rules yet. In #240a the deputy answers with a canned reply and
-  # opens no socket outward; provider egress and the Vault KV read arrive with
-  # #240b, and get a network stanza then — narrowed, not blanket.
+  # No @{PROC} or cgroup grants, deliberately: the deputy is a current-thread
+  # runtime over a std listener that binds nothing, so tokio's somaxconn and
+  # cgroup probes (which maknaed's profile grants) are never reached here.
+  # An enforcing-host denial would say otherwise; that is #242's to see.
+
+  # #240b: the deputy's own credential set — the RoleID and its copy of the
+  # Vault TLS anchor — written by `maknae enroll` as root:_maknae-egress 0640
+  # under a 0750 dir. The sealed SecretID stays under /etc/maknae/private,
+  # denied below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
+  /etc/maknae/egress/                    r,
+  /etc/maknae/egress/**                  r,
+
+  # #240b: the two OUTBOUND legs (the inbound one, AF_UNIX, is below).
+  # Vault (the AppRole login and the KV read,
+  # with /etc/maknae/egress/vault-ca.crt PINNED as the only trust anchor on
+  # that leg — maknae-vault's own HTTP client, not vaultrs's) and the provider
+  # (TLS verified against the SYSTEM trust store — reqwest's platform verifier
+  # reads the distribution bundle on Linux, which is what abstractions/ssl_certs
+  # grants). WHICH endpoint is reached is the kernel's decision over root-owned
+  # configuration; the deputy originates nothing — the same division as
+  # maknaed's Vault leg.
+  network inet stream,
+  network inet6 stream,
+  #include <abstractions/ssl_certs>
+  # And the family the deputy is BUILT on: it accepts on the systemd-passed
+  # AF_UNIX fd, reads, writes and captures peer credentials there. Stated
+  # explicitly rather than left to abstractions/base and parser defaults,
+  # as the unit's RestrictAddressFamilies and the SELinux module state it.
+  # Whether these lines are LOAD-BEARING under enforcement — i.e. whether a
+  # profile with inet rules and no unix rule denies AF_UNIX on a given
+  # kernel — is #242's to measure on the enforcing host; the sibling maknaed
+  # profile carries the same two lines for the same reason. Both spellings,
+  # for kernels with and without fine-grained unix mediation.
+  network unix stream,
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setopt, getopt, shutdown) type=stream,
 
   # Explicitly denied, so the intent is legible rather than merely absent:
   # the deputy never reads user files and never touches the audit trail.

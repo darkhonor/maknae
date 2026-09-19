@@ -322,6 +322,10 @@ const DISCLOSABLE: &[&str] = &[
     "provider.name",
     "provider.endpoint",
     "provider.model",
+    // The `egress` section (#240): where the daemon finds the deputy and how
+    // long one send may take — deployment shape, never a credential.
+    "egress.socket_path",
+    "egress.deadline_ms",
     "transport.socket_path",
     "transport.max_connections",
     "transport.frame_max_bytes",
@@ -552,6 +556,9 @@ pub struct ResolvedSettings<'a> {
     /// mount in active use, which is the MASK/NOT_SET conflation inverted.
     pub vault_approle_mount: Option<String>,
     pub vault_pki_int_mount: Option<String>,
+    /// The `egress` section as resolved (#240): both keys default, so both are
+    /// always present here.
+    pub egress: &'a crate::EgressConfig,
 }
 
 /// The complete `admin.config.show` view: the file walk, plus every resolved
@@ -612,6 +619,17 @@ pub fn effective_view(
                 "read_timeout_ms",
                 Some(r.transport.read_timeout_ms.to_string()),
             ),
+        ],
+    );
+    Document::merge_resolved(
+        &mut v,
+        "egress",
+        &[
+            (
+                "socket_path",
+                Some(r.egress.socket_path.display().to_string()),
+            ),
+            ("deadline_ms", Some(r.egress.deadline_ms.to_string())),
         ],
     );
     v
@@ -948,6 +966,7 @@ mod tests {
                 audit: &audit,
                 vault_approle_mount: None,
                 vault_pki_int_mount: None,
+                egress: &crate::EgressConfig::default(),
             },
         );
         assert_eq!(
@@ -968,6 +987,7 @@ mod tests {
                 audit: &audit_set,
                 vault_approle_mount: None,
                 vault_pki_int_mount: None,
+                egress: &crate::EgressConfig::default(),
             },
         );
         assert_eq!(v2["audit"]["siem"], MASK);
@@ -992,12 +1012,17 @@ mod tests {
                 audit: &audit,
                 vault_approle_mount: Some("maknae-approle".into()),
                 vault_pki_int_mount: Some("maknae-pki-int".into()),
+                egress: &crate::EgressConfig::default(),
             },
         );
         assert_eq!(v["transport"]["frame_max_bytes"], "65536");
         assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
+        // #240: the egress fold is asserted, not just passed — deleting the
+        // merge passed every other test and the disclosure gate.
+        assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
+        assert_eq!(v["egress"]["deadline_ms"], "280000");
     }
 
     /// A suppressed path stays suppressed on the RESOLVED lane too. Without

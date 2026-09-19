@@ -7,8 +7,9 @@ set -e
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
-        # Two identities by construction: the `_maknae` daemon account (primary
-        # group `_maknae`) and the separate `maknae` OPERATOR group. Prefer
+        # THREE identities by construction (#240a added the third): the
+        # `_maknae` daemon account (primary group `_maknae`), the separate
+        # `maknae` OPERATOR group, and the `_maknae-egress` deputy. Prefer
         # systemd-sysusers (reads /usr/lib/sysusers.d/maknae.conf); fall back to
         # groupadd/useradd on hosts without it.
         #
@@ -30,6 +31,14 @@ case "$1" in
             useradd --system -g _maknae -d /nonexistent -s /usr/sbin/nologin \
                     --comment "Maknae trust-plane daemon" _maknae
         fi
+        # #240b: the egress deputy's account, its own group (sysusers `u` line).
+        if ! getent group _maknae-egress >/dev/null 2>&1; then
+            groupadd --system _maknae-egress
+        fi
+        if ! getent passwd _maknae-egress >/dev/null 2>&1; then
+            useradd --system -g _maknae-egress -d /nonexistent -s /usr/sbin/nologin \
+                    --comment "Maknae egress deputy" _maknae-egress
+        fi
 
         # --- §4.6 directory ownership + modes (no %attr on deb) ------------------
         # The loader fail-closes on any world bit for config paths, so directory
@@ -37,6 +46,17 @@ case "$1" in
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
         install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+        # #240b: the deputy's credential set (RoleID + Vault CA copy, written
+        # by `maknae enroll`), under the deputy's OWN group.
+        install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
+        # #240b (D3): the deputy is in neither root nor _maknae, and the loader
+        # refuses any world bit on /etc/maknae, so it reaches the dir by a user
+        # ACL granting `rx` — `r` because maknae-io opens the directory
+        # O_RDONLY|O_DIRECTORY (a search-only entry fails that open), `x` for
+        # traversal, never `w` (that would trip the loader's 0o022 mask). `acl`
+        # is a Depends. Re-asserted on every configure and by `maknae enroll`.
+        setfacl -m u:_maknae-egress:rx /etc/maknae 2>/dev/null || \
+            echo "maknae: setfacl failed — grant _maknae-egress rx on /etc/maknae or the egress deputy cannot start" >&2
 
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
         # The MAC policy grants `append`, not `create`, so a first boot that had to
@@ -81,6 +101,14 @@ case "$1" in
         # onto the new binary — preserving the operator's enabled/running state.
         if [ -n "${2:-}" ]; then
             systemctl try-restart maknaed.service 2>/dev/null || :
+            # The SOCKET first: /run/maknae-egress is its RuntimeDirectory= now
+            # (#240), and an existing directory keeps the mode the old service
+            # unit gave it (0750, untraversable by _maknae) until re-created.
+            # Asserted here as well, in case the unit's setting leaves an
+            # existing directory alone. The service then restarts onto the
+            # re-created listener.
+            [ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
+            systemctl try-restart maknae-egress.socket 2>/dev/null || :
             systemctl try-restart maknae-egress.service 2>/dev/null || :
         fi
         ;;

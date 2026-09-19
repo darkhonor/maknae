@@ -76,6 +76,9 @@ sudo apt install -y ./dist/maknae_0.1.0-1_amd64.deb   # pulls apparmor, apparmor
 sudo maknae enroll --deployment-id <id>               # provisions daemon cred + principal
 # re-login so the operator picks up the `maknae` group membership
 sudo systemctl enable --now maknaed.service
+# with a provider registered (#240), the deputy's socket unit too — it is
+# preset-disabled, and without it every permitted prompt is refused as not ready
+sudo systemctl enable --now maknae-egress.socket
 maknae ping     # -> pong
 maknae whoami   # -> maknae://<id>/plane/cli
 ```

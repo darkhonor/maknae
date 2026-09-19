@@ -175,21 +175,22 @@ resource "vault_policy" "maknae_cli" {
 # change and a re-enrolment. The blast radius is stated and accepted — a
 # compromised deputy can read every provider key, which is the same reach it
 # already has by holding the only route out.
+# #240b (2026-09-15): revoke-self ONLY. The deputy's token is use-bounded
+# (below) and never renewed or looked up; the two grants the other planes
+# carry for their periodic tokens would be capabilities nothing exercises.
 resource "vault_policy" "maknae_egress" {
   name   = "maknae-egress"
   policy = <<-EOT
     path "${vault_mount.maknae_kv.path}/data/${var.provider_key_prefix}/*" { capabilities = ["read"] }
-    path "auth/token/renew-self"  { capabilities = ["update"] }
-    path "auth/token/lookup-self" { capabilities = ["read"] }
     path "auth/token/revoke-self" { capabilities = ["update"] }
   EOT
 }
 
 # ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
 # `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
-# AppRole token, so it needs its own least-privilege policy: read both RoleIDs,
-# mint/destroy both SecretIDs, and read the intermediate issuer bundle it hands to
-# the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
+# AppRole token, so it needs its own least-privilege policy: read all three
+# RoleIDs, mint/destroy all three SecretIDs, and read the intermediate issuer
+# bundle it hands to the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
 # prefix (vault_auth_backend.approle.path is the BARE mount name; vaultrs/Vault
 # addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
 # enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),
@@ -243,16 +244,24 @@ resource "vault_approle_auth_backend_role" "maknaed" {
   token_no_default_policy = true
 }
 
-# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018)
-# and a PERIODIC token — it is a long-lived service, not a per-invocation CLI.
+# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018).
+# #240b (corrected 2026-09-15): NOT a periodic token. The deputy logs in per
+# key read — login, one KV read, revoke-self — and holds no token between
+# reads, so the token it creates is bounded to exactly that: three uses (Vault
+# spends one per request; the read and the revoke are two) and a short TTL,
+# set above twice the deputy's per-request HTTP timeout so a slow-but-alive
+# Vault cannot expire the token between the read and the revoke. A token
+# whose revoke failed is then usable for at most that; the deputy still
+# refuses on that failure.
 resource "vault_approle_auth_backend_role" "maknae_egress" {
   backend                 = vault_auth_backend.approle.path
   role_name               = "maknae-egress"
   token_policies          = [vault_policy.maknae_egress.name]
-  secret_id_ttl           = 0                # ADR-0018 invariant: standing SecretID
-  secret_id_num_uses      = 0                # unlimited logins (hands-free reboots)
-  token_period            = var.token_period # PERIODIC token — renews indefinitely
-  token_max_ttl           = 0
+  secret_id_ttl           = 0  # ADR-0018 invariant: standing SecretID
+  secret_id_num_uses      = 0  # unlimited logins (hands-free reboots)
+  token_num_uses          = 3   # read + revoke, with one to spare
+  token_ttl               = 120 # seconds: above TWICE the deputy's per-request HTTP timeout (maknae-vault VAULT_HTTP_TIMEOUT, 30 s)
+  token_max_ttl           = 120
   token_no_default_policy = true
 }
 

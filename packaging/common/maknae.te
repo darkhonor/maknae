@@ -46,6 +46,14 @@ allow init_t maknae_egress_t:process2 { nnp_transition nosuid_transition };
 type maknae_egress_bounds_t;
 files_config_file(maknae_egress_bounds_t)
 
+# #240b: the deputy's credential dir (/etc/maknae/egress: its RoleID and its
+# copy of the Vault TLS anchor). Its own type, so the grant is by TYPE and the
+# maknae_etc_t wildcard (maknae.yaml, maknaed-approle-id, tls/) stays
+# unreadable to the deputy. The sealed SecretID is maknae_secret_t and stays
+# neverallow'd below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
+type maknae_egress_etc_t;
+files_config_file(maknae_egress_etc_t)
+
 # Config (/etc/maknae) + private (/etc/maknae/private) + audit (/var/log/maknae)
 # + runtime (/run/maknae) types.
 type maknae_etc_t;
@@ -95,14 +103,65 @@ allow maknaed_t maknae_etc_t:file { read open getattr };
 allow maknaed_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_egress_bounds_t:file { read open getattr };
 allow maknae_egress_t maknae_etc_t:dir { open read search getattr };
+allow maknae_egress_t maknae_egress_etc_t:dir { open read search getattr };
+# maknaed enumerates /etc/maknae at boot; on a filesystem without d_type it
+# stats each entry, so it needs getattr (and only that) on the deputy's dir.
+allow maknaed_t maknae_egress_etc_t:dir { getattr search };
+allow maknae_egress_t maknae_egress_etc_t:file { read open getattr };
 # The deputy's own entrypoint.
 allow maknae_egress_t maknae_egress_exec_t:file { read execute execute_no_trans open getattr };
-# NO network rules yet, deliberately. In #240a the deputy answers with a canned
-# reply and opens no socket outward at all; provider egress and the Vault KV
-# read arrive with #240b. When they do they follow this file's existing idiom —
-# a dedicated labeled port type plus `name_connect`, as maknae_vault_port_t
-# does for maknaed — never a blanket corenet_tcp_connect_*_port, which would
-# grant every port of that class.
+# #240b: the decrypted SecretID in $CREDENTIALS_DIRECTORY — the same label
+# split as maknaed's (el10 init_var_run_t, el9 tmpfs_t; see the maknaed block
+# below for the probe that established it). Required here as well as there:
+# checkmodule is single-pass, and this block comes first in the file.
+gen_require(`
+    type var_run_t;
+    type init_var_run_t;
+    type tmpfs_t;
+')
+allow maknae_egress_t var_run_t:dir { search getattr open read };
+allow maknae_egress_t init_var_run_t:dir { search getattr open read };
+allow maknae_egress_t init_var_run_t:file { read open getattr };
+allow maknae_egress_t tmpfs_t:file { read open getattr };
+# #240b: the two network legs. Vault: the SAME operator-labeled port as
+# maknaed (maknae_vault_port_t, maknae-selinux-ports.sh). Provider:
+# corenet_tcp_connect_http_port.
+#
+# CORRECTED 2026-09-14. The #240a comment here promised the provider leg "a
+# dedicated labeled port type plus name_connect, never a blanket
+# corenet_tcp_connect_*_port". That is not expressible for the port every
+# provider listens on: tcp/443 is http_port_t in base policy, and the shipped
+# ports helper refuses (by design) to relabel a foreign label. The interface
+# is therefore the narrowest grant the policy language offers for 443; WHICH
+# endpoint is reached is decided by the kernel over root-owned configuration,
+# not by the port label. UNVERIFIED on an enforcing host in this change — the
+# packaged-Rocky evidence is #242's.
+allow maknae_egress_t self:tcp_socket { create connect setopt getopt read write getattr shutdown };
+allow maknae_egress_t maknae_vault_port_t:tcp_socket name_connect;
+corenet_tcp_connect_http_port(maknae_egress_t)
+corenet_tcp_sendrecv_generic_node(maknae_egress_t)
+sysnet_dns_name_resolve(maknae_egress_t)
+# The provider leg verifies against the system trust store.
+miscfiles_read_generic_certs(maknae_egress_t)
+# Resolves `_maknae` by name at start (nsswitch); urandom for TLS; the same
+# daemon basics maknaed_t carries (tokio + reqwest read /proc and signal).
+auth_use_nsswitch(maknae_egress_t)
+dev_read_urand(maknae_egress_t)
+miscfiles_read_localization(maknae_egress_t)
+kernel_read_system_state(maknae_egress_t)
+allow maknae_egress_t self:process { signal sigchld };
+# The listening socket is NOT bound by the deputy: systemd creates it
+# (maknae-egress.socket) and hands the fd over. systemd labels a socket
+# unit's listener with the domain its service's entrypoint transitions to
+# (socket_determine_selinux_label: maknae_egress_t here), falling back to
+# its own init_t when that computation is unavailable; both are granted so
+# the accept/read/write on the inherited fd works either way, and #242's
+# enforcing-host shakeout drops the one that never fires. The accepted
+# connection's socket is the deputy's own. (Corrected 2026-09-15: #240a's
+# text said the fd "carries init_t's label" — that is the fallback, not the
+# rule; the daemon's connectto grant below names the same two labels.)
+allow maknae_egress_t init_t:unix_stream_socket { accept listen getattr getopt setopt read write shutdown };
+allow maknae_egress_t self:unix_stream_socket { create accept listen getattr getopt setopt read write shutdown };
 # DENIED BY TYPE, not by omission: the deputy never reads the audit trail and
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };
@@ -185,7 +244,20 @@ allow maknaed_t maknae_runtime_t:dir { open read search getattr add_name write r
 allow maknaed_t maknae_runtime_t:sock_file { create setattr getattr unlink };
 allow maknaed_t var_run_t:dir { add_name write remove_name };
 allow maknaed_t var_run_t:sock_file { create setattr getattr unlink };
-allow maknaed_t self:unix_stream_socket { create bind listen accept read write getattr setopt getopt shutdown connectto };
+allow maknaed_t self:unix_stream_socket { create bind listen accept connect read write getattr setopt getopt shutdown connectto };
+# #240: the daemon is the CLIENT of the deputy's activation socket
+# (/run/maknae-egress/egress.sock — maknae_runtime_t by the .fc, in a dir the
+# grant above already lets it search). A connect is `write` on the sock_file
+# plus `connectto` on the LISTENING socket's label: the label systemd
+# computed for maknae-egress.socket from the deputy's entrypoint
+# (maknae_egress_t; see the deputy's accept grant) or init_t as the
+# fallback. Without these the newly selected SocketEgress is denied before a
+# frame is exchanged (found by codex review of #240). What bounds it: the
+# only sock_files the daemon may write are maknae_runtime_t ones, so the
+# connectto reaches nothing outside /run/maknae and /run/maknae-egress; no
+# bind, listen or accept is granted on the deputy's socket.
+allow maknaed_t maknae_runtime_t:sock_file write;
+allow maknaed_t { maknae_egress_t init_t }:unix_stream_socket connectto;
 
 # #189 journald audit mirror: the appender writes the systemd native journal
 # protocol as a DATAGRAM. Nothing above grants unix_dgram_socket at all --

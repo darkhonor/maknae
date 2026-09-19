@@ -64,6 +64,12 @@ profile maknaed /usr/bin/maknaed {
   # the 0660 _maknae:maknae socket file that gates operator access.
   /run/maknae/                           rw,
   /run/maknae/**                         rw,
+  # #240: the deputy's activation socket (maknae-egress.socket). A connect to
+  # a PATHNAME AF_UNIX socket is mediated as a file access on the socket
+  # inode in addition to the `unix` rule below, so the path must be granted
+  # here as the deputy's profile grants it there; the unix rule alone left
+  # the daemon denied (found by codex review of #240).
+  /run/maknae-egress/egress.sock         rw,
 
   # Network — Vault egress is MANDATORY for maknae (unlike Microkosmos's opt-in):
   # the daemon cannot AppRole-auth or fetch/renew PKI leaves without reaching
@@ -71,6 +77,12 @@ profile maknaed /usr/bin/maknaed {
   # AppArmor analog; confinement of *which* endpoint is left to the network layer
   # and Vault policy.)
   network tcp,
+  # #240b (self-review): the daemon binds, listens and accepts on its AF_UNIX
+  # control socket; stated explicitly, as the deputy's profile states it,
+  # rather than left to abstractions/base and parser defaults. Load-bearing
+  # or not under enforcement is #242's to measure.
+  network unix stream,
+  unix (create, bind, listen, accept, connect, send, receive, getattr, setopt, getopt, shutdown) type=stream,
 
   # /proc and /sys runtime introspection.
   @{PROC}/sys/net/core/somaxconn         r,

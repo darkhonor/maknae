@@ -115,6 +115,10 @@ files = [
   # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
+  # #240b: the deputy's per-read token lifecycle — login/read/revoke composed
+  # over the EgressOps seam; a failed revoke is a failed probe and a withheld
+  # secret. The vaultrs half is egress.rs (T3).
+  "crates/maknae-vault/src/egress_session.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
@@ -149,6 +153,9 @@ files = [
   # malformed or hostile registry entry naming a Vault path outside the
   # deputy's grant. Both maknaed (at boot) and the deputy (at use) decide on it.
   "crates/maknae-config/src/bounds.rs",
+  # #240: the `egress` section — the deputy's socket and the provider deadline,
+  # range-checked, fail-closed like `transport`.
+  "crates/maknae-config/src/egress_cfg.rs",
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
   "bins/maknae-egress/src/handle.rs",
@@ -159,6 +166,9 @@ files = [
   # boot" is single-provider thinking and fails with two. A failed read is not
   # cached, so a transient Vault failure cannot poison a destination.
   "bins/maknae-egress/src/keys.rs",
+  # #240b: what the deputy refuses to inherit from its environment — a list, and
+  # the scrub over it. Pure data; the test holds the two families by name.
+  "bins/maknae-egress/src/env.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
@@ -341,7 +351,7 @@ why = "opens a ROOT-owned artifact through maknae-io; no unit test can create on
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: arg parse + bounds load + uid resolve + socket acquire; every decision it makes is fail-closed exit-1, and the behaviour lives in handle.rs (T1), serve.rs and listen.rs (T2) — same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs/env.rs (T1), serve.rs and listen.rs (T2) and maknae-vault's egress_session.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in env.rs — same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
@@ -438,6 +448,14 @@ why = "AppRole login (standing SecretID) — live-Vault I/O; exercised by the ga
 [[t3]]
 path = "crates/maknae-vault/src/client.rs"
 why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exercised by the gated live-smoke, mutation-excluded"
+
+[[t3]]
+path = "crates/maknae-vault/src/http.rs"
+why = "#240b: builds the hardened reqwest client every Vault client sends through (no redirects, HTTPS only, no proxy); the two construction-time refusals are unit-tested, the redirect policy is stated by construction — proving it needs a TLS server. Mutation-excluded like client.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/egress.rs"
+why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O with no stub by design; the dead-address and fail-closed-construction paths are unit-tested, the SOURCE decision it consumes is T1 in secret_source.rs (the secret_io/secret_source split), mutation-excluded like client.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/secret_io.rs"
@@ -561,6 +579,36 @@ path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
 why = "write_frame's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds body by transport.frame_max_bytes (<=1 MiB, config.rs range-enforced), never by this defensive cap. The Io error paths on the same function (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
+
+# #240: the egress socket's budget, both legs (egress_socket.rs). Six arms that
+# are errno passthroughs with no decision, or a retry that needs a signal or a
+# transient EAGAIN mid-loop; the decisions around them (a spent budget, a poll
+# timeout, a peer closing mid-frame, a dribbling peer on either leg) are each
+# provoked for real by the module's tests.
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(nix::errno::Errno::EINTR) => continue,"
+why = "poll interrupted by a signal mid-syscall: retried; cannot be provoked without a signal delivered to a blocking worker thread"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) => return Err(Self::transport(format!(\"poll: {e}\"))),"
+why = "poll on a live, borrowed socket fd cannot fail (a closed fd reports POLLNVAL as readable, not an error); pure errno passthrough with no decision"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,"
+why = "read interrupted by a signal mid-syscall: retried, as std's read_exact does; cannot be provoked without a signal delivered to a blocking worker thread"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) if Self::write_is_retried(&e) => continue,"
+why = "a non-blocking write with no space yet (EAGAIN, a moment after poll reported writability) or a signal mid-syscall: the loop re-asks the budget; neither is controllable from a test (the write-leg dribble test observes the partial-write path)"
+
+[[exception]]
+path = "crates/maknae-kernel/src/egress_socket.rs"
+anchor = "Err(e) => break Err(Self::transport(format!(\"write: {e}\"))),"
+why = "a write that fails for a reason other than the timer or a signal is a kernel-level fault (EPIPE on a peer that already went is raised on the read that follows in every test that provokes it); pure errno passthrough with no decision"
 
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.

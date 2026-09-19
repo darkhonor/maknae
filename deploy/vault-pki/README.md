@@ -89,25 +89,29 @@ are present (a permissive role is still schema-valid) — that is a review conce
 
 AppRole login needs **two** things: the **RoleID** (non-secret, stable) and a
 **SecretID** (secret; **standing** under ADR-0018 — `num_uses=0`, `ttl=0`). Terraform
-provisions both roles and outputs the RoleIDs; it does not generate or deliver SecretIDs.
+provisions all three roles and outputs the RoleIDs; it does not generate or deliver
+SecretIDs.
 
-Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config):
+Read the RoleIDs from the outputs (non-secret — safe to bake into each plane's config;
+`maknae enroll` reads all three over the API and writes them for you):
 
 ```bash
-terraform output -raw maknaed_role_id   # trust plane
-terraform output -raw maknae_role_id    # CLI plane
+terraform output -raw maknaed_role_id        # trust plane
+terraform output -raw maknae_role_id         # CLI plane
+terraform output -raw maknae_egress_role_id  # egress deputy (#240b)
 ```
 
 Then issue a standing SecretID per plane (note the `auth/` mount prefix):
 
 ```bash
-vault write -f auth/<approle-path>/role/maknaed/secret-id   # daemon bootstrap
-vault write -f auth/<approle-path>/role/maknae/secret-id    # operator CLI
+vault write -f auth/<approle-path>/role/maknaed/secret-id        # daemon bootstrap
+vault write -f auth/<approle-path>/role/maknae/secret-id         # operator CLI
+vault write -f auth/<approle-path>/role/maknae-egress/secret-id  # egress deputy (#240b, the third plane)
 ```
 
 `maknae enroll` runs under the **operator's own Vault token**, not either plane's
 AppRole token. This Terraform provisions a least-privilege `maknae-enroll` policy
-(read both RoleIDs, create/update both SecretIDs, destroy both SecretID accessors,
+(read all three RoleIDs, create/update all three SecretIDs, destroy their accessors,
 read the intermediate issuer bundle — no `list`, per §4.5), but **provisioning the
 policy does not grant it to anyone**: before running `sudo maknae enroll`, the
 operator's Vault identity must be attached to it — e.g. via `vault token create

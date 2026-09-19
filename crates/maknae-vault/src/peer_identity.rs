@@ -30,6 +30,32 @@ pub fn creds_match_uid(creds: &PeerCreds, expected_uid: u32) -> bool {
     creds.uid == expected_uid
 }
 
+/// Is the LISTENER this fd is connected to created by `expected_uid` — or
+/// by root, the init system that creates a socket-activated listener on the
+/// service's behalf?
+///
+/// The client side of a connection sees the credentials in effect at the
+/// peer's `listen(2)` (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS).
+/// Under socket activation that is the init system, uid 0, not the account
+/// the service later runs as — so an exact check would refuse the very
+/// listener the packaging ships (ADR-0023's correction 1, prototyped by
+/// #240). A root-created listener at the service's path is the init
+/// system's delegation: root needs no impersonation to read what a client
+/// sends. Every other uid but the expected one is refused, and a capture
+/// error is a refusal. Use [`peer_uid_is`] on an ACCEPTED connection, where
+/// the credentials are the connecting process's own.
+pub fn listener_uid_is<Fd: AsFd>(fd: &Fd, expected_uid: u32) -> Result<bool, VaultError> {
+    Ok(creds_match_listener_uid(
+        &crate::peercred::capture(fd)?,
+        expected_uid,
+    ))
+}
+
+/// The pure decision behind [`listener_uid_is`].
+pub fn creds_match_listener_uid(creds: &PeerCreds, expected_uid: u32) -> bool {
+    creds.uid == expected_uid || creds.uid == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +96,37 @@ mod tests {
     fn a_peer_we_cannot_identify_is_an_error_not_a_pass() {
         let f = std::fs::File::open("/dev/null").unwrap();
         assert!(peer_uid_is(&f, 0).is_err());
+    }
+
+    /// The CLIENT side of an init-system-created listener: `SO_PEERCRED` /
+    /// `LOCAL_PEERCRED` report the credentials in effect at `listen(2)`,
+    /// which under socket activation are the init system's — uid 0 — not
+    /// the service's. So a listener created by root at the deputy's path is
+    /// accepted as the init system's delegation to the deputy; every other
+    /// uid but the deputy's own is refused, exactly as before.
+    #[test]
+    fn a_listener_created_by_the_deputy_or_by_root_is_accepted_and_nothing_else() {
+        assert!(creds_match_listener_uid(&creds(1000), 1000));
+        assert!(creds_match_listener_uid(&creds(0), 1000));
+        assert!(!creds_match_listener_uid(&creds(1001), 1000));
+        assert!(!creds_match_listener_uid(&creds(1000), 1001));
+        // and the plain check is UNCHANGED: root is not exempt from it
+        assert!(!creds_match_uid(&creds(0), 1000));
+    }
+
+    /// Through the real syscall: the running uid is accepted as the listener's
+    /// creator, a neighbouring uid is not (unless the test itself runs as
+    /// root, whose listener is accepted by design), and a fd that is not a
+    /// socket is an error, never a pass.
+    #[test]
+    fn listener_uid_is_agrees_with_the_running_uid_over_a_real_socket() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        assert!(listener_uid_is(&a, me).unwrap());
+        if me != 0 {
+            assert!(!listener_uid_is(&a, me.wrapping_add(1)).unwrap());
+        }
+        let f = std::fs::File::open("/dev/null").unwrap();
+        assert!(listener_uid_is(&f, me).is_err());
     }
 }

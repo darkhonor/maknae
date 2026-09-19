@@ -40,6 +40,9 @@ Requires:       policycoreutils-python-utils
 Requires:       selinux-policy-targeted
 # #77 read path: enroll sets the _maknae home ACL with setfacl (spec D5a).
 Requires:       acl
+# #240b: %post runs setfacl, so acl must be installed BEFORE this package's
+# scriptlet, which a plain Requires does not order.
+Requires(post): acl
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted
@@ -92,13 +95,15 @@ install -D -m 0644 %{SOURCE6} %{buildroot}%{_sysconfdir}/fapolicyd/trust.d/makna
 install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
+# #240b: the deputy's credential set dir (files written by `maknae enroll`).
+install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # audit.jsonl is NOT a payload file — it is %ghost, created first-install-only in
 # %post (a payload file under the chattr +a dir would fail to replace on upgrade).
 
 %pre
-# Create _maknae user + maknae operator group BEFORE payload unpack so rpm -V
-# never sees owner drift.
+# Create the _maknae and _maknae-egress accounts and the maknae operator group
+# BEFORE payload unpack so rpm -V never sees owner drift.
 %sysusers_create_compat %{SOURCE3}
 
 %post
@@ -106,6 +111,16 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
+# #240b (D3): the egress deputy is in neither root nor _maknae, and the config
+# loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
+# ACL granting `rx` — `r` because maknae-io opens the directory
+# O_RDONLY|O_DIRECTORY, `x` for traversal, never `w` (the loader's 0o022 mask).
+# Requires: acl. Re-asserted on every %post and by `maknae enroll`.
+setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
+    echo "maknae: setfacl failed — grant _maknae-egress rx on %{_sysconfdir}/maknae or the egress deputy cannot start" >&2
+# #240: /run/maknae-egress is the socket unit's, 0751; a directory left by the
+# earlier service-unit shape (0750) is untraversable by _maknae until re-created.
+[ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
@@ -130,7 +145,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %postun
-%systemd_postun_with_restart maknaed.service maknae-egress.service
+# /run/maknae-egress is the socket unit's RuntimeDirectory= (#240); an existing
+# directory keeps the old (0750) mode until re-created, so the mode is asserted
+# in %post too. One transaction: systemd orders the socket before its service
+# from maknae-egress.service's Requires=/After=, not from this argv.
+%systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
 fi
@@ -150,6 +169,7 @@ fi
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
+%dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 

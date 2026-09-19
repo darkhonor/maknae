@@ -13,9 +13,12 @@ mod config;
 mod csr;
 mod csr_gen;
 mod digest;
+mod egress;
+mod egress_session;
 mod error;
 mod fips;
 mod fips_glue;
+mod http;
 mod operator;
 mod plane;
 mod plane_verify;
@@ -39,35 +42,34 @@ mod socket;
 mod stream;
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
-pub use client::{PlaneClient, PlaneIdentity};
+pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
 pub use config::{
-    load_vault_config, validate_deployment_id, vault_config_from_document, VaultConfig,
-    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,
+    load_vault_config, validate_deployment_id, validate_vault_addr, vault_config_from_document,
+    VaultConfig, DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
+pub use egress::{
+    load_egress_auth, EgressVault, EGRESS_APPROLE_ROLE, EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE,
+};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(unix)]
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
-pub use peer_identity::{creds_match_uid, peer_uid_is};
+pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use secret_source::{
-    resolve_cli_secret_source, resolve_daemon_secret_source, CliSecretSource, CredentialSourceKind,
-    DaemonSecretSource,
+    resolve_cli_secret_source, resolve_daemon_secret_source, resolve_egress_secret_source,
+    CliSecretSource, CredentialSourceKind, DaemonSecretSource,
+    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
 };
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
 };
-/// Re-exported so a sibling crate can name the client `read_kv_field` takes
-/// WITHOUT depending on `vaultrs` itself. This crate owns every Vault
-/// interaction and its pinning (#240a); a second direct `vaultrs` dependency
-/// elsewhere would be a second place for that pinning to drift.
-pub use vaultrs::client::Client as VaultClientTrait;
 pub use verify::{verify_plane_uri_san, VerifyError};
 
 #[used]

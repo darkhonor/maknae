@@ -35,6 +35,8 @@ disclose	provider.endpoint	where the loop's content goes; the point of registeri
 disclose	provider.model	the model identifier sent on every request
 omit	provider.key_vault_path	the secret store's layout; not the key, and not the grant's business (ADR-0023 d3)
 omit	provider.key_field	the field inside that secret (#308); with the path it locates a credential, and the grant shows WHAT is configured, not where
+disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
+disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
 disclose	transport.socket_path	the socket the daemon is listening on
 disclose	transport.max_connections	transport shape
 disclose	transport.frame_max_bytes	transport shape

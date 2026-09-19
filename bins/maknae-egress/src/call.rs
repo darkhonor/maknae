@@ -137,6 +137,8 @@ mod tests {
         maknae_config::EgressBounds {
             kv_mount: "maknae-kv".into(),
             key_vault_path_prefix: "maknae/providers".into(),
+            vault_addr: "https://vault.example:8200".into(),
+            approle_mount: None,
         }
     }
 
