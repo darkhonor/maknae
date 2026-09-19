@@ -610,11 +610,6 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "Err(e) => break Err(Self::transport(format!(\"write: {e}\"))),"
 why = "a write that fails for a reason other than the timer or a signal is a kernel-level fault (EPIPE on a peer that already went is raised on the read that follows in every test that provokes it); pure errno passthrough with no decision"
 
-[[exception]]
-path = "crates/maknae-kernel/src/egress_socket.rs"
-anchor = "Err(e) => return Err(Self::transport(e)),"
-why = "a read that poll just reported readable fails only on a kernel-level fault; the two outcomes with a decision — EOF mid-frame and the budget — are provoked for real"
-
 # [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
 
