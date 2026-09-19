@@ -100,6 +100,108 @@ phase1() {
                                                 || fail "no embedded SBOM in $b"
     done
 
+    # --- #227 item 3: the Developer ID signing seam --------------------------
+    # MEASURED 2026-09-19 on Wrathion: Hardened Runtime library validation requires
+    # the process and the loaded FIPS dylib to carry the SAME Team ID. Developer ID
+    # on both satisfies it with NO entitlement; ad-hoc on both fails rc 134
+    # ("different Team IDs"). The dangerous middle case is an identity applied to
+    # the binaries but NOT the dylib — that is invisible until an installed binary
+    # runs outside cargo, which is the worst possible moment to find it.
+    grep -q 'MAKNAE_SIGN_IDENTITY' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh carries a signing-identity seam" \
+        || fail "no signing seam — Developer ID signing cannot be requested (#227 item 3)"
+
+    # A NAMED identity that is absent must REFUSE, never fall back to ad-hoc. A
+    # silent downgrade ships an artifact the operator believes is signed.
+    grep -q 'security find-identity' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh proves the named identity exists before signing" \
+        || fail "a named-but-absent identity could silently fall back to ad-hoc"
+
+    grep -q 'productsign' "$HERE/build-pkg.sh" \
+        && ok "build-pkg.sh can productsign the distribution" \
+        || fail "no productsign — the .pkg cannot carry a Developer ID Installer signature"
+
+    # Team ID CONSISTENCY across ALL THREE loaded objects, including the DYLIB.
+    #
+    # The executables alone are not enough, and this is the whole failure mode: if the
+    # dylib-signing line in build-pkg.sh is deleted or regresses while both executables
+    # stay Developer ID signed, every static assertion above still passes and the
+    # installed binaries die at launch with the measured "different Team IDs" (rc 134).
+    # install_name_tool has already invalidated the dylib's signature by that point, so
+    # dropping the signing step leaves it broken rather than merely ad-hoc.
+    #
+    # The dylib is signed in build-pkg.sh's $STAGE, which is deleted on exit, so it is
+    # read back out of the SHIPPED PACKAGE via `pkgutil --expand-full` — asserting on the
+    # artifact that actually installs rather than on an intermediate.
+    #
+    # Holds in BOTH modes, so it never passes on nothing: codesign reports the literal
+    # "not set" for ad-hoc, a real identity reports the Team ID, and a MIX is the defect.
+    local tid_d tid_c tid_l
+    tid_d="$(codesign -dv --verbose=4 "$B/maknaed" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    tid_c="$(codesign -dv --verbose=4 "$B/maknae"  2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [ "$tid_d" = "$tid_c" ]; then
+        ok "maknaed and maknae agree on Team ID ($tid_d)"
+    else
+        fail "Team ID MISMATCH between executables: maknaed='$tid_d' maknae='$tid_c'"
+    fi
+
+    if [ -n "$PKG" ]; then
+        local xf dylib
+        xf="$(mktemp -d)"
+        if pkgutil --expand-full "$PKG" "$xf/full" >/dev/null 2>&1; then
+            dylib="$(find "$xf/full" -name 'libaws_lc_fips_*_crypto.dylib' -type f 2>/dev/null | head -1)"
+            if [ -n "$dylib" ]; then
+                tid_l="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+                if [ "$tid_l" = "$tid_d" ] && [ "$tid_l" = "$tid_c" ]; then
+                    ok "the PACKAGED FIPS dylib carries the same Team ID as both executables ($tid_l)"
+                else
+                    fail "Team ID MISMATCH — library validation WILL fail at launch (rc 134): dylib='$tid_l' maknaed='$tid_d' maknae='$tid_c'"
+                fi
+                # Hardened Runtime on the dylib too: library validation is what makes the
+                # Team ID load-bearing, and it is the runtime flag that enables it.
+                #
+                # Match the flags FIELD for the word, never the literal hex. Measured
+                # 2026-09-20: a Developer ID dylib reports flags=0x10000(runtime) but an
+                # ad-hoc one reports flags=0x10002(adhoc,runtime) — BOTH are hardened. An
+                # earlier draft compared the exact string 0x10000(runtime), so it really
+                # detected "not Developer ID" while REPORTING "not hardened", duplicating
+                # the Team ID assertion above under a false name. That is the same defect
+                # class this block exists to close, so it is recorded rather than quietly
+                # corrected.
+                local cdflags
+                cdflags="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/.*flags=\([^ ]*\).*/\1/p' | head -1)"
+                case "$cdflags" in
+                    *runtime*) ok "the packaged FIPS dylib carries Hardened Runtime ($cdflags)" ;;
+                    *) fail "the packaged FIPS dylib is NOT hardened ($cdflags) — library validation is not enforced on it" ;;
+                esac
+            else
+                fail "no libaws_lc_fips_*_crypto.dylib in the package payload — the FIPS module is not shipped"
+            fi
+        else
+            fail "pkgutil --expand-full failed; the packaged dylib's signature cannot be verified"
+        fi
+        rm -rf "$xf"
+    else
+        fail "no package built, so the shipped dylib's Team ID cannot be checked"
+    fi
+
+    # Notarization is only assertable once a ticket exists. This reports a NOTE
+    # rather than ok when absent — an "ok" on an un-notarized package would be the
+    # ok-on-nothing class this file refuses elsewhere.
+    if [ -n "$PKG" ]; then
+        if xcrun stapler validate "$PKG" >/dev/null 2>&1; then
+            ok "package carries a stapled notarization ticket (first launch works offline)"
+            local asses; asses="$(spctl --assess -t install -vv "$PKG" 2>&1)"
+            case "$asses" in
+                *"source=Notarized Developer ID"*) ok "Gatekeeper accepts the package as Notarized Developer ID" ;;
+                *accepted*) fail "Gatekeeper accepts but NOT as notarized: $asses" ;;
+                *) fail "Gatekeeper REJECTS the package despite a stapled ticket: $asses" ;;
+            esac
+        else
+            echo "  note — package is not notarized; set MAKNAE_NOTARY_PROFILE to produce a Gatekeeper-clean artifact"
+        fi
+    fi
+
     if [ -n "$PKG" ]; then
         ok "package present: $(basename "$PKG")"
         local x; x="$(mktemp -d)"

@@ -21,7 +21,7 @@ normative statement; this directory holds the packaging that follows from it.
 | **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped to `/usr/local/lib/maknae`, pinned by **absolute install name** | **shipped** |
 | `.pkg` installer | `pkgbuild` → `productbuild` | **built** (`dist/Maknae-<version>-arm64.pkg`) |
 | Install/boot/uninstall verification | `smoke.sh phase1` (no root) / `phase2` (root) | phase 1 **green**; phase 2 **owed — needs console** |
-| Signature + notarization | Developer ID Installer cert → `notarytool` → `stapler` | not configured (#227 item 3) |
+| Signature + notarization | Developer ID Application (code + dylib) → Developer ID Installer (`productsign`) → `notarytool` → `stapler` | **seam built** (`build-pkg.sh`, declared via `MAKNAE_SIGN_IDENTITY` / `MAKNAE_INSTALLER_IDENTITY` / `MAKNAE_NOTARY_PROFILE`; unset = ad-hoc) |
 
 > **`maknae-spifc` is deliberately not packaged.** CI builds three shipped binaries (`ci.yml:145`), but the Linux packages ship two (`build-deb.sh:63-64`, `maknae.spec:65-66`); macOS follows the packaging precedent, not the CI one.
 >
@@ -82,10 +82,18 @@ enables library validation, which requires the loaded dylib to carry the **same 
 process. Ad-hoc signatures carry *no* Team ID, so an ad-hoc binary refuses an ad-hoc dylib:
 `dyld: ... not valid for use in process: mapping process and mapped file (non-platform) have
 different Team IDs` (rc 134). A real **Developer ID** signs both with one Team ID and is expected to
-satisfy it with no entitlement — **unverified until the certificate exists, and it must be verified
-rather than assumed.** Until then, local builds either omit `--options runtime` or carry
-`com.apple.security.cs.disable-library-validation` on the **dev path only**; that entitlement must
-not reach a shipped artifact without its own recorded decision.
+satisfy it with no entitlement.
+
+**VERIFIED 2026-09-19 (#227), on the day the certificate existed, exactly as the sentence above
+demanded — and it PASSES.** One Developer ID over both the binary and the FIPS dylib, under
+`--options runtime` and timestamped, starts cleanly. The negative control was observed first: the
+identical two files re-signed ad-hoc fail `rc 134` with *"mapping process and mapped file
+(non-platform) have different Team IDs"*, so the check was seen failing before it was trusted
+passing. **Consequence: `com.apple.security.cs.disable-library-validation` never has to exist on
+any path.** `maknae.entitlements` and `maknaed.entitlements` stay deliberately empty, and no
+Hardened Runtime exception reaches a shipped artifact. `build-pkg.sh` signs the dylib from the
+**same** variable as the executables, because signing the executables alone produces an artifact
+that only fails once installed.
 
 ## The isolation delta, stated
 

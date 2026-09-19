@@ -7,8 +7,16 @@
 # Output: dist/Maknae-<version>-arm64.pkg  (+ the component pkgs, kept in dist/ so
 # smoke.sh can inspect them without re-running this script)
 #
-# Apple Silicon ONLY (AGENTS.md). Signing is AD-HOC: Developer ID signing and
-# notarization are out of scope (#227 item 3) and no seam is written for them.
+# Apple Silicon ONLY (AGENTS.md). Signing defaults to AD-HOC and is DECLARED, never
+# inferred (#227 item 3):
+#
+#   MAKNAE_SIGN_IDENTITY      Developer ID Application  -> binaries + FIPS dylib
+#   MAKNAE_INSTALLER_IDENTITY Developer ID Installer    -> productsign the .pkg
+#   MAKNAE_NOTARY_PROFILE     notarytool keychain profile -> submit + staple
+#
+# Unset means ad-hoc, exactly as before. SET-BUT-ABSENT REFUSES: a named identity
+# that silently fell back to ad-hoc would ship an artifact the operator believes is
+# signed, and the difference is invisible until first launch on another Mac.
 set -euo pipefail
 
 VERSION="${1:?usage: build-pkg.sh <version>}"
@@ -113,9 +121,35 @@ done
 # `--options runtime` is accepted by ad-hoc signing, so the HARDENING lands today
 # and only the IDENTITY waits on a Developer ID; notarization then cannot fail on a
 # missing runtime flag, the usual first rejection.
-codesign --force --sign - --options runtime --timestamp=none "$STAGE/$FIPS_BASE"
+# THE IDENTITY IS DECLARED, NEVER DETECTED. Auto-selecting from the keychain is how
+# a build signs with whatever happens to be installed; a release states its intent.
+#
+# MEASURED 2026-09-19 on Apple Silicon: Hardened Runtime enables library validation,
+# which requires the process and the loaded dylib to carry the SAME Team ID. One
+# Developer ID over BOTH satisfies it with NO entitlement (verified: clean start);
+# ad-hoc over both fails rc 134, "different Team IDs" (negative control, observed).
+# So the dylib is signed from the SAME variable as the binaries — signing the
+# executables alone produces an artifact that only fails once installed.
+SIGN_ID="${MAKNAE_SIGN_IDENTITY:-}"
+if [ -n "$SIGN_ID" ]; then
+    # CAPTURE then match. `security ... | grep -q` SIGPIPEs the writer, and under
+    # `set -o pipefail` the pipeline returns 141 precisely when the match SUCCEEDS
+    # (the same trap smoke.sh documents at its otool checks).
+    _ids="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    case "$_ids" in
+        *"$SIGN_ID"*) ;;
+        *) echo "REFUSED: signing identity not in the keychain: $SIGN_ID" >&2
+           echo "  A named-but-absent identity must never fall back to ad-hoc." >&2
+           exit 2 ;;
+    esac
+    CODESIGN_ARGS=(--sign "$SIGN_ID" --options runtime --timestamp)
+else
+    CODESIGN_ARGS=(--sign - --options runtime --timestamp=none)
+fi
+
+codesign --force "${CODESIGN_ARGS[@]}" "$STAGE/$FIPS_BASE"
 for b in maknaed maknae; do
-    codesign --force --sign - --options runtime --timestamp=none \
+    codesign --force "${CODESIGN_ARGS[@]}" \
         --entitlements "$HERE/${b}.entitlements" "$BIN/$b"
     codesign --verify --strict --verbose=2 "$BIN/$b"
 done
@@ -183,7 +217,50 @@ productbuild --distribution "$HERE/distribution.xml" --package-path "$STAGE" \
              --version "$VERSION" "$OUT"
 cp "$STAGE/maknae-daemon.pkg" "$STAGE/maknae-cli.pkg" "$DIST/"
 
+# --- productsign: a DIFFERENT certificate from the binaries -------------------
+# Developer ID *Installer* signs the .pkg; Developer ID *Application* signs code.
+# They are not interchangeable, and notarization refuses an unsigned installer.
+INST_ID="${MAKNAE_INSTALLER_IDENTITY:-}"
+if [ -n "$INST_ID" ]; then
+    _iids="$(security find-identity -v 2>/dev/null || true)"
+    case "$_iids" in
+        *"$INST_ID"*) ;;
+        *) echo "REFUSED: installer identity not in the keychain: $INST_ID" >&2; exit 2 ;;
+    esac
+    productsign --sign "$INST_ID" --timestamp "$OUT" "$OUT.signed"
+    mv "$OUT.signed" "$OUT"
+    SIGNED_PKG=yes
+else
+    SIGNED_PKG=no
+fi
+
+# --- notarize + staple -------------------------------------------------------
+# Stapling is what makes FIRST LAUNCH work OFFLINE; without the ticket attached,
+# Gatekeeper needs the network to reach Apple and an air-gapped install fails.
+NOTARY="${MAKNAE_NOTARY_PROFILE:-}"
+if [ -n "$NOTARY" ]; then
+    # REFUSE rather than submit something that cannot pass. Notarization requires
+    # Developer ID code signatures AND a Developer ID Installer signature; an
+    # ad-hoc submission is rejected by Apple after a slow round trip.
+    [ -n "$SIGN_ID" ] || { echo "REFUSED: notarization needs MAKNAE_SIGN_IDENTITY (binaries are ad-hoc)" >&2; exit 2; }
+    [ "$SIGNED_PKG" = yes ] || { echo "REFUSED: notarization needs MAKNAE_INSTALLER_IDENTITY (the .pkg is unsigned)" >&2; exit 2; }
+    xcrun notarytool submit "$OUT" --keychain-profile "$NOTARY" --wait
+    xcrun stapler staple "$OUT"
+    xcrun stapler validate "$OUT"
+fi
+
 echo "Built: $OUT"
 echo "FIPS module: $FIPS_BASE -> $FIPS_LIBDIR (absolute install name, no rpath)"
-echo "UNSIGNED distribution (ad-hoc component binaries only) — Developer ID signing"
-echo "and notarization are out of scope (#227 item 3)."
+if [ -n "$SIGN_ID" ]; then
+    echo "Code signature: $SIGN_ID (Hardened Runtime, timestamped; dylib signed to match)"
+else
+    echo "Code signature: AD-HOC (set MAKNAE_SIGN_IDENTITY for Developer ID)"
+fi
+echo "Installer signature: ${INST_ID:-none}"
+# NOT a ${x:+a}${x:-b} pair: when x is SET, :+ emits a AND :- emits x's VALUE, so
+# both arms fire and the line reads "...profile 'maknae'maknae". Observed 2026-09-19.
+if [ -n "$NOTARY" ]; then
+    echo "Notarization: submitted and stapled via profile '$NOTARY'"
+else
+    echo "Notarization: not requested"
+fi
