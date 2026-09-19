@@ -30,13 +30,27 @@
 # certificate: .fips() proves the FIPS BUILD and returns the same value on a
 # validated module and on one in review. The certificate state belongs in
 # `version`, where a reader of the rendered StdV-1 sees it.
+#
+# `evidence` IS LENGTH-CONSTRAINED, and this is the second thing review caught:
+# generate.py's fit() TRUNCATES silently at ~102 characters for this column, so
+# a first attempt that read "... — runtime .fips() assertion (proves the FIPS
+# build, not a certificate); design/adr/ADR-0025-...md" rendered with the ADR
+# path cut off entirely -- 169 characters into a 102-character budget. The
+# citation this row exists to carry was the part that fell off. So the ADR path
+# comes FIRST and the prose explanation lives in this comment and in the ADR
+# itself. When editing this field, REGENERATE AND READ THE EMITTED <text>
+# ELEMENT, not the source string.
+#
+# The previous `ci/gates/feature-resolution-pin.sh` citation is deliberately
+# dropped, not lost: that gate checks `hermetic-test-seam` feature resolution and
+# has nothing to do with FIPS, so it never evidenced this claim. Do not restore it.
 [[standard]]
 name = "FIPS 140-3"
 version = "AWS-LC-FIPS 4.x — in CMVP review"
 category = "Cryptography"
 applies_to = "all crypto operations; Vault leg, plane mTLS"
 status = "enforced"
-evidence = "crates/maknae-vault/src/fips.rs — runtime .fips() assertion (proves the FIPS build, not a certificate); design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md"
+evidence = "design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-vault/src/fips.rs"
 
 [[standard]]
 name = "TLS"

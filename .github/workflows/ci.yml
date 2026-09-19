@@ -284,11 +284,16 @@ jobs:
     # (Corrected 2026-09-19, #320: MEASURED today on both `main` and the #320
     # branch — 22 workspace members, 16 cross-checked, 6 SDK-blocked by name
     # (maknae, maknae-egress, maknae-kernel, maknae-llm, maknae-vault, maknaed).
-    # The "seventeen / four" below predates several crates and is stale on both
-    # trees, so this is not a #320 regression; it is corrected here because #320
-    # touches the gate this comment describes and a stale count next to a swept
-    # file is exactly the drift AGENTS.md names. `ring` is also no longer in the
-    # graph on any target, though the gate still matches it by name harmlessly.)
+    # The "seventeen / four" in the sentence this note interrupts, AND the
+    # "17 members" in the timeout comment below, both predate several crates and
+    # are stale on BOTH trees -- so this is not a #320 regression; it is corrected
+    # here because #320 touches the gate this comment describes, and a stale count
+    # next to a swept file is exactly the drift AGENTS.md names. Both historical
+    # numbers are left in place as the measurements they were, the way the version
+    # note in darwin-cross-check.sh is. `ring` is also no longer in the graph on
+    # any target, though the gate still matches it by name harmlessly. (The
+    # "+ 2 feature passes" below is CORRECT and re-measured today: maknae-config
+    # and maknae-authz-basic each declare hermetic-test-seam.))
     # four are reported blocked by name. `negative-control` proves it fires.
     runs-on: ubuntu-latest
     timeout-minutes: 30  # per-pass cold cache: 116 s measured on Rocky 9 x86_64 (17 members + 2 feature passes), ~2.5 min on Apple Silicon (#198)

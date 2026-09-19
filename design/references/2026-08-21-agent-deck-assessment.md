@@ -56,7 +56,7 @@ Two coupled disciplines: (a) test the feature **as the user actually sees it** �
 
 ### 3.5 Cargo pin rationale-in-comments — LEARN FROM (natural fit for FIPS / SCRM).
 Every dependency pin in the deck's `Cargo.toml` documents the **exact failure it prevents** (the `crossterm` C0-decoder inverse, the `portable-pty` ConPTY stall, `reqwest`'s rustls-feature churn across patch releases).
-- **Fit to Maknae:** for a FIPS-140-3 / DoD-SCRM project on `aws-lc-rs` with a `deny.toml` already in place, a pin without a documented reason is an *unreviewed control*. The convention turns the workspace `Cargo.toml` into supply-chain evidence.
+- **Fit to Maknae:** for a FIPS-140-3 / DoD-SCRM project on `aws-lc-rs` with a `deny.toml` already in place, a pin without a documented reason is an *unreviewed control*. The convention turns the workspace `Cargo.toml` into supply-chain evidence. *(Scoped 2026-09-19, [ADR-0025](../adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md): "a FIPS-140-3 / DoD-SCRM project" overstates what Maknae is — there is no authorization boundary, no ATO and no assessor, and AGENTS.md struck that exact framing the same day because it is what let a compliance pin be imported from a project that does carry the obligation. The engineering observation in this bullet stands; the premise about Maknae's posture does not.)*
 
 ### 3.6 The "vacuously-green gate" war story — LEARN FROM (field validation of the fail-closed coverage contract).
 The deck's Rules 2/5 document a real incident: `clippy`/`nextest` were silently type-checking and asserting over **zero** test files (and entire `xtask` members) until `--all-targets --features e2e --workspace` were all present — a green gate that measured nothing.

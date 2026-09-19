@@ -25,7 +25,15 @@ maknae-config = { path = "../maknae-config" }
 vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
-# UPPER BOUND REMOVED 2026-09-19 (#320) TOGETHER WITH THE aws-lc-rs BOUND BELOW —
+# THE COMPLIANCE CEILING IS REMOVED 2026-09-19 (#320) TOGETHER WITH THE aws-lc-rs
+# BOUND BELOW. What remains -- `<0.15` -- IS NOT A CONTROL: for a 0.x crate that
+# is exactly cargo's caret bound, i.e. `>=0.14.9, <0.15` resolves identically to
+# `rcgen = "0.14.9"`, written out so the floor is visible. THE FLOOR IS THE
+# CONTROL; the ceiling is cargo's own semantics. (Review caught an earlier draft
+# of this header claiming the bound was simply "removed" while the line below
+# still spelled one out -- an unexplained ceiling in a manifest whose rule is
+# that a bound records the failure it prevents.)
+#
 # see that comment for the ruling and the module-line facts, which are not
 # restated here so there is one place to correct. The ceiling here was never
 # about rcgen: `>=0.14.9, <0.14.10` existed because rcgen 0.14.10 raises its OWN
