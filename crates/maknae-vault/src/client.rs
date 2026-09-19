@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
-use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
+use vaultrs::client::{Client, VaultClient, VaultClientSettings, VaultClientSettingsBuilder};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 use zeroize::Zeroizing;
@@ -262,6 +262,60 @@ async fn sign_leaf_for(
     Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
 }
 
+/// The daemon plane's Vault client settings. Extracted from
+/// `from_document_with_secret` so the STATED-not-defaulted properties below are
+/// unit-testable against a populated environment (#318) rather than only
+/// reviewable by eye.
+fn plane_settings(addr: &str, vault_ca: &Path) -> Result<VaultClientSettings, VaultError> {
+    VaultClientSettingsBuilder::default()
+        .address(addr)
+        .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
+        // Stated, not defaulted (#240b self-review): vaultrs fills an unset
+        // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
+        // any value other than 0/f/false — the empty string included.
+        //
+        // The root-store, proxy and identity env defaults are NOT re-explained
+        // here: `env.rs`'s module doc is the single statement of what each one
+        // is worth and why, and this comment deliberately points at it instead
+        // of restating it. (#318 round 3: three review rounds each found the
+        // same claim corrected in some copies and not others, because the
+        // mechanism was written out in six places. One statement, many
+        // pointers, is the fix for that — not a sixth copy.)
+        .verify(true)
+        // #318: stated too, so this constructor is safe ON ITS OWN and not only
+        // under `main`'s scrub — the same pair `egress.rs` already states, and
+        // the asymmetry between them WAS the bug. `harden()` replaces the
+        // reqwest client but KEEPS vaultrs's token middleware, so an inherited
+        // token would ride on the AppRole login until `mint()` calls
+        // `set_token`; login supplies the real one, so `""` is correct here.
+        //
+        // The two are NOT equally load-bearing, and the difference is stated
+        // once each rather than here: the token's reachability is asserted by
+        // `the_daemon_settings_refuse_an_inherited_token`, and why
+        // `.identity(None)` is a statement rather than a live control is
+        // recorded at `the_linked_vaultrs_cannot_build_a_client_identity_from_
+        // the_environment` (in this file's test module) and in `Cargo.toml`'s
+        // vaultrs feature note. Do not re-explain either here.
+        .token("")
+        .identity(None)
+        // A HARD per-request HTTP timeout on every Vault operation this client ever
+        // makes (login/mint/sign, renew_self, revoke_self). vaultrs defaults
+        // `timeout` to None — an UNBOUNDED reqwest client — so a hung Vault connection
+        // (network drop with no RST, a stalled LB) would otherwise wedge whatever
+        // awaits it: the credential supervisor's renew/rotate (silently zombifying the
+        // daemon — the supervisor never returns, so the run-loop's supervisor-exit
+        // select never fires and the leaf just expires), boot-time `mint()`, and the
+        // best-effort `revoke_self` on the shutdown path. 30s is far above any healthy
+        // Vault round-trip and far below every credential validity window; a timeout
+        // surfaces as an ordinary retryable error to the supervisor's
+        // retry-within-window logic (ADR-0018). Moved here with the call it
+        // explains when #318 extracted this function; it used to sit at the
+        // call site.
+        .timeout(Some(PLANE_HTTP_TIMEOUT))
+        .build()
+        .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))
+}
+
 impl PlaneClient {
     /// Build from a config dir, loading the config under a `vault`-only registry.
     /// Retained for back-compat (the gated live-smoke tests). A process that ALSO reads
@@ -372,31 +426,7 @@ impl PlaneClient {
         // RoleID is non-secret (an identifier), still read from disk here.
         let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
         let vault_ca = dir.join("tls").join("vault-ca.crt");
-        // A HARD per-request HTTP timeout on every Vault operation this client ever
-        // makes (login/mint/sign, renew_self, revoke_self). vaultrs defaults
-        // `timeout` to None — an UNBOUNDED reqwest client — so a hung Vault connection
-        // (network drop with no RST, a stalled LB) would otherwise wedge whatever
-        // awaits it: the credential supervisor's renew/rotate (silently zombifying the
-        // daemon — the supervisor never returns, so the run-loop's supervisor-exit
-        // select never fires and the leaf just expires), boot-time `mint()`, and the
-        // best-effort `revoke_self` on the shutdown path. 30s is far above any healthy
-        // Vault round-trip and far below every credential validity window; a timeout
-        // surfaces as an ordinary retryable error to the supervisor's
-        // retry-within-window logic (ADR-0018).
-        let settings = VaultClientSettingsBuilder::default()
-            .address(cfg.addr)
-            .ca_certs(vec![vault_ca.to_string_lossy().to_string()])
-            // Stated, not defaulted (#240b self-review): vaultrs fills an unset
-            // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
-            // any value other than 0/f/false — the empty string included.
-            // The proxy and identity env defaults do not reach the request
-            // either, and neither do the root-store variables: the client
-            // that actually sends is `http.rs`'s, pinned to the Vault CA with
-            // no platform verifier on this leg at all.
-            .verify(true)
-            .timeout(Some(PLANE_HTTP_TIMEOUT))
-            .build()
-            .map_err(|e| VaultError::Auth(format!("vault client settings: {e}")))?;
+        let settings = plane_settings(&cfg.addr, &vault_ca)?;
         let mut client = VaultClient::new(settings)
             .map_err(|e| VaultError::Auth(format!("vault client: {e}")))?;
         // #240b (codex review): the client vaultrs built follows redirects and
@@ -894,6 +924,138 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// #318: an inherited `VAULT_TOKEN` must NOT become the daemon's client
+    /// token. It is a vaultrs 0.8.0 settings DEFAULT (`default_token`), and
+    /// `harden()` replaces only the reqwest client — it keeps vaultrs's token
+    /// middleware — so an unstated token reaches the wire on the AppRole login.
+    /// There is no legitimate source for one: `AuthMethod` has a single
+    /// variant, AppRole. OBSERVED FAILING before `.token("")` was stated, with
+    /// this exact sentinel in the settings.
+    ///
+    /// The client IDENTITY is deliberately NOT asserted here, because an
+    /// assertion on THIS function cannot go red: `default_identity` always runs
+    /// and always reads VAULT_CLIENT_CERT/KEY, but only the `Identity`
+    /// construction inside it is `#[cfg(feature = "rustls")]`, and this crate
+    /// takes `rustls-no-provider` — so it returns None however good the pair
+    /// is, with or without our `.identity(None)`. The identity question is
+    /// answered by the TWO tests BELOW instead, which can:
+    /// `the_linked_vaultrs_cannot_build_a_client_identity_from_the_environment`
+    /// asks the compiled dependency, and
+    /// `the_vaultrs_feature_posture_keeps_the_env_client_identity_compiled_out`
+    /// reads the manifest that decides it.
+    ///
+    /// Held under `ENV_LOCK` (the pattern this crate already uses) because
+    /// `set_var` races any concurrent read in this test binary.
+    #[test]
+    fn the_daemon_settings_refuse_an_inherited_token() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("VAULT_TOKEN", "inherited-operator-token-318");
+        let built = plane_settings(
+            "https://vault.example:8200",
+            Path::new("/etc/maknae/tls/vault-ca.crt"),
+        );
+        std::env::remove_var("VAULT_TOKEN");
+        let settings = built.expect("settings build");
+        assert!(
+            settings.token.is_empty(),
+            "an inherited VAULT_TOKEN reached the daemon's client settings: {:?}",
+            settings.token
+        );
+        // The property #240b stated, re-asserted here so one test covers all
+        // three environment-sourced settings this constructor must refuse.
+        assert!(settings.verify, "TLS verification must be stated on");
+        // #318 round 3: the HARD timeout moved into this function with the
+        // extraction, and `client.rs` is mutation-excluded as "network I/O", so
+        // deleting `.timeout(..)` would be both unkillable and unasserted — the
+        // unbounded-client failure this function's own comment documents at
+        // length. Asserted here so the exclusion note's claim of compensating
+        // controls is true of every property the function states, not three of
+        // four.
+        assert_eq!(settings.timeout, Some(PLANE_HTTP_TIMEOUT));
+    }
+
+    /// #318, round 2: the COMPILED behaviour behind the manifest test below.
+    /// The manifest test reads text and so cannot see feature unification; this
+    /// one asks the linked `vaultrs` directly, with both variables pointing at
+    /// a REAL cert/key pair, whether it will build an identity from them —
+    /// `.identity(..)` deliberately NOT stated, because stating it is what
+    /// makes the question unanswerable. Under `rustls` this goes red; under
+    /// `rustls-no-provider` the `Identity` construction is compiled out and the
+    /// answer is None however good the pair is.
+    ///
+    /// This is the assertion an earlier round deleted as "vacuous". It was
+    /// vacuous as a guard on OUR `.identity(None)` — which makes it None
+    /// regardless — and load-bearing as a guard on the DEPENDENCY, which is the
+    /// thing actually keeping the env path shut. Same bytes, different subject.
+    #[test]
+    fn the_linked_vaultrs_cannot_build_a_client_identity_from_the_environment() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let params =
+            rcgen::CertificateParams::new(vec!["inherited.identity.318".into()]).expect("params");
+        let cert = params.self_signed(&kp).unwrap();
+        let base = std::env::temp_dir().join(format!("mv-318-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let (cert_path, key_path) = (base.join("client.crt"), base.join("client.key"));
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, kp.serialize_pem()).unwrap();
+
+        std::env::set_var("VAULT_CLIENT_CERT", &cert_path);
+        std::env::set_var("VAULT_CLIENT_KEY", &key_path);
+        let built = VaultClientSettingsBuilder::default()
+            .address("https://vault.example:8200")
+            .ca_certs(vec![cert_path.to_string_lossy().to_string()])
+            .verify(true)
+            .token("")
+            .build();
+        std::env::remove_var("VAULT_CLIENT_CERT");
+        std::env::remove_var("VAULT_CLIENT_KEY");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            built.expect("settings build").identity.is_none(),
+            "the linked vaultrs built a client identity from the environment: the \
+             `rustls` feature is reachable, and every plane's `.identity(None)` is \
+             now the ONLY thing closing that path"
+        );
+    }
+
+    /// #318: the reason `VAULT_CLIENT_CERT`/`VAULT_CLIENT_KEY` cannot reach any
+    /// of the three Vault clients is a FEATURE posture, not a statement in our
+    /// code — the `Identity` construction inside vaultrs's `default_identity`
+    /// is `#[cfg(feature = "rustls")]` (the function itself always runs and
+    /// always reads the two variables), and this crate takes
+    /// `rustls-no-provider`, which is a DIFFERENT feature
+    /// (vaultrs 0.8.0 `Cargo.toml`: `rustls = ["rustify/rustls"]`,
+    /// `rustls-no-provider = ["rustify/rustls-no-provider"]`). Switching to
+    /// `rustls` — or letting `default-features` back on, since the default IS
+    /// `rustls` — silently re-opens an environment-supplied client identity on
+    /// every plane.
+    ///
+    /// **That is a CONSEQUENCE of the feature choice, not its reason.** The
+    /// manifest records the reason: from reqwest 0.13 the `rustls` feature
+    /// installs the non-FIPS aws-lc-rs provider as the process default and
+    /// races the FIPS provider this crate installs. This test guards BOTH
+    /// properties with one assertion, because one line of manifest carries
+    /// them both — and neither was checked by anything before #318.
+    #[test]
+    fn the_vaultrs_feature_posture_keeps_the_env_client_identity_compiled_out() {
+        let manifest = include_str!("../Cargo.toml");
+        let dep = manifest
+            .lines()
+            .find(|l| l.starts_with("vaultrs = "))
+            .expect("a `vaultrs = ` dependency line");
+        assert!(
+            dep.contains("default-features = false"),
+            "vaultrs's default feature is `rustls`, which compiles the \
+             VAULT_CLIENT_CERT/KEY identity path back in: {dep}"
+        );
+        assert!(
+            dep.contains("\"rustls-no-provider\"") && !dep.contains("\"rustls\""),
+            "only `rustls-no-provider` keeps `default_identity` compiled out: {dep}"
+        );
     }
 
     /// The regression guard (round-1 C1, mandatory per plan review): `Plane::Kernel`

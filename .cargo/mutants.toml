@@ -147,6 +147,23 @@ exclude_globs = [
   "crates/maknae-io/src/error.rs",       # IoError/IoKind enum + Display; no From impl exists
   "crates/maknae-vault/src/auth.rs",       # AppRole login (standing SecretID) — live-Vault I/O
   "crates/maknae-vault/src/client.rs",     # mint/renew/shutdown/rotate_leaf — network I/O
+  # NOTED 2026-09-19 (#318), because this glob is now wider than its own
+  # justification and an over-wide exclusion is a finding this file records
+  # elsewhere: #318 added `plane_settings` to this file, and it is NOT network
+  # I/O — it is the pure builder that STATES `.verify(true)`, `.token("")` and
+  # `.identity(None)` for the daemon plane. `cargo mutants --file client.rs`
+  # therefore reports "Found 0 mutants to test" — measured, not assumed.
+  # The glob is LEFT AS IS rather than narrowed, because the compensating
+  # controls are direct and demonstrated, which a mutation run would not
+  # improve on:
+  #   - `the_daemon_settings_refuse_an_inherited_token` populates VAULT_TOKEN and
+  #     asserts the built settings carry an empty token, and asserts `verify`.
+  #     PROVEN RED by deleting `.token("")`: the sentinel shows up in the settings.
+  #   - `.identity(None)` is not assertable on this function at all — vaultrs
+  #     compiles the identity path out under `rustls-no-provider` — so the two
+  #     tests that CAN go red interrogate the dependency and the manifest instead.
+  # If a future change puts a real DECISION in this file, narrow the glob to the
+  # I/O methods rather than inheriting this note.
   "crates/maknae-vault/src/egress.rs",     # #240b: the deputy's login-per-read/revoke and KV read — live-Vault I/O; the SecretID-source decision is secret_source.rs (T1, NOT excluded)
   "crates/maknae-vault/src/http.rs",       # #240b: the hardened reqwest client builder — construction I/O; `redirect(none)`/`https_only(true)` have no getter to assert against
   "crates/maknae-vault/src/operator.rs",   # OperatorClient role-id/secret-id/accessor/CA I/O (Task 3) — thin vaultrs pass-throughs + one hand-rolled Endpoint; the pure join_ca_chain helper is unit-tested directly, not via mutation

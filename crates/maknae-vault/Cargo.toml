@@ -22,6 +22,13 @@ maknae-config = { path = "../maknae-config" }
 # Microkosmos. The failure this prevents: a Vault-HTTPS leg on a non-FIPS provider
 # with every test still green. vaultrs and rustify move TOGETHER (0.7.4 needs rustify
 # 0.6, 0.8.0 needs 0.7); Dependabot #254 and #255 each bumped one and failed to build.
+# SECOND consequence, found while closing #318 and now asserted by two tests in
+# client.rs (one reads this line, one asks the linked crate): vaultrs's
+# `default_identity` always reads $VAULT_CLIENT_CERT/$VAULT_CLIENT_KEY, but the
+# `Identity` construction it would return is `#[cfg(feature = "rustls")]`. This
+# feature choice is therefore also what keeps that env path shut on every plane.
+# Taking `rustls` (or restoring default-features) re-opens it — MEASURED: the
+# compiled-behaviour test goes red on that change, it is not a paper claim.
 vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 # #240b: the HTTP client every Vault client actually sends through is built HERE
 # (http.rs), not by vaultrs — vaultrs 0.8.0 keeps reqwest's default redirect

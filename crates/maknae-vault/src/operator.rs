@@ -64,6 +64,13 @@ impl OperatorClient {
             // any value other than 0/f/false — the empty string included, and
             // `sudo -E maknae enroll` carries the operator's environment.
             .verify(true)
+            // #318: stated so all three constructors make the SAME statements —
+            // the asymmetry between them was the bug. `token` is already
+            // supplied above (the operator's own, from `--token-file` or the
+            // no-echo prompt), so only the identity is added here; see
+            // `client.rs`'s `plane_settings` for why that one is a statement
+            // against a feature change rather than a live control.
+            .identity(None)
             .timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(|e| VaultError::Operator(format!("vault client settings: {e}")))?;

@@ -5,7 +5,18 @@
   <key>Label</key>
   <string>io.maknae.maknaed</string>
 
-  <!-- maknaed takes NO flags: bins/maknaed/src/main.rs:16 reads argv[1] as the
+  <!-- systemd UnsetEnvironment= (#318).
+       DELTA, and it is the reason the scrub cannot be left to the init system:
+       launchd has NO UnsetEnvironment= equivalent. There is deliberately no
+       EnvironmentVariables dict here either — it can only ADD inheritance, never
+       remove it. So on macOS the whole control is the in-process scrub maknaed's
+       main() performs before anything else (maknae_vault::SCRUBBED_ENV), and a
+       test in crates/maknae-vault/src/env.rs pins this note plus the absence of
+       an EnvironmentVariables key, so the gap stays recorded rather than
+       rediscovered. macOS is a production target, not a dev convenience
+       (AGENTS.md), so this is a supported-platform delta, not a footnote. -->
+
+  <!-- maknaed takes NO flags: bins/maknaed/src/main.rs reads argv[1] as the
        CONFIG DIRECTORY (default /etc/maknae). Passed explicitly so the unit is
        self-describing. -->
   <key>ProgramArguments</key>

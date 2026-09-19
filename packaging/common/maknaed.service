@@ -40,6 +40,20 @@ TimeoutStopSec=880
 # (0400, _maknae-only, memory-backed). Name pinned: enroll seals
 # --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.
 LoadCredentialEncrypted=maknaed-secret-id:/etc/maknae/private/maknaed-secret-id.cred
+# #318: the unit's environment is NOT clean by default. DefaultEnvironment=
+# (system.conf) and `systemctl set-environment` reach EVERY spawned service, so
+# a proxied enterprise estate hands the daemon HTTPS_PROXY as routine practice.
+# The list is `maknae_vault::SCRUBBED_ENV`, held EQUAL to this line by a test in
+# crates/maknae-vault/src/env.rs (the same test holds maknae-egress.service), and
+# `main` removes the same names in-process — the half that also covers a
+# non-systemd run and is the ONLY half on macOS, where launchd has no
+# UnsetEnvironment= equivalent. What must NEVER be added to this line is
+# `maknae_vault::NEVER_SCRUB_ENV` — read it there rather than from a copy here,
+# which is how this comment briefly shipped a list missing XDG_RUNTIME_DIR. A
+# disjointness test enforces the two constants against each other; nothing
+# enforces prose. The nearest one to this unit is CREDENTIALS_DIRECTORY, the
+# credential loaded immediately above.
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
 RuntimeDirectory=maknae
 RuntimeDirectoryMode=0751
 # ProtectSystem=strict mounts /var/log read-only; without this the audit sink

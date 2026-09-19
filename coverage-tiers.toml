@@ -166,9 +166,13 @@ files = [
   # boot" is single-provider thinking and fails with two. A failed read is not
   # cached, so a transient Vault failure cannot poison a destination.
   "bins/maknae-egress/src/keys.rs",
-  # #240b: what the deputy refuses to inherit from its environment — a list, and
-  # the scrub over it. Pure data; the test holds the two families by name.
-  "bins/maknae-egress/src/env.rs",
+  # #318: what ALL THREE binaries refuse to inherit from their environment, and
+  # the disjoint list of what they must never stop inheriting. Moved here from
+  # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
+  # same control — one list, not three copies. A wrong entry either re-opens an
+  # env-chosen destination/identity or silently unmakes socket activation, the
+  # sealed credential, or the operator's own enroll context.
+  "crates/maknae-vault/src/env.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
   # #243: the provider registration parser. A wrong arm registers a
@@ -351,15 +355,15 @@ why = "opens a ROOT-owned artifact through maknae-io; no unit test can create on
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs/env.rs (T1), serve.rs and listen.rs (T2) and maknae-vault's egress_session.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in env.rs — same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs (T1), serve.rs (T2) and listen.rs (T3) and maknae-vault's egress_session.rs and env.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in its OWN test module — env.rs was deleted by #318 when the scrub list moved to maknae-vault, and its deputy-specific tests moved here with it. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
-why = "thin main: arg resolve + boot + exit mapping; behavior exercised by tests/boot.rs"
+why = "thin main: env scrub + arg resolve + boot + exit mapping; behavior exercised by tests/boot.rs, and the one load-bearing ORDERING #318 added (scrub before the kernel, while single-threaded) is pinned by a source-order test in its own test module — the deputy's treatment, since a behavioural test cannot reach a T3 main"
 
 [[t3]]
 path = "bins/maknae/src/main.rs"
-why = "scaffold stub — re-tier at body landing"
+why = "thin main: env scrub + runtime build + dispatch to cli::run_cli (T3) + bounded teardown; #318's ORDERING (scrub before the multi-thread runtime, because remove_var is only sound single-threaded) is pinned by a source-order test in its own test module. Was \"scaffold stub — re-tier at body landing\"; the body is still elsewhere, so the tier is unchanged and only the description is now accurate"
 
 [[t3]]
 path = "bins/maknae-spifc/src/main.rs"
