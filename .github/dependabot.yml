@@ -54,24 +54,17 @@ updates:
           - "webpki*"
       dev-dependencies:
         dependency-type: "development"
-    ignore:
-      # aws-lc-rs 1.18.0 moves the `fips` backend from the AWS-LC-FIPS 3.x
-      # module (CMVP #5314, VALIDATED) to 4.x (Modules In Process). ASD STIG
-      # APSC-DV-001860 (CAT I) requires the validated list, so
-      # crates/maknae-vault/Cargo.toml pins aws-lc-rs to <1.18.0 as a
-      # compliance control. Dependabot does not honor an upper bound: it
-      # proposes widening it. Ignore 1.18.x and later until NIST issues the
-      # 4.x certificate; the watch is #259.
-      - dependency-name: "aws-lc-rs"
-        versions: [">=1.18.0"]
-      # rcgen 0.14.10 raises its OWN aws-lc-rs requirement to ^1.18, so it is
-      # the same control reached from the other side: it cannot resolve against
-      # the bound above, and a Dependabot PR proposing it can only ever be a red
-      # build. crates/maknae-vault/Cargo.toml pins rcgen <0.14.10 and carries
-      # the measured resolver error. Lift both together when NIST issues the
-      # AWS-LC-FIPS 4.x certificate; the watch is #259.
-      - dependency-name: "rcgen"
-        versions: [">=0.14.10"]
+    # NO IGNORE RULES. Removed 2026-09-19 (#320) with the bounds they mirrored:
+    # `aws-lc-rs >=1.18.0` and `rcgen >=0.14.10` were both the same FIPS control,
+    # holding the tree on the AWS-LC-FIPS 3.x module. The maintainer ruled that
+    # FIPS 140-3 validation is Maknae's design GOAL, not a constraint in force,
+    # and the tree moved to the 4.x module line so RUSTSEC-2026-0285 could be
+    # taken (rustls 0.23.45 requires aws-lc-rs >=1.18). The decision of record
+    # is design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; the
+    # posture comment in crates/maknae-vault/Cargo.toml mirrors it with the
+    # dependency facts. A
+    # Dependabot bump of aws-lc-rs or rcgen is now an ordinary bump: review it
+    # against that comment, which must stay true.
 
   # ---------------------------------------------------------------------------
   # GitHub Actions

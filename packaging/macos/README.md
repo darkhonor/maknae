@@ -45,6 +45,13 @@ $ otool -l target/debug/maknaed | grep -c LC_RPATH
 0
 ```
 
+*(The measurement above is left at its observed value. **The dylib's basename carries the
+`aws-lc-fips-sys` crate version, so it moved with the 4.x module: on and after 2026-09-19 (#320)
+it is `libaws_lc_fips_0_14_2_crypto.dylib`.** Nothing in the packaging depends on the literal name
+— `build-pkg.sh` globs `libaws_lc_fips_*_crypto.dylib` and `smoke.sh` normalises it to `FIPSDYLIB`
+before comparing the bill of materials — but a reader matching this block against a fresh `otool`
+would otherwise see a mismatch and suspect the wrong thing.)*
+
 `cargo run` and `cargo test` work only because cargo injects `DYLD_*`. **An installed binary has
 no such help.** This is not a Maknae defect and not a macOS deficiency — it is upstream's required
 configuration: `aws-lc-fips-sys/README.md:143` calls a shared `libcrypto` *"the required form for
@@ -56,8 +63,12 @@ aarch64-apple-darwin`, which dies on that exact line).
 warning (`README.md:141-149`): a shared install's directory is not embedded in the consumer binary,
 so *"a different `libcrypto` may be loaded — on macOS the build-host's `@rpath` install name can
 resolve to an unrelated library."* An unresolved `@rpath` **searches**. The bad outcome is not a
-clean startup failure; it is Maknae running on a **non-validated** crypto module while the posture
-statement claims otherwise.
+clean startup failure; it is Maknae running on **some other `libcrypto` entirely** — one nobody
+chose, self-tested or shipped — while the posture statement claims otherwise. *(Corrected
+2026-09-19, #320: this said "a **non-validated** crypto module". The hazard was never about the
+CMVP list; it is that an unresolved `@rpath` binds an arbitrary library. Maknae's own module is
+itself no longer on the validated list — see the posture correction below — and the hazard is
+exactly as serious.)*
 
 **The packaging answer: an absolute install name, no rpath.** `install_name_tool -change
 @rpath/libaws_lc_fips_<ver>_crypto.dylib /usr/local/lib/maknae/libaws_lc_fips_<ver>_crypto.dylib`
@@ -144,6 +155,8 @@ means for a FIPS-posture product.
 > **What DOES change, and it is a packaging obligation with a fail-open edge.** `aws-lc-fips-sys/README.md:141-149` warns that a shared install's library directory is not embedded in the consumer binary, so *"a different `libcrypto` may be loaded — on macOS the build-host's `@rpath` install name can resolve to an unrelated library."* Measured on `main` 2026-09-12: `otool -L target/debug/maknaed` shows `@rpath/libaws_lc_fips_0_13_17_crypto.dylib` and `otool -l` shows **zero `LC_RPATH`**; the binaries run under `cargo` only because cargo injects `DYLD_*`. The hazard is therefore not merely "the installed binary fails to start" — it is that an unresolved `@rpath` **searches**, and can bind a *non-validated* `libcrypto` while the posture claims otherwise. #227 pins the module by **absolute install name** (the pattern Cisco AnyConnect uses for its own crypto dylibs on this platform: `/opt/cisco/anyconnect/lib/libacciscocrypto.dylib`, zero `LC_RPATH`), so the loader can resolve exactly one file and no search occurs.
 >
 > **The certificate SPLIT is the real correction here, and it stands.** **MAINTAINER RULING 2026-09-13 (restated; first given 2026-09-12): ANY 3.x implementation is approved. The AWS-LC-FIPS **3.x line** is what CMVP validated and what an assessor evaluates; that the certificate was issued at 3.1.0 while the pinned crate vendors 3.6.0 is NOT a finding and is not tracked. Earlier prose here treated it as an unresolved 'version mapping' that barred citing the certificate — that was wrong, it is struck, and it must not be reintroduced.** What changes on macOS is *which certificate applies* — #5298, the dynamic line — not any question about the module's version. The normative statement lives in `packaging/isolation-contract.md`; this paragraph mirrors it.
+
+> **CORRECTED 2026-09-19 (#320, maintainer ruling) — the answer above is now "it is not, on either axis".** The blocks above resolve one question (*is `aws-lc-fips` FIPS-140-3 validated on macOS arm64?*) with *no, because the operational environment is not listed*, while the module line itself was validated. **Maknae has since moved off that line.** RUSTSEC-2026-0285 is fixed only in rustls 0.23.45, which requires `aws-lc-rs >=1.18` — the AWS-LC-FIPS **4.x** module, which upstream lists as *Modules In Process* (v4.0 static and dynamic, "Review"; `aws-lc/crypto/fipsmodule/FIPS.md`, read 2026-09-19). The maintainer's ruling, recorded as **[ADR-0025](../../design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md)** — the decision of record, which this paragraph mirrors: *"The design goal is the same (FIPS Validated), but it's a goal not a constraint."* **So on macOS the applicable module is v4.0 dynamic, submitted and under CMVP review — the static/dynamic split above still holds, because upstream submitted v4.0 as the same two modules.** Both axes are now incomplete: certificate and environment. Every "validated" above is history, not a current claim about what the `.pkg` installs. **What does not change:** the dylib packaging obligation, the absolute-install-name pinning, and the runtime `.fips()` assertion — which proved the FIPS build, never a certificate. The v4.0 certificate is **not tracked** (maintainer, 2026-09-19: *"We don't need to be FIPS Validated because there is no CAT I"*) — no watch issue, nothing owed.
 
 ## References
 

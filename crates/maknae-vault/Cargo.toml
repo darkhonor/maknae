@@ -19,31 +19,29 @@ maknae-config = { path = "../maknae-config" }
 # process default, which would silently pull aws-lc-sys into the TLS path and race
 # the FIPS provider this crate installs (§6.1). `rustls-no-provider` leaves provider
 # selection to the process, i.e. to the `.fips()`-asserted install. Same choice as
-# Microkosmos. The failure this prevents: a Vault-HTTPS leg on a non-validated module
+# Microkosmos. The failure this prevents: a Vault-HTTPS leg on a non-FIPS provider
 # with every test still green. vaultrs and rustify move TOGETHER (0.7.4 needs rustify
 # 0.6, 0.8.0 needs 0.7); Dependabot #254 and #255 each bumped one and failed to build.
 vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no-provider"] }
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
-# UPPER BOUND IS THE SAME COMPLIANCE CONTROL AS THE aws-lc-rs BOUND BELOW,
-# REACHED FROM THE OTHER SIDE — see that comment for the module-line facts;
-# they are not restated here so there is one place to correct. rcgen 0.14.10
-# raises its OWN aws-lc-rs requirement to ^1.18, which is precisely the range
-# that bound excludes. The two are unsatisfiable together, so 0.14.10 does not
-# resolve at all. MEASURED, not assumed — with the ceiling widened to <0.15,
-# `cargo update -p rcgen --precise 0.14.10` fails:
+# UPPER BOUND REMOVED 2026-09-19 (#320) TOGETHER WITH THE aws-lc-rs BOUND BELOW —
+# see that comment for the ruling and the module-line facts, which are not
+# restated here so there is one place to correct. The ceiling here was never
+# about rcgen: `>=0.14.9, <0.14.10` existed because rcgen 0.14.10 raises its OWN
+# aws-lc-rs requirement to ^1.18, which the old FIPS bound excluded, so the two
+# were unsatisfiable and cargo refused the pair. With that bound lifted, 0.14.10
+# resolves normally (MEASURED: aws-lc-rs 1.18.1, aws-lc-fips-sys 0.14.2, rcgen
+# 0.14.10, pem 4.0.0 in one `cargo update`; workspace tests and `cargo deny
+# check` both green).
 #
-#   error: failed to select a version for `aws-lc-rs`.
-#       ... required by package `rcgen v0.14.10`
-#   versions that meet the requirements `^1.18` are: 1.18.1, 1.18.0
-#   all possible versions conflict with previously selected packages
-#     previously selected package `aws-lc-rs v1.17.3`
-#
-# So cargo already fails closed; the bound exists to say WHY in the manifest
-# instead of leaving the next reader to reverse-engineer a resolver error, and
-# the dependabot.yml ignore rule mirrors it (Dependabot does not honor an upper
-# bound — it proposes widening one). Lift it only WITH the aws-lc-rs bound; the
-# watch is #259.
+# THE FLOOR IS DELIBERATE AND STAYS: `>=0.14.9`, not the bare `0.14` a first
+# pass wrote. Caught in review 2026-09-19 before this shipped -- `"0.14"` is
+# cargo's caret requirement, i.e. `>=0.14.0`, which would have silently dropped
+# the floor eight patch versions below anything measured here, in a manifest
+# whose own rule is that a bound records the failure it prevents. Nothing below
+# 0.14.9 has ever been resolved or tested against the `Issuer::from_params`
+# usage this crate depends on (see the API note below).
 #
 # 0.13 -> 0.14 was an API break, not a routine bump: `CertificateParams::signed_by`
 # takes an `Issuer` instead of (issuer certificate, issuer key). Test issuers
@@ -52,39 +50,89 @@ rustify_derive = "=0.5.5"                                          # the #[deriv
 # this crate deliberately does not enable (we parse with our own x509-parser).
 # The `aws_lc_rs` + `fips` feature definitions are byte-identical across the
 # break, so the FIPS backend selection is unchanged by the bump.
-rcgen = { version = ">=0.14.9, <0.14.10", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["fips"] }
-# UPPER BOUND IS A COMPLIANCE CONTROL, NOT DEPENDENCY HYGIENE. Do not relax it to
-# take a routine Dependabot bump (the dependabot.yml ignore rule mirrors it).
-# aws-lc-rs is otherwise only a transitive dependency (rustls, rcgen, webpki);
-# it is named here so the workspace resolves ONE version and this bound wins.
+# FIPS POSTURE — READ BEFORE CHANGING THIS LINE. aws-lc-rs is otherwise only a
+# transitive dependency (rustls, rcgen, webpki); it is named here so the
+# workspace resolves ONE version and this requirement wins, and so the posture
+# has one documented home.
 #
-# aws-lc-rs 1.18.0 switches aws-lc-fips-sys from the AWS-LC-FIPS 3.x module to
-# 4.x. The 3.x module shipped by aws-lc-rs 1.17.x is FIPS 140-3 VALIDATED (CMVP
-# certificate #5314 static / #5298 dynamic); the 4.x module has completed lab
-# testing and is on the CMVP Modules In Process list, not the validated list.
-# Upstream's own guidance: "Consumers who need to remain on the FIPS 3.x module
-# should pin aws-lc-rs to <1.18.0." Upstream keeps the 1.17.x line patched
-# (1.17.4 and 1.18.1 released the same day), so the pin costs no fixes.
+# MAINTAINER RULING 2026-09-19 (#320), recorded as ADR-0025 --
+# design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md, which is
+# the DECISION OF RECORD; this comment mirrors it and never outranks it
+# (AGENTS.md authority order: code -> KLC -> current ADRs -> everything else).
+# Maknae moves to the AWS-LC-FIPS 4.x module line. In their words: *"Maknae does NOT have the same compliance
+# posture as Microkosmos and it's silly to try and justify it otherwise. The
+# design goal is the same (FIPS Validated), but it's a goal not a constraint."*
+# Maknae is a personal project — no authorization boundary, no ATO, no assessor
+# (AGENTS.md). FIPS 140-3 validation is a DESIGN TARGET so the system CAN be
+# fielded; when a DoD deployment is genuinely pursued, the deploying
+# organization's requirements govern, and re-pinning is a decision available to
+# them at that time.
 #
-#   AWS-LC-FIPS module | aws-lc-rs        | aws-lc-fips-sys
-#   3.0.x              | >=1.17.3, <1.18  | 0.13.x   <-- maknae is here, deliberately
-#   4.x                | >=1.18           | 0.14.x
+#   AWS-LC-FIPS module | aws-lc-rs        | aws-lc-fips-sys | CMVP
+#   3.x                | >=1.17.3, <1.18  | 0.13.x          | VALIDATED: #5314 static / #5298 dynamic
+#   4.x                | >=1.18           | 0.14.x          | Modules In Process (Review) <-- maknae is here
 #
-# Narrowed 2026-09-13 (#284): "VALIDATED" above is a claim about the MODULE, not
-# about any platform Maknae ships on. Certificate #5314's security policy Table 3
-# lists Amazon Linux 2023 on Graviton4 / Xeon 8375C as the tested operational
-# environments; RHEL/Rocky 9 and macOS arm64 are both PORTED, unlisted ones, and
-# CMVP "makes no statement as to the correct operation of the module when so
-# ported". The honest claim is "a validated module", never "validated here".
+# (Rows are LINES, not module versions. The 2026-09-13 ruling that any 3.x
+# implementation is approved -- and that the certificate-issued-at-3.1.0 vs
+# crate-vendors-3.6.0 mapping is not a finding -- stands and is not reopened
+# here; a row labelled with an exact version would reintroduce exactly that.)
 #
-# ASD STIG APSC-DV-001860 (CAT I) requires the module on the NIST CMVP
-# VALIDATED list; in-process does not satisfy it. Raising this bound moves the
-# product off a validated module and is an AO-visible change. Revisit only when
-# 4.x has an issued certificate: the watch is #259. Same control as Microkosmos.
-# The failure this pin prevents: the lockfile had already drifted to 1.18.0 /
-# aws-lc-fips-sys 0.14.1 (the in-process module) before the pin existed.
-aws-lc-rs = { version = ">=1.17.3, <1.18.0", features = ["fips"] }
+# (Upstream `aws-lc/crypto/fipsmodule/FIPS.md`, read 2026-09-19: v4.0 static and
+# dynamic are both listed under Modules In Process, not under validated.)
+#
+# THE HONEST CLAIM, everywhere in this repository: Maknae is built on the
+# AWS-LC-FIPS 4.x module line, which is SUBMITTED and under CMVP review — never
+# "validated", and never "validated here". (The platform half of that caveat is
+# unchanged and independent: certificate environments were Amazon Linux 2023 on
+# Graviton4 / Xeon 8375C even for 3.1, so RHEL/Rocky and macOS arm64 were ported,
+# unlisted environments then too.) The old bound cited ASD STIG APSC-DV-001860
+# (CAT I), which requires a module on the NIST CMVP validated list. **That
+# requirement does not apply to Maknae**: there is no authorization boundary, no
+# ATO and no assessor (AGENTS.md; maintainer, 2026-09-19: *"We don't need to be
+# FIPS Validated because there is no CAT I."*). It would apply to a deployment
+# fielded under an ASD STIG obligation — and such a deployment can re-pin to a
+# validated line, which is the deploying organization's decision, made with
+# their own knowledge of the tradeoff this comment records.
+#
+# WHAT FORCED THE DECISION — RUSTSEC-2026-0285 (#320). rustls <0.23.45 accepts
+# TLS 1.3 handshake messages across encryption-level boundaries.
+#
+# ITS MEASURED SEVERITY, because this comment does not get to be vague where it
+# asks for precision elsewhere: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N,
+# and the advisory says plainly that "the handshake transcript is still
+# authenticated, so a network-position attacker cannot use this to alter or
+# complete a handshake". It is a confidentiality-only, low-severity defect, NOT
+# a handshake break. The forcing function was never its blast radius: it was
+# that a FAIL-CLOSED gate went red on every branch with no fix reachable. The fix,
+# 0.23.45, requires aws-lc-rs >=1.18, which the old `<1.18.0` bound excluded, so
+# `cargo deny check advisories` was red on main and on every branch with no
+# agent-available fix. The standing reasoning applies and is the maintainer's
+# own (2026-09-12): keeping an older crypto library with known vulnerabilities is
+# worse than moving within the vendor's supported channel. A frozen, validated,
+# VULNERABLE module is the posture an assessor penalises.
+#
+# MEASURED on the move (2026-09-19, Linux x86_64, Rust 1.98.1): aws-lc-rs 1.18.1
+# + aws-lc-fips-sys 0.14.2 + rustls 0.23.45 + rcgen 0.14.10 resolve and build;
+# `cargo deny check` -> "advisories ok, bans ok, licenses ok, sources ok"; the
+# runtime `.fips()` assertion still holds on the 4.x module
+# (`fips_glue::tests::asserts_fips_true_on_this_build`), which is what actually
+# proves the FIPS build, not the dependency tree.
+#
+# The floor is >=1.18 because that is where the 4.x module starts. There is no
+# ceiling of OUR OWN -- but "1.18" is cargo's caret requirement, i.e.
+# >=1.18.0, <2.0.0, so an aws-lc-rs 2.x would still need a manifest edit. That
+# is cargo's bound, not a compliance control, and nothing here mirrors it: the
+# dependabot.yml ignore that mirrored the old ceiling is removed outright.
+#
+# THE v4.0 CERTIFICATE IS NOT TRACKED, and that is the maintainer's ruling too
+# (2026-09-19): *"We don't need to be FIPS Validated because there is no CAT I."*
+# There is no watch issue, no review date and nothing owed. If NIST issues the
+# certificate, the only change it licenses is an upgrade to the CLAIM — this
+# comment and the posture docs — never a version change, and no one is obliged
+# to notice. Do not file a watch, and do not re-raise the pin.
+aws-lc-rs = { version = "1.18", features = ["fips"] }
 x509-parser = "0.18"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"

@@ -10,6 +10,17 @@ multiple-versions = "warn"
 # never the OpenSSL path. `ring` and `aws-lc-sys` are NOT banned — both are present-but-dead
 # and unbannable (aws-lc-sys pulled by rcgen[aws_lc_rs]; ring is reqwest's bundled fallback,
 # never used once the FIPS provider is installed). The runtime `.fips()` assertion is the gate.
+#
+# MEASURED 2026-09-19 (#320) — `ring` IS NO LONGER IN THE GRAPH AT ALL, so the sentence
+# above is stale on its facts though not in its conclusion. `cargo tree -i ring --target
+# all` prints nothing: ring left when reqwest moved 0.12 -> 0.13 under `rustls-no-provider`,
+# and the regenerated THIRD-PARTY-NOTICES.md no longer lists it. It survives in Cargo.lock
+# only as an unselected optional feature edge of rustls-webpki. "Present-but-dead" is
+# therefore now simply "absent", and "unbannable" is untested against the current graph.
+# WHETHER TO BAN IT OUTRIGHT IS THE MAINTAINER'S CALL AND IS DELIBERATELY NOT TAKEN HERE
+# — this note records the fact so the next reader is not reasoning from a stale rationale.
+# Also corrected: `aws-lc-sys` is pulled by `aws-lc-rs` itself, not by `rcgen[aws_lc_rs]`
+# (`cargo tree -i aws-lc-sys --target all` roots at aws-lc-rs; rcgen is one consumer of four).
 deny = [
   { name = "native-tls" },
   { name = "openssl-sys" },
