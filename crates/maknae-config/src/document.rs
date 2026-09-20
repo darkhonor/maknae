@@ -1260,4 +1260,166 @@ mod tests {
         assert_eq!(d.source_of("provider"), Some(&Source::Base));
         assert_eq!(d.source_of("absent"), None);
     }
+    /// #210's derived cross-check, and its SCOPE is stated because a partial
+    /// check that reads as complete is worse than none.
+    ///
+    /// `DISCLOSABLE`/`SUPPRESSED` are an inventory of dotted config paths kept
+    /// by hand for the disclosure gate, INDEPENDENTLY of the section parsers.
+    /// So every path they name must be a key its parser actually accepts —
+    /// otherwise disclosure promises to show or mask a key that can never be
+    /// set. Computed from a different source than the code under test, per the
+    /// standing no-baked-counts rule: no number appears here.
+    ///
+    /// ONE DIRECTION ONLY, and this is measured, not stylistic: the converse is
+    /// false, carried entirely by `audit.siem`: it is read by the parser
+    /// (`audit_cfg.rs`) and named by neither list, so deriving the allow-lists
+    /// FROM this inventory would refuse a shipped, valid config.
+    ///
+    /// COVERS the five sections whose lists live in this crate. `core`'s TOP
+    /// level (list in `maknae-kernel`'s `boot.rs`, where core is consumed) and
+    /// `vault` (in `maknae-vault`) are out of reach from here. `core.handling`
+    /// and `core.handling.ceiling` ARE in this crate (`ceiling.rs`) and are
+    /// nonetheless unchecked for a different reason: the inventory carries only
+    /// the bare prefix `core.handling`, never a key beneath it, so there is
+    /// nothing here to match them against.
+    #[test]
+    fn every_disclosed_path_is_a_key_its_parser_accepts() {
+        let in_crate: &[(&str, &[&str])] = &[
+            (crate::AUDIT_SECTION, &crate::audit_cfg::AUDIT_KEYS),
+            (crate::TRANSPORT_SECTION, &crate::transport::TRANSPORT_KEYS),
+            (crate::PRINCIPAL_SECTION, &crate::principal::PRINCIPAL_KEYS),
+            (crate::EGRESS_SECTION, &crate::egress_cfg::EGRESS_KEYS),
+            (crate::PROVIDER_SECTION, &crate::provider::KEYS),
+        ];
+        let mut matched: Vec<&str> = Vec::new();
+        for path in DISCLOSABLE.iter().chain(SUPPRESSED.iter()) {
+            let Some((sect, rest)) = path.split_once('.') else {
+                continue;
+            };
+            let Some((_, allowed)) = in_crate.iter().find(|(s, _)| *s == sect) else {
+                continue; // core / vault — out of this crate's reach
+            };
+            // Only the FIRST segment is a section key; `a.b.c` nests below it.
+            let key = rest.split('.').next().expect("non-empty");
+            assert!(
+                allowed.contains(&key),
+                "disclosure names '{path}', but '{sect}' has no key '{key}' — \
+                 the inventory promises a path the parser would refuse"
+            );
+            matched.push(sect);
+        }
+        // A floor of one would let a whole section's entries vanish from the
+        // inventory unnoticed. Derived from `in_crate`, not from a count: EVERY
+        // section listed here must have been exercised by at least one path.
+        for (sect, _) in in_crate {
+            assert!(
+                matched.contains(sect),
+                "no inventory path exercised '{sect}' — its entries disappeared, \
+                 and this cross-check stopped covering it silently"
+            );
+        }
+    }
+    /// #210 round-1 review: the direction that actually breaks a shipped config
+    /// — an allow-list that DRIFTS from the key set its parser reads. Add a
+    /// field to `TransportConfig` and forget `TRANSPORT_KEYS` and the parser
+    /// reads a key the vocabulary refuses, so a valid `maknae.yaml` stops
+    /// booting; no other test, gate or mutant catches that.
+    ///
+    /// Derived by a DIFFERENT MECHANISM than the code under test, per the
+    /// standing no-baked-numbers rule: the expected set is parsed out of each
+    /// config struct's source at run time and compared for EQUALITY — not a
+    /// floor, not a count. `ci/gates/config-disclosure-drift.sh` already
+    /// inventories the same `file|struct|section|count|kind` rows for its own
+    /// purpose, which is why these structs are the right authority. Covered
+    /// here: the five whose allow-lists live beside them in this crate. `Ceiling`
+    /// is deliberately outside — its seven fields span TWO YAML levels
+    /// (`accreditation_ref` is a sibling of `ceiling`, not a field under it), so
+    /// plain equality cannot hold. `VaultConfig` is in another crate.
+    #[test]
+    fn every_allow_list_equals_its_config_structs_fields() {
+        fn fields(src: &str, name: &str) -> Vec<String> {
+            let at = src
+                .find(&format!("pub struct {name} {{"))
+                .unwrap_or_else(|| panic!("no `pub struct {name}` in source"));
+            let body = &src[at..][..src[at..].find("\n}").expect("struct closes")];
+            // LOUD, not lossy. An earlier version filtered on `pub ` and dropped
+            // anything it could not parse, which made a `pub(crate)` field the
+            // parser reads invisible — a FALSE GREEN on the one guard that
+            // protects a shipped config. Review demonstrated it by adding
+            // `pub(crate) probe_key` and a parser read: the test stayed green.
+            // Now `pub`, `pub(crate)` and private are accepted and an unparsed
+            // field-shaped line PANICS rather than vanishing. Precisely: any
+            // other visibility form (`pub(super)`, `pub(in path)`) also panics —
+            // safe direction, but it is a panic, not acceptance, so do not read
+            // this as "any visibility". One silent-drop route remains by choice:
+            // an attribute on the SAME line as the field (`#[serde(skip)] pub x:
+            // u32,`) is dropped by the `#[` test. `cargo fmt` splits that onto
+            // two lines and `cargo fmt --all --check` is a gate, so fmt is what
+            // closes it — stated because a guard leaning on another gate should
+            // say so.
+            body.lines()
+                .skip(1) // the `pub struct X {` header
+                .filter_map(|l| {
+                    let l = l.trim();
+                    if l.is_empty() || l.starts_with("//") || l.starts_with("#[") {
+                        return None;
+                    }
+                    let rest = l
+                        .strip_prefix("pub(crate) ")
+                        .or_else(|| l.strip_prefix("pub "))
+                        .unwrap_or(l);
+                    let (ident, _) = rest.split_once(':').unwrap_or_else(|| {
+                        panic!(
+                            "{name}: cannot parse field-shaped line `{l}` — if this is \
+                                not a field, teach the extractor; do not let it drop silently"
+                        )
+                    });
+                    assert!(
+                        ident
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                        "{name}: unexpected field identifier `{ident}`"
+                    );
+                    Some(ident.to_string())
+                })
+                .collect()
+        }
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                include_str!("transport.rs"),
+                "TransportConfig",
+                &crate::transport::TRANSPORT_KEYS,
+            ),
+            (
+                include_str!("audit_cfg.rs"),
+                "AuditConfig",
+                &crate::audit_cfg::AUDIT_KEYS,
+            ),
+            (
+                include_str!("principal.rs"),
+                "Principal",
+                &crate::principal::PRINCIPAL_KEYS,
+            ),
+            (
+                include_str!("egress_cfg.rs"),
+                "EgressConfig",
+                &crate::egress_cfg::EGRESS_KEYS,
+            ),
+            (
+                include_str!("provider.rs"),
+                "ProviderConfig",
+                &crate::provider::KEYS,
+            ),
+        ];
+        for (src, name, keys) in cases {
+            let mut from_struct = fields(src, name);
+            let mut from_list: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            from_struct.sort();
+            from_list.sort();
+            assert_eq!(
+                from_struct, from_list,
+                "{name}'s fields and its allow-list disagree — one of them was edited alone"
+            );
+        }
+    }
 }

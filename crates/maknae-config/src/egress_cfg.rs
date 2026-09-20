@@ -21,6 +21,9 @@ use std::path::PathBuf;
 /// The registered section name.
 pub const EGRESS_SECTION: &str = "egress";
 
+/// #210: the keys this section's parser reads — the closed vocabulary.
+pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
+
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// The deputy's worst-case wall time on one request, plus a margin. Every
 /// Vault operation is bounded by `maknae-vault`'s `VAULT_HTTP_TIMEOUT`
@@ -76,13 +79,11 @@ pub fn egress_from_section(v: Option<&Value>) -> Result<EgressConfig, ConfigErro
             "egress section must be a map".into(),
         ));
     };
-    for (k, _) in entries {
-        if k != "socket_path" && k != "deadline_ms" {
-            return Err(ConfigError::InvalidEgress(format!(
-                "unknown key '{k}' under 'egress' (no registered spec)"
-            )));
-        }
-    }
+    // #210: this section was ALREADY closed; what changed is the error. It
+    // raised a stringly `InvalidEgress("unknown key …")` of its own, which is
+    // the duplication the standard exists to end — one sentence for a wrong
+    // key, wherever it appears.
+    crate::reject_unknown_keys(EGRESS_SECTION, entries, &EGRESS_KEYS)?;
     let socket_path = match get(section, "socket_path") {
         None => PathBuf::from(DEFAULT_SOCKET_PATH),
         Some(Value::Str(s)) if !s.is_empty() => PathBuf::from(s),
@@ -194,5 +195,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("'mystery'"), "{e}");
+    }
+    /// #210: a key this parser does not read must REFUSE, not leave its field
+    /// at the default. An ignored key silently substitutes the DEFAULT for what
+    /// the operator wrote — sometimes weaker, sometimes STRICTER (a raised
+    /// `max_connections` falls back to 64 from a ceiling of 4096) — and either
+    /// way their stated intent is discarded without a word.
+    #[test]
+    fn a_key_this_parser_does_not_read_refuses() {
+        let v = Value::Map(vec![("deadline_msec".into(), Value::Str("x".into()))]);
+        match egress_from_section(Some(&v)) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, EGRESS_SECTION);
+                assert_eq!(key, "deadline_msec");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
+    /// Companion: every key the parser DOES read still loads, so closing the
+    /// vocabulary cannot silently reject a valid config.
+    #[test]
+    fn every_key_the_parser_reads_is_accepted() {
+        let v = Value::Map(vec![
+            ("socket_path".into(), Value::Null),
+            ("deadline_ms".into(), Value::Null),
+        ]);
+        let e = egress_from_section(Some(&v));
+        assert!(
+            !matches!(e, Err(ConfigError::UnknownKey { .. })),
+            "a key the parser reads was rejected: {e:?}"
+        );
     }
 }

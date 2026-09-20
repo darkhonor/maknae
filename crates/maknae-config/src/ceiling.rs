@@ -166,11 +166,15 @@ fn parse_handling(
 ) -> Result<Ceiling, ConfigError> {
     let hmap = as_map(handling).ok_or_else(|| err("handling is not a map"))?;
     // additionalProperties: false -- `policy` (ADR-0022) joins the two lake keys.
-    for (k, _) in hmap {
-        if k != "ceiling" && k != "accreditation_ref" && k != "policy" {
-            return Err(err(format!("handling: unknown key '{k}'")));
-        }
-    }
+    // #210: the refusal is unchanged; the ERROR converged onto the shared
+    // `ConfigError::UnknownKey`. This level was already closed — what it could
+    // not catch is a typo ONE LEVEL UP, where `handling` itself is misspelled
+    // and none of this runs; `boot.rs` closes `core` for that reason.
+    crate::reject_unknown_keys(
+        "core.handling",
+        hmap,
+        &["ceiling", "accreditation_ref", "policy"],
+    )?;
     // required: [ceiling, accreditation_ref]; `policy` is optional (read separately).
     let accreditation_ref = match get(hmap, "accreditation_ref") {
         None => return Err(err("handling: missing 'accreditation_ref'")),
@@ -196,12 +200,8 @@ fn parse_ceiling(
         "dissemination_permitted",
     ];
     let m = as_map(ceiling).ok_or_else(|| err("handling.ceiling is not a map"))?;
-    // additionalProperties: false
-    for (k, _) in m {
-        if !KEYS.contains(&k.as_str()) {
-            return Err(err(format!("handling.ceiling: unknown key '{k}'")));
-        }
-    }
+    // additionalProperties: false (#210: onto the shared standard)
+    crate::reject_unknown_keys("core.handling.ceiling", m, &KEYS)?;
     // required + typed (field() errors on a missing required key)
     let classification = {
         let raw = as_str(field(m, "classification")?)
@@ -557,16 +557,6 @@ mod tests {
             "handling:\n".to_string(),
             // handling missing ceiling
             "handling:\n  accreditation_ref: null\n".to_string(),
-            // additionalProperties: unknown key at the HANDLING level
-            BASE.replace(
-                "  accreditation_ref: null\n",
-                "  accreditation_ref: null\n  bogus: 1\n",
-            ),
-            // additionalProperties: unknown key in ceiling
-            BASE.replace(
-                "    cui_permitted: false\n",
-                "    cui_permitted: false\n    cui_permited: true\n",
-            ),
             // classification wrong type
             BASE.replace("classification: UNCLASSIFIED", "classification: 42"),
             // sci wrong type
@@ -593,6 +583,42 @@ mod tests {
             match ceiling_from_core(Some(&v), &US) {
                 Err(ConfigError::InvalidCeiling { .. }) => {}
                 other => panic!("expected InvalidCeiling for yaml:\n{y}\ngot {other:?}"),
+            }
+        }
+    }
+
+    /// #210: the two additionalProperties cases moved OUT of the
+    /// `InvalidCeiling` list above and onto the shared standard. Stronger than
+    /// what they replaced: the old assertion only checked the error kind, these
+    /// pin the LEVEL that rejected the key as well as the token, so a check
+    /// wired to the wrong level cannot pass.
+    #[test]
+    fn an_unknown_key_at_either_handling_level_names_its_level_and_token() {
+        for (yaml, level, token) in [
+            (
+                BASE.replace(
+                    "  accreditation_ref: null\n",
+                    "  accreditation_ref: null\n  bogus: 1\n",
+                ),
+                "core.handling",
+                "bogus",
+            ),
+            (
+                BASE.replace(
+                    "    cui_permitted: false\n",
+                    "    cui_permitted: false\n    cui_permited: true\n",
+                ),
+                "core.handling.ceiling",
+                "cui_permited",
+            ),
+        ] {
+            let v = core(&yaml);
+            match ceiling_from_core(Some(&v), &US) {
+                Err(ConfigError::UnknownKey { section, key }) => {
+                    assert_eq!(section, level, "wrong level for token '{token}'");
+                    assert_eq!(key, token);
+                }
+                other => panic!("expected UnknownKey for:\n{yaml}\ngot {other:?}"),
             }
         }
     }

@@ -8,6 +8,15 @@ use std::path::PathBuf;
 /// The registered section name for `transport` (spec/task-brief §Interfaces).
 pub const TRANSPORT_SECTION: &str = "transport";
 
+/// #210: the keys this section's parser reads — the closed vocabulary.
+pub(crate) const TRANSPORT_KEYS: [&str; 5] = [
+    "socket_path",
+    "max_connections",
+    "frame_max_bytes",
+    "handshake_timeout_ms",
+    "read_timeout_ms",
+];
+
 const DEFAULT_MAX_CONNECTIONS: u32 = 64;
 const DEFAULT_FRAME_MAX_BYTES: usize = 65536;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
@@ -157,6 +166,10 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
     // fall through to all-defaults: `get()` returns `None` for every field against a
     // non-`Map` value, which would otherwise bind the production default socket/limits
     // to a malformed section (codex round-6 P2). Fail closed instead.
+    // #210: closed vocabulary — every key below is one this function reads.
+    if let Value::Map(entries) = section {
+        crate::reject_unknown_keys(TRANSPORT_SECTION, entries, &TRANSPORT_KEYS)?;
+    }
     if !matches!(section, Value::Map(_)) {
         return Err(ConfigError::InvalidTransport(
             "transport section must be a map".into(),
@@ -400,6 +413,40 @@ mod tests {
         assert_eq!(
             c.socket_path,
             std::path::PathBuf::from("/var/run/other.sock")
+        );
+    }
+    /// #210: a key this parser does not read must REFUSE, not leave its field
+    /// at the default. An ignored key silently substitutes the DEFAULT for what
+    /// the operator wrote — sometimes weaker, sometimes STRICTER (a raised
+    /// `max_connections` falls back to 64 from a ceiling of 4096) — and either
+    /// way their stated intent is discarded without a word.
+    #[test]
+    fn a_key_this_parser_does_not_read_refuses() {
+        let v = Value::Map(vec![("sockt_path".into(), Value::Str("x".into()))]);
+        match transport_from_section(Some(&v)) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, TRANSPORT_SECTION);
+                assert_eq!(key, "sockt_path");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
+    /// Companion: every key the parser DOES read still loads, so closing the
+    /// vocabulary cannot silently reject a valid config.
+    #[test]
+    fn every_key_the_parser_reads_is_accepted() {
+        let v = Value::Map(vec![
+            ("socket_path".into(), Value::Null),
+            ("max_connections".into(), Value::Null),
+            ("frame_max_bytes".into(), Value::Null),
+            ("handshake_timeout_ms".into(), Value::Null),
+            ("read_timeout_ms".into(), Value::Null),
+        ]);
+        let e = transport_from_section(Some(&v));
+        assert!(
+            !matches!(e, Err(ConfigError::UnknownKey { .. })),
+            "a key the parser reads was rejected: {e:?}"
         );
     }
 }

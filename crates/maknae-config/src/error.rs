@@ -36,6 +36,21 @@ pub enum ConfigError {
     PermissionsUnsupported,
     /// A config file's document root is not a mapping (spec §2/§6).
     NotAMap { source_path: String },
+    /// A key inside a section matches nothing that section's parser reads
+    /// (#210). THE standard unknown-key error: `authz.yaml`'s grammar checks
+    /// and `core.handling`'s hand-rolled `additionalProperties: false` both
+    /// raise this one rather than a lookalike of their own, so an operator sees
+    /// the same sentence wherever a key is wrong.
+    ///
+    /// `section` is the DOTTED path to the level that rejected it
+    /// (`audit`, `core.handling`, `authz.permissions`), so a nested typo is locatable;
+    /// for a file that is not a `maknae.yaml` section the label is the file's own
+    /// stem and level (`egress-bounds.yaml`, `egress-bounds.yaml/vault`, `authz`) — one
+    /// convention, so nobody invents a fourth spelling;
+    /// `key` is the offending token, quoted verbatim in Display. The section
+    /// parsers take only the section's value and never the file, so — unlike
+    /// [`ConfigError::UnknownSection`] — there is no `source_path` to carry.
+    UnknownKey { section: String, key: String },
     /// A top-level key matches no registered section spec (spec §5).
     UnknownSection {
         section: String,
@@ -122,6 +137,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::NotAMap { source_path } => {
                 write!(f, "config root is not a mapping: '{source_path}'")
+            }
+            ConfigError::UnknownKey { section, key } => {
+                write!(f, "unknown key '{key}' in '{section}'")
             }
             ConfigError::UnknownSection {
                 section,
@@ -260,6 +278,23 @@ mod tests {
         assert!(
             s.contains("core.handling.policy") && s.contains("'ROK'"),
             "{s}"
+        );
+    }
+
+    /// #210: the property the standard is SOLD on — that the dotted level makes
+    /// a nested typo locatable — lives entirely in this sentence, and a format
+    /// string is not a mutation class. Pinned here, per this module's
+    /// per-variant Display convention.
+    #[test]
+    fn display_covers_unknown_key_and_names_its_level() {
+        let e = ConfigError::UnknownKey {
+            section: "core.handling.ceiling".into(),
+            key: "cui_permited".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("cui_permited") && s.contains("core.handling.ceiling"),
+            "Display must name BOTH the token and the level it was rejected at; was: {s}"
         );
     }
 

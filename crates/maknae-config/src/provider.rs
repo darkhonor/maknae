@@ -26,7 +26,7 @@ use crate::{ConfigError, Value};
 pub const PROVIDER_SECTION: &str = "provider";
 
 /// The five keys the section accepts, and no others.
-const KEYS: [&str; 5] = ["name", "endpoint", "model", "key_vault_path", "key_field"];
+pub(crate) const KEYS: [&str; 5] = ["name", "endpoint", "model", "key_vault_path", "key_field"];
 /// Upper bound on `provider.key_field`. It reaches `VaultError::MissingKvField`
 /// and therefore terminals and audit lines, so it is bounded like every other
 /// operator-supplied string that can be printed.
@@ -201,11 +201,10 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
     // The plaintext-key refusal comes FIRST: an operator who pasted a key next
     // to a typo in another field should hear about the key, not the typo.
     refuse_plaintext_keys(section)?;
-    for (k, _) in m {
-        if !KEYS.contains(&k.as_str()) {
-            return Err(err(format!("provider: unknown key '{k}'")));
-        }
-    }
+    // #210: this section was ALREADY closed; what changed is the error. It
+    // raised a stringly `InvalidProvider("provider: unknown key …")` of its own
+    // — the fifth such lookalike the standard absorbs.
+    crate::reject_unknown_keys(PROVIDER_SECTION, m, &KEYS)?;
     let name = required_str(m, "name")?;
     if !name
         .chars()
@@ -423,9 +422,13 @@ mod tests {
 
     #[test]
     fn the_key_set_is_exact() {
+        // #210: the refusal is unchanged; the ERROR converged onto the shared
+        // `ConfigError::UnknownKey` standard, so this asserts the token and the
+        // section as fields rather than grepping a formatted string.
         match parse(&format!("{OK}region: us\n")) {
-            Err(ConfigError::InvalidProvider(r)) => {
-                assert!(r.contains("unknown key 'region'"), "{r}")
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, PROVIDER_SECTION);
+                assert_eq!(key, "region");
             }
             other => panic!("{other:?}"),
         }

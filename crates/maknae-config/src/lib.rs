@@ -88,6 +88,49 @@ pub use value::Value;
 
 use builder::Builder;
 
+/// Refuse a key the section's parser does not read (#210).
+///
+/// **The fail-closed half of a section parse.** A parser pulls the fields it
+/// knows by name; anything else in the map is invisible to it, so a transposed
+/// key silently leaves its field at the DEFAULT and the daemon boots clean. The
+/// ignored key silently substitutes the DEFAULT for what the operator wrote.
+/// An earlier version of this doc called that asymmetric — "can only relax,
+/// never tighten" — and that is FALSE: `max_connections` defaults to 64 against
+/// a ceiling of 4096, so a typo'd raise lands STRICTER, and a typo'd
+/// `insecure_plaintext_secret_path` removes an opt-in weakening. What is
+/// constant is not the direction but that the operator's stated intent is
+/// discarded without a word, which is why this refuses rather than warns,
+/// matching `authz.yaml`, whose grammar has always been closed.
+///
+/// `section` is the DOTTED path to the level being checked (`audit`,
+/// `core.handling`), so a nested typo is locatable in the message.
+///
+/// Callers hold their own `allowed` list beside the fields they read, because
+/// the parser is the only thing that knows what it reads. Deriving the list
+/// from `document.rs`'s disclosure inventory was considered and rejected: that
+/// inventory is incomplete by design — it omits `audit.siem` entirely, and
+/// names NONE of `core.handling`'s three keys (it carries only the bare prefix
+/// `core.handling`) — so deriving from it would refuse a shipped, valid config.
+/// A test holds the inventory to be a SUBSET of these lists — one direction
+/// only, for that reason, and over the five IN-CRATE sections only: `core`'s
+/// list lives in `maknae-kernel` and `vault`'s in `maknae-vault`, each carrying
+/// its own guard.
+pub fn reject_unknown_keys(
+    section: &str,
+    map: &[(String, Value)],
+    allowed: &[&str],
+) -> Result<(), ConfigError> {
+    for (key, _) in map {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ConfigError::UnknownKey {
+                section: section.to_string(),
+                key: key.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parse a YAML string into a [`Value`], fail-closed. Strips a single leading BOM.
 pub fn load_str(input: &str) -> Result<Value, ConfigError> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);

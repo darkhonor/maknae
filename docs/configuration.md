@@ -225,6 +225,20 @@ Additional file rules:
 
 ## 3. Sections and precedence
 
+> **Changed 2026-09-19 (#210) — every section WITH A PARSER now refuses a key it does not read, and this can stop a host booting that booted yesterday.** Until now MOST of `maknae.yaml`'s parsers pulled the fields they knew by name and silently ignored anything else, so a transposed key NAME left its field at the **default** (`egress` and `provider` already refused, as did `egress-bounds.yaml` — what changed for those three is only that they now raise the same error as everything else): `jsonl_pth` meant the audit sink quietly became `<config-dir>/audit.jsonl`, and `handlng` meant the whole classification-ceiling block was invisible and the instance came up at the system's lowest level. An ignored key silently substitutes the DEFAULT for what you wrote, and the direction is NOT always weaker: `max_connections` defaults to 64 against a ceiling of 4096, so a typo'd raise lands stricter, and a typo'd `insecure_plaintext_secret_path` removes an opt-in weakening. What is constant is that your stated intent is discarded without a word — so it now refuses, naming the token and the level: `unknown key 'jsonl_pth' in 'audit'`. **Before upgrading, check any host whose config carries a key outside the sets below** — including notes or deployer-invented keys inside a section, which used to load. Listed below is every key of the levels this change NEWLY closes, because no single section of this reference lists them all — §4 does not even enumerate all of `core` (it omits `deployment_id`, which is on every enrolled host). **`provider`, `egress`, `core.handling.ceiling`, `egress-bounds.yaml` and `authz.yaml` already refused an unknown key before this change and need no upgrade check** — only their error changed:
+>
+> | section | every key its parser reads |
+> |---|---|
+> | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
+> | `core.handling` *(already closed; listed for completeness)* | `ceiling`, `accreditation_ref`, `policy` |
+> | `transport` | `socket_path`, `max_connections`, `frame_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
+> | `audit` | `jsonl_path`, `siem`, `au3_1` |
+> | `principal` | `name`, `uid`, `home` |
+> | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path` |
+>
+> `authz.yaml` and `egress-bounds.yaml` have always behaved this way. **Two places are deliberately still open** and a key there continues to load: `lake`, which is registered for a forthcoming subsystem and has no parser, and `core.identity`, left as it is by maintainer direction. **Three limits, stated so the note is not read as more than it is.** (1) This closes wrong key NAMES. A key with the right name and the wrong SHAPE is handled per field and NOT uniformly: the bounded numeric and typed fields refuse (`transport: { max_connections: nope }` is `InvalidTransport`), while the shape-TOLERANT ones — `audit.jsonl_path`, `audit.siem`, and `vault`'s `get_str` keys — silently default that one field. That tolerance is a deliberate decision recorded in the parsers and is unchanged here. (2) `core`'s own level is checked where the DAEMON consumes it, so a `core` typo in a CLI-side `maknae.yaml` is not caught by this at all — it may surface later as a missing-key refusal, or not at all: an extra `handlng` beside a valid `deployment_id` is simply ignored there, and even a misspelled `deployment_id` can be masked by the supported `vault.deployment_id` fallback. (3) A `core` that is present but not a MAP still boots at the system's lowest level, as `ceiling_from_core` has always documented and a test pins — the sibling sections refuse a non-map, `core` does not, and changing that is a decision nobody has taken. **The check applies to the contribution that WINS precedence** — a `config.d/` member replaces a whole section, so a key in a shadowed block is never read and is not refused.
+
+
 A configuration file is a YAML **mapping** whose top-level keys are **sections**. Each
 section is owned by one subsystem; a section's value is *conventionally* a mapping, but
 **the config loader is schema-agnostic** — it carries whatever `Value` the section
@@ -589,9 +603,12 @@ partial or wrong value is ever produced.
 ## 8. Validation and errors (fail-closed catalogue)
 
 Every failure below refuses the operation. The names are the config crate's error
-variants. All but the last are raised by the **directory load** itself; `InvalidCeiling`
-is raised by the **typed ceiling read** (`ceiling_from_core`, §4.1), which the kernel
-performs after the load.
+variants. Most are raised by the **directory load** itself; `InvalidCeiling` is raised
+by the **typed ceiling read** (`ceiling_from_core`, §4.1), and `UnknownKey` by the
+individual **section parsers**, two of which live outside `maknae-config` (`vault`'s in
+`maknae-vault`, `core`'s own level in `maknae-kernel`'s boot). `egress-bounds.yaml` is
+not part of the directory load at all and is read by the DEPUTY as well as the daemon.
+One name below, `UnknownRole`, is `maknae-authz-basic`'s rather than the config crate's.
 
 | Condition | Error |
 |---|---|
@@ -608,8 +625,9 @@ performs after the load.
 | `core` defined in a `config.d/` file | `CoreOverride` |
 | A caller registering a reserved name (`core`) | `ReservedSection` |
 | A duplicate section name in the registration | `DuplicateSpec` |
-| `egress-bounds.yaml` read but refused: a missing `vault` block, an unknown key, a malformed path fragment (#240) | `InvalidEgressBounds` |
-| The `egress` section (§6.2): a non-map section, an unknown key, a value of the wrong type or out of range (#240) | `InvalidEgress` |
+| `egress-bounds.yaml` read but refused: a missing `vault` block, a malformed path fragment (#240) | `InvalidEgressBounds` |
+| The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
+| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, `provider`, `egress` and `vault`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block; and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 
 ---
@@ -822,7 +840,8 @@ file.
 #### What the parser accepts (`crates/maknae-config/src/provider.rs`)
 
 **Exactly five keys, all required, no others** — a sixth key refuses with
-`provider: unknown key '<name>'`.
+`unknown key '<name>' in 'provider'` *(the message changed with #210, which made
+`UnknownKey` the one refusal for a wrong key everywhere)*.
 
 - **`name`** — at most **32 bytes** (it is written into every egress audit record's
   `object`), and only ASCII letters, digits, `-`, `_` and `.`. A space or a `/` refuses.

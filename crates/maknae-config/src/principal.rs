@@ -18,6 +18,9 @@ use std::path::PathBuf;
 /// The registered section name for `principal` (spec §7/§5.5).
 pub const PRINCIPAL_SECTION: &str = "principal";
 
+/// #210: the keys this section's parser reads — the closed vocabulary.
+pub(crate) const PRINCIPAL_KEYS: [&str; 3] = ["name", "uid", "home"];
+
 /// The enrolled operator identity written by `maknae enroll`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Principal {
@@ -66,6 +69,10 @@ pub fn principal_from_section(v: Option<&Value>) -> Result<Option<Principal>, Co
         None => return Ok(None),
         Some(section) => section,
     };
+    // #210: closed vocabulary — every key below is one this function reads.
+    if let Value::Map(entries) = section {
+        crate::reject_unknown_keys(PRINCIPAL_SECTION, entries, &PRINCIPAL_KEYS)?;
+    }
     if !matches!(section, Value::Map(_)) {
         return Err(ConfigError::InvalidPrincipal(
             "principal section must be a map".into(),
@@ -307,5 +314,37 @@ mod tests {
             principal_from_section(Some(&v)),
             Err(ConfigError::InvalidPrincipal(_))
         ));
+    }
+    /// #210: a key this parser does not read must REFUSE, not leave its field
+    /// at the default. An ignored key silently substitutes the DEFAULT for what
+    /// the operator wrote — sometimes weaker, sometimes STRICTER (a raised
+    /// `max_connections` falls back to 64 from a ceiling of 4096) — and either
+    /// way their stated intent is discarded without a word.
+    #[test]
+    fn a_key_this_parser_does_not_read_refuses() {
+        let v = Value::Map(vec![("hom".into(), Value::Str("x".into()))]);
+        match principal_from_section(Some(&v)) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, PRINCIPAL_SECTION);
+                assert_eq!(key, "hom");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
+    /// Companion: every key the parser DOES read still loads, so closing the
+    /// vocabulary cannot silently reject a valid config.
+    #[test]
+    fn every_key_the_parser_reads_is_accepted() {
+        let v = Value::Map(vec![
+            ("name".into(), Value::Null),
+            ("uid".into(), Value::Null),
+            ("home".into(), Value::Null),
+        ]);
+        let e = principal_from_section(Some(&v));
+        assert!(
+            !matches!(e, Err(ConfigError::UnknownKey { .. })),
+            "a key the parser reads was rejected: {e:?}"
+        );
     }
 }
