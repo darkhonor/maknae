@@ -192,21 +192,53 @@ transport:
   socket_path: /usr/local/var/run/maknae/maknaed.sock
 MACOS_TRANSPORT
 
-# Strip xattrs BEFORE pkgbuild. Files here carry com.apple.provenance; `install`
-# preserves them, and pkgbuild then serialises each as an AppleDouble `._name`
-# sibling INTO the payload — measured. Those become real installed files.
-xattr -rc "$D"
+# Strip what CAN be stripped, then VERIFY BY RE-READING — never by exit status.
+#
+# CORRECTED 2026-09-20 (#332). This previously read "Strip xattrs BEFORE pkgbuild
+# ... — measured", and trusted `xattr -rc` alone. That line is INERT for
+# com.apple.provenance: measured at the syscall, removexattr(2) returns
+# rc=0/errno=0 and leaves the attribute in place, so NO exit status anywhere can
+# detect the failure. It is kept because it still clears genuinely removable
+# attributes (quarantine and the like); it is simply no longer believed.
+#
+# The attribute is attached per-write by the RESPONSIBLE APPLICATION of the
+# writing process — not by macOS 26, not by APFS, not by pkgbuild. A build driven
+# by launchd, CI or Terminal.app writes an untagged payload; one driven by an
+# agent session, an editor's integrated terminal, or a third-party terminal tags
+# every file and directory it writes, and pkgbuild then serialises each as an
+# AppleDouble `._name` sibling INTO the payload, where it becomes a real
+# installed file that uninstall.sh knows nothing about. See
+# ci/gates/payload-xattr-clean.sh for the full measurement trail.
+#
+# The gate REFUSES rather than warns: a package shipping `._` entries into
+# /usr/local is worse than a build that stops.
+xattr -rc "$D" 2>/dev/null || true
+"$REPO/ci/gates/payload-xattr-clean.sh" "$D"
+
+# Scripts are STAGED, not passed from the repo. Two reasons, both load-bearing:
+#   1. pkgbuild reads --scripts IN PLACE, so the repo files' OWN attributes end up
+#      in the Scripts archive — and that archive is NOT in the BOM, so smoke.sh's
+#      exact-payload assertion is structurally blind to a `._postinstall` there.
+#      Copying makes the staged tree inherit THIS build's cleanliness instead of
+#      whatever historically tagged the working copy.
+#   2. The old `chmod +x "$HERE/scripts"/*` mutated the working tree on every
+#      build. Staging keeps the repo read-only here.
+S="$STAGE/scripts"
+install -d "$S"
 # Hermetic: do not rely on a fresh clone carrying git's exec bit.
-chmod +x "$HERE/scripts"/*
+install -m 0755 "$HERE/scripts"/* "$S/"
+xattr -rc "$S" 2>/dev/null || true
+"$REPO/ci/gates/payload-xattr-clean.sh" "$S"
 
 pkgbuild --root "$D" --identifier io.maknae.daemon --version "$VERSION" \
-         --scripts "$HERE/scripts" --install-location / "$STAGE/maknae-daemon.pkg"
+         --scripts "$S" --install-location / "$STAGE/maknae-daemon.pkg"
 
 # --- component: cli ----------------------------------------------------------
 C="$STAGE/cli"
 install -d "$C/usr/local/bin"
 install -m 0755 "$BIN/maknae" "$C/usr/local/bin/maknae"
-xattr -rc "$C"
+xattr -rc "$C" 2>/dev/null || true
+"$REPO/ci/gates/payload-xattr-clean.sh" "$C"
 pkgbuild --root "$C" --identifier io.maknae.cli --version "$VERSION" \
          --install-location / "$STAGE/maknae-cli.pkg"
 
