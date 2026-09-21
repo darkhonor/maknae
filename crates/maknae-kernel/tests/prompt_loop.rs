@@ -6,7 +6,9 @@
 mod common;
 use common::{Fixture, Records};
 use maknae_audit_append::EgressStatus;
-use maknae_proto::{ContentBlock, Payload, ProtoErrCode, RespResult, SecretText, Verb};
+use maknae_proto::{
+    ContentBlock, Payload, ProposedToolCall, ProtoErrCode, RespResult, SecretText, Turn, Verb,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,12 +53,29 @@ impl maknae_kernel::Egress for Recording {
         r: maknae_kernel::EgressRequest,
     ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
         self.calls.lock().unwrap().push("send");
+        // Mirrors `content_measure` (R9): every `Text` block across every turn,
+        // PLUS every assistant turn's tool-call arguments — both leave the
+        // process, so the recorded sum is what the trail digests.
         let text_len = r
-            .content
+            .turns
             .iter()
-            .map(|b| match b {
-                ContentBlock::Text { text } => text.0.len() as u64,
-                _ => 0,
+            .map(|t| {
+                let (content, tool_calls): (&[ContentBlock], &[ProposedToolCall]) = match t {
+                    Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
+                    Turn::Assistant {
+                        content,
+                        tool_calls,
+                    } => (content, tool_calls),
+                };
+                let text: u64 = content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.0.len() as u64,
+                        _ => 0,
+                    })
+                    .sum();
+                let args: u64 = tool_calls.iter().map(|c| c.arguments.0.len() as u64).sum();
+                text + args
             })
             .sum();
         self.seen
@@ -95,7 +114,9 @@ fn text(s: &str) -> ContentBlock {
 fn prompt(s: &str) -> Verb {
     Verb::SessionPrompt {
         conversation: "conv-1".into(),
-        content: vec![text(s)],
+        turns: vec![Turn::User {
+            content: vec![text(s)],
+        }],
     }
 }
 fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
@@ -597,9 +618,11 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         (
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![ContentBlock::Image {
-                    data: "AA==".into(),
-                    mime_type: "image/png".into(),
+                turns: vec![Turn::User {
+                    content: vec![ContentBlock::Image {
+                        data: "AA==".into(),
+                        mime_type: "image/png".into(),
+                    }],
                 }],
             },
             "image",
@@ -607,23 +630,27 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         (
             Verb::SessionPrompt {
                 conversation: "has space".into(),
-                content: vec![text("x")],
+                turns: vec![Turn::User {
+                    content: vec![text("x")],
+                }],
             },
             "conversation",
         ),
         (
             Verb::SessionPrompt {
                 conversation: "c".repeat(33),
-                content: vec![text("x")],
+                turns: vec![Turn::User {
+                    content: vec![text("x")],
+                }],
             },
             "conversation",
         ),
         (
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![],
+                turns: vec![],
             },
-            "no content",
+            "no turns",
         ),
         // #264 review round 5: the blank-TEXT shapes, on the PRODUCTION chain.
         // The justification for placing the content-bearing check in
@@ -640,23 +667,55 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         (
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![text("")],
+                turns: vec![Turn::User {
+                    content: vec![text("")],
+                }],
             },
             "no text to send",
         ),
         (
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![text("   \n\t ")],
+                turns: vec![Turn::User {
+                    content: vec![text("   \n\t ")],
+                }],
             },
             "no text to send",
         ),
         (
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![text(""), text("  ")],
+                turns: vec![Turn::User {
+                    content: vec![text(""), text("  ")],
+                }],
             },
             "no text to send",
+        ),
+        // #241 R4: a client-supplied tool call over its argument bound is
+        // refused by SHAPE admission at the pre-gate — before any intent
+        // record, before the PDP. The payload is well under the default
+        // `frame_max_bytes`, so the frame itself is accepted and the pre-gate
+        // is what refuses.
+        (
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![
+                    Turn::User {
+                        content: vec![text("q")],
+                    },
+                    Turn::Assistant {
+                        content: vec![],
+                        tool_calls: vec![ProposedToolCall {
+                            name: "read_file".into(),
+                            call_id: "c1".into(),
+                            arguments: SecretText(maknae_io::Zeroizing::new(
+                                "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1),
+                            )),
+                        }],
+                    },
+                ],
+            },
+            "shape admission",
         ),
     ] {
         let records = Records::new(0);
@@ -715,24 +774,30 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
     for verb in [
         Verb::SessionPrompt {
             conversation: "c".into(),
-            content: vec![ContentBlock::Image {
-                data: "AA==".into(),
-                mime_type: "image/png".into(),
+            turns: vec![Turn::User {
+                content: vec![ContentBlock::Image {
+                    data: "AA==".into(),
+                    mime_type: "image/png".into(),
+                }],
             }],
         },
         Verb::SessionPrompt {
             conversation: "has space".into(),
-            content: vec![text("x")],
+            turns: vec![Turn::User {
+                content: vec![text("x")],
+            }],
         },
         Verb::SessionPrompt {
             conversation: "c".into(),
-            content: vec![],
+            turns: vec![],
         },
         // #264 round 5: a prompt bearing no text must also cost ZERO PDP
         // decisions — it is refused by the operand pre-gate, not by policy.
         Verb::SessionPrompt {
             conversation: "c".into(),
-            content: vec![text("   ")],
+            turns: vec![Turn::User {
+                content: vec![text("   ")],
+            }],
         },
     ] {
         let counting = Arc::new(Counting {
@@ -767,8 +832,10 @@ async fn a_malformed_prompt_frame_never_carries_its_bytes_into_the_trail() {
     // (Text is a map), and the sentinel must not reach any record.
     // Hand-emitted CBOR (the kernel's test crate carries no CBOR dependency):
     // {"protocol_version": 1, "verb": {"SessionPrompt": {"conversation": "c",
-    //  "content": [{"Text": "<sentinel>"}]}}}. `Text` must be a map; a bare
-    // string is what makes the decoder quote the value in its diagnostic.
+    //  "turns": [{"User": {"content": [{"Text": "<sentinel>"}]}}]}}}. The
+    // sentinel sits one level deeper than before, inside a `Turn::User`, and
+    // `ContentBlock::Text` must be a MAP; the bare string there is what makes
+    // the decoder quote the value in its diagnostic.
     let sentinel = "PROMPT_PLAINTEXT_REVIEW_SENTINEL";
     fn tstr(out: &mut Vec<u8>, s: &str) {
         let n = s.len();
@@ -790,12 +857,17 @@ async fn a_malformed_prompt_frame_never_carries_its_bytes_into_the_trail() {
     raw.push(0xa2);
     tstr(&mut raw, "conversation");
     tstr(&mut raw, "c");
-    tstr(&mut raw, "content");
-    raw.push(0x81);
-    raw.push(0xa1);
-    tstr(&mut raw, "Text");
-    tstr(&mut raw, sentinel);
-    // Prove the frame is the malformed shape intended: it must NOT decode.
+    tstr(&mut raw, "turns");
+    raw.push(0x81); // array(1)
+    raw.push(0xa1); // map(1)
+    tstr(&mut raw, "User"); //   "User":
+    raw.push(0xa1); //   map(1)
+    tstr(&mut raw, "content"); //     "content":
+    raw.push(0x81); //     array(1)
+    raw.push(0xa1); //     map(1)
+    tstr(&mut raw, "Text"); //       "Text":
+    tstr(&mut raw, sentinel); //       a BARE STRING where a map is expected
+                              // Prove the frame is the malformed shape intended: it must NOT decode.
     assert!(maknae_proto::decode_request(&raw).is_err());
     let fx = Fixture::with_policy("prompt-sentinel", "Read", GRANTED);
     let records = Records::new(0);
@@ -830,7 +902,7 @@ async fn a_pre_gate_refusal_whose_record_cannot_be_appended_is_closed_frameless(
         .roundtrip(
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![],
+                turns: vec![],
             },
             Arc::clone(&records),
             Some("openai"),

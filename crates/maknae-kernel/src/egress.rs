@@ -9,7 +9,7 @@
 //! refusal is never recorded as a send. #240 supplies the real backend.
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressStatus};
-use maknae_proto::{ContentBlock, PromptReply};
+use maknae_proto::{ContentBlock, PromptReply, Turn};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct EgressRequest {
     /// fixed in the deputy — the registry knows it, the deputy must not guess.
     pub key_field: String,
     pub conversation: String,
-    pub content: Vec<ContentBlock>,
+    pub turns: Vec<Turn>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +259,12 @@ pub fn production_egress(
 /// kernel records as `OutcomeUnknown` ("the provider may have received the
 /// prompt"), and that would be false for a prompt that was never sent. The
 /// deputy keeps its own guard as defence in depth.
+///
+/// *#241: this is now the PER-TURN primitive — [`admitted_turns`] is the
+/// production entry point and shape-checks every turn first, so a `Turn`
+/// reaching here always carries at least one block and the "prompt carries no
+/// content" branch is unreachable from the production chain. Its direct unit
+/// test is its only remaining killer; do not delete it.*
 pub fn admitted_blocks(content: &[ContentBlock]) -> Result<(), String> {
     if content.is_empty() {
         return Err("prompt carries no content".into());
@@ -286,6 +292,48 @@ pub fn admitted_blocks(content: &[ContentBlock]) -> Result<(), String> {
     }
 }
 
+/// The transcript must be the USER's and every turn must be admissible: the
+/// first turn is a user turn bearing text (the #264 property — "the preamble
+/// must never be the whole request" — extended across roles), every turn
+/// passes shape admission (R4: client-supplied tool calls are bounded HERE,
+/// before any intent record and before the PDP), and content is text only.
+pub fn admitted_turns(turns: &[Turn]) -> Result<(), String> {
+    let Some(first) = turns.first() else {
+        return Err("prompt carries no turns".into());
+    };
+    if turns.iter().any(|t| !maknae_proto::turn_is_acceptable(t)) {
+        return Err("turn fails shape admission".into());
+    }
+    match first {
+        Turn::User { content } => admitted_blocks(content)?,
+        _ => return Err("prompt must begin with a user turn".into()),
+    }
+    for t in &turns[1..] {
+        match t {
+            Turn::User { content } => admitted_blocks(content)?,
+            Turn::Assistant { content, .. } => {
+                if let Some(b) = content
+                    .iter()
+                    .find(|b| !matches!(b, ContentBlock::Text { .. }))
+                {
+                    return Err(format!(
+                        "content block type not admitted in this deployment: {}",
+                        b.kind()
+                    ));
+                }
+            }
+            Turn::Tool { content, .. } => admitted_blocks(content).map_err(|e| {
+                if e == "prompt carries no text to send" {
+                    "tool result carries no text".to_string()
+                } else {
+                    e
+                }
+            })?,
+        }
+    }
+    Ok(())
+}
+
 /// What the trail holds about content. Never the text; the digest is fed
 /// incrementally so no second copy of secret text is made, and truncated to
 /// 32 hex characters for the macOS unified-log cap (record.rs says why).
@@ -295,13 +343,33 @@ pub struct ContentMeasure {
     pub digest32: String,
 }
 
-pub fn content_measure(content: &[ContentBlock]) -> ContentMeasure {
+/// What the trail holds about content. Digests every `Text` block AND every
+/// tool call's arguments, across every turn in order — both leave the process
+/// (arguments ride as `tool_calls[].function.arguments`), so trail == wire.
+/// Never the text; fed incrementally so no second copy of secret text is
+/// made, and truncated to 32 hex characters (record.rs says why).
+pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     let mut length = 0u64;
     let mut h = maknae_vault::Sha256::new();
-    for b in content {
-        if let ContentBlock::Text { text } = b {
-            length += text.0.len() as u64;
-            h.update(text.0.as_bytes());
+    let mut feed = |bytes: &[u8]| {
+        length += bytes.len() as u64;
+        h.update(bytes);
+    };
+    for t in turns {
+        let (content, tool_calls): (&[ContentBlock], &[maknae_proto::ProposedToolCall]) = match t {
+            Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
+            Turn::Assistant {
+                content,
+                tool_calls,
+            } => (content, tool_calls),
+        };
+        for b in content {
+            if let ContentBlock::Text { text } = b {
+                feed(text.0.as_bytes());
+            }
+        }
+        for c in tool_calls {
+            feed(c.arguments.0.as_bytes());
         }
     }
     let mut digest32 = h.finish_hex();
@@ -748,7 +816,9 @@ mod tests {
 
     use super::*;
     use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressAudit, EgressStatus};
-    use maknae_proto::{ContentBlock, SecretText};
+    use maknae_proto::{
+        ContentBlock, ProposedToolCall, SecretText, Turn, MAX_TOOL_CALL_ARGS_BYTES,
+    };
     // `Arc` arrives via `use super::*`; a second import is `unused_imports` under -D warnings.
     use std::sync::Mutex;
 
@@ -864,7 +934,9 @@ mod tests {
             key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
             conversation: "c".into(),
-            content: vec![text("a")],
+            turns: vec![Turn::User {
+                content: vec![text("a")],
+            }],
         }
     }
 
@@ -1164,11 +1236,15 @@ mod tests {
 
     #[test]
     fn content_measure_is_length_and_a_32_hex_digest_never_the_text() {
-        let m = content_measure(&[text("abc"), text("de")]);
+        let m = content_measure(&[Turn::User {
+            content: vec![text("abc"), text("de")],
+        }]);
         assert_eq!(m.length, 5);
         assert_eq!(m.digest32, &maknae_vault::sha256_hex(b"abcde")[..32]);
         assert_eq!(m.digest32.len(), 32);
-        let m2 = content_measure(&[text("the secret plan")]);
+        let m2 = content_measure(&[Turn::User {
+            content: vec![text("the secret plan")],
+        }]);
         assert!(
             !format!("{m2:?}").contains("secret"),
             "a Debug of the measure must not carry plaintext"
@@ -1176,17 +1252,125 @@ mod tests {
         // A non-text block contributes no length and no digest input (the
         // pre-gate refuses it before this runs; the measure must still not lie
         // if it ever saw one).
-        let m = content_measure(&[
-            text("abc"),
-            ContentBlock::ResourceLink {
-                uri: "https://x".into(),
-                name: "x".into(),
-            },
-        ]);
+        let m = content_measure(&[Turn::User {
+            content: vec![
+                text("abc"),
+                ContentBlock::ResourceLink {
+                    uri: "https://x".into(),
+                    name: "x".into(),
+                },
+            ],
+        }]);
         assert_eq!(
             (m.length, m.digest32.as_str()),
             (3, &maknae_vault::sha256_hex(b"abc")[..32])
         );
+    }
+
+    fn call(id: &str, args: &str) -> ProposedToolCall {
+        ProposedToolCall {
+            name: "read_file".into(),
+            call_id: id.into(),
+            arguments: SecretText(maknae_io::Zeroizing::new(args.into())),
+        }
+    }
+
+    #[test]
+    fn admitted_turns_holds_the_preamble_is_never_the_whole_request_across_roles() {
+        let u = |s: &str| Turn::User {
+            content: vec![text(s)],
+        };
+        let tool = |s: &str| Turn::Tool {
+            call_id: "c1".into(),
+            content: vec![text(s)],
+        };
+        let asst = || Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![call("c1", "{}")],
+        };
+        assert_eq!(admitted_turns(&[]).unwrap_err(), "prompt carries no turns");
+        assert_eq!(
+            admitted_turns(&[u("  ")]).unwrap_err(),
+            "prompt carries no text to send"
+        );
+        assert_eq!(
+            admitted_turns(&[asst(), tool("r")]).unwrap_err(),
+            "prompt must begin with a user turn"
+        );
+        assert_eq!(
+            admitted_turns(&[u("q"), asst(), tool("   ")]).unwrap_err(),
+            "tool result carries no text"
+        );
+        let img_b = || ContentBlock::Image {
+            data: "".into(),
+            mime_type: "image/png".into(),
+        };
+        let img = Turn::User {
+            content: vec![img_b()],
+        };
+        assert_eq!(
+            admitted_turns(&[u("q"), img]).unwrap_err(),
+            "content block type not admitted in this deployment: image"
+        );
+        // Non-text in an ASSISTANT turn and in a TOOL turn — each arm is its
+        // own T1 region in a mutation-gated file, and every other row here
+        // builds Assistant turns with `content: vec![]`, so without these the
+        // Assistant arm's `find` is unconditionally `None` and its negation
+        // survives mutation (round 8, measured class).
+        let asst_img = Turn::Assistant {
+            content: vec![img_b()],
+            tool_calls: vec![call("c1", "{}")],
+        };
+        assert_eq!(
+            admitted_turns(&[u("q"), asst_img]).unwrap_err(),
+            "content block type not admitted in this deployment: image"
+        );
+        let tool_img = Turn::Tool {
+            call_id: "c1".into(),
+            content: vec![img_b()],
+        };
+        assert_eq!(
+            admitted_turns(&[u("q"), asst(), tool_img]).unwrap_err(),
+            "content block type not admitted in this deployment: image"
+        );
+        // R4: an over-bound client-supplied tool call is refused at the
+        // pre-gate — before any intent record, before the PDP.
+        let over = Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![call("c1", &"a".repeat(MAX_TOOL_CALL_ARGS_BYTES + 1))],
+        };
+        assert_eq!(
+            admitted_turns(&[u("q"), over]).unwrap_err(),
+            "turn fails shape admission"
+        );
+        assert_eq!(admitted_turns(&[u("q"), asst(), tool("r")]), Ok(()));
+        assert_eq!(admitted_turns(&[u("\u{200b}")]), Ok(()));
+    }
+
+    #[test]
+    fn content_measure_covers_every_turn_and_every_tool_argument_in_order() {
+        // TRAIL == WIRE: tool ARGUMENTS leave the process too, as
+        // tool_calls[].function.arguments, so they are digested in order.
+        let turns = [
+            Turn::User {
+                content: vec![text("ab")],
+            },
+            Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![call("c1", "{\"p\":1}")],
+            },
+            Turn::Tool {
+                call_id: "c1".into(),
+                content: vec![text("cd")],
+            },
+        ];
+        let m = content_measure(&turns);
+        assert_eq!(m.length, 11);
+        assert_eq!(
+            m.digest32,
+            &maknae_vault::sha256_hex(b"ab{\"p\":1}cd")[..32]
+        );
+        assert_eq!(m.digest32, "88f32a34ef1a5afa7297f567ab39cf2b");
     }
 
     #[test]

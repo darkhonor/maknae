@@ -56,10 +56,7 @@ async fn stub(
 fn req<'a>(model: &'a str) -> ChatRequest<'a> {
     ChatRequest {
         model,
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: "hi".into(),
-        }],
+        messages: vec![ChatMessage::user("hi")],
         tools: vec![],
         tool_choice: None,
         stream: false,

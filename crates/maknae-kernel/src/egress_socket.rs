@@ -249,7 +249,7 @@ impl Egress for SocketEgress {
             key_vault_path: req.key_vault_path,
             key_field: req.key_field,
             conversation: req.conversation,
-            content: req.content,
+            turns: req.turns,
         };
         let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
         // BEFORE the first write, so an over-cap request is a pre-send failure
@@ -325,7 +325,7 @@ impl Egress for SocketEgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::{ContentBlock, SecretText};
+    use maknae_proto::{ContentBlock, SecretText, Turn};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
@@ -338,10 +338,12 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
-            content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new(
-                    "the president flies at 0300".into(),
-                )),
+            turns: vec![Turn::User {
+                content: vec![ContentBlock::Text {
+                    text: SecretText(maknae_io::Zeroizing::new(
+                        "the president flies at 0300".into(),
+                    )),
+                }],
             }],
         }
     }
@@ -515,8 +517,10 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let mut big = req();
         // under the request cap, over any socket buffer
-        big.content = vec![ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+        big.turns = vec![Turn::User {
+            content: vec![ContentBlock::Text {
+                text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+            }],
         }];
         let started = std::time::Instant::now();
         let out = e.send(&intent, big);
@@ -540,10 +544,12 @@ mod tests {
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let mut big = req();
-        big.content = vec![ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new(
-                "x".repeat(crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES),
-            )),
+        big.turns = vec![Turn::User {
+            content: vec![ContentBlock::Text {
+                text: SecretText(maknae_io::Zeroizing::new(
+                    "x".repeat(crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES),
+                )),
+            }],
         }];
         match e.send(&intent, big) {
             Err(EgressFailure::Transport(m)) => {

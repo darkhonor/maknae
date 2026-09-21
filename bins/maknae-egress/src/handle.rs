@@ -42,6 +42,10 @@ pub enum Refusal {
     /// a well-formed request the provider ANSWERS from the system prompt
     /// alone. The preamble must never be the whole request (review round 2).
     NoTextToSend,
+    /// The transcript does not begin with a user turn. Names a kernel bug
+    /// (`admitted_turns` refuses it at the PDP); a record must never call a
+    /// transcript-shape fault "no text" (#241 R6).
+    TranscriptShape,
 }
 
 /// Proof that a frame passed admission.
@@ -105,16 +109,43 @@ pub fn decide<'a>(
     // prompts before a frame exists. They are defence in depth, and they are
     // the reason `Admitted` can be handed to `fulfil` without `fulfil` needing
     // to re-judge content.
+    fn content_of(t: &maknae_proto::Turn) -> &[maknae_proto::ContentBlock] {
+        match t {
+            maknae_proto::Turn::User { content }
+            | maknae_proto::Turn::Assistant { content, .. }
+            | maknae_proto::Turn::Tool { content, .. } => content,
+        }
+    }
     if req
-        .content
+        .turns
         .iter()
+        .flat_map(|t| content_of(t).iter())
         .any(|b| !matches!(b, maknae_proto::ContentBlock::Text { .. }))
     {
         return Err(Refusal::NonTextBlock);
     }
-    if req.content.iter().all(|b| match b {
-        maknae_proto::ContentBlock::Text { text } => text.0.trim().is_empty(),
-        _ => false,
+    // NEVER `turns[0]`: an index panic in the deputy is a DoS surface, and the
+    // emptiness invariant lives forty-odd lines away in
+    // `egress_frame_request_is_acceptable`.
+    match req.turns.first() {
+        Some(maknae_proto::Turn::User { .. }) => {}
+        _ => return Err(Refusal::TranscriptShape),
+    }
+    // EVERY user turn and every tool turn — the same set the kernel's
+    // `admitted_turns` checks (#241 R14), so the "defence in depth" claim is
+    // about the same predicate rather than a looser one. An assistant turn may
+    // legitimately be tool calls with no text at all.
+    let blank = |content: &[maknae_proto::ContentBlock]| {
+        content.iter().all(|b| match b {
+            maknae_proto::ContentBlock::Text { text } => text.0.trim().is_empty(),
+            _ => false,
+        })
+    };
+    if req.turns.iter().any(|t| match t {
+        maknae_proto::Turn::User { content } | maknae_proto::Turn::Tool { content, .. } => {
+            blank(content)
+        }
+        maknae_proto::Turn::Assistant { .. } => false,
     }) {
         return Err(Refusal::NoTextToSend);
     }
@@ -124,7 +155,7 @@ pub fn decide<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::{ContentBlock, SecretText};
+    use maknae_proto::{ContentBlock, SecretText, Turn};
 
     fn bounds() -> EgressBounds {
         EgressBounds {
@@ -143,8 +174,10 @@ mod tests {
             key_vault_path: key_vault_path.into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
-            content: vec![ContentBlock::Text {
-                text: SecretText(zeroize::Zeroizing::new("hello".into())),
+            turns: vec![Turn::User {
+                content: vec![ContentBlock::Text {
+                    text: SecretText(zeroize::Zeroizing::new("hello".into())),
+                }],
             }],
         }
     }
@@ -207,22 +240,26 @@ mod tests {
     #[test]
     fn a_malformed_frame_is_refused_before_the_bounds_check() {
         let mut r = req("maknae/providers/openai");
-        r.content.clear();
+        r.turns.clear();
         assert_eq!(decide(&r, &bounds()).unwrap_err(), Refusal::MalformedFrame);
     }
 
     /// #264 review rounds 2-4: THE PREAMBLE MUST NEVER BE THE WHOLE REQUEST.
     ///
-    /// Frame admission requires a non-empty content VEC, not a `Text` block
-    /// bearing text. Before #264 that was harmless — the deputy produced no
-    /// messages and the provider rejected the request. After #264 prepends a
-    /// trusted preamble it stops being harmless: the request becomes well
-    /// formed and the provider ANSWERS it from the system prompt alone, so
-    /// "sent nothing" would masquerade as a turn.
+    /// Frame admission requires each turn to carry a non-empty content VEC,
+    /// not a `Text` block bearing text. Before #264 that was harmless — the
+    /// deputy produced no messages and the provider rejected the request.
+    /// After #264 prepends a trusted preamble it stops being harmless: the
+    /// request becomes well formed and the provider ANSWERS it from the system
+    /// prompt alone, so "sent nothing" would masquerade as a turn.
     ///
     /// Round 1 guarded only the image-only case; round 2 guarded a COUNT of
     /// mapped messages rather than content; round 4 moved the judgement here,
     /// where it is pure, mutation-visible, and carries the right taxonomy.
+    ///
+    /// #241 extends the property across ROLES: a blank tool RESULT is just as
+    /// much "nothing to send", and a transcript that does not begin with a
+    /// user turn is `TranscriptShape`, never "no text".
     #[test]
     fn no_frame_shape_can_make_the_preamble_the_whole_request() {
         let text = |t: &str| ContentBlock::Text {
@@ -232,34 +269,111 @@ mod tests {
             data: "AAAA".into(),
             mime_type: "image/png".into(),
         };
-        let cases: Vec<(&str, Vec<ContentBlock>, Refusal)> = vec![
-            ("image only", vec![image()], Refusal::NonTextBlock),
+        let user = |c: Vec<ContentBlock>| Turn::User { content: c };
+        let call = || maknae_proto::ProposedToolCall {
+            name: "read_file".into(),
+            call_id: "c1".into(),
+            arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+        };
+        let cases: Vec<(&str, Vec<Turn>, Refusal)> = vec![
+            (
+                "image only",
+                vec![user(vec![image()])],
+                Refusal::NonTextBlock,
+            ),
             (
                 "text + image",
-                vec![text("real"), image()],
+                vec![user(vec![text("real"), image()])],
                 Refusal::NonTextBlock,
             ),
             (
                 "image + text",
-                vec![image(), text("real")],
+                vec![user(vec![image(), text("real")])],
                 Refusal::NonTextBlock,
             ),
-            ("empty text", vec![text("")], Refusal::NoTextToSend),
+            (
+                "empty text",
+                vec![user(vec![text("")])],
+                Refusal::NoTextToSend,
+            ),
             (
                 "whitespace only",
-                vec![text("   \n\t ")],
+                vec![user(vec![text("   \n\t ")])],
                 Refusal::NoTextToSend,
             ),
-            ("carriage return", vec![text("\r\n")], Refusal::NoTextToSend),
+            (
+                "carriage return",
+                vec![user(vec![text("\r\n")])],
+                Refusal::NoTextToSend,
+            ),
             (
                 "several blank texts",
-                vec![text(""), text("  "), text("\n")],
+                vec![user(vec![text(""), text("  "), text("\n")])],
                 Refusal::NoTextToSend,
             ),
+            // #241: the same property across ROLES. A blank tool RESULT is
+            // just as much "nothing to send" as a blank user turn, and a
+            // transcript that does not begin with a user turn names a kernel
+            // bug that must not be recorded as "no text".
+            (
+                "blank tool result",
+                vec![
+                    user(vec![text("q")]),
+                    Turn::Assistant {
+                        content: vec![],
+                        tool_calls: vec![call()],
+                    },
+                    Turn::Tool {
+                        call_id: "c1".into(),
+                        content: vec![text("  ")],
+                    },
+                ],
+                Refusal::NoTextToSend,
+            ),
+            (
+                "no leading user turn",
+                vec![
+                    Turn::Assistant {
+                        content: vec![],
+                        tool_calls: vec![call()],
+                    },
+                    Turn::Tool {
+                        call_id: "c1".into(),
+                        content: vec![text("r")],
+                    },
+                ],
+                Refusal::TranscriptShape,
+            ),
+            (
+                "non-text in an assistant turn",
+                vec![
+                    user(vec![text("q")]),
+                    Turn::Assistant {
+                        content: vec![image()],
+                        tool_calls: vec![call()],
+                    },
+                ],
+                Refusal::NonTextBlock,
+            ),
+            (
+                "non-text in a tool turn",
+                vec![
+                    user(vec![text("q")]),
+                    Turn::Assistant {
+                        content: vec![],
+                        tool_calls: vec![call()],
+                    },
+                    Turn::Tool {
+                        call_id: "c1".into(),
+                        content: vec![image()],
+                    },
+                ],
+                Refusal::NonTextBlock,
+            ),
         ];
-        for (name, content, want) in cases {
+        for (name, turns, want) in cases {
             let mut f = req("maknae/providers/openai");
-            f.content = content;
+            f.turns = turns;
             assert_eq!(decide(&f, &bounds()).unwrap_err(), want, "{name}");
         }
 
@@ -267,17 +381,37 @@ mod tests {
         // a blank alongside it is NOT the deputy's to drop — the kernel's
         // `content_measure` digested it into the intent record, so dropping it
         // would make the trail attest bytes that never left.
-        for (name, content) in [
-            ("blank then real", vec![text("  "), text("real")]),
-            ("real then blank", vec![text("real"), text("  ")]),
+        for (name, turns) in [
+            (
+                "blank then real",
+                vec![user(vec![text("  "), text("real")])],
+            ),
+            (
+                "real then blank",
+                vec![user(vec![text("real"), text("  ")])],
+            ),
             // A zero-width character is NOT Unicode White_Space and is
             // therefore content. Asserted so the boundary is recorded rather
             // than discovered: this refuses "nothing to send", it is not a
             // meaningfulness judgement about the prompt.
-            ("zero-width", vec![text("\u{200b}")]),
+            ("zero-width", vec![user(vec![text("\u{200b}")])]),
+            (
+                "a full tool-calling round",
+                vec![
+                    user(vec![text("q")]),
+                    Turn::Assistant {
+                        content: vec![],
+                        tool_calls: vec![call()],
+                    },
+                    Turn::Tool {
+                        call_id: "c1".into(),
+                        content: vec![text("r")],
+                    },
+                ],
+            ),
         ] {
             let mut f = req("maknae/providers/openai");
-            f.content = content;
+            f.turns = turns;
             assert!(decide(&f, &bounds()).is_ok(), "{name} must be admitted");
         }
     }

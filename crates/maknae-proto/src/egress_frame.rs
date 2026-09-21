@@ -45,8 +45,10 @@ pub struct EgressFrameRequest {
     pub key_field: String,
     /// The loop's identifier (#241). Informational, never decided on.
     pub conversation: String,
-    /// The content leaving the trust plane.
-    pub content: Vec<crate::ContentBlock>,
+    /// The transcript leaving the trust plane (#241). Roles per `crate::Turn`;
+    /// there is no `System` variant, so the trusted preamble the deputy
+    /// prepends is the only system message.
+    pub turns: Vec<crate::Turn>,
 }
 
 impl std::fmt::Debug for EgressFrameRequest {
@@ -61,7 +63,7 @@ impl std::fmt::Debug for EgressFrameRequest {
             // credential is kept, and nothing needs it in a log line.
             .field("key_field", &"<omitted>")
             .field("conversation", &self.conversation)
-            .field("content", &format_args!("<{} blocks>", self.content.len()))
+            .field("turns", &format_args!("<{} turns>", self.turns.len()))
             .finish()
     }
 }
@@ -90,7 +92,8 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.model.is_empty()
         && !r.key_vault_path.is_empty()
         && !r.key_field.is_empty()
-        && !r.content.is_empty()
+        && !r.turns.is_empty()
+        && r.turns.iter().all(crate::turn_is_acceptable)
 }
 
 #[cfg(test)]
@@ -111,7 +114,7 @@ mod tests {
         }
     }
 
-    fn req(conversation: &str, content: Vec<crate::ContentBlock>) -> EgressFrameRequest {
+    fn req(conversation: &str, turns: Vec<crate::Turn>) -> EgressFrameRequest {
         EgressFrameRequest {
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
@@ -119,7 +122,7 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: conversation.into(),
-            content,
+            turns,
         }
     }
 
@@ -128,7 +131,12 @@ mod tests {
     /// provider credential lives (`ProviderConfig` marks that `omit`).
     #[test]
     fn an_egress_frame_debug_redacts_prompt_content_and_the_key_path() {
-        let r = req("conv1", vec![text("the president flies at 0300")]);
+        let r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("the president flies at 0300")],
+            }],
+        );
         let d = format!("{r:?}");
         assert!(!d.contains("0300"), "prompt content leaked: {d}");
         assert!(!d.contains("secret/data"), "key path leaked: {d}");
@@ -136,11 +144,20 @@ mod tests {
             d.contains("provider:openai"),
             "destination should be visible: {d}"
         );
+        assert!(
+            d.contains("<1 turns>"),
+            "the turn count should be shown: {d}"
+        );
     }
 
     #[test]
     fn a_frame_round_trips() {
-        let r = req("conv1", vec![text("hello")]);
+        let r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("hello")],
+            }],
+        );
         let mut buf = Vec::new();
         ciborium::into_writer(&r, &mut buf).unwrap();
         let back: EgressFrameRequest = ciborium::from_reader(&buf[..]).unwrap();
@@ -154,24 +171,60 @@ mod tests {
     fn an_over_long_conversation_is_refused() {
         let ok = req(
             &"a".repeat(crate::MAX_CONVERSATION_ID_BYTES),
-            vec![text("x")],
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
         );
         assert!(egress_frame_request_is_acceptable(&ok));
         let bad = req(
             &"a".repeat(crate::MAX_CONVERSATION_ID_BYTES + 1),
-            vec![text("x")],
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
         );
         assert!(!egress_frame_request_is_acceptable(&bad));
     }
 
     #[test]
-    fn an_empty_content_frame_is_refused() {
+    fn an_empty_turns_frame_is_refused() {
         assert!(!egress_frame_request_is_acceptable(&req("conv1", vec![])));
+    }
+
+    /// The new `all(turn_is_acceptable)` conjunct, on its own. Every other
+    /// `req()` site carries only `User` turns, which always pass shape
+    /// admission, and cargo-mutants emits no operator on the `all(..)`
+    /// sub-expression — so without this row the conjunct could be deleted with
+    /// the suite green (AGENTS.md principle 5).
+    #[test]
+    fn a_frame_whose_turn_fails_shape_admission_is_refused() {
+        let over = crate::ProposedToolCall {
+            name: "read_file".into(),
+            call_id: "c1".into(),
+            arguments: crate::SecretText(zeroize::Zeroizing::new(
+                "a".repeat(crate::MAX_TOOL_CALL_ARGS_BYTES + 1),
+            )),
+        };
+        let mut r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("q")],
+            }],
+        );
+        r.turns.push(crate::Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![over],
+        });
+        assert!(!egress_frame_request_is_acceptable(&r));
     }
 
     #[test]
     fn the_request_codec_round_trips_and_refuses_garbage() {
-        let r = req("conv1", vec![text("hello")]);
+        let r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("hello")],
+            }],
+        );
         let buf = crate::encode_egress_frame_request(&r).unwrap();
         assert_eq!(crate::decode_egress_frame_request(&buf).unwrap(), r);
         assert!(crate::decode_egress_frame_request(&[0xffu8, 0xff, 0xff]).is_err());
@@ -194,7 +247,12 @@ mod tests {
     /// malformed frame reaches the deputy.
     #[test]
     fn every_required_field_is_checked() {
-        let base = req("conv1", vec![text("x")]);
+        let base = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
+        );
         for (label, bad) in [
             (
                 "destination",

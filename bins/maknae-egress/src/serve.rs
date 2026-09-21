@@ -139,8 +139,10 @@ mod tests {
             key_vault_path: key.into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
-            content: vec![ContentBlock::Text {
-                text: SecretText(zeroize::Zeroizing::new("hi".into())),
+            turns: vec![maknae_proto::Turn::User {
+                content: vec![ContentBlock::Text {
+                    text: SecretText(zeroize::Zeroizing::new("hi".into())),
+                }],
             }],
         };
         maknae_proto::encode_egress_frame_request(&r)
