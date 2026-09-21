@@ -13,11 +13,29 @@ use std::future::Future;
 /// of a `Zeroizing` into a plain `Vec` (R28). The secrecy therefore survives
 /// the whole hop, hands → brain → renderer, instead of being re-established
 /// at each seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(zeroize::Zeroizing<Vec<u8>>),
     Refused,
     Unavailable,
+}
+
+/// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
+/// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
+/// `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
+/// into any `{:?}`, including a test's `panic!("{other:?}")` (R31). Length
+/// only. The other two arms carry nothing but their own names.
+impl std::fmt::Debug for ReadOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadOutcome::Content(bytes) => f
+                .debug_tuple("Content")
+                .field(&format_args!("<{} bytes>", bytes.len()))
+                .finish(),
+            ReadOutcome::Refused => f.write_str("Refused"),
+            ReadOutcome::Unavailable => f.write_str("Unavailable"),
+        }
+    }
 }
 
 /// ONLY a clean `Applied`; everything that came back from the wire other than
@@ -95,5 +113,24 @@ mod tests {
             }
         }
         assert!(format!("{:?}", errs[1]).contains("Transport"));
+    }
+
+    /// R31: the served bytes are kernel-served home-file content, so
+    /// `ReadOutcome`'s `Debug` is hand-written and redacting — the crate
+    /// convention `route.rs`'s `ToolRequest` already follows.
+    #[test]
+    fn a_read_outcomes_debug_never_prints_the_served_bytes() {
+        let d = format!(
+            "{:?}",
+            ReadOutcome::Content(zeroize::Zeroizing::new(b"SENTINEL-READ-BYTES".to_vec()))
+        );
+        assert!(!d.contains("SENTINEL-READ-BYTES"), "{d}");
+        // A `#[derive(Debug)]` substitution prints `Zeroizing([83, 69, ...])`, so
+        // the ABSENCE line fails on its own — not only the `<19 bytes>` marker.
+        assert!(!d.contains("Zeroizing"), "{d}");
+        assert!(d.contains("<19 bytes>"), "{d}");
+        // The other two arms of the hand-written impl are T1 regions too.
+        assert_eq!(format!("{:?}", ReadOutcome::Refused), "Refused");
+        assert_eq!(format!("{:?}", ReadOutcome::Unavailable), "Unavailable");
     }
 }

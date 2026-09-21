@@ -10,7 +10,7 @@
 /// [`crate::plane::ReadOutcome`] states: the read path MOVES its buffer
 /// through and never copies content out of a `Zeroizing` into a plain `Vec`
 /// (R28). `from_utf8` below reads it through `Deref`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ToolOutcome {
     ReadContent(zeroize::Zeroizing<Vec<u8>>),
     ReadRefused,
@@ -19,6 +19,29 @@ pub enum ToolOutcome {
     WriteUnknown,
     WriteNotSent,
     BadCall(String),
+}
+
+/// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
+/// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
+/// `ReadContent(Zeroizing([83, 69, …]))`, dumping kernel-served home-file
+/// content into any `{:?}`, including a test's `panic!("{other:?}")` (R31).
+/// Length only. `BadCall`'s `String` IS printed — it is router-authored text
+/// (a tool name, a serde message), never served content.
+impl std::fmt::Debug for ToolOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolOutcome::ReadContent(bytes) => f
+                .debug_tuple("ReadContent")
+                .field(&format_args!("<{} bytes>", bytes.len()))
+                .finish(),
+            ToolOutcome::ReadRefused => f.write_str("ReadRefused"),
+            ToolOutcome::ReadUnavailable => f.write_str("ReadUnavailable"),
+            ToolOutcome::WriteApplied => f.write_str("WriteApplied"),
+            ToolOutcome::WriteUnknown => f.write_str("WriteUnknown"),
+            ToolOutcome::WriteNotSent => f.write_str("WriteNotSent"),
+            ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
+        }
+    }
 }
 
 pub const NOT_AUTHORIZED: &str = "Not authorized";
@@ -113,6 +136,42 @@ mod tests {
             ToolOutcome::WriteNotSent,
         ] {
             assert!(render(&o, 7).ends_with("steps remaining: 7"), "{o:?}");
+        }
+    }
+
+    /// R31: the read bytes are kernel-served home-file content, so
+    /// `ToolOutcome`'s `Debug` is hand-written and redacting — the crate
+    /// convention `route.rs`'s `ToolRequest` already follows. The loop above
+    /// formats every OTHER variant, which is why it can exclude this one.
+    #[test]
+    fn a_read_results_debug_never_prints_the_served_bytes() {
+        let d = format!(
+            "{:?}",
+            ToolOutcome::ReadContent(zeroize::Zeroizing::new(b"SENTINEL-READ-BYTES".to_vec()))
+        );
+        assert!(!d.contains("SENTINEL-READ-BYTES"), "{d}");
+        // A `#[derive(Debug)]` substitution prints `Zeroizing([83, 69, ...])`, so
+        // the ABSENCE line fails on its own — not only the `<19 bytes>` marker.
+        assert!(!d.contains("Zeroizing"), "{d}");
+        assert!(d.contains("<19 bytes>"), "{d}");
+        // `BadCall` carries ROUTER-authored text, not content: it is printed.
+        assert_eq!(
+            format!("{:?}", ToolOutcome::BadCall("unknown tool nope".into())),
+            "BadCall(\"unknown tool nope\")"
+        );
+        // Every remaining arm, formatted EAGERLY and by name. The loop above
+        // cannot stand in for this: `assert!(cond, "{o:?}")` evaluates its
+        // message only when the assertion FAILS, so on a green run those arms
+        // are never executed (measured: render.rs fell to 72% against the 95
+        // floor with this block absent).
+        for (o, want) in [
+            (ToolOutcome::ReadRefused, "ReadRefused"),
+            (ToolOutcome::ReadUnavailable, "ReadUnavailable"),
+            (ToolOutcome::WriteApplied, "WriteApplied"),
+            (ToolOutcome::WriteUnknown, "WriteUnknown"),
+            (ToolOutcome::WriteNotSent, "WriteNotSent"),
+        ] {
+            assert_eq!(format!("{o:?}"), want);
         }
     }
 }
