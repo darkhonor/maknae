@@ -4,15 +4,16 @@
 //! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
 //! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).
 //!
-//! **Closed dependency enumeration** (Task 9's isolation gate enforces this):
-//! `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`, `clap`, `tokio`,
-//! `nix`, `zeroize`, `yaml-rust2`, `rpassword`, and macOS-only `security-framework`
-//! (`bins/maknae/Cargo.toml`). The `ping`/`whoami` wire path below uses only the
-//! first five; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/`security-framework` are
-//! `enroll/`-only. NO privileged crate (`maknae-kernel`/`-subject-ctx-mint`/
-//! `-audit-append`/`-spif-compile`) — spec §3 P1 — even for `enroll`: it does its
-//! own privileged work via `nix` safe wrappers and process re-exec (`sudo -u`),
-//! never by linking the daemon's privileged crates.
+//! **Closed dependency enumeration** (recorded here and in `Cargo.toml`; no gate
+//! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
+//! `maknae-agent`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`, `rpassword`,
+//! and macOS-only `security-framework` (`bins/maknae/Cargo.toml`). The
+//! `ping`/`whoami` wire path below uses only the first five; `maknae-agent` is the
+//! agent loop's (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
+//! `security-framework` are `enroll/`-only. NO privileged crate
+//! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
+//! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
+//! and process re-exec (`sudo -u`), never by linking the daemon's privileged crates.
 
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
@@ -41,10 +42,15 @@ pub fn resolve_config_dir() -> PathBuf {
 
 /// The section registry the CLI loads its config under: `vault` (required — the CLI
 /// mints a plane leaf) + `transport` (optional — the daemon's socket path / frame cap;
-/// absent → documented defaults). `core` is auto-registered. Loading ONCE with this
-/// combined set is what lets a realistic `vault`+`transport` config load without each
-/// section's own loader rejecting the other as `UnknownSection` (the P1-B fix).
-fn cli_config_specs() -> [SectionSpec; 2] {
+/// absent → documented defaults) + `agent` (optional — the loop's own advisory bounds,
+/// #241). `core` is auto-registered. Loading ONCE with this combined set is what lets a
+/// realistic `vault`+`transport` config load without each section's own loader rejecting
+/// the other as `UnknownSection` (the P1-B fix).
+///
+/// One list serves every verb, so `agent` is accepted (and validated) for `ping` as much
+/// as for `agent` — a documented residual of the single-registry design, not a per-verb
+/// grammar.
+pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {
             name: VAULT_SECTION.to_string(),
@@ -52,6 +58,10 @@ fn cli_config_specs() -> [SectionSpec; 2] {
         },
         SectionSpec {
             name: TRANSPORT_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: crate::agent::AGENT_SECTION.to_string(),
             required: false,
         },
     ]
@@ -113,6 +123,8 @@ enum Command {
     /// Enumerate role bindings as the daemon resolves them right now.
     /// Ungranted by default.
     SubjectList,
+    /// Run the agent loop on one prompt (ADR-0023).
+    Agent { prompt: String },
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(crate::enroll::EnrollArgs),
@@ -470,12 +482,17 @@ pub(crate) async fn send_verb(
 /// The mode is `Existing` — what `maknae write` sends too — because
 /// [`crate::mutation::prepare`] overrides it at open time (`CreateExclusive` on a
 /// `NotFound`), so BOTH write lanes are reachable from this one constructor.
-#[allow(dead_code)] // the in-process caller arrives with the agent loop (#241 Task 7).
 pub(crate) fn write_request(
     path: String,
     content: zeroize::Zeroizing<Vec<u8>>,
     frame_max: usize,
 ) -> Result<maknae_proto::Verb, String> {
+    // Judged BEFORE the encode, so an over-budget write is refused in the caller's
+    // own words rather than as an opaque codec failure — the same wording family as
+    // the stdin path's check above.
+    if content.len() > frame_max {
+        return Err("content exceeds the configured frame budget".to_string());
+    }
     let request = maknae_proto::Verb::FsWrite {
         path,
         content: maknae_proto::Bytes::new(content),
@@ -605,6 +622,13 @@ pub async fn run_cli() -> ExitCode {
                 }
             }
         }
+        Command::Agent { prompt } => match crate::agent::run(prompt).await {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("maknae: {e}");
+                ExitCode::from(1)
+            }
+        },
         Command::Enroll(args) => crate::enroll::run_enroll(args).await,
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
@@ -666,6 +690,24 @@ mod tests {
         assert!(
             request_from_input(verb, 8, &mut &[][..]).is_err(),
             "envelope alone exceeds budget"
+        );
+    }
+
+    /// The in-memory write lane's own budget check, direct — `request_from_input`'s
+    /// stdin test above cannot reach it, and the agent loop (#241) is the only
+    /// caller. Over-budget content must be refused BEFORE the encode, with the
+    /// stdin path's wording, not as an opaque codec failure.
+    #[test]
+    fn write_request_refuses_content_over_the_frame_budget() {
+        let e = write_request(
+            "/projects/big".into(),
+            zeroize::Zeroizing::new(vec![7u8; 64]),
+            16,
+        )
+        .expect_err("over-budget content must not encode");
+        assert!(
+            e.contains("exceeds the configured frame budget"),
+            "unexpected message: {e}"
         );
     }
 

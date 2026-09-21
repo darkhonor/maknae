@@ -553,6 +553,10 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
 
+[[t3]]
+path = "bins/maknae/src/agent.rs"
+why = "#241: the loop's I/O wiring — config, one plane client, stdout. The decision code is maknae-agent (T1); this is the thin shell, the bins/maknaed precedent."
+
 # PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
 # constraint (decision logic that needed 0-missed lives in the library crates
 # already — secret_source.rs, config.rs, principal.rs, etc., all T1 above).

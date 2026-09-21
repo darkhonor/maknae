@@ -1,6 +1,7 @@
 //! maknae — Maknae CLI, untrusted interaction plane (spec §3). Thin entrypoint:
 //! all logic lives in `cli::run_cli` (T3 — arg parse + orchestration, no
 //! decision logic of its own).
+mod agent;
 mod cli;
 mod enroll;
 mod mutation;

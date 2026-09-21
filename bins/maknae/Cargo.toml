@@ -25,6 +25,10 @@ maknae-config = { path = "../../crates/maknae-config" }
 maknae-io = { path = "../../crates/maknae-io" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 maknae-msgs = { path = "../../crates/maknae-msgs" }
+# The runtime loop's BRAIN (#241): transcript, routing, rendering, drive. Non-privileged
+# and I/O-free by construction — it links only maknae-proto, so the hands (`src/agent.rs`)
+# are the only thing here that touches a socket.
+maknae-agent = { path = "../../crates/maknae-agent" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 # `user` — nix::unistd::{User,Group,geteuid,getegid} (passwd/group lookup, the enroll-
@@ -51,8 +55,10 @@ security-framework = "3"
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged (task-8 brief): the closed set of direct deps this crate
-# links is maknae-proto, maknae-vault, maknae-config, maknae-msgs, clap, tokio, nix,
-# zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no maknae-mcp
-# either (Task 9's isolation gate enforces this set). `nix`/`zeroize`/`yaml-rust2`/
-# `rpassword`/`security-framework` are `enroll/`-only (spec §4.1-§4.6); the wire path
-# (`cli.rs`) still touches only the original five.
+# links is maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-agent, clap,
+# tokio, nix, zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no
+# maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and
+# links only maknae-proto. No gate enforces this set, so this comment IS the record.
+# `nix`/`zeroize`/`yaml-rust2`/`rpassword`/`security-framework` are `enroll/`-only
+# (spec §4.1-§4.6); the wire path (`cli.rs`, `agent.rs`) still touches only the
+# original five.
