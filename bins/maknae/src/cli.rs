@@ -257,10 +257,6 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     outcome
 }
 
-/// The post-mint round trip: connect → request → (bounded) response → print. Split out so
-/// [`execute`] can revoke the minted token on EVERY return path (success or error) before
-/// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
-/// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 /// The object this verb delegates a descriptor for, if any.
 ///
 /// Only terms that NAME an object have one (ADR-0009). `ping` and `whoami` name none,
@@ -283,6 +279,13 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
     }
 }
 
+/// The post-mint round trip: connect → request → (bounded) response → print. Split out so
+/// [`execute`] can revoke the minted token on EVERY return path (success or error) before
+/// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
+/// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
+///
+/// Everything that writes to a terminal lives HERE; the sendable core is [`send_verb`],
+/// which prints nothing so a caller that sends many verbs is not also a printer.
 async fn round_trip(
     verb: Verb,
     request_verb: maknae_proto::Verb,
@@ -290,6 +293,56 @@ async fn round_trip(
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
 ) -> Result<bool, String> {
+    match send_verb(request_verb, delegated_object(&verb), transport, client, ca).await? {
+        SentOutcome::Payload(payload) => {
+            // The daemon returned SOME successful payload — but it must be the payload
+            // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
+            // a protocol violation, not a result to print; propagate Err so `execute`
+            // revokes the token and the CLI exits non-zero.
+            print_payload_for_verb(verb, payload)?;
+            Ok(true)
+        }
+        SentOutcome::WriteDone { applied } => Ok(applied),
+        SentOutcome::Refused(code, message) => {
+            eprintln!("maknae: daemon refused: {code:?}: {message}");
+            Ok(false)
+        }
+    }
+}
+
+/// What one sent verb came back as, with NOTHING printed — the caller decides what a
+/// terminal (or a model) is told.
+///
+/// `Refused` carries the code AND the message because [`round_trip`] prints both; dropping
+/// the message would be a silent behaviour change no CLI test captures. `Debug` because a
+/// caller that expected a different variant formats the whole outcome to say so.
+#[derive(Debug)]
+pub(crate) enum SentOutcome {
+    /// A successful payload, NOT yet checked against the verb that asked for it —
+    /// [`print_payload_for_verb`] is what rejects an answer to a different question.
+    Payload(maknae_proto::Payload),
+    /// A mutation reached a terminal state. `applied` is true ONLY for a clean kernel
+    /// `MutationComplete` or a client-reported `Ok(true)` — and the latter is a CLAIM
+    /// (ADR-0023 decision 4), never a kernel assertion.
+    WriteDone { applied: bool },
+    /// The daemon refused, with the wire's own code and message and no reason beyond them
+    /// (ADR-0019).
+    Refused(maknae_proto::ProtoErrCode, String),
+}
+
+/// Send ONE verb over the post-mint plane and report what came back, printing nothing.
+///
+/// `object` is the path to open and delegate a descriptor for, passed EXPLICITLY rather
+/// than derived here: the delegated object is keyed by the CLI's own [`Verb`] (see
+/// [`delegated_object`]), so that exhaustive match stays in one place and a caller with no
+/// CLI `Verb` at all can still arm a read exactly as `maknae read` does (ADR-0009).
+pub(crate) async fn send_verb(
+    request_verb: maknae_proto::Verb,
+    object: Option<&str>,
+    transport: &maknae_config::TransportConfig,
+    client: &PlaneClient,
+    ca: &maknae_vault::CaBundle,
+) -> Result<SentOutcome, String> {
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
     // forever (it still fails non-zero, and `execute` still revokes the token on this
@@ -331,7 +384,7 @@ async fn round_trip(
         ) {
             armer.arm(fd);
         }
-    } else if let (Some(object), Some(armer)) = (delegated_object(&verb), stream.armer()) {
+    } else if let (Some(object), Some(armer)) = (object, stream.armer()) {
         match maknae_io::open_for_delegation(std::path::Path::new(object)) {
             Ok(fd) => {
                 armer.arm(fd);
@@ -389,18 +442,14 @@ async fn round_trip(
     };
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
-    let ok = match response.result {
+    match response.result {
         RespResult::Ok(Payload::MutationAttempt(grant)) => {
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
-            return crate::mutation::execute(
-                prepared,
-                grant,
-                &mut stream,
-                transport,
-                request_started,
-            )
-            .await;
+            let applied =
+                crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
+                    .await?;
+            Ok(SentOutcome::WriteDone { applied })
         }
         RespResult::Ok(Payload::MutationComplete) => {
             if !matches!(prepared.as_ref(), Some(p) if !p.is_namespace()) {
@@ -408,22 +457,40 @@ async fn round_trip(
                     "protocol error: daemon completion for a namespace or ordinary request".into(),
                 );
             }
-            true
+            Ok(SentOutcome::WriteDone { applied: true })
         }
-        RespResult::Ok(payload) => {
-            // The daemon returned SOME successful payload — but it must be the payload
-            // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
-            // a protocol violation, not a result to print; propagate Err so `execute`
-            // revokes the token and the CLI exits non-zero.
-            print_payload_for_verb(verb, payload)?;
-            true
-        }
-        RespResult::Err(e) => {
-            eprintln!("maknae: daemon refused: {:?}: {}", e.code, e.message);
-            false
-        }
+        RespResult::Ok(payload) => Ok(SentOutcome::Payload(payload)),
+        RespResult::Err(e) => Ok(SentOutcome::Refused(e.code, e.message)),
+    }
+}
+
+/// Build an `FsWrite` for `content` the caller already holds in memory, under the same
+/// frame budget [`request_from_input`] enforces on stdin bytes.
+///
+/// The mode is `Existing` — what `maknae write` sends too — because
+/// [`crate::mutation::prepare`] overrides it at open time (`CreateExclusive` on a
+/// `NotFound`), so BOTH write lanes are reachable from this one constructor.
+#[allow(dead_code)] // the in-process caller arrives with the agent loop (#241 Task 7).
+pub(crate) fn write_request(
+    path: String,
+    content: zeroize::Zeroizing<Vec<u8>>,
+    frame_max: usize,
+) -> Result<maknae_proto::Verb, String> {
+    let request = maknae_proto::Verb::FsWrite {
+        path,
+        content: maknae_proto::Bytes::new(content),
+        mode: maknae_proto::WriteMode::Existing,
     };
-    Ok(ok)
+    // Includes the actual CBOR envelope, not just the content length.
+    encode_request_zeroizing(
+        &Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: request.clone(),
+        },
+        frame_max,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(request)
 }
 
 /// Print the successful `payload` IFF its variant matches the requested `verb`
@@ -1018,5 +1085,21 @@ mod tests {
 
     fn maknae_io_zeroizing(v: Vec<u8>) -> zeroize::Zeroizing<Vec<u8>> {
         zeroize::Zeroizing::new(v)
+    }
+
+    /// The future `send_verb` returns must be `Send`: Task 7's `impl Plane` returns it
+    /// behind a trait bound that carries `+ Send`, and a guard held across an `.await`
+    /// inside `send_verb` would otherwise only surface there. Compile-time only — never
+    /// called, and that is the point: it checks the FUTURE, not a closure. It lives
+    /// inside `mod tests` so a future re-tiering of `cli.rs` cannot trip
+    /// `coverage_check.py`'s column-0-after-the-test-module rule.
+    #[allow(dead_code)]
+    fn assert_send_verb_future_is_send(
+        t: &maknae_config::TransportConfig,
+        c: &PlaneClient,
+        ca: &maknae_vault::CaBundle,
+    ) {
+        fn s<T: Send>(_: T) {}
+        s(send_verb(maknae_proto::Verb::Ping, None, t, c, ca));
     }
 }
