@@ -7,6 +7,19 @@
 //! identity map. The invariant is *egress reads no policy and no registry; it
 //! may read its own operating bounds.*
 //!
+//! **Amended 2026-09-21 by #264 — READ THIS BEFORE REASONING FROM THE CLAUSE
+//! ABOVE.** The deputy's binary also links `maknae-llm`'s compiled-in core
+//! prompt and baseline tool definitions and composes them into every outbound
+//! request. That does not weaken the invariant: those are policy **APPROVED at
+//! design time** (`include_str!`'d from reviewable text files, changed only by
+//! a reviewed commit), not policy **EVALUATED at runtime**, and the deputy
+//! still reads no configuration for them and decides nothing about them. The
+//! clause is about runtime state and decisions. *(Recorded here, and in
+//! `bins/maknae-egress/src/main.rs`, because misreading it as excluding the
+//! preamble cost a design round on #264 and needed a maintainer ruling to
+//! unwind — and this file is where the invariant is attributed, so it is the
+//! one the next agent opens.)*
+//!
 //! **Why the parser lives here rather than in the binary.** Both processes
 //! read this file — `maknaed` validates every registered `key_vault_path`
 //! against the prefix at BOOT (`maknae-kernel`'s `egress_bounds_boot_gate`),

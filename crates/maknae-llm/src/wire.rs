@@ -242,10 +242,14 @@ pub fn with_preamble(content: Vec<ChatMessage>) -> Vec<ChatMessage> {
 /// Panics only on a malformed compiled-in constant, which is a build-time
 /// programming error a test makes unshippable, never a runtime condition.
 pub fn baseline_catalog() -> Vec<ToolDef> {
-    // Parsed ONCE per process, not once per request. The `expect` then fires
-    // at most once on a malformed compiled-in constant -- a build-time
-    // programming error a test makes unshippable -- rather than sitting on the
-    // hot path of the most sensitive process in the tree on every turn.
+    // Parsed ONCE per process, not once per request: the parse leaves the hot
+    // path of the most sensitive process in the tree. The `expect` can only
+    // fire on a malformed compiled-in constant, which is a build-time
+    // programming error `baseline_catalog_is_exactly_the_two_maknae_tools`
+    // makes unshippable. (Not "at most once": `get_or_init` leaves the cell
+    // uninitialized if its closure panics, so it would fire on every
+    // subsequent call. Unreachable given the test, and stated correctly rather
+    // than conveniently.)
     static CATALOG: std::sync::OnceLock<Vec<ToolDef>> = std::sync::OnceLock::new();
     CATALOG
         .get_or_init(|| {

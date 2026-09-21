@@ -63,12 +63,17 @@ pub async fn fulfil<S: KeySource>(
     // no secret in hand and before anything is composed.
     //
     // Round 1 guarded `messages.is_empty()`, which closed the image-only frame
-    // and left the CLASS open: nothing in the tree checks that a `Text` block
-    // bears any text. `Text("")` and `Text("   ")` pass the kernel's
-    // `admitted_blocks` pre-gate, pass `egress_frame_request_is_acceptable`
-    // (which tests only `!content.is_empty()` on the VEC), map to a NON-empty
-    // `messages`, and would then be composed with the preamble into a
-    // well-formed request the provider answers from the system prompt alone.
+    // and left the CLASS open: at that point NOTHING in the tree checked that
+    // a `Text` block bears any text. `Text("")` and `Text("   ")` passed the
+    // kernel's `admitted_blocks` pre-gate, passed
+    // `egress_frame_request_is_acceptable` (which tests only
+    // `!content.is_empty()` on the VEC), mapped to a NON-empty `messages`, and
+    // would then have been composed with the preamble into a well-formed
+    // request the provider answers from the system prompt alone. **Round 3
+    // closed it at the kernel too** (`maknae_kernel::egress::admitted_blocks`
+    // now refuses a text-less prompt at the PDP, before the write-ahead
+    // intent), so that sentence is history and this guard is the second
+    // layer.
     // That is `maknae-kernel/src/egress.rs`'s stated property broken on a path
     // that needs no kernel bug: "an empty prompt is refused too, so 'sent
     // nothing' cannot masquerade as a turn."
@@ -82,12 +87,23 @@ pub async fn fulfil<S: KeySource>(
     //      and letting the model answer a truncated prompt.
     //   2. content that is empty or whitespace-only carries nothing to send.
     //
-    // The deputy has exactly ONE refusal signal to the kernel (a closed
-    // connection; `serve.rs`), so the kernel records this as
-    // `SendOutcome::OutcomeUnknown` -- "send outcome unknown" -- which is
-    // imprecise for a frame that was never sent. That imprecision is
-    // pre-existing and shared with every `handle::Refusal` path; it is named
-    // here rather than silently inherited.
+    // ROUND 3 CORRECTION. This comment previously said the audit imprecision
+    // below was "pre-existing and shared with every `handle::Refusal` path".
+    // That was wrong: every pre-existing refusal path is a kernel bug or a
+    // registry misconfiguration, and none is reachable from a well-formed
+    // prompt, so this guard was the FIRST pre-send deputy refusal a
+    // kernel-admitted frame could reach. It no longer is --
+    // `maknae_kernel::egress::admitted_blocks` now refuses a text-less prompt
+    // at the PDP, before the write-ahead intent, with an accurate `deny`
+    // record. So this guard is DEFENCE IN DEPTH against a kernel bug, which is
+    // exactly what `handle.rs`'s convention covers.
+    //
+    // The imprecision that remains, named rather than inherited silently: the
+    // deputy's only signal is a closed connection (`serve.rs`), which the
+    // kernel records as `SendOutcome::OutcomeUnknown` -- documented as "the
+    // provider may have received the prompt" -- and that is false for a frame
+    // that was never sent. Reaching it requires a kernel bug; making the
+    // signal expressive is not this issue's.
     let mut messages = Vec::with_capacity(req.content.len());
     for b in &req.content {
         match b {
@@ -101,6 +117,18 @@ pub async fn fulfil<S: KeySource>(
                 });
             }
             other => {
+                // TAXONOMY NOTE (#264 round 3): this rides
+                // `FulfilError::Provider`, which `serve.rs` maps to
+                // `ServeError::Fulfil` -- documented as "the deputy was
+                // WILLING, and something downstream did not work". A pre-send
+                // refusal is not that. The variant is reused deliberately
+                // rather than adding a lane: reaching here requires a kernel
+                // bug (the PDP refuses non-text on the prompt leg), the wire
+                // signal to the kernel is a closed connection either way, and
+                // the discriminator available to a reader is the MESSAGE, not
+                // the variant -- which is equally true of a connection failure,
+                // since `chat_completion`'s `map_err` produces the same
+                // variant. Both doc comments carry a dated pointer here.
                 return Err(FulfilError::Provider(format!(
                     "frame carried a non-text {} block the prompt leg cannot send",
                     other.kind()
@@ -128,7 +156,8 @@ pub async fn fulfil<S: KeySource>(
     // compiled into `maknae-llm` from reviewable text files under its
     // `prompt/` directory; this deputy holds neither of them and decides
     // nothing about them -- it cannot build a provider request without them
-    // because this is the only construction site, and the preamble is applied
+    // because this is the only construction site in production (tests build
+    // their own), and the preamble is applied
     // here rather than by the client, which has no system-role field at all.
     let advertised = maknae_llm::advertise(&maknae_llm::baseline_catalog());
     // DERIVED, never passed in: what a reply may name is exactly what was
@@ -166,6 +195,18 @@ mod tests {
     impl KeySource for Denied {
         async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
             Err(format!("permission denied on {p}"))
+        }
+    }
+
+    /// A source that must never be reached. #264 round 3: a frame carrying
+    /// nothing to send must be refused with NO secret in hand, and a source
+    /// that returns `Err` cannot prove that -- an implementation that read the
+    /// key and discarded the error would pass. This one cannot be read
+    /// silently.
+    struct Panics;
+    impl KeySource for Panics {
+        async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
+            panic!("the credential must not be read before the content is judged (path {p})");
         }
     }
 
@@ -239,7 +280,8 @@ mod tests {
             let (mut s, _) = l.accept().await.unwrap();
             // Read until the whole body has arrived. One `read(2)` on a stream
             // socket is not one message, and since #264 the request body is
-            // ~2.4 KB (preamble + tool schemas) rather than ~70 bytes -- a
+            // ~2.1 KB (2136 bytes: 1084-byte preamble + 893 bytes of tool
+            // schemas + envelope) rather than ~70 bytes -- a
             // short read would make every `contains` assertion below silently
             // weaker rather than failing loudly.
             let mut seen = Vec::new();
@@ -250,18 +292,24 @@ mod tests {
                     break;
                 }
                 seen.extend_from_slice(&buf[..n]);
-                let txt = String::from_utf8_lossy(&seen);
-                if let Some((head, body)) = txt.split_once("\r\n\r\n") {
-                    let want = head
-                        .lines()
-                        .find_map(|l| {
-                            l.strip_prefix("content-length: ")
-                                .or_else(|| l.strip_prefix("Content-Length: "))
-                        })
-                        .and_then(|v| v.trim().parse::<usize>().ok());
-                    if want.is_some_and(|w| body.len() >= w) {
-                        break;
-                    }
+                // RAW bytes. `from_utf8_lossy` substitutes 3 bytes per invalid
+                // byte, so a read boundary inside a multi-byte character (the
+                // preamble and the tool descriptions both carry em-dashes)
+                // would over-count the body and break the loop early.
+                let Some(brk) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&seen[..brk]).to_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                match want {
+                    Some(w) if seen.len() - (brk + 4) >= w => break,
+                    // No Content-Length: read to EOF rather than blocking
+                    // forever on a client that is waiting for our response.
+                    None => break,
+                    _ => {}
                 }
             }
             let seen = String::from_utf8_lossy(&seen).to_string();
@@ -369,11 +417,22 @@ mod tests {
         );
         // BOTH ENDS of the preamble, not just its first line matched anywhere:
         // a mutation that truncated the preamble would have survived a
-        // first-line check. Asserted as two whole lines rather than the exact
-        // JSON-escaped blob because `serde_json` is not a dependency of this
-        // binary and adding one to a TCB process for a test assertion is a
-        // supply-chain change this test does not justify; neither line
-        // contains a quote, so neither is altered by JSON escaping.
+        // first-line check.
+        //
+        // Two whole lines rather than the byte-exact JSON blob because THAT
+        // assertion already exists, in the crate that owns the bytes:
+        // `maknae-llm`'s `the_production_request_shape_serialises_as_the_
+        // provider_expects` asserts `messages[0].content == CORE_PROMPT`
+        // exactly. This test's job is narrower and different -- that the bytes
+        // LEFT THE DEPUTY. Neither line contains a quote, so neither is
+        // altered by JSON escaping.
+        //
+        // (An earlier version of this comment claimed `serde_json` was not a
+        // dependency of this binary and that adding it would be a TCB
+        // supply-chain change. Both halves were false: `cargo tree -p
+        // maknae-egress -i serde_json --edges normal` shows it arriving
+        // through `maknae-config`, and a dev-dependency is built only for test
+        // targets and never linked into the shipped binary.)
         let mut lines = maknae_llm::CORE_PROMPT.lines().filter(|l| !l.is_empty());
         let head = lines.next().unwrap();
         let tail = lines.next_back().unwrap();
@@ -405,7 +464,9 @@ mod tests {
             mime_type: "image/png".into(),
         };
         // Round 1 fixed only the first of these. The rest are the CLASS: a
-        // `Text` block bearing no text is checked NOWHERE in the tree, and a
+        // `Text` block bearing no text was checked nowhere in the tree when
+        // round 1 shipped (the kernel now refuses it as well, at
+        // `admitted_blocks` — this test holds the deputy's own layer), and a
         // mixed frame previously dropped its non-text block silently and sent
         // the remainder, letting the model answer a truncated prompt.
         let cases: Vec<(&str, Vec<maknae_proto::ContentBlock>, &str)> = vec![
@@ -428,9 +489,12 @@ mod tests {
             let mut f = frame();
             f.content = content;
             let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-            // A credential source that PANICS if read: the refusal must be
-            // decided with no secret in hand.
-            let mut keys = KeyCache::new(Denied);
+            // A credential source that genuinely PANICS if read. Round 2
+            // used `Denied` while the comment claimed a panic; `Denied`
+            // returns `Err`, so the ordering was caught only by the
+            // `Credential` match arm below. A panicking source is strictly
+            // stronger: it also catches a read whose error is swallowed.
+            let mut keys = KeyCache::new(Panics);
             let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
                 .await
                 .unwrap_err();
@@ -445,7 +509,15 @@ mod tests {
                      provider key: {m}"
                 ),
             }
-            assert!(!e.to_string().contains("sk-test-not-real"));
+            // NOT a key-leak assertion here: with a source that never yields
+            // a key there is nothing to leak, so such an assertion could not
+            // fail. The leak property is held by
+            // `a_provider_failure_is_a_named_refusal_that_never_echoes_the_key`.
+            // What this asserts is that the refusal NAMES its reason.
+            assert!(
+                !e.to_string().is_empty(),
+                "{name}: a refusal must carry a reason"
+            );
         }
     }
 
