@@ -6,6 +6,17 @@
 //! learns WHO the subject is — the kernel decided that long before the frame
 //! existed — and it never originates a call of its own.
 //!
+//! **Amended 2026-09-21 by #264:** the binary also links `maknae-llm`'s
+//! compiled-in core prompt and baseline tool definitions, and composes them
+//! into every outbound request (`call.rs`). That is not a walk-back of "no
+//! policy" above: those artifacts are policy **APPROVED at design time** —
+//! `include_str!`'d from reviewable text files, changed only by a reviewed
+//! commit — not policy **EVALUATED at runtime**. The deputy still decides
+//! nothing, holds no registry, and reads no configuration for them. The "no
+//! policy" clause is about runtime state and decisions, and that is unchanged.
+//! *(Recorded because misreading this exact clause as excluding the preamble
+//! cost a design round on #264 and needed a maintainer ruling to unwind.)*
+//!
 //! Thin by design (T3, the `bins/maknaed` precedent): the decision is in
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
@@ -174,7 +185,6 @@ fn main() {
                     rt.block_on(call::fulfil(
                         admitted,
                         &mut keys,
-                        &[],
                         call::CallBounds::default(),
                         // #308: the KV mount, from the deputy's own bounds
                         // document — the only place it is declared, because the

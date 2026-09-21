@@ -242,9 +242,37 @@ pub fn production_egress(
 
 /// Text only in Cooky (#153, #229). Names the FIRST non-text kind; an empty
 /// prompt is refused too, so "sent nothing" cannot masquerade as a turn.
+///
+/// **Amended 2026-09-21 by #264 (critical review round 3).** The emptiness test
+/// was on the content VEC only: a `Text("")` or `Text("   ")` block satisfied
+/// it, and nothing else in the tree tested the text itself. That was harmless
+/// while the deputy's request would have been rejected by the provider for
+/// having no messages — and stopped being harmless the moment #264 prepended a
+/// trusted preamble, because the request then becomes well formed and the
+/// provider ANSWERS it from the system prompt alone. The sentence above would
+/// have been false on a path needing no kernel bug.
+///
+/// It is fixed HERE rather than only in the deputy because this is where the
+/// property is stated, where it is T1 and mutation-visible, and where a
+/// refusal produces an accurate `deny` record **before** the write-ahead
+/// intent is appended — the deputy can only close the connection, which the
+/// kernel records as `OutcomeUnknown` ("the provider may have received the
+/// prompt"), and that would be false for a prompt that was never sent. The
+/// deputy keeps its own guard as defence in depth.
 pub fn admitted_blocks(content: &[ContentBlock]) -> Result<(), String> {
     if content.is_empty() {
         return Err("prompt carries no content".into());
+    }
+    // CONTENT-BEARING, not merely present. `str::trim` is Unicode
+    // `White_Space`; a zero-width character (U+200B, U+FEFF, U+2060) is NOT
+    // whitespace by that definition and counts as content here, deliberately —
+    // this predicate refuses the "nothing to send" case, it is not a
+    // meaningfulness judgement about the prompt.
+    if content.iter().all(|b| match b {
+        ContentBlock::Text { text } => text.0.trim().is_empty(),
+        _ => false,
+    }) {
+        return Err("prompt carries no text to send".into());
     }
     match content
         .iter()
@@ -1088,6 +1116,49 @@ mod tests {
         assert_eq!(
             admitted_blocks(&[]).unwrap_err(),
             "prompt carries no content"
+        );
+    }
+
+    /// #264 round 3: the emptiness test was on the content VEC, so a block
+    /// bearing no text satisfied it. Harmless until #264 prepended a trusted
+    /// preamble to the provider request — after which a text-less prompt
+    /// becomes a well-formed request the provider ANSWERS from the system
+    /// prompt alone, and this function's own doc sentence ("an empty prompt is
+    /// refused too, so 'sent nothing' cannot masquerade as a turn") would have
+    /// been false on a path needing no kernel bug.
+    #[test]
+    fn a_prompt_bearing_no_text_cannot_masquerade_as_a_turn() {
+        for blank in ["", " ", "   ", "\n", "\t", " \n\t ", "\r\n"] {
+            assert_eq!(
+                admitted_blocks(&[text(blank)]).unwrap_err(),
+                "prompt carries no text to send",
+                "a Text({blank:?}) block must not be admitted"
+            );
+        }
+        // Several blank blocks are still nothing to send.
+        assert_eq!(
+            admitted_blocks(&[text(""), text("  "), text("\n")]).unwrap_err(),
+            "prompt carries no text to send"
+        );
+        // ONE content-bearing block is enough, wherever it sits.
+        assert_eq!(admitted_blocks(&[text(""), text("real")]), Ok(()));
+        assert_eq!(admitted_blocks(&[text("real"), text("")]), Ok(()));
+        // A zero-width character is NOT Unicode White_Space and is therefore
+        // content by this predicate. Deliberate and asserted so the boundary is
+        // recorded rather than discovered: this refuses "nothing to send", it
+        // is not a meaningfulness judgement about the prompt.
+        assert_eq!(admitted_blocks(&[text("\u{200b}")]), Ok(()));
+        // The non-text refusal still takes precedence and still names the kind.
+        assert_eq!(
+            admitted_blocks(&[
+                text(""),
+                ContentBlock::Image {
+                    data: "".into(),
+                    mime_type: "image/png".into(),
+                }
+            ])
+            .unwrap_err(),
+            "content block type not admitted in this deployment: image"
         );
     }
 

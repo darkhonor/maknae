@@ -457,7 +457,6 @@ mod tests {
                 rt.block_on(crate::call::fulfil(
                     admitted,
                     &mut keys,
-                    &[],
                     crate::call::CallBounds::default(),
                     &b.kv_mount,
                 ))
