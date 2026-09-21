@@ -3857,6 +3857,130 @@ expect_accept "mutation-oracle/scratch-with-room-passes" "KiB free" \
 expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
   bash "$mo" scratch "$NC_TMP/definitely-not-here"
 
+# ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
+# pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every
+# entry carrying an extended attribute, and those become REAL INSTALLED FILES.
+# The mitigation this replaces was `xattr -rc`, which is INERT: measured
+# 2026-09-20, removexattr(2) returns rc=0/errno=0 for com.apple.provenance and
+# leaves the attribute in place, so NO exit status anywhere can detect it. The
+# gate therefore verifies by RE-READING the attribute list, and these probes
+# exist to prove that re-read actually fires.
+#
+# Darwin-only: `xattr(1)` does not exist on Linux, and this suite runs on
+# ubuntu-latest (ci.yml:176). A silent pass there would be the ok-on-nothing
+# class this whole file exists to make impossible, so it is a counted skip.
+pxc="$here/payload-xattr-clean.sh"
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "neg-skip: [payload-xattr-clean/*] not Darwin; xattr(1) is a macOS tool"
+  skipped=$((skipped+8))
+else
+  # CONTAMINATED: a REMOVABLE attribute, deliberately. com.apple.provenance
+  # CANNOT BE FABRICATED (the kernel attaches it; userspace cannot set it), so
+  # the fixture uses com.example.probe. That is sound rather than a compromise:
+  # the gate's contract is "no extended attribute survives", not "provenance
+  # specifically", and a removable attribute exercises exactly that predicate.
+  #
+  # The expected substring names the OFFENDING PATH, not the words "extended
+  # attribute". MEASURED: with "extended attribute" as the expectation, a mutant
+  # that disabled the per-entry walk entirely still scored neg-ok, because the
+  # gate's separate PAYLOAD-ROOT check fired instead and printed the same words.
+  # The probe was proving the root check, not the walk it is named for — the
+  # exact hazard expect_reject_because's own comment describes. Naming the entry
+  # path makes the two distinguishable, and the mutant now dies.
+  pxc_dirty="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_dirty/usr/local/bin"
+  printf '#!/bin/sh\n' > "$pxc_dirty/usr/local/bin/tool"
+  xattr -w com.example.probe contaminated "$pxc_dirty/usr/local/bin/tool"
+  expect_reject_because "payload-xattr-clean/tagged-entry-is-refused" "usr/local/bin/tool" \
+    "$pxc" "$pxc_dirty"
+
+  # The payload ROOT is a separate check with a separate failure message, so it
+  # gets its own probe. Without one, removing the root check would be invisible
+  # in any environment whose writes are untagged.
+  pxc_rootdirty="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_rootdirty/usr"
+  xattr -w com.example.probe contaminated "$pxc_rootdirty"
+  expect_reject_because "payload-xattr-clean/tagged-root-is-refused" "payload root" \
+    "$pxc" "$pxc_rootdirty"
+
+  # FLOOR (#219): a gate that examined nothing has found nothing. This is the
+  # precise defect #332 is about — a control reporting success while doing no
+  # work — so it gets its own probe rather than being assumed.
+  pxc_empty="$(mktemp -d -p "$NC_TMP")"
+  expect_reject_because "payload-xattr-clean/zero-entries-is-refused" "ZERO" \
+    "$pxc" "$pxc_empty"
+
+  # A target that is not there is fail-closed, never "nothing to check, ok".
+  expect_reject_because "payload-xattr-clean/missing-target-is-refused" "does not exist" \
+    "$pxc" "$NC_TMP/definitely-not-here"
+
+  # AN INSPECTION ERROR IS NOT A CLEAN ENTRY (blind review of PR #336).
+  #
+  # The gate originally read every attribute list as `"$(xattr -s "$p" 2>/dev/null
+  # || true)"`, discarding the exit status and leaving an empty string that is
+  # indistinguishable from "no extended attributes". Reproduced: with an `xattr`
+  # that failed every query the gate printed `ok (4 entries examined, none carry
+  # extended attributes)` and exited 0, having attested NOTHING — the same
+  # ok-on-nothing class the gate exists to catch, reintroduced inside the fix
+  # for it. These three probes are why it cannot come back.
+  #
+  # Each shims a tool onto PATH, the same idiom the clippy and darwin probes use.
+  pxc_shim="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim/bin"
+  pxc_sfix="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_sfix/usr/local/bin"
+  printf '#!/bin/sh\n' > "$pxc_sfix/usr/local/bin/tool"
+
+  # (a) every query fails -> the ROOT check must refuse before anything else.
+  printf '#!/bin/sh\necho "simulated xattr failure" >&2\nexit 1\n' > "$pxc_shim/bin/xattr"
+  chmod +x "$pxc_shim/bin/xattr"
+  expect_reject_because "payload-xattr-clean/unreadable-root-is-refused" "payload root" \
+    env PATH="$pxc_shim/bin:$PATH" "$pxc" "$pxc_sfix"
+
+  # (b) the root succeeds and only ENTRIES fail, isolating the walk. Without
+  # this, (a) alone would be satisfied by the root check and the per-entry
+  # status check could be deleted unnoticed — the same wrong-reason hazard that
+  # let a mutant survive the tagged-entry probe above.
+  pxc_shim2="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim2/bin"
+  { printf '#!/bin/sh\ncase "$2" in\n'
+    printf '  "%s") exit 0 ;;\n' "$pxc_sfix"
+    printf '  *) echo "simulated per-entry xattr failure" >&2; exit 1 ;;\nesac\n'
+  } > "$pxc_shim2/bin/xattr"
+  chmod +x "$pxc_shim2/bin/xattr"
+  expect_reject_because "payload-xattr-clean/unreadable-entry-is-refused" \
+    "cannot READ the extended attributes of" \
+    env PATH="$pxc_shim2/bin:$PATH" "$pxc" "$pxc_sfix"
+
+  # (c) DISCOVERY failing is its own refusal. A `find` that emits entries and
+  # THEN errors leaves a short list which passes the floor, so the under-count
+  # would score ok. Process substitution discarded that status; the listing is
+  # materialised now so it is observable.
+  pxc_shim3="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim3/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$pxc_shim3/bin/xattr"; chmod +x "$pxc_shim3/bin/xattr"
+  printf '#!/bin/sh\nprintf "%%s\\0" "/some/entry"\necho "simulated partial walk failure" >&2\nexit 1\n' \
+    > "$pxc_shim3/bin/find"; chmod +x "$pxc_shim3/bin/find"
+  expect_reject_because "payload-xattr-clean/failed-walk-is-refused" "directory walk" \
+    env PATH="$pxc_shim3/bin:$PATH" "$pxc" "$pxc_sfix"
+
+  # POSITIVE control. It needs a genuinely untagged fixture, and whether this
+  # environment can produce one is NOT a given. CORRECTED 2026-09-21: an earlier
+  # revision of this comment said the attribute is attached by the RESPONSIBLE
+  # APPLICATION and that Terminal.app writes untagged files. Both are wrong —
+  # measured on a SIP-enabled host, Terminal.app tags touch, `>`, mkdir,
+  # install -d and mktemp -d, in every location tried. Only two contexts have
+  # been measured clean: a launchd-spawned process, and a macos-26 CI runner
+  # (which reports SIP disabled). So the probe MEASURES its own environment
+  # first and reports a counted skip naming the reason, rather than a red that
+  # says the gate is broken when what is really true is that this shell cannot
+  # make a clean file. On CI this probe RUNS.
+  pxc_probe="$(mktemp -d -p "$NC_TMP")"; : > "$pxc_probe/canary"
+  if [ -n "$(xattr "$pxc_probe/canary" 2>/dev/null)" ]; then
+    echo "neg-skip: [payload-xattr-clean/clean-fixture-passes] this environment tags every write ($(xattr "$pxc_probe/canary" | tr '\n' ' ')); it cannot construct an untagged fixture"
+    skipped=$((skipped+1))
+  else
+    pxc_clean="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_clean/usr/local/bin"
+    printf '#!/bin/sh\n' > "$pxc_clean/usr/local/bin/tool"
+    expect_accept "payload-xattr-clean/clean-fixture-passes" "payload-xattr-clean: ok" \
+      "$pxc" "$pxc_clean"
+  fi
+fi
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
