@@ -50,6 +50,12 @@ struct Scripted {
     replies: Mutex<VecDeque<PromptReply>>,
     seen_roles: Mutex<Vec<Vec<&'static str>>>,
 }
+impl Scripted {
+    /// Replies the loop never asked for.
+    fn remaining(&self) -> usize {
+        self.replies.lock().unwrap().len()
+    }
+}
 impl maknae_kernel::Egress for Scripted {
     fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
         Ok(())
@@ -68,12 +74,16 @@ impl maknae_kernel::Egress for Scripted {
             .lock()
             .unwrap()
             .push(r.turns.iter().map(role).collect());
-        let reply = self
-            .replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("script exhausted");
+        // Exhaustion is a BACKEND FAILURE, never a panic: a panic here fires
+        // inside the spawned kernel task, where it reaches the test only as
+        // `verb`'s missing frame and names the wrong cause. As a failure it
+        // travels the kernel's own egress-failure path, and each test body
+        // asserts what the script had left (`remaining`).
+        let Some(reply) = self.replies.lock().unwrap().pop_front() else {
+            return Err(maknae_kernel::EgressFailure::Transport(
+                "script exhausted".into(),
+            ));
+        };
         Ok(maknae_kernel::EgressReply { reply })
     }
 }
@@ -129,7 +139,17 @@ impl Plane for FixturePlane {
             // The buffer is MOVED, never copied out of its `Zeroizing` (R28,
             // `maknae_proto::Bytes::new`) — the same hop `read_outcome` makes.
             RespResult::Ok(Payload::ReadContent(b)) => ReadOutcome::Content(b.0),
-            RespResult::Err(_) => ReadOutcome::Refused,
+            // R11, exactly as production's `read_outcome` decides it: ONLY an
+            // authorization refusal is `Refused`. Collapsing every code into
+            // `Refused` would leave the deny test green for a kernel that
+            // answered a PDP deny with `Internal` — the trail records the
+            // "deny" class for `Unavailable`/`TimedOut` too
+            // (`handler.rs:480-501`) — while the real CLI rendered
+            // "read unavailable".
+            RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
+                ReadOutcome::Refused
+            }
+            RespResult::Err(_) => ReadOutcome::Unavailable,
             _ => ReadOutcome::Unavailable,
         }
     }
@@ -183,7 +203,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
                 tool_calls: vec![call(
                     "c2",
                     "write_file",
-                    &format!(r#"{{"path":"{}","content":"new body"}}"#, target.display()),
+                    &format!(r#"{{"path":"{}","content":"new"}}"#, target.display()),
                 )],
             },
             PromptReply {
@@ -212,8 +232,10 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     assert_eq!(out.answer.as_deref(), Some("Edited."));
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
-        "new body",
-        "exactly the model's bytes"
+        // SHORTER than "old body" on purpose: an overwrite that wrote the
+        // right bytes without truncating would leave "new body" and pass.
+        "new",
+        "exactly the model's bytes, and nothing of the old ones"
     );
     assert_eq!(
         egress.seen_roles.lock().unwrap().as_slice(),
@@ -248,6 +270,11 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         .iter()
         .filter(|r| r.action == "session.prompt")
         .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
+    assert_eq!(
+        egress.remaining(),
+        0,
+        "the loop asked for every scripted reply"
+    );
 }
 
 #[tokio::test]
@@ -292,7 +319,14 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         },
     )
     .await;
-    assert!(tool_text(&transcript.turns()[2]).starts_with("Not authorized"));
+    // The WHOLE string, literal: `starts_with` would stay green if a refusal
+    // reason were appended, and a refusal carries none (ADR-0019, ADR-0023 d4).
+    // Pinned as text, not via `maknae_agent::render`'s const, for the reason
+    // render.rs's own R24 test states.
+    assert_eq!(
+        tool_text(&transcript.turns()[2]),
+        "Not authorized\n\nsteps remaining: 2"
+    );
     assert!(
         !tool_text(&transcript.turns()[2]).contains("PRIVATE"),
         "the key bytes never reach the model"
@@ -303,6 +337,11 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         .find(|r| r.action == "fs.read")
         .expect("an fs.read record");
     assert_eq!(read.outcome.result, "deny");
+    assert_eq!(
+        egress.remaining(),
+        0,
+        "the loop asked for every scripted reply"
+    );
 }
 
 #[tokio::test]
@@ -344,8 +383,10 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         },
     )
     .await;
-    assert!(
-        tool_text(&transcript.turns()[2]).starts_with("outcome unknown"),
+    // The WHOLE string, literal — same reason as the denied-read test.
+    assert_eq!(
+        tool_text(&transcript.turns()[2]),
+        "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 2",
         "a refused write is unknown, never 'not authorized'"
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "old body");
@@ -355,6 +396,11 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         .find(|r| r.action == "fs.write")
         .expect("an fs.write record");
     assert_eq!(w.outcome.result, "deny");
+    assert_eq!(
+        egress.remaining(),
+        0,
+        "the loop asked for every scripted reply"
+    );
 }
 
 #[tokio::test]
@@ -388,4 +434,9 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
         2,
         "exactly two prompts reached the provider"
     );
+    // The drained count, in the TEST body: a third reply is scripted and the
+    // bound must leave it untouched. A loop that ran on would consume it and
+    // fail HERE, by name, rather than as a missing frame from the panic inside
+    // the kernel task that the old `expect` would have raised.
+    assert_eq!(egress.remaining(), 1, "the third reply was never asked for");
 }
