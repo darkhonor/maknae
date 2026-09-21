@@ -174,7 +174,6 @@ fn main() {
                     rt.block_on(call::fulfil(
                         admitted,
                         &mut keys,
-                        &[],
                         call::CallBounds::default(),
                         // #308: the KV mount, from the deputy's own bounds
                         // document — the only place it is declared, because the

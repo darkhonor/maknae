@@ -54,7 +54,6 @@ impl Default for CallBounds {
 pub async fn fulfil<S: KeySource>(
     admitted: &Admitted<'_>,
     keys: &mut KeyCache<S>,
-    offered: &[String],
     bounds: CallBounds,
     kv_mount: &str,
 ) -> Result<EgressFrameReply, FulfilError> {
@@ -85,10 +84,21 @@ pub async fn fulfil<S: KeySource>(
         })
         .collect::<Vec<_>>();
 
+    // #264: the trusted preamble and the baseline tool definitions. Both are
+    // compiled into `maknae-llm` from reviewable text files under its
+    // `prompt/` directory; this deputy holds neither of them and decides
+    // nothing about them -- it cannot build a provider request without them
+    // because this is the only construction site, and the preamble is applied
+    // here rather than by the client, which has no system-role field at all.
+    let advertised = maknae_llm::advertise(&maknae_llm::baseline_catalog());
+    // DERIVED, never passed in: what a reply may name is exactly what was
+    // advertised. Tracking the two separately is how a model gets refused for
+    // a tool we published, or accepted for one we never offered.
+    let offered = maknae_llm::offered_names(&advertised);
     let chat = maknae_llm::ChatRequest {
         model: &req.model,
-        messages,
-        tools: vec![],
+        messages: maknae_llm::with_preamble(messages),
+        tools: advertised,
         tool_choice: None,
         stream: false,
     };
@@ -97,7 +107,7 @@ pub async fn fulfil<S: KeySource>(
         &req.endpoint,
         &key,
         &chat,
-        offered,
+        &offered,
         bounds.timeout,
         bounds.max_body_bytes,
     )
@@ -149,15 +159,9 @@ mod tests {
         let f = frame();
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Denied);
-        let e = fulfil(
-            &admitted,
-            &mut keys,
-            &[],
-            CallBounds::default(),
-            "maknae-kv",
-        )
-        .await
-        .unwrap_err();
+        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            .await
+            .unwrap_err();
         match &e {
             FulfilError::Credential(m) => {
                 assert!(m.contains("maknae/providers/openai"));
@@ -223,15 +227,9 @@ mod tests {
         let f = frame_to(url);
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        let reply = fulfil(
-            &admitted,
-            &mut keys,
-            &[],
-            CallBounds::default(),
-            "maknae-kv",
-        )
-        .await
-        .unwrap();
+        let reply = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            .await
+            .unwrap();
         assert_eq!(reply.reply.blocks.len(), 1);
 
         let sent = h.await.unwrap();
@@ -256,15 +254,9 @@ mod tests {
         let f = frame_to(url);
         let admitted = crate::handle::decide(&f, &bounds()).unwrap();
         let mut keys = KeyCache::new(Fixed("sk-SECRET-VALUE"));
-        let e = fulfil(
-            &admitted,
-            &mut keys,
-            &[],
-            CallBounds::default(),
-            "maknae-kv",
-        )
-        .await
-        .unwrap_err();
+        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            .await
+            .unwrap_err();
         match &e {
             FulfilError::Provider(m) => assert!(m.contains("401"), "{m}"),
             other => panic!("expected a provider refusal, got {other:?}"),
