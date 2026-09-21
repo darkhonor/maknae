@@ -70,11 +70,31 @@ pub fn mint_conversation_id() -> String {
 /// carries no reason (ADR-0019); it does carry the code.
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
-        Ok(SentOutcome::Payload(Payload::ReadContent(b))) => ReadOutcome::Content(b.0.to_vec()),
+        // The buffer is MOVED, never copied: `b.0` is already a `Zeroizing`,
+        // and `maknae_proto::Bytes::new` forbids copying content out of one
+        // into a plain `Vec` (R28). `ReadOutcome::Content` carries the same
+        // type, so the secrecy survives the hop into the brain.
+        Ok(SentOutcome::Payload(Payload::ReadContent(b))) => ReadOutcome::Content(b.0),
         Ok(SentOutcome::Refused(maknae_proto::ProtoErrCode::Unauthorized, _)) => {
             ReadOutcome::Refused
         }
         _ => ReadOutcome::Unavailable,
+    }
+}
+
+/// R29, the write half of R11's treatment and pure for the same reason: ONLY a
+/// clean `WriteDone { applied: true }` is `Applied`.
+///
+/// Everything else is `Unknown` — a non-applied completion, a refusal, a
+/// payload for some other verb, and every transport error. ADR-0023 d4: a
+/// `String` error cannot tell a pre-send connect failure from a post-send read
+/// timeout, and guessing would manufacture certainty. `NotSent` is NOT decided
+/// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
+/// before `send_verb` is ever called (R13).
+pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
+    match sent {
+        Ok(SentOutcome::WriteDone { applied: true }) => WriteOutcome::Applied,
+        _ => WriteOutcome::Unknown,
     }
 }
 
@@ -142,14 +162,7 @@ impl Plane for RealPlane<'_> {
         ) else {
             return WriteOutcome::NotSent;
         };
-        match send_verb(verb, None, self.transport, self.client, self.ca).await {
-            Ok(SentOutcome::WriteDone { applied: true }) => WriteOutcome::Applied,
-            // ADR-0023 d4: everything that came back from the wire — or failed
-            // to — is unknown. A `String` error cannot tell a pre-send connect
-            // failure from a post-send read timeout, and guessing would
-            // manufacture certainty.
-            _ => WriteOutcome::Unknown,
-        }
+        write_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
     }
 }
 
@@ -216,6 +229,16 @@ mod tests {
         let c =
             agent_from_section(Some(&yaml("max_steps: 3\nmax_tool_calls_per_step: 1\n"))).unwrap();
         assert_eq!((c.max_steps, c.max_tool_calls_per_step), (3, 1));
+        // The UPPER bound at its own boundary, both keys: every other row sits
+        // strictly inside or far outside it, so without these an `<=` → `<`
+        // mutant on either ceiling survives.
+        let top = agent_from_section(Some(&yaml("max_steps: 64\nmax_tool_calls_per_step: 16\n")))
+            .unwrap();
+        assert_eq!((top.max_steps, top.max_tool_calls_per_step), (64, 16));
+        assert!(
+            agent_from_section(Some(&yaml("max_tool_calls_per_step: 17\n"))).is_err(),
+            "one past the tool-call ceiling (16)"
+        );
         assert!(
             agent_from_section(Some(&yaml("max_steps: 0\n"))).is_err(),
             "zero steps is not a loop"
@@ -247,6 +270,38 @@ mod tests {
         ));
     }
     #[test]
+    fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
+        // R29/ADR-0023 d4: the wire cannot distinguish uncertain from refused
+        // on the write lane, so only a clean `applied: true` may claim
+        // certainty. `NotSent` is absent by construction — it is decided from
+        // `write_request`'s `Err`, before `send_verb` is called (R13).
+        use maknae_proto::{Payload, ProtoErrCode};
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::WriteDone { applied: true })),
+            WriteOutcome::Applied
+        );
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::WriteDone { applied: false })),
+            WriteOutcome::Unknown
+        );
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::Refused(
+                ProtoErrCode::Unauthorized,
+                "not authorized".into()
+            ))),
+            WriteOutcome::Unknown,
+            "a refusal is not a certainty on the write lane"
+        );
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
+            WriteOutcome::Unknown
+        );
+        assert_eq!(
+            write_outcome(Err("no response from daemon within 5000ms".into())),
+            WriteOutcome::Unknown
+        );
+    }
+    #[test]
     fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
         // R11 is a CONTROL, so it is tested: only the authorization code is a
         // refusal the model may not appeal; a BadRequest (`/a/../b`), a
@@ -255,7 +310,7 @@ mod tests {
         let content = maknae_proto::Bytes::new(zeroize::Zeroizing::new(b"x".to_vec()));
         assert_eq!(
             read_outcome(Ok(SentOutcome::Payload(Payload::ReadContent(content)))),
-            ReadOutcome::Content(b"x".to_vec())
+            ReadOutcome::Content(zeroize::Zeroizing::new(b"x".to_vec()))
         );
         assert_eq!(
             read_outcome(Ok(SentOutcome::Refused(

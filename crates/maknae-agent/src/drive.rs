@@ -262,7 +262,7 @@ mod tests {
             reads: vec![],
             writes: vec![],
             prompts: 0,
-            read_outcome: ReadOutcome::Content(b"file body".to_vec()),
+            read_outcome: ReadOutcome::Content(Zeroizing::new(b"file body".to_vec())),
             write_outcome: WriteOutcome::Applied,
         }
     }

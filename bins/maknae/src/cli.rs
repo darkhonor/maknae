@@ -8,8 +8,9 @@
 //! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `maknae-agent`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`, `rpassword`,
 //! and macOS-only `security-framework` (`bins/maknae/Cargo.toml`). The
-//! `ping`/`whoami` wire path below uses only the first five; `maknae-agent` is the
-//! agent loop's (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
+//! `ping`/`whoami` wire path below uses only `maknae-proto`, `maknae-vault`,
+//! `maknae-config`, `maknae-msgs` and `clap`; `maknae-agent` is the agent loop's
+//! (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
 //! `security-framework` are `enroll/`-only. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
@@ -239,7 +240,8 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 
     let dir = resolve_config_dir();
 
-    // Load the CLI's config ONCE, registering EVERY section it uses (vault + transport)
+    // Load the CLI's config ONCE, registering EVERY section it uses (vault + transport
+    // + agent)
     // so a realistic combined config is accepted; a genuinely-unknown section still
     // fails closed with UnknownSection. The single document is then parsed by-section —
     // transport here, vault inside `PlaneClient::from_document` — never re-loaded under a

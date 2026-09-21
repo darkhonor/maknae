@@ -6,9 +6,13 @@
 //! `READ_UNAVAILABLE` and `tool error:` are renderer-only: the prompt does not
 //! promise them, and they describe transport and argument faults, not
 //! decisions.
+/// `ReadContent` carries a `Zeroizing<Vec<u8>>` for the reason
+/// [`crate::plane::ReadOutcome`] states: the read path MOVES its buffer
+/// through and never copies content out of a `Zeroizing` into a plain `Vec`
+/// (R28). `from_utf8` below reads it through `Deref`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutcome {
-    ReadContent(Vec<u8>),
+    ReadContent(zeroize::Zeroizing<Vec<u8>>),
     ReadRefused,
     ReadUnavailable,
     WriteApplied,
@@ -77,10 +81,16 @@ mod tests {
     #[test]
     fn a_read_result_is_the_text_and_binary_is_described_not_lossily_converted() {
         assert_eq!(
-            render(&ToolOutcome::ReadContent(b"line\n".to_vec()), 5),
+            render(
+                &ToolOutcome::ReadContent(zeroize::Zeroizing::new(b"line\n".to_vec())),
+                5
+            ),
             "line\n\n\nsteps remaining: 5"
         );
-        let r = render(&ToolOutcome::ReadContent(vec![0xff, 0x00, 0xfe]), 5);
+        let r = render(
+            &ToolOutcome::ReadContent(zeroize::Zeroizing::new(vec![0xff, 0x00, 0xfe])),
+            5,
+        );
         assert!(r.starts_with("binary content, 3 bytes"), "{r}");
         assert!(!r.contains('\u{FFFD}'));
     }

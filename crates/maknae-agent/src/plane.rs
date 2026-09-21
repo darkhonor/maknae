@@ -6,9 +6,16 @@ use std::future::Future;
 
 /// `Refused` is the wire's `Unauthorized` — for a READ that word is honest (no
 /// side effect). `Unavailable` is a transport failure: no frame, a timeout.
+///
+/// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
+/// kernel-served home-file content, and `maknae_proto::Bytes::new` states the
+/// rule the read path obeys — MOVE the buffer through, never copy content out
+/// of a `Zeroizing` into a plain `Vec` (R28). The secrecy therefore survives
+/// the whole hop, hands → brain → renderer, instead of being re-established
+/// at each seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
-    Content(Vec<u8>),
+    Content(zeroize::Zeroizing<Vec<u8>>),
     Refused,
     Unavailable,
 }
@@ -53,7 +60,7 @@ mod tests {
     #[test]
     fn every_outcome_variant_is_constructible_comparable_and_debuggable() {
         let reads = [
-            ReadOutcome::Content(vec![1]),
+            ReadOutcome::Content(zeroize::Zeroizing::new(vec![1])),
             ReadOutcome::Refused,
             ReadOutcome::Unavailable,
         ];
