@@ -19,7 +19,7 @@ serde = { workspace = true, features = ["derive"] }
 # Tool ARGUMENTS arrive as a JSON string the model produced; parsing them is the
 # one place this crate reads untrusted structure. Already in the workspace graph
 # via maknae-llm — no new supply-chain surface. Same major as that pin.
-# (serde and serde_json are first USED by route.rs in Task 3; declared here so
+# (serde and serde_json are first USED by route.rs; declared here so
 # the manifest is written once.)
 serde_json = "1"
 # Same pin form as maknae-proto's: tool arguments and write content are

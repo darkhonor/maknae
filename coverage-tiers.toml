@@ -248,6 +248,7 @@ files = [
   # "applied" for an uncertain write, is false assurance the model acts on —
   # it retries a write the kernel may have half-applied. No I/O in the crate.
   "crates/maknae-agent/src/transcript.rs",
+  "crates/maknae-agent/src/route.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -255,6 +256,7 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
+# It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
 mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
@@ -404,7 +406,7 @@ why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is b
 
 [[t3]]
 path = "crates/maknae-agent/src/lib.rs"
-why = "module declarations only; the loop logic is transcript.rs (T1) and the Task 3-5 files"
+why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs)"
 
 [[t3]]
 path = "crates/maknae-agent/src/plane.rs"
