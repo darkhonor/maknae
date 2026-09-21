@@ -6,13 +6,15 @@
 //! `READ_UNAVAILABLE` and `tool error:` are renderer-only: the prompt does not
 //! promise them, and they describe transport and argument faults, not
 //! decisions.
+use zeroize::Zeroizing;
+
 /// `ReadContent` carries a `Zeroizing<Vec<u8>>` for the reason
 /// [`crate::plane::ReadOutcome`] states: the read path MOVES its buffer
 /// through and never copies content out of a `Zeroizing` into a plain `Vec`
 /// (R28). `from_utf8` below reads it through `Deref`.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ToolOutcome {
-    ReadContent(zeroize::Zeroizing<Vec<u8>>),
+    ReadContent(Zeroizing<Vec<u8>>),
     ReadRefused,
     ReadUnavailable,
     WriteApplied,
@@ -52,23 +54,34 @@ pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// R13: a LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
 
-pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> String {
-    let body = match outcome {
+/// R32: the output is a `Zeroizing<String>`, and it is BUILT as one. On the
+/// read path this text IS the kernel-served file content, so a plain `String`
+/// anywhere on the way — including a `format!` that copies a finished body into
+/// a fresh buffer — would leave a non-zeroizing copy of home-file bytes behind
+/// until the allocator reused the page. The caller
+/// ([`crate::transcript::Transcript::push_tool_result`]) copies this into a
+/// `SecretText`, which zeroizes too, so the content never lands in a plain
+/// buffer on the whole path. Same discipline as R28 one layer up.
+pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> {
+    let mut out = match outcome {
         ToolOutcome::ReadContent(bytes) => match std::str::from_utf8(bytes) {
-            Ok(s) => s.to_string(),
+            Ok(s) => Zeroizing::new(String::from(s)),
             // Never lossily converted: the model would act on U+FFFD as if it were the file.
-            Err(_) => format!("binary content, {} bytes", bytes.len()),
+            Err(_) => Zeroizing::new(format!("binary content, {} bytes", bytes.len())),
         },
-        ToolOutcome::ReadRefused => NOT_AUTHORIZED.to_string(),
-        ToolOutcome::ReadUnavailable => READ_UNAVAILABLE.to_string(),
-        ToolOutcome::WriteApplied => APPLIED.to_string(),
-        ToolOutcome::WriteUnknown => OUTCOME_UNKNOWN.to_string(),
-        ToolOutcome::WriteNotSent => WRITE_NOT_SENT.to_string(),
-        ToolOutcome::BadCall(why) => format!("tool error: {why}"),
+        ToolOutcome::ReadRefused => Zeroizing::new(NOT_AUTHORIZED.to_string()),
+        ToolOutcome::ReadUnavailable => Zeroizing::new(READ_UNAVAILABLE.to_string()),
+        ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),
+        ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
+        ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
+        ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
     };
     // The live step count rides HERE, in per-turn content — never in the
-    // compiled prompt, which ships verbatim (#264).
-    format!("{body}\n\nsteps remaining: {steps_remaining}")
+    // compiled prompt, which ships verbatim (#264). Appended IN PLACE, so the
+    // body is never copied into a second buffer (R32).
+    out.push_str("\n\nsteps remaining: ");
+    out.push_str(&steps_remaining.to_string());
+    out
 }
 
 #[cfg(test)]
@@ -79,14 +92,14 @@ mod tests {
         // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt
         // (this crate must never link maknae-llm). Wording changes there change here.
         assert_eq!(
-            render(&ToolOutcome::ReadRefused, 3),
+            render(&ToolOutcome::ReadRefused, 3).as_str(),
             "Not authorized\n\nsteps remaining: 3"
         );
         assert_eq!(
-            render(&ToolOutcome::WriteApplied, 2),
+            render(&ToolOutcome::WriteApplied, 2).as_str(),
             "applied\n\nsteps remaining: 2"
         );
-        assert_eq!(render(&ToolOutcome::WriteUnknown, 1),
+        assert_eq!(render(&ToolOutcome::WriteUnknown, 1).as_str(),
             "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 1");
     }
     #[test]
@@ -97,7 +110,7 @@ mod tests {
         // NOT_AUTHORIZED goes red — a transport fault rendered as a refusal
         // would tell the model the kernel decided.
         assert_eq!(
-            render(&ToolOutcome::ReadUnavailable, 4),
+            render(&ToolOutcome::ReadUnavailable, 4).as_str(),
             "read unavailable — do not retry\n\nsteps remaining: 4"
         );
     }
@@ -105,16 +118,17 @@ mod tests {
     fn a_read_result_is_the_text_and_binary_is_described_not_lossily_converted() {
         assert_eq!(
             render(
-                &ToolOutcome::ReadContent(zeroize::Zeroizing::new(b"line\n".to_vec())),
+                &ToolOutcome::ReadContent(Zeroizing::new(b"line\n".to_vec())),
                 5
-            ),
+            )
+            .as_str(),
             "line\n\n\nsteps remaining: 5"
         );
         let r = render(
-            &ToolOutcome::ReadContent(zeroize::Zeroizing::new(vec![0xff, 0x00, 0xfe])),
+            &ToolOutcome::ReadContent(Zeroizing::new(vec![0xff, 0x00, 0xfe])),
             5,
         );
-        assert!(r.starts_with("binary content, 3 bytes"), "{r}");
+        assert!(r.starts_with("binary content, 3 bytes"), "{}", *r);
         assert!(!r.contains('\u{FFFD}'));
     }
     #[test]
@@ -125,7 +139,7 @@ mod tests {
         );
         // R13: never "may have happened" for a write that never left the process.
         assert_eq!(
-            render(&ToolOutcome::WriteNotSent, 4),
+            render(&ToolOutcome::WriteNotSent, 4).as_str(),
             "tool error: write not sent — content exceeds the frame bound\n\nsteps remaining: 4"
         );
         for o in [
@@ -141,13 +155,12 @@ mod tests {
 
     /// R31: the read bytes are kernel-served home-file content, so
     /// `ToolOutcome`'s `Debug` is hand-written and redacting — the crate
-    /// convention `route.rs`'s `ToolRequest` already follows. The loop above
-    /// formats every OTHER variant, which is why it can exclude this one.
+    /// convention `route.rs`'s `ToolRequest` already follows.
     #[test]
     fn a_read_results_debug_never_prints_the_served_bytes() {
         let d = format!(
             "{:?}",
-            ToolOutcome::ReadContent(zeroize::Zeroizing::new(b"SENTINEL-READ-BYTES".to_vec()))
+            ToolOutcome::ReadContent(Zeroizing::new(b"SENTINEL-READ-BYTES".to_vec()))
         );
         assert!(!d.contains("SENTINEL-READ-BYTES"), "{d}");
         // A `#[derive(Debug)]` substitution prints `Zeroizing([83, 69, ...])`, so

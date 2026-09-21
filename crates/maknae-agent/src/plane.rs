@@ -10,9 +10,16 @@ use std::future::Future;
 /// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
 /// kernel-served home-file content, and `maknae_proto::Bytes::new` states the
 /// rule the read path obeys — MOVE the buffer through, never copy content out
-/// of a `Zeroizing` into a plain `Vec` (R28). The secrecy therefore survives
-/// the whole hop, hands → brain → renderer, instead of being re-established
-/// at each seam.
+/// of a `Zeroizing` into a plain `Vec` (R28).
+///
+/// What that buys, precisely: the served bytes are moved from
+/// `maknae_proto::Bytes` into this variant, moved on into
+/// [`crate::render::ToolOutcome::ReadContent`], rendered into a
+/// `Zeroizing<String>` (R32), and copied from there into a
+/// `maknae_proto::SecretText`, which zeroizes too — so the CONTENT never lands
+/// in a plain buffer anywhere on the path. It is not a claim that nothing is
+/// ever copied: the render and the `SecretText` are copies, both into
+/// zeroizing destinations, and that is the property, not zero-copy.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(zeroize::Zeroizing<Vec<u8>>),
