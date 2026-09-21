@@ -3872,7 +3872,7 @@ expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
 pxc="$here/payload-xattr-clean.sh"
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "neg-skip: [payload-xattr-clean/*] not Darwin; xattr(1) is a macOS tool"
-  skipped=$((skipped+5))
+  skipped=$((skipped+8))
 else
   # CONTAMINATED: a REMOVABLE attribute, deliberately. com.apple.provenance
   # CANNOT BE FABRICATED (the kernel attaches it; userspace cannot set it), so
@@ -3911,6 +3911,52 @@ else
   # A target that is not there is fail-closed, never "nothing to check, ok".
   expect_reject_because "payload-xattr-clean/missing-target-is-refused" "does not exist" \
     "$pxc" "$NC_TMP/definitely-not-here"
+
+  # AN INSPECTION ERROR IS NOT A CLEAN ENTRY (blind review of PR #336).
+  #
+  # The gate originally read every attribute list as `"$(xattr -s "$p" 2>/dev/null
+  # || true)"`, discarding the exit status and leaving an empty string that is
+  # indistinguishable from "no extended attributes". Reproduced: with an `xattr`
+  # that failed every query the gate printed `ok (4 entries examined, none carry
+  # extended attributes)` and exited 0, having attested NOTHING — the same
+  # ok-on-nothing class the gate exists to catch, reintroduced inside the fix
+  # for it. These three probes are why it cannot come back.
+  #
+  # Each shims a tool onto PATH, the same idiom the clippy and darwin probes use.
+  pxc_shim="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim/bin"
+  pxc_sfix="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_sfix/usr/local/bin"
+  printf '#!/bin/sh\n' > "$pxc_sfix/usr/local/bin/tool"
+
+  # (a) every query fails -> the ROOT check must refuse before anything else.
+  printf '#!/bin/sh\necho "simulated xattr failure" >&2\nexit 1\n' > "$pxc_shim/bin/xattr"
+  chmod +x "$pxc_shim/bin/xattr"
+  expect_reject_because "payload-xattr-clean/unreadable-root-is-refused" "payload root" \
+    env PATH="$pxc_shim/bin:$PATH" "$pxc" "$pxc_sfix"
+
+  # (b) the root succeeds and only ENTRIES fail, isolating the walk. Without
+  # this, (a) alone would be satisfied by the root check and the per-entry
+  # status check could be deleted unnoticed — the same wrong-reason hazard that
+  # let a mutant survive the tagged-entry probe above.
+  pxc_shim2="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim2/bin"
+  { printf '#!/bin/sh\ncase "$2" in\n'
+    printf '  "%s") exit 0 ;;\n' "$pxc_sfix"
+    printf '  *) echo "simulated per-entry xattr failure" >&2; exit 1 ;;\nesac\n'
+  } > "$pxc_shim2/bin/xattr"
+  chmod +x "$pxc_shim2/bin/xattr"
+  expect_reject_because "payload-xattr-clean/unreadable-entry-is-refused" \
+    "cannot READ the extended attributes of" \
+    env PATH="$pxc_shim2/bin:$PATH" "$pxc" "$pxc_sfix"
+
+  # (c) DISCOVERY failing is its own refusal. A `find` that emits entries and
+  # THEN errors leaves a short list which passes the floor, so the under-count
+  # would score ok. Process substitution discarded that status; the listing is
+  # materialised now so it is observable.
+  pxc_shim3="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_shim3/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$pxc_shim3/bin/xattr"; chmod +x "$pxc_shim3/bin/xattr"
+  printf '#!/bin/sh\nprintf "%%s\\0" "/some/entry"\necho "simulated partial walk failure" >&2\nexit 1\n' \
+    > "$pxc_shim3/bin/find"; chmod +x "$pxc_shim3/bin/find"
+  expect_reject_because "payload-xattr-clean/failed-walk-is-refused" "directory walk" \
+    env PATH="$pxc_shim3/bin:$PATH" "$pxc" "$pxc_sfix"
 
   # POSITIVE control. It needs a genuinely untagged fixture, and whether this
   # environment can produce one is NOT a given. CORRECTED 2026-09-21: an earlier

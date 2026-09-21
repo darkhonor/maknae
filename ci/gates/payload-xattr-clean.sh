@@ -72,32 +72,69 @@ command -v xattr >/dev/null 2>&1 \
 
 fail=0
 
+# AN ENTRY THAT COULD NOT BE INSPECTED HAS NOT BEEN ATTESTED CLEAN.
+#
+# CORRECTED 2026-09-21 (blind review of PR #336). Every query below previously
+# read `"$(xattr -s "$p" 2>/dev/null || true)"`, which discards the exit status
+# and leaves an empty string — indistinguishable from "this entry has no
+# extended attributes". REPRODUCED with an `xattr` shim that fails every query:
+# the gate printed `ok (4 entries examined, none carry extended attributes)` and
+# exited 0, having attested nothing.
+#
+# That is the SAME defect class this gate exists to catch — a control reporting
+# success while doing no work — reintroduced inside the fix for it. Every query
+# now captures its status separately and REFUSES on an inspection error.
+work="$(mktemp -d -t maknae-pxc.XXXXXXXX)"
+trap 'rm -rf -- "$work"' EXIT INT TERM
+
 # The payload ROOT's own attributes are checked, but are NOT counted as an entry:
 # the root maps to `.` in the BOM and has no sibling position of its own, while
 # the floor below must be able to see an EMPTY payload. Counting the root would
 # make `examined` >= 1 unconditionally and the floor unreachable.
-root_attrs="$(xattr -s "$target" 2>/dev/null || true)"
+if ! root_attrs="$(xattr -s "$target" 2>&1)"; then
+  echo "FAIL: cannot READ the extended attributes of the payload root $target: $root_attrs"
+  echo "  An entry that could not be inspected has not been attested clean."
+  exit 1
+fi
 if [ -n "$root_attrs" ]; then
   echo "FAIL: extended attribute on the payload root $target: $(printf '%s' "$root_attrs" | tr '\n' ' ')"
   fail=1
 fi
 
+# DISCOVERY IS CHECKED TOO. The walk previously fed the loop through process
+# substitution, which discards `find`'s exit status: a walk that failed PARTWAY
+# — after emitting some entries — left a short list that passed the floor and
+# scored `ok`. The listing is materialised first so the status is observable.
+# (`rc=0; cmd || rc=$?` keeps the failure out of `set -e`'s reach.)
+find_rc=0
+find "$target" -mindepth 1 -print0 > "$work/list" 2>"$work/err" || find_rc=$?
+if [ "$find_rc" -ne 0 ]; then
+  echo "FAIL: the directory walk of $target FAILED (find exit $find_rc): $(head -3 "$work/err")"
+  echo "  A partial walk would under-count, and an under-count can still clear"
+  echo "  the floor below — so discovery failing is itself a refusal, never an"
+  echo "  empty payload."
+  exit 1
+fi
+
 examined=0
 # -print0 / read -d '', because a payload path may contain whitespace, and
-# `xattr -s` so a symlink's OWN attributes are read rather than its target's (a
-# dangling link would otherwise error and be skipped silently).
+# `xattr -s` so a symlink's OWN attributes are read rather than its target's.
 #
-# The loop runs in THIS shell — process substitution, never a pipe — so the
+# The loop runs in THIS shell — redirected from a file, never a pipe — so the
 # counters survive it. A `while ... | read` would count in a subshell and the
 # floor below would always read zero.
 while IFS= read -r -d '' p; do
   examined=$((examined+1))
-  attrs="$(xattr -s "$p" 2>/dev/null || true)"
+  if ! attrs="$(xattr -s "$p" 2>&1)"; then
+    echo "FAIL: cannot READ the extended attributes of $p: $attrs"
+    fail=1
+    continue
+  fi
   if [ -n "$attrs" ]; then
     echo "FAIL: extended attribute on $p: $(printf '%s' "$attrs" | tr '\n' ' ')"
     fail=1
   fi
-done < <(find "$target" -mindepth 1 -print0)
+done < "$work/list"
 
 # THE FLOOR (#219 class, and the precise defect #332 is about): a control that
 # examined nothing has found nothing. `xattr -rc` exited 0 having done no work,
