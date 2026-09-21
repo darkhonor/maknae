@@ -22,14 +22,26 @@ set -euo pipefail
 # tooling is otherwise sound: `xattr -w com.example.test` then `-d` removes
 # cleanly; only com.apple.provenance resists.
 #
-# THE ROOT CAUSE IS THE RESPONSIBLE APPLICATION of the writing process — not
-# macOS 26, not APFS, not pkgbuild. Proven end to end: same pkgbuild, same host,
-# same filesystem, same payload shape, changing only who ran it —
-#   built by an agent session -> BOM has 9 rows, 4 of them `._`
-#   built inside a launchd job -> BOM is clean, and `xattr -r -l` returned empty
-# There is no in-session escape for a tagged writer: `>`, cp, install, ditto,
-# tee, dd, python3, sed, touch, mkdir — and even mv/rename and a plain append —
-# all re-tag.
+# THE ATTRIBUTE IS ATTACHED ON WRITE, and an interactive macOS session cannot
+# avoid it. CORRECTED 2026-09-21: an earlier revision of this comment blamed the
+# "responsible application" and named Terminal.app as a clean context. THAT IS
+# FALSE. Measured on the maintainer's host (SIP enabled) in a shell whose lineage
+# is Terminal.app -> login -> -zsh: `touch`, `>`, `mkdir`, `install -d` and
+# `mktemp -d` ALL produce the attribute, in EVERY location tried — /tmp, $TMPDIR,
+# $HOME, /var/tmp and the repo working tree. Staging elsewhere does not help.
+#
+# Copying spreads it further: `install`, `cp` and `ditto` PROPAGATE a source
+# file's extended attributes to the destination (`cp -X` and
+# `ditto --norsrc --noextattr` do not), so a tagged build input contaminates the
+# payload even before the writing process adds its own.
+#
+# TWO contexts have been measured to produce a CLEAN payload, and only two:
+#   * a launchd-spawned process on the maintainer's host
+#   * a GitHub Actions macos-26 runner, which reports SIP DISABLED
+# The second is consistent with the attribute being SIP-protected, but causation
+# is NOT proven here — it is recorded as the material difference, not the cause.
+# That uncertainty is exactly why this gate runs in CI rather than being assumed:
+# the runner image's SIP posture is GitHub's to change.
 #
 # Two other doors are closed, so nobody reopens them:
 #   * `pkgbuild --filter` cannot reach the entries. The man page says filters
@@ -107,15 +119,22 @@ if [ "$fail" -ne 0 ]; then
   installed file that uninstall.sh does not know about.
 
   If the attribute is com.apple.provenance, it CANNOT BE REMOVED — removexattr(2)
-  returns success and leaves it in place. It is attached per-write by the
-  RESPONSIBLE APPLICATION of the process doing the writing, so the fix is to
-  build from a context whose responsible application is Apple-signed:
+  returns success and leaves it in place.
 
-      Terminal.app, a launchd job, or CI.
+  THIS IS EXPECTED ON AN INTERACTIVE macOS HOST and is not something you can fix
+  locally. Every interactive session measured attaches it to everything it
+  writes, in every location, Terminal.app included. Packaging therefore happens
+  in CI:
 
-  A build driven by an agent session, an editor's integrated terminal, or a
-  third-party terminal emulator tags every file and directory it writes, and no
-  amount of stripping inside that session will clear it.
+      the `darwin-package` job in .github/workflows/ci.yml
+
+  It builds the .pkg ad-hoc (NO secrets required) and runs smoke.sh phase 1,
+  publishing the package as a build artifact. Download that artifact if you need
+  a .pkg to install or to run phase 2 against.
+
+  If you are seeing this IN CI, do not work around it: the runner has started
+  tagging writes, the packaging context is no longer clean, and a package built
+  there would ship AppleDouble files into /usr/local.
 REMEDY
   exit 1
 fi

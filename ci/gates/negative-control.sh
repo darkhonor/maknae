@@ -3913,17 +3913,19 @@ else
     "$pxc" "$NC_TMP/definitely-not-here"
 
   # POSITIVE control. It needs a genuinely untagged fixture, and whether this
-  # environment can produce one is NOT a given: com.apple.provenance is attached
-  # per-write by the RESPONSIBLE APPLICATION of the writing process. A build
-  # driven by launchd, CI or Terminal.app writes untagged files; one driven by an
-  # agent, an editor or a third-party terminal tags every file AND directory it
-  # writes, with no in-session escape (measured: even mv/rename and a plain
-  # append re-tag). So the probe MEASURES its own environment first and reports a
-  # counted skip naming the reason, rather than a red that says the gate is
-  # broken when what is really true is that this shell cannot make a clean file.
+  # environment can produce one is NOT a given. CORRECTED 2026-09-21: an earlier
+  # revision of this comment said the attribute is attached by the RESPONSIBLE
+  # APPLICATION and that Terminal.app writes untagged files. Both are wrong —
+  # measured on a SIP-enabled host, Terminal.app tags touch, `>`, mkdir,
+  # install -d and mktemp -d, in every location tried. Only two contexts have
+  # been measured clean: a launchd-spawned process, and a macos-26 CI runner
+  # (which reports SIP disabled). So the probe MEASURES its own environment
+  # first and reports a counted skip naming the reason, rather than a red that
+  # says the gate is broken when what is really true is that this shell cannot
+  # make a clean file. On CI this probe RUNS.
   pxc_probe="$(mktemp -d -p "$NC_TMP")"; : > "$pxc_probe/canary"
   if [ -n "$(xattr "$pxc_probe/canary" 2>/dev/null)" ]; then
-    echo "neg-skip: [payload-xattr-clean/clean-fixture-passes] this shell's responsible application tags every write ($(xattr "$pxc_probe/canary" | tr '\n' ' ')); it cannot construct an untagged fixture"
+    echo "neg-skip: [payload-xattr-clean/clean-fixture-passes] this environment tags every write ($(xattr "$pxc_probe/canary" | tr '\n' ' ')); it cannot construct an untagged fixture"
     skipped=$((skipped+1))
   else
     pxc_clean="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$pxc_clean/usr/local/bin"

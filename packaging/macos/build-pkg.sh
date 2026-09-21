@@ -201,13 +201,16 @@ MACOS_TRANSPORT
 # detect the failure. It is kept because it still clears genuinely removable
 # attributes (quarantine and the like); it is simply no longer believed.
 #
-# The attribute is attached per-write by the RESPONSIBLE APPLICATION of the
-# writing process — not by macOS 26, not by APFS, not by pkgbuild. A build driven
-# by launchd, CI or Terminal.app writes an untagged payload; one driven by an
-# agent session, an editor's integrated terminal, or a third-party terminal tags
-# every file and directory it writes, and pkgbuild then serialises each as an
-# AppleDouble `._name` sibling INTO the payload, where it becomes a real
-# installed file that uninstall.sh knows nothing about. See
+# The attribute is attached on write, and an INTERACTIVE macOS HOST CANNOT AVOID
+# IT. Corrected 2026-09-21: an earlier revision of this comment named Terminal.app
+# as a clean context; it is not. On a SIP-enabled host, `touch`, `>`, `mkdir`,
+# `install -d` and `mktemp -d` all tag, in every location tried. pkgbuild then
+# serialises each attribute as an AppleDouble `._name` sibling INTO the payload,
+# where it becomes a real installed file that uninstall.sh knows nothing about.
+#
+# SO THIS SCRIPT IS EXPECTED TO REFUSE WHEN RUN LOCALLY. Packaging happens in the
+# `darwin-package` job in .github/workflows/ci.yml, which builds ad-hoc (no
+# secrets) and publishes the .pkg as an artifact. See
 # ci/gates/payload-xattr-clean.sh for the full measurement trail.
 #
 # The gate REFUSES rather than warns: a package shipping `._` entries into
