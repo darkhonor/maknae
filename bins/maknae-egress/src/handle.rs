@@ -29,6 +29,19 @@ pub enum Refusal {
     KeyPathMalformed,
     /// Shape admission failed — an empty field, an over-long conversation.
     MalformedFrame,
+    /// The frame carried a non-text block on the prompt leg. Cooky is text
+    /// only (#153, #229) and the kernel refuses non-text long before here, so
+    /// this names a kernel BUG rather than dropping the block silently — a
+    /// silent drop would send the remainder and let the model answer a
+    /// truncated prompt (#264 review round 2).
+    NonTextBlock,
+    /// The frame carried no text to send. `maknae_kernel::egress::
+    /// admitted_blocks` refuses this at the PDP, so this names a kernel bug
+    /// too — and it is load-bearing rather than cosmetic: since #264 prepends
+    /// a trusted preamble, a prompt with nothing in it would otherwise become
+    /// a well-formed request the provider ANSWERS from the system prompt
+    /// alone. The preamble must never be the whole request (review round 2).
+    NoTextToSend,
 }
 
 /// Proof that a frame passed admission.
@@ -75,6 +88,35 @@ pub fn decide<'a>(
     }
     if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
+    }
+    // #264 review round 4: the CONTENT judgement belongs here, not in
+    // `call.rs`. Two reasons, and NEITHER is mutation coverage: this function
+    // is PURE and directly testable (no socket, no credential, no provider),
+    // and `Refusal` is the right taxonomy — `serve.rs` documents its `Fulfil`
+    // lane as "the deputy was WILLING", which a pre-send refusal is not.
+    //
+    // On coverage, stated accurately because an earlier version of this
+    // comment got it wrong: **`maknae-egress` is not in `mutants_crates` at
+    // all** (`coverage-tiers.toml`), so #297's blind spot covers this file too
+    // — this module's own header calling itself "mutation-visible" is
+    // aspirational. The new predicates were hand-mutated instead.
+    //
+    // Both checks name a kernel bug: the PDP refuses non-text and text-less
+    // prompts before a frame exists. They are defence in depth, and they are
+    // the reason `Admitted` can be handed to `fulfil` without `fulfil` needing
+    // to re-judge content.
+    if req
+        .content
+        .iter()
+        .any(|b| !matches!(b, maknae_proto::ContentBlock::Text { .. }))
+    {
+        return Err(Refusal::NonTextBlock);
+    }
+    if req.content.iter().all(|b| match b {
+        maknae_proto::ContentBlock::Text { text } => text.0.trim().is_empty(),
+        _ => false,
+    }) {
+        return Err(Refusal::NoTextToSend);
     }
     Ok(Admitted { req })
 }
@@ -167,5 +209,76 @@ mod tests {
         let mut r = req("maknae/providers/openai");
         r.content.clear();
         assert_eq!(decide(&r, &bounds()).unwrap_err(), Refusal::MalformedFrame);
+    }
+
+    /// #264 review rounds 2-4: THE PREAMBLE MUST NEVER BE THE WHOLE REQUEST.
+    ///
+    /// Frame admission requires a non-empty content VEC, not a `Text` block
+    /// bearing text. Before #264 that was harmless — the deputy produced no
+    /// messages and the provider rejected the request. After #264 prepends a
+    /// trusted preamble it stops being harmless: the request becomes well
+    /// formed and the provider ANSWERS it from the system prompt alone, so
+    /// "sent nothing" would masquerade as a turn.
+    ///
+    /// Round 1 guarded only the image-only case; round 2 guarded a COUNT of
+    /// mapped messages rather than content; round 4 moved the judgement here,
+    /// where it is pure, mutation-visible, and carries the right taxonomy.
+    #[test]
+    fn no_frame_shape_can_make_the_preamble_the_whole_request() {
+        let text = |t: &str| ContentBlock::Text {
+            text: SecretText(zeroize::Zeroizing::new(t.into())),
+        };
+        let image = || ContentBlock::Image {
+            data: "AAAA".into(),
+            mime_type: "image/png".into(),
+        };
+        let cases: Vec<(&str, Vec<ContentBlock>, Refusal)> = vec![
+            ("image only", vec![image()], Refusal::NonTextBlock),
+            (
+                "text + image",
+                vec![text("real"), image()],
+                Refusal::NonTextBlock,
+            ),
+            (
+                "image + text",
+                vec![image(), text("real")],
+                Refusal::NonTextBlock,
+            ),
+            ("empty text", vec![text("")], Refusal::NoTextToSend),
+            (
+                "whitespace only",
+                vec![text("   \n\t ")],
+                Refusal::NoTextToSend,
+            ),
+            ("carriage return", vec![text("\r\n")], Refusal::NoTextToSend),
+            (
+                "several blank texts",
+                vec![text(""), text("  "), text("\n")],
+                Refusal::NoTextToSend,
+            ),
+        ];
+        for (name, content, want) in cases {
+            let mut f = req("maknae/providers/openai");
+            f.content = content;
+            assert_eq!(decide(&f, &bounds()).unwrap_err(), want, "{name}");
+        }
+
+        // ADMITTED: one content-bearing block is enough, wherever it sits, and
+        // a blank alongside it is NOT the deputy's to drop — the kernel's
+        // `content_measure` digested it into the intent record, so dropping it
+        // would make the trail attest bytes that never left.
+        for (name, content) in [
+            ("blank then real", vec![text("  "), text("real")]),
+            ("real then blank", vec![text("real"), text("  ")]),
+            // A zero-width character is NOT Unicode White_Space and is
+            // therefore content. Asserted so the boundary is recorded rather
+            // than discovered: this refuses "nothing to send", it is not a
+            // meaningfulness judgement about the prompt.
+            ("zero-width", vec![text("\u{200b}")]),
+        ] {
+            let mut f = req("maknae/providers/openai");
+            f.content = content;
+            assert!(decide(&f, &bounds()).is_ok(), "{name} must be admitted");
+        }
     }
 }

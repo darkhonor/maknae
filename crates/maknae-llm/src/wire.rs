@@ -637,51 +637,89 @@ mod tests {
         );
     }
 
+    /// The two maintainer rulings on artifact CONTENT, held by the existing
+    /// test lane rather than by a new CI script (#264 forbids one):
+    ///
+    ///   1. Tool NAMES only — **no kernel verb** the model could be induced to
+    ///      quote back, and no vocabulary an injected instruction could use to
+    ///      sound legitimate.
+    ///   2. **No bounding policy of ANY family.** A HomeLab has no
+    ///      classification and an enterprise may bound activity by an InfoSec
+    ///      policy of another form, so "not authorized" as the entire answer is
+    ///      what keeps the prompt correct across deployments — and a policy
+    ///      statement here would also go stale the moment configuration
+    ///      changed.
+    ///
+    /// The verb list is **DERIVED from `ci/gates/verb-manifest.txt`**, not
+    /// hand-written. Round 4 caught the hand-written version holding 5 of the
+    /// 57 shipped verbs: a prompt edit naming `admin.contain`, `session.new`
+    /// or `mcp.tool.call` passed the test while violating the ruling it
+    /// claimed to hold. Deriving it means a verb added to the vocabulary is
+    /// covered here the moment it is added.
     #[test]
     fn the_artifacts_name_no_kernel_verb_and_no_bounding_policy() {
-        // Two maintainer rulings on artifact CONTENT, held by the existing
-        // test lane rather than by a new CI script (#264 forbids one):
-        //   1. tool NAMES only -- no kernel verb the model could be induced to
-        //      quote back, and no vocabulary an injected instruction could use
-        //      to sound legitimate;
-        //   2. no bounding policy of ANY family. A HomeLab has no
-        //      classification and an enterprise may bound activity by an
-        //      InfoSec policy of another form, so "not authorized" as the
-        //      entire answer is what keeps the prompt correct across
-        //      deployments -- and a policy statement here would also go stale
-        //      the moment configuration changed.
+        const MANIFEST: &str = include_str!("../../../ci/gates/verb-manifest.txt");
+        let verbs: Vec<&str> = MANIFEST
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                match (f.next(), f.next()) {
+                    (Some("action"), Some(name)) if !name.is_empty() => Some(name),
+                    _ => None,
+                }
+            })
+            .collect();
+        // The derivation itself must not silently yield nothing -- an
+        // ok-on-nothing floor would make this whole test vacuous.
+        assert!(
+            verbs.len() >= 50,
+            "expected the shipped verb vocabulary, derived {} names",
+            verbs.len()
+        );
+
+        // Bounding-policy vocabulary, every family -- not just classification.
+        let policy_words = [
+            "classification",
+            "clearance",
+            "releasability",
+            "compartment",
+            "need-to-know",
+            "unclassified",
+            "confidential",
+            "secret",
+            "top secret",
+            "protected",
+            "official",
+            "deny list",
+            "denylist",
+            "allow list",
+            "allowlist",
+            "permit list",
+            "~/",
+            "/home",
+            "/users",
+            "$home",
+            ".ssh",
+        ];
+
         for (what, text) in [
             ("core-prompt.txt", CORE_PROMPT),
             ("baseline-tools.json", BASELINE_TOOLS_JSON),
         ] {
             let lower = text.to_lowercase();
-            for forbidden in [
-                "fs.read",
-                "fs.write",
-                "fs.delete",
-                "fs.mkdir",
-                "session.prompt",
-                "UNCLASSIFIED",
-                "SECRET",
-                "CONFIDENTIAL",
-                "classification",
-                "clearance",
-                "releasability",
-                "~/",
-                "/home",
-                "/Users",
-                ".ssh",
-                "deny list",
-                "denylist",
-                "allow list",
-                "allowlist",
-                "$home",
-            ] {
-                // Case-insensitive: `SECRET`, `Secret` and `secret` are the
-                // same ruling, and a future edit will not respect my casing.
+            for verb in &verbs {
                 assert!(
-                    !lower.contains(&forbidden.to_lowercase()),
-                    "{what} must not name {forbidden:?} -- see the maintainer rulings in #264"
+                    !lower.contains(&verb.to_lowercase()),
+                    "{what} must not name the kernel verb {verb:?} -- \
+                     tool NAMES only (maintainer ruling, #264)"
+                );
+            }
+            for word in policy_words {
+                assert!(
+                    !lower.contains(word),
+                    "{what} must not name bounding policy ({word:?}) -- \
+                     the prompt is policy-shape-agnostic by ruling (#264)"
                 );
             }
         }

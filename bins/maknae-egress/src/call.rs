@@ -59,88 +59,40 @@ pub async fn fulfil<S: KeySource>(
 ) -> Result<EgressFrameReply, FulfilError> {
     let req = admitted.request();
 
-    // ── #264 critical review round 2: decide the CONTENT question FIRST, with
-    // no secret in hand and before anything is composed.
+    // NOTE on the "no secret in hand" property, which round 2 tested with a
+    // credential source and round 4 made STRUCTURAL: the content judgement is
+    // `handle::decide`'s, and `decide` runs before `fulfil` is called at all.
+    // `fulfil` is the only place a credential is read, so a frame carrying
+    // nothing to send cannot reach a Vault read — not because a test watches
+    // the ordering, but because there is no ordering to get wrong.
     //
-    // Round 1 guarded `messages.is_empty()`, which closed the image-only frame
-    // and left the CLASS open: at that point NOTHING in the tree checked that
-    // a `Text` block bears any text. `Text("")` and `Text("   ")` passed the
-    // kernel's `admitted_blocks` pre-gate, passed
-    // `egress_frame_request_is_acceptable` (which tests only
-    // `!content.is_empty()` on the VEC), mapped to a NON-empty `messages`, and
-    // would then have been composed with the preamble into a well-formed
-    // request the provider answers from the system prompt alone. **Round 3
-    // closed it at the kernel too** (`maknae_kernel::egress::admitted_blocks`
-    // now refuses a text-less prompt at the PDP, before the write-ahead
-    // intent), so that sentence is history and this guard is the second
-    // layer.
-    // That is `maknae-kernel/src/egress.rs`'s stated property broken on a path
-    // that needs no kernel bug: "an empty prompt is refused too, so 'sent
-    // nothing' cannot masquerade as a turn."
+    // EVERY `Text` block, verbatim and in order. Do NOT filter blanks here:
+    // the kernel's `content_measure` digests every `Text` block into the
+    // write-ahead intent record, so skipping one would make the trail attest
+    // bytes that never left the process — measured 6 for
+    // `[Text("  "), Text("real")]` and sent 4 (#264 review round 4, a
+    // regression this branch introduced in round 2 and three rounds missed).
+    // Trail == wire is the property.
     //
-    // THE PREAMBLE MUST NEVER BE THE WHOLE REQUEST. So:
-    //   1. a NON-TEXT block is a named refusal, not a silent drop. Cooky is
-    //      text-only on the prompt leg and the kernel refuses non-text long
-    //      before here, so one arriving IS a kernel bug -- and `handle.rs`'s
-    //      convention is that a kernel bug becomes a named refusal. Round 1
-    //      still dropped them silently on a MIXED frame, sending the remainder
-    //      and letting the model answer a truncated prompt.
-    //   2. content that is empty or whitespace-only carries nothing to send.
-    //
-    // ROUND 3 CORRECTION. This comment previously said the audit imprecision
-    // below was "pre-existing and shared with every `handle::Refusal` path".
-    // That was wrong: every pre-existing refusal path is a kernel bug or a
-    // registry misconfiguration, and none is reachable from a well-formed
-    // prompt, so this guard was the FIRST pre-send deputy refusal a
-    // kernel-admitted frame could reach. It no longer is --
-    // `maknae_kernel::egress::admitted_blocks` now refuses a text-less prompt
-    // at the PDP, before the write-ahead intent, with an accurate `deny`
-    // record. So this guard is DEFENCE IN DEPTH against a kernel bug, which is
-    // exactly what `handle.rs`'s convention covers.
-    //
-    // The imprecision that remains, named rather than inherited silently: the
-    // deputy's only signal is a closed connection (`serve.rs`), which the
-    // kernel records as `SendOutcome::OutcomeUnknown` -- documented as "the
-    // provider may have received the prompt" -- and that is false for a frame
-    // that was never sent. Reaching it requires a kernel bug; making the
-    // signal expressive is not this issue's.
-    let mut messages = Vec::with_capacity(req.content.len());
-    for b in &req.content {
-        match b {
-            maknae_proto::ContentBlock::Text { text } => {
-                if text.0.trim().is_empty() {
-                    continue;
-                }
-                messages.push(maknae_llm::ChatMessage {
-                    role: "user".to_string(),
-                    content: text.0.to_string(),
-                });
-            }
-            other => {
-                // TAXONOMY NOTE (#264 round 3): this rides
-                // `FulfilError::Provider`, which `serve.rs` maps to
-                // `ServeError::Fulfil` -- documented as "the deputy was
-                // WILLING, and something downstream did not work". A pre-send
-                // refusal is not that. The variant is reused deliberately
-                // rather than adding a lane: reaching here requires a kernel
-                // bug (the PDP refuses non-text on the prompt leg), the wire
-                // signal to the kernel is a closed connection either way, and
-                // the discriminator available to a reader is the MESSAGE, not
-                // the variant -- which is equally true of a connection failure,
-                // since `chat_completion`'s `map_err` produces the same
-                // variant. Both doc comments carry a dated pointer here.
-                return Err(FulfilError::Provider(format!(
-                    "frame carried a non-text {} block the prompt leg cannot send",
-                    other.kind()
-                )));
-            }
-        }
-    }
-    if messages.is_empty() {
-        return Err(FulfilError::Provider(
-            "frame carried no admissible content".into(),
-        ));
-    }
+    // The CONTENT judgement is `handle::decide`'s (pure, directly testable,
+    // and `Refusal` is the right taxonomy): it refuses a non-text block and a
+    // prompt with no text to send, so `Admitted` — which has no public
+    // constructor — is proof that neither case reaches here. That is why this
+    // is a straight map with no re-judgement, and why the preamble can never
+    // be the whole request.
+    let messages: Vec<maknae_llm::ChatMessage> = req
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            maknae_proto::ContentBlock::Text { text } => Some(maknae_llm::ChatMessage {
+                role: "user".to_string(),
+                content: text.0.to_string(),
+            }),
+            // Unreachable through `decide`; kept so this mapping cannot start
+            // silently dropping content if the admission ever loosens.
+            _ => None,
+        })
+        .collect();
 
     // #308: the mount comes from the deputy's OWN bounds document, the path and
     // the field from the frame. An explicit parameter rather than a field on
@@ -195,18 +147,6 @@ mod tests {
     impl KeySource for Denied {
         async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
             Err(format!("permission denied on {p}"))
-        }
-    }
-
-    /// A source that must never be reached. #264 round 3: a frame carrying
-    /// nothing to send must be refused with NO secret in hand, and a source
-    /// that returns `Err` cannot prove that -- an implementation that read the
-    /// key and discarded the error would pass. This one cannot be read
-    /// silently.
-    struct Panics;
-    impl KeySource for Panics {
-        async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
-            panic!("the credential must not be read before the content is judged (path {p})");
         }
     }
 
@@ -304,12 +244,15 @@ mod tests {
                     .lines()
                     .find_map(|l| l.strip_prefix("content-length:"))
                     .and_then(|v| v.trim().parse::<usize>().ok());
-                match want {
-                    Some(w) if seen.len() - (brk + 4) >= w => break,
-                    // No Content-Length: read to EOF rather than blocking
-                    // forever on a client that is waiting for our response.
-                    None => break,
-                    _ => {}
+                // `None` does NOT break: it keeps reading until the peer
+                // half-closes (the `n == 0` arm above). An earlier version
+                // broke here while its comment claimed it "reads to EOF" — it
+                // did the opposite, returning whatever one read delivered.
+                // Unreachable in practice: `reqwest`'s `.json()` serialises
+                // with `serde_json::to_vec` into a sized body, so
+                // Content-Length is always set.
+                if want.is_some_and(|w| seen.len() - (brk + 4) >= w) {
+                    break;
                 }
             }
             let seen = String::from_utf8_lossy(&seen).to_string();
@@ -445,80 +388,45 @@ mod tests {
         }
     }
 
-    /// #264: the preamble must never be the WHOLE request.
+    /// #264 review round 4: TRAIL == WIRE.
     ///
-    /// Frame admission requires a non-empty `content`, not a `Text` block, so
-    /// an image-only frame is admitted and every block is dropped by the
-    /// mapping. Composing a preamble onto that would produce a well-formed
-    /// request the provider answers from the system prompt alone -- "sent
-    /// nothing" masquerading as a turn, which `maknae-kernel/src/egress.rs`
-    /// says cannot happen. It is refused here, and no provider is contacted.
+    /// The kernel's `content_measure` digests EVERY `Text` block into the
+    /// write-ahead intent record. Round 2 skipped blank blocks in the deputy,
+    /// so `[Text("  "), Text("real")]` was measured as 6 bytes and sent as 4 —
+    /// the trail attested bytes that never left. Both blocks must ride.
+    ///
+    /// (The "nothing to send" shapes are refused by `handle::decide` before an
+    /// `Admitted` exists, so they cannot reach `fulfil` at all; that class is
+    /// tested in `handle.rs`, where the judgement lives.)
     #[tokio::test]
-    async fn no_frame_shape_can_make_the_preamble_the_whole_request() {
+    async fn every_text_block_rides_verbatim_so_the_trail_matches_the_wire() {
         fips();
+        let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+        let mut f = frame_to(url);
         let text = |t: &str| maknae_proto::ContentBlock::Text {
             text: maknae_proto::SecretText(zeroize::Zeroizing::new(t.into())),
         };
-        let image = || maknae_proto::ContentBlock::Image {
-            data: "AAAA".into(),
-            mime_type: "image/png".into(),
-        };
-        // Round 1 fixed only the first of these. The rest are the CLASS: a
-        // `Text` block bearing no text was checked nowhere in the tree when
-        // round 1 shipped (the kernel now refuses it as well, at
-        // `admitted_blocks` — this test holds the deputy's own layer), and a
-        // mixed frame previously dropped its non-text block silently and sent
-        // the remainder, letting the model answer a truncated prompt.
-        let cases: Vec<(&str, Vec<maknae_proto::ContentBlock>, &str)> = vec![
-            ("image only", vec![image()], "non-text"),
-            ("empty text", vec![text("")], "no admissible content"),
-            (
-                "whitespace only",
-                vec![text("   \n\t ")],
-                "no admissible content",
-            ),
-            ("text + image", vec![text("real"), image()], "non-text"),
-            ("image + text", vec![image(), text("real")], "non-text"),
-            (
-                "several blank texts",
-                vec![text(""), text("  ")],
-                "no admissible content",
-            ),
-        ];
-        for (name, content, needle) in cases {
-            let mut f = frame();
-            f.content = content;
-            let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-            // A credential source that genuinely PANICS if read. Round 2
-            // used `Denied` while the comment claimed a panic; `Denied`
-            // returns `Err`, so the ordering was caught only by the
-            // `Credential` match arm below. A panicking source is strictly
-            // stronger: it also catches a read whose error is swallowed.
-            let mut keys = KeyCache::new(Panics);
-            let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
-                .await
-                .unwrap_err();
-            match &e {
-                FulfilError::Provider(m) => assert!(
-                    m.contains(needle),
-                    "{name}: expected a refusal mentioning {needle:?}, got {m:?}"
-                ),
-                FulfilError::Credential(m) => panic!(
-                    "{name}: the credential was read BEFORE the content was \
-                     judged -- a frame with nothing to send must never pull the \
-                     provider key: {m}"
-                ),
-            }
-            // NOT a key-leak assertion here: with a source that never yields
-            // a key there is nothing to leak, so such an assertion could not
-            // fail. The leak property is held by
-            // `a_provider_failure_is_a_named_refusal_that_never_echoes_the_key`.
-            // What this asserts is that the refusal NAMES its reason.
-            assert!(
-                !e.to_string().is_empty(),
-                "{name}: a refusal must carry a reason"
-            );
+        f.content = vec![text("   "), text("sentinel-alpha"), text("sentinel-omega")];
+        // Admitted: one content-bearing block is enough, and the blank is NOT
+        // the deputy's to drop.
+        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
+        let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
+        let _ = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            .await
+            .unwrap();
+
+        let sent = h.await.unwrap();
+        for needle in ["sentinel-alpha", "sentinel-omega"] {
+            assert!(sent.contains(needle), "{needle} must ride; sent:\n{sent}");
         }
+        // Three user messages plus the one system preamble: the blank rode too.
+        // Counting `"role":"user"` is what goes red if a filter comes back.
+        assert_eq!(
+            sent.matches(r#""role":"user""#).count(),
+            3,
+            "every Text block must ride, blanks included; sent:\n{sent}"
+        );
+        assert_eq!(sent.matches(r#""role":"system""#).count(), 1);
     }
 
     /// A provider failure is a NAMED refusal the kernel reads, and the
