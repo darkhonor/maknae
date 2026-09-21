@@ -53,16 +53,31 @@ jobs:
 
       - name: Resolve the package version (REFUSE rather than guess)
         id: ver
+        # NO `${{ }}` EXPRESSION APPEARS IN `run:` ANYWHERE IN THIS FILE, and that
+        # is a security property, not a style choice. GitHub substitutes an
+        # expression into the shell SOURCE before the shell parses it, so
+        # `v='${{ inputs.version }}'` with an input of `1.2.3'; <command>; #`
+        # closes the quote and executes <command> on the release runner. The regex
+        # below cannot prevent it: the payload runs while that line is evaluated,
+        # BEFORE any validation. Found in blind review of PR #338 — this file
+        # introduced the pattern; ci.yml has none.
+        #
+        # Values therefore arrive through `env:`, where the shell reads them as
+        # ordinary variables and never as program text.
+        env:
+          RAW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          case "${{ github.event_name }}" in
-            workflow_dispatch) v='${{ inputs.version }}' ;;
+          # $GITHUB_EVENT_NAME, not an expression, for the same reason.
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch) v="$RAW_VERSION" ;;
             push)              v="${GITHUB_REF_NAME#v}" ;;
-            *) echo "FAIL: unexpected event ${{ github.event_name }}"; exit 1 ;;
+            *) echo "FAIL: unexpected event $GITHUB_EVENT_NAME"; exit 1 ;;
           esac
           # build-pkg.sh applies this same expression and exits 2 on a mismatch.
           # Checking here too means a bad tag fails in one line instead of after a
-          # ~7 minute build.
+          # ~7 minute build. It is a CORRECTNESS check; the injection defence is
+          # the `env:` indirection above, never this.
           printf '%s' "$v" | grep -qE '^[0-9][0-9A-Za-z.~+_-]*$' \
             || { echo "FAIL: invalid version '$v' (allowed: ^[0-9][0-9A-Za-z.~+_-]\$)"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
@@ -112,7 +127,13 @@ jobs:
       # plugs in here by populating the secrets and adding a keychain-import step;
       # it cannot silently half-apply.
       - name: Build the .pkg (the payload gate runs inside build-pkg.sh)
-        run: ./packaging/macos/build-pkg.sh "${{ steps.ver.outputs.version }}"
+        # Through `env:` as well. This value HAS been regex-validated above, so it
+        # carries no shell metacharacter — but routing it the same way removes the
+        # need for a reader to verify that ordering argument at all, and keeps the
+        # file's "no expression in run:" property absolute rather than case-by-case.
+        env:
+          PKG_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./packaging/macos/build-pkg.sh "$PKG_VERSION"
 
       - name: smoke.sh phase 1 — the EXACT-payload BOM assertion (#332)
         # A release that fails phase 1 must not publish. Not piped: a `| tail`
