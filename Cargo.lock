@@ -1127,6 +1127,7 @@ dependencies = [
 name = "maknae-kernel"
 version = "0.0.0"
 dependencies = [
+ "maknae-agent",
  "maknae-audit",
  "maknae-audit-append",
  "maknae-authz-basic",

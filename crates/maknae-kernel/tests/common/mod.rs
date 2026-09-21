@@ -218,6 +218,14 @@ impl Fixture {
     }
 
     pub fn with_policy(tag: &str, allow: &str, policy_tail: &str) -> Self {
+        Self::with_rules(tag, &[allow], &[], policy_tail)
+    }
+    /// `allows` are capability names granted over `~/**` (the shape every
+    /// existing caller used); `denies` are FULL rule strings as the shipped
+    /// policy writes them (`packaging/common/authz.yaml`), e.g. `Read(~/.ssh/**)`.
+    /// The asymmetry is deliberate: it keeps `with_policy`'s generated YAML
+    /// byte-identical to what it produced before, for every existing caller.
+    pub fn with_rules(tag: &str, allows: &[&str], denies: &[&str], policy_tail: &str) -> Self {
         let root = std::env::temp_dir().join(format!("mutation_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -227,7 +235,22 @@ impl Fixture {
             uid: nix::unistd::geteuid().as_raw(),
             home: root.clone(),
         };
-        let policy = format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}(~/**)\"\n  deny: []\nbindings:\n  user: [\"root\"]\n{policy_tail}");
+        let allow_lines: String = allows
+            .iter()
+            .map(|a| format!("    - \"{a}(~/**)\"\n"))
+            .collect();
+        let deny_block = if denies.is_empty() {
+            "  deny: []\n".to_string()
+        } else {
+            format!(
+                "  deny:\n{}",
+                denies
+                    .iter()
+                    .map(|d| format!("    - \"{d}\"\n"))
+                    .collect::<String>()
+            )
+        };
+        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"root\"]\n{policy_tail}");
         std::fs::write(root.join("authz.yaml"), policy).unwrap();
         std::fs::set_permissions(
             root.join("authz.yaml"),
@@ -458,7 +481,7 @@ impl Fixture {
     /// a truncated frame, or an undecodable frame each PANIC, so a test that
     /// asserts `is_none()` proves frameless closure and not merely "no
     /// complete frame arrived".
-    async fn exchange(
+    pub async fn exchange(
         mut client: tokio::io::DuplexStream,
         task: tokio::task::JoinHandle<()>,
         body: &[u8],
