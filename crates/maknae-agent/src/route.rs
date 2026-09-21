@@ -149,6 +149,12 @@ mod tests {
             route(&call("write_file", r#"{"path":"./a","content":"x"}"#)),
             Err(RouteError::RelativePath)
         ));
+        // R22: a home-relative path is refused, never expanded — this crate has
+        // no environment to expand `~` against, and must never acquire one.
+        assert!(matches!(
+            route(&call("read_file", r#"{"path":"~/foo"}"#)),
+            Err(RouteError::RelativePath)
+        ));
     }
     #[test]
     fn an_unknown_tool_fails_closed_without_guessing() {
@@ -188,6 +194,9 @@ mod tests {
         .unwrap();
         let d = format!("{r:?}");
         assert!(!d.contains("SECRET-BYTES"), "{d}");
+        // R22: a `#[derive(Debug)]` substitution prints `Zeroizing([...])`, so the
+        // absence assertion fails on its own — not only the `<12 bytes>` marker.
+        assert!(!d.contains("Zeroizing"), "{d}");
         assert!(d.contains("<12 bytes>"), "{d}");
         // The Read arm of the hand-written impl is a T1 region too (measured:
         // without this, route.rs sits at 88% against the 95 floor).

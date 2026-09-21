@@ -5,5 +5,6 @@
 //! plane client and the kernel's tests implement over the in-process fixture.
 //! Its dependency surface cannot open a file or a socket.
 pub mod plane;
+pub mod render;
 pub mod route;
 pub mod transcript;

@@ -249,6 +249,7 @@ files = [
   # it retries a write the kernel may have half-applied. No I/O in the crate.
   "crates/maknae-agent/src/transcript.rs",
   "crates/maknae-agent/src/route.rs",
+  "crates/maknae-agent/src/render.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
