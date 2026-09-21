@@ -659,26 +659,44 @@ mod tests {
     #[test]
     fn the_artifacts_name_no_kernel_verb_and_no_bounding_policy() {
         const MANIFEST: &str = include_str!("../../../ci/gates/verb-manifest.txt");
+        // `action` AND `kernel-action` (`kernel.contain`,
+        // `kernel.session.terminate`). Round 5 caught the derivation covering
+        // only `action`, leaving the two kernel-actions uncovered while this
+        // docstring claimed the whole vocabulary.
+        //
+        // `capability` rows are DELIBERATELY excluded, and this is the reason
+        // rather than an oversight: they are the bare words `Read` and
+        // `Write`, which appear legitimately in both artifacts ("Read the file
+        // first if you need its current contents", "A write comes back
+        // applied"). Matching them would fail immediately and for the wrong
+        // reason. `grantable` rows are the same names as `action` rows.
         let verbs: Vec<&str> = MANIFEST
             .lines()
             .filter(|l| !l.starts_with('#'))
             .filter_map(|l| {
                 let mut f = l.split('\t');
                 match (f.next(), f.next()) {
-                    (Some("action"), Some(name)) if !name.is_empty() => Some(name),
+                    (Some("action" | "kernel-action"), Some(name)) if !name.is_empty() => {
+                        Some(name)
+                    }
                     _ => None,
                 }
             })
             .collect();
         // The derivation itself must not silently yield nothing -- an
         // ok-on-nothing floor would make this whole test vacuous.
+        // 59 today (57 `action` + 2 `kernel-action`); the floor leaves
+        // headroom for retirement while refusing an ok-on-nothing derivation,
+        // which would make this whole test vacuous.
         assert!(
             verbs.len() >= 50,
             "expected the shipped verb vocabulary, derived {} names",
             verbs.len()
         );
 
-        // Bounding-policy vocabulary, every family -- not just classification.
+        // Bounding-policy vocabulary, every FAMILY -- not just classification,
+        // because a HomeLab has none and an enterprise may bound activity by
+        // an InfoSec policy of another form entirely.
         let policy_words = [
             "classification",
             "clearance",
@@ -688,7 +706,6 @@ mod tests {
             "unclassified",
             "confidential",
             "secret",
-            "top secret",
             "protected",
             "official",
             "deny list",
@@ -696,12 +713,10 @@ mod tests {
             "allow list",
             "allowlist",
             "permit list",
-            "~/",
-            "/home",
-            "/users",
-            "$home",
-            ".ssh",
         ];
+        // Paths are a separate class with its own failure message: naming one
+        // is stale-prone rather than policy-shaped.
+        let paths = ["~/", "/home", "/users", "$home", ".ssh"];
 
         for (what, text) in [
             ("core-prompt.txt", CORE_PROMPT),
@@ -715,11 +730,21 @@ mod tests {
                      tool NAMES only (maintainer ruling, #264)"
                 );
             }
+            // Needles lowered too: round 5 caught the comparison lowering only
+            // the HAYSTACK, so an uppercase entry added to either list later
+            // would have been silently vacuous.
             for word in policy_words {
                 assert!(
-                    !lower.contains(word),
+                    !lower.contains(&word.to_lowercase()),
                     "{what} must not name bounding policy ({word:?}) -- \
                      the prompt is policy-shape-agnostic by ruling (#264)"
+                );
+            }
+            for path in paths {
+                assert!(
+                    !lower.contains(&path.to_lowercase()),
+                    "{what} must not name a filesystem path ({path:?}) -- \
+                     the model learns the boundary by hitting it (#264)"
                 );
             }
         }

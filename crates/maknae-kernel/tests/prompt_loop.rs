@@ -625,6 +625,39 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
             },
             "no content",
         ),
+        // #264 review round 5: the blank-TEXT shapes, on the PRODUCTION chain.
+        // The justification for placing the content-bearing check in
+        // `admitted_blocks` is that a refusal produces an accurate `deny`
+        // record BEFORE the write-ahead intent — and that property lives in
+        // this pre-gate, not in the predicate. A `handle::decide` test in the
+        // deputy cannot prove it: different binary, no `run.rs`, no audit
+        // record, no PDP counter.
+        //
+        // Load-bearing since #264 prepends a trusted preamble: a prompt with
+        // nothing in it would otherwise reach the provider as a well-formed
+        // request answered from the system prompt alone — "sent nothing"
+        // masquerading as a turn.
+        (
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: vec![text("")],
+            },
+            "no text to send",
+        ),
+        (
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: vec![text("   \n\t ")],
+            },
+            "no text to send",
+        ),
+        (
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                content: vec![text(""), text("  ")],
+            },
+            "no text to send",
+        ),
     ] {
         let records = Records::new(0);
         let eg = Arc::new(Recording::default());
@@ -694,6 +727,12 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
         Verb::SessionPrompt {
             conversation: "c".into(),
             content: vec![],
+        },
+        // #264 round 5: a prompt bearing no text must also cost ZERO PDP
+        // decisions — it is refused by the operand pre-gate, not by policy.
+        Verb::SessionPrompt {
+            conversation: "c".into(),
+            content: vec![text("   ")],
         },
     ] {
         let counting = Arc::new(Counting {

@@ -80,19 +80,33 @@ pub async fn fulfil<S: KeySource>(
     // constructor — is proof that neither case reaches here. That is why this
     // is a straight map with no re-judgement, and why the preamble can never
     // be the whole request.
-    let messages: Vec<maknae_llm::ChatMessage> = req
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            maknae_proto::ContentBlock::Text { text } => Some(maknae_llm::ChatMessage {
+    // FAIL CLOSED, never `filter_map`. `_ => None` would be a SILENT DROP —
+    // exactly the defect round 2 fixed at the refusal and round 4 reintroduced
+    // here: if #229 ever loosens admission to permit a non-text block, a
+    // dropped block means the model answers a TRUNCATED prompt while the
+    // kernel's `content_measure` still attests the full content.
+    //
+    // This arm is UNREACHABLE today and therefore untested and unmutatable:
+    // `decide` refuses non-text, and `Admitted` has no public constructor, so
+    // no non-text frame can reach `fulfil`. Reinstating `_ => None` keeps the
+    // suite green for exactly that reason — measured, not assumed. It is
+    // written as a refusal rather than a drop so that the day admission
+    // loosens, the failure is loud instead of a truncated prompt.
+    let mut messages: Vec<maknae_llm::ChatMessage> = Vec::with_capacity(req.content.len());
+    for b in &req.content {
+        match b {
+            maknae_proto::ContentBlock::Text { text } => messages.push(maknae_llm::ChatMessage {
                 role: "user".to_string(),
                 content: text.0.to_string(),
             }),
-            // Unreachable through `decide`; kept so this mapping cannot start
-            // silently dropping content if the admission ever loosens.
-            _ => None,
-        })
-        .collect();
+            other => {
+                return Err(FulfilError::Provider(format!(
+                    "frame carried a non-text {} block the prompt leg cannot send",
+                    other.kind()
+                )));
+            }
+        }
+    }
 
     // #308: the mount comes from the deputy's OWN bounds document, the path and
     // the field from the frame. An explicit parameter rather than a field on
