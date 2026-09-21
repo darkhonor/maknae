@@ -208,9 +208,10 @@ MACOS_TRANSPORT
 # serialises each attribute as an AppleDouble `._name` sibling INTO the payload,
 # where it becomes a real installed file that uninstall.sh knows nothing about.
 #
-# SO THIS SCRIPT IS EXPECTED TO REFUSE WHEN RUN LOCALLY. Packaging happens in the
-# `darwin-package` job in .github/workflows/ci.yml, which builds ad-hoc (no
-# secrets) and publishes the .pkg as an artifact. See
+# SO THIS SCRIPT IS EXPECTED TO REFUSE WHEN RUN LOCALLY. Packaging happens in
+# .github/workflows/release.yml — on a `v*` tag, or run by hand with a version —
+# which publishes the .pkg as an artifact. Split out of ci.yml 2026-09-21: there
+# is no reason to build a package outside a release. See
 # ci/gates/payload-xattr-clean.sh for the full measurement trail.
 #
 # The gate REFUSES rather than warns: a package shipping `._` entries into

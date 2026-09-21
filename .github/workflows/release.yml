@@ -1,0 +1,128 @@
+# Release packaging for macOS. SPLIT OUT OF ci.yml 2026-09-21 by maintainer
+# direction: there is no reason to build a .pkg outside a release.
+#
+# WHY PACKAGING HAPPENS HERE AND NOT ON A DEV HOST (#332). `pkgbuild` serialises
+# an AppleDouble `._name` sibling INTO the payload for every entry carrying an
+# extended attribute, and those become real installed files under /usr/local that
+# uninstall.sh knows nothing about. macOS attaches com.apple.provenance to
+# essentially everything an interactive session writes, and it CANNOT be removed:
+# measured at the syscall, removexattr(2) returns rc=0/errno=0 and leaves the
+# attribute in place, so no exit status anywhere can detect the failure.
+#
+# Measured on a SIP-enabled host, in a shell whose lineage is
+# Terminal.app -> login -> -zsh: touch, `>`, mkdir, install -d and mktemp -d ALL
+# tag, in EVERY location tried. Measured on a macos-26 runner: every write clean,
+# and the BOM comes out as exactly the intended path set. The material difference
+# is that the runner reports SIP disabled — consistent with the attribute being
+# SIP-protected, though causation is NOT proven.
+#
+# ci/gates/payload-xattr-clean.sh therefore RUNS ANYWAY inside build-pkg.sh rather
+# than being assumed: the runner image's SIP posture is GitHub's to change, and if
+# it ever does, this workflow must refuse rather than publish a package that
+# installs AppleDouble files.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version, e.g. 0.1.0 (no leading v)'
+        required: true
+        type: string
+# Least privilege, matching ci.yml: this workflow does NOT write to the repo. The
+# package is published as a build ARTIFACT. Attaching it to a GitHub Release would
+# require `contents: write`, which is a posture change and a maintainer decision,
+# not something to take by default.
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  macos-package:
+    # Pinned to a NAMED image, deliberately not macos-latest: the runner is part
+    # of the evidence for #332, so it must not re-point underneath a release.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      CARGO_AUDITABLE_VERSION: "0.7.6"
+      RUST_AUDIT_INFO_VERSION: "0.5.4"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the package version (REFUSE rather than guess)
+        id: ver
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            workflow_dispatch) v='${{ inputs.version }}' ;;
+            push)              v="${GITHUB_REF_NAME#v}" ;;
+            *) echo "FAIL: unexpected event ${{ github.event_name }}"; exit 1 ;;
+          esac
+          # build-pkg.sh applies this same expression and exits 2 on a mismatch.
+          # Checking here too means a bad tag fails in one line instead of after a
+          # ~7 minute build.
+          printf '%s' "$v" | grep -qE '^[0-9][0-9A-Za-z.~+_-]*$' \
+            || { echo "FAIL: invalid version '$v' (allowed: ^[0-9][0-9A-Za-z.~+_-]\$)"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "packaging version: $v"
+
+      - name: Install toolchain (pinned)
+        run: rustup show
+      # Same pin and reason as ci.yml's darwin lanes: aws-lc-fips-sys drives
+      # aws-lc's cmake/go.cmake, the image ships cmake but no Go, and `stable`
+      # would download whatever that name meant on the day.
+      - name: Install Go (aws-lc-fips-sys builds the FIPS module with cmake + go)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          check-latest: false
+          cache: false
+      - name: Cache packaging-tool executables
+        id: pkg-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-auditable
+            ~/.cargo/bin/rust-audit-info
+          key: pkg-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-auditable-${{ env.CARGO_AUDITABLE_VERSION }}-audit-info-${{ env.RUST_AUDIT_INFO_VERSION }}
+      - name: Install packaging tooling (build-pkg.sh REFUSES without rust-audit-info)
+        if: steps.pkg-tools-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install cargo-auditable --version "$CARGO_AUDITABLE_VERSION" --locked
+          cargo install rust-audit-info --version "$RUST_AUDIT_INFO_VERSION" --locked
+      - name: Ensure smoke.sh's required tooling is present (it REFUSES without it)
+        run: |
+          set -euo pipefail
+          # smoke.sh phase 1 exits 2 rather than skipping when a tool is absent.
+          # MEASURED 2026-09-21: shellcheck is NOT preinstalled on macos-26.
+          for t in shellcheck xmllint rust-audit-info; do
+            command -v "$t" >/dev/null 2>&1 && { echo "present: $t"; continue; }
+            case "$t" in
+              shellcheck) brew install shellcheck ;;
+              *) echo "FAIL: $t missing and this workflow cannot provide it"; exit 1 ;;
+            esac
+          done
+
+      # SIGNING IS DECLARED, NEVER INFERRED (#227 item 3). With none of these set,
+      # build-pkg.sh signs AD-HOC — which is what happens today, because the
+      # repository holds no signing secrets. A named-but-absent identity REFUSES
+      # rather than falling back, so a future Developer ID + notarization setup
+      # plugs in here by populating the secrets and adding a keychain-import step;
+      # it cannot silently half-apply.
+      - name: Build the .pkg (the payload gate runs inside build-pkg.sh)
+        run: ./packaging/macos/build-pkg.sh "${{ steps.ver.outputs.version }}"
+
+      - name: smoke.sh phase 1 — the EXACT-payload BOM assertion (#332)
+        # A release that fails phase 1 must not publish. Not piped: a `| tail`
+        # here would read tail's exit status, not smoke's.
+        run: ./packaging/macos/smoke.sh phase1
+
+      - name: Publish the package (phase 2 needs root on a real machine)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: maknae-macos-${{ steps.ver.outputs.version }}
+          path: dist/*.pkg
+          if-no-files-found: error
+          retention-days: 90
