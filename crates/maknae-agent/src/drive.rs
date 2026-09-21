@@ -185,6 +185,12 @@ mod tests {
             _ => panic!("not a tool turn: {t:?}"),
         }
     }
+    fn tool_call_id(t: &Turn) -> String {
+        match t {
+            Turn::Tool { call_id, .. } => call_id.clone(),
+            _ => panic!("not a tool turn: {t:?}"),
+        }
+    }
 
     #[test]
     fn a_text_only_reply_is_the_answer() {
@@ -292,6 +298,45 @@ mod tests {
         assert_eq!(t.turns().len(), 6, "user, asst, tool, asst, tool, asst");
         assert!(tool_text(&t.turns()[2]).starts_with("file body"));
         assert!(tool_text(&t.turns()[4]).starts_with("applied"));
+    }
+    #[tokio::test]
+    async fn each_tool_result_answers_its_own_call_id_in_call_order() {
+        // Two calls in ONE step (cap 2), so the correlation is observable:
+        // every other row has a single call, where answering `calls[0]` — or
+        // the empty string — is indistinguishable from answering `call`.
+        // cargo-mutants does not substitute call arguments, so the 0-missed
+        // run does not cover this; only this row does.
+        let mut p = scripted(vec![
+            PromptReply {
+                blocks: vec![],
+                tool_calls: vec![
+                    call("c1", "read_file", r#"{"path":"/w/a"}"#),
+                    call("c2", "read_file", r#"{"path":"/w/b"}"#),
+                ],
+            },
+            PromptReply {
+                blocks: vec![text("both read")],
+                tool_calls: vec![],
+            },
+        ]);
+        let mut t = Transcript::new("conv", "read both");
+        let out = drive(&mut p, &mut t, &budget()).await;
+        assert_eq!(out.answer.as_deref(), Some("both read"));
+        assert_eq!(p.reads, vec!["/w/a", "/w/b"], "executed in call order");
+        assert_eq!(t.turns().len(), 5, "user, asst, tool c1, tool c2, asst");
+        assert_eq!(
+            [tool_call_id(&t.turns()[2]), tool_call_id(&t.turns()[3])],
+            ["c1".to_string(), "c2".to_string()],
+            "each tool turn answers ITS OWN call_id, in call order"
+        );
+        // Both results are rendered with the SAME live count: steps-remaining
+        // is per STEP, not per call, and one step spent one step.
+        for i in [2, 3] {
+            assert!(
+                tool_text(&t.turns()[i]).ends_with("steps remaining: 3"),
+                "{i}"
+            );
+        }
     }
     #[tokio::test]
     async fn a_refused_read_reaches_the_model_as_not_authorized_and_the_loop_continues() {

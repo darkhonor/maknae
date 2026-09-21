@@ -61,9 +61,14 @@ mod tests {
         );
         assert_eq!(render(&ToolOutcome::WriteUnknown, 1),
             "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 1");
-        // R24: renderer-only, but pinned to its LITERAL text and not to the
-        // const, so swapping this arm to NOT_AUTHORIZED goes red. A transport
-        // fault rendered as a refusal would tell the model the kernel decided.
+    }
+    #[test]
+    fn the_renderer_only_strings_are_exact() {
+        // NOT promised by the compiled prompt (see the module doc): these
+        // describe transport and argument faults, not decisions. R24 pins the
+        // text LITERALLY and not via the const, so swapping the arm to
+        // NOT_AUTHORIZED goes red — a transport fault rendered as a refusal
+        // would tell the model the kernel decided.
         assert_eq!(
             render(&ToolOutcome::ReadUnavailable, 4),
             "read unavailable — do not retry\n\nsteps remaining: 4"
