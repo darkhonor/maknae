@@ -250,6 +250,7 @@ files = [
   "crates/maknae-agent/src/transcript.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
+  "crates/maknae-agent/src/drive.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set

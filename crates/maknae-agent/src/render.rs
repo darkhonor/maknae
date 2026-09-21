@@ -61,6 +61,13 @@ mod tests {
         );
         assert_eq!(render(&ToolOutcome::WriteUnknown, 1),
             "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 1");
+        // R24: renderer-only, but pinned to its LITERAL text and not to the
+        // const, so swapping this arm to NOT_AUTHORIZED goes red. A transport
+        // fault rendered as a refusal would tell the model the kernel decided.
+        assert_eq!(
+            render(&ToolOutcome::ReadUnavailable, 4),
+            "read unavailable — do not retry\n\nsteps remaining: 4"
+        );
     }
     #[test]
     fn a_read_result_is_the_text_and_binary_is_described_not_lossily_converted() {
