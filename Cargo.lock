@@ -1043,6 +1043,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-agent"
+version = "0.0.0"
+dependencies = [
+ "maknae-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "maknae-audit"
 version = "0.0.0"
 
