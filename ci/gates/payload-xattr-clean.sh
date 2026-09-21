@@ -161,13 +161,13 @@ if [ "$fail" -ne 0 ]; then
   THIS IS EXPECTED ON AN INTERACTIVE macOS HOST and is not something you can fix
   locally. Every interactive session measured attaches it to everything it
   writes, in every location, Terminal.app included. Packaging therefore happens
-  in CI:
+  in the RELEASE workflow:
 
-      the `darwin-package` job in .github/workflows/ci.yml
+      .github/workflows/release.yml  (tag `v*`, or run it by hand with a version)
 
-  It builds the .pkg ad-hoc (NO secrets required) and runs smoke.sh phase 1,
-  publishing the package as a build artifact. Download that artifact if you need
-  a .pkg to install or to run phase 2 against.
+  It builds the .pkg and runs smoke.sh phase 1, publishing the package as a build
+  artifact. Download that artifact if you need a .pkg to install or to run
+  phase 2 against.
 
   If you are seeing this IN CI, do not work around it: the runner has started
   tagging writes, the packaging context is no longer clean, and a package built
