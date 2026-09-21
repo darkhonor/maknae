@@ -257,9 +257,14 @@ const BASELINE_TOOLS_JSON: &str = include_str!("../prompt/baseline-tools.json");
 /// not in the caller, which would weld the composition to one vendor's message
 /// model.
 ///
-/// The client cannot displace it: egress builds every inbound block with
-/// `role: "user"` unconditionally, so a client has no way to emit a system
-/// message at all. Non-omittable is not the same as prevailing -- a client may
+/// The client cannot displace it. *(Corrected 2026-09-22, #241: this said
+/// "egress builds every inbound block with `role: "user"` unconditionally", and
+/// that mechanism is gone — the deputy now maps each `Turn` to its own
+/// provider role. The conclusion is unchanged and in fact stronger: `Turn` has
+/// no `System` variant at all, so a system message cannot be expressed on the
+/// wire, and the preamble is the only system message. It is a fact of the type
+/// rather than of a mapping that could be changed.)* Non-omittable is not the
+/// same as prevailing -- a client may
 /// still append contradicting text, and models weight recency. This is an
 /// integrity control, never an injection control; what contains a hostile
 /// client is the reference monitor deciding every call.

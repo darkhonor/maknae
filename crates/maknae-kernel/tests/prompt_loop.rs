@@ -867,7 +867,8 @@ async fn a_malformed_prompt_frame_never_carries_its_bytes_into_the_trail() {
     raw.push(0xa1); //     map(1)
     tstr(&mut raw, "Text"); //       "Text":
     tstr(&mut raw, sentinel); //       a BARE STRING where a map is expected
-                              // Prove the frame is the malformed shape intended: it must NOT decode.
+
+    // Prove the frame is the malformed shape intended: it must NOT decode.
     assert!(maknae_proto::decode_request(&raw).is_err());
     let fx = Fixture::with_policy("prompt-sentinel", "Read", GRANTED);
     let records = Records::new(0);

@@ -344,8 +344,20 @@ pub struct ContentMeasure {
 }
 
 /// What the trail holds about content. Digests every `Text` block AND every
-/// tool call's arguments, across every turn in order — both leave the process
-/// (arguments ride as `tool_calls[].function.arguments`), so trail == wire.
+/// tool call's arguments, across every turn in order — arguments ride the wire
+/// as `tool_calls[].function.arguments`, so the content a prompt actually
+/// carries is attested rather than only its user-visible half.
+///
+/// *Scoped 2026-09-22, #241: this said "so trail == wire", which overclaims.
+/// What the digest covers is exactly the `Text` blocks' bytes and the tool
+/// calls' `arguments` bytes. A tool call's `name` and `call_id`, and a `Tool`
+/// turn's `call_id`, also leave the process and are NOT digest input: they are
+/// length-bounded and shape-admitted (`turn_is_acceptable`,
+/// `proposed_tool_call_is_acceptable`, `MAX_TOOL_CALL_NAME_BYTES`,
+/// `MAX_TOOL_CALL_ID_BYTES`) but not attested by this value. The digest is an
+/// identifier for the content, never an integrity control over the whole frame
+/// — record.rs says why, and the 32-hex truncation is why it could not be one.*
+///
 /// Never the text; fed incrementally so no second copy of secret text is
 /// made, and truncated to 32 hex characters (record.rs says why).
 pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
@@ -391,7 +403,7 @@ pub enum ReplyRefusal {
     ToolCallUnacceptable,
 }
 
-/// The reply-direction admission. `admitted_blocks` is the prompt direction
+/// The reply-direction admission. `admitted_turns` is the prompt direction
 /// and says "prompt" in its reason; a reply gets its own so the record never
 /// calls an empty reply "non-text". Text only, at least one block.
 pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {

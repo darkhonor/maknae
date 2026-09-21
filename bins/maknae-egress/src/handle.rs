@@ -36,7 +36,9 @@ pub enum Refusal {
     /// truncated prompt (#264 review round 2).
     NonTextBlock,
     /// The frame carried no text to send. `maknae_kernel::egress::
-    /// admitted_blocks` refuses this at the PDP, so this names a kernel bug
+    /// admitted_turns` refuses this at the PDP (it is the prompt-direction
+    /// entry point since #241; `admitted_blocks` is now its per-turn
+    /// primitive), so this names a kernel bug
     /// too — and it is load-bearing rather than cosmetic: since #264 prepends
     /// a trusted preamble, a prompt with nothing in it would otherwise become
     /// a well-formed request the provider ANSWERS from the system prompt
