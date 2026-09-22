@@ -70,6 +70,10 @@ pub enum PlaneError {
     Transport(String),
     /// The kernel refused `session.prompt` itself.
     Refused,
+    /// The kernel rejected the prompt request's SHAPE (`BadRequest`) — a
+    /// pre-gate fault, decided before the exchange was attempted, so the
+    /// prompt provably never reached the provider.
+    Malformed,
 }
 
 pub trait Plane {
@@ -115,6 +119,7 @@ mod tests {
             PlaneError::FrameTooLarge,
             PlaneError::Transport("t".into()),
             PlaneError::Refused,
+            PlaneError::Malformed,
         ];
         for (i, a) in errs.iter().enumerate() {
             assert_eq!(a.clone(), *a);
@@ -123,6 +128,10 @@ mod tests {
             }
         }
         assert!(format!("{:?}", errs[1]).contains("Transport"));
+        // `Malformed` is NOT `Refused`: a `BadRequest` on the prompt leg is a
+        // shape fault the subject can fix, and the loop must report it as one
+        // instead of sending them to an audit trail that holds nothing.
+        assert_ne!(PlaneError::Malformed, PlaneError::Refused);
     }
 
     /// The served bytes are kernel-served home-file content, so

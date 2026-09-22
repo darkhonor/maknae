@@ -128,6 +128,13 @@ impl Plane for FixturePlane {
             .result
         {
             RespResult::Ok(Payload::PromptReply(r)) => Ok(r),
+            // The same split production's `prompt_outcome` makes (#241 CR1
+            // SF2): a `BadRequest` on the prompt leg is a pre-gate shape
+            // fault that never reached the provider, and the fixture must not
+            // be kinder to the loop than the CLI is.
+            RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::BadRequest => {
+                Err(PlaneError::Malformed)
+            }
             RespResult::Err(_) => Err(PlaneError::Refused),
             other => Err(PlaneError::Transport(format!("{other:?}"))),
         }

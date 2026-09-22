@@ -20,6 +20,7 @@ pub enum StopReason {
     TooManyToolCalls(usize),
     FrameBound,
     PromptRefused,
+    PromptMalformed,
     Transport(String),
 }
 
@@ -96,6 +97,13 @@ pub async fn drive<P: Plane>(
                 return Outcome {
                     answer: None,
                     stopped: Some(StopReason::PromptRefused),
+                    steps_used,
+                }
+            }
+            Err(PlaneError::Malformed) => {
+                return Outcome {
+                    answer: None,
+                    stopped: Some(StopReason::PromptMalformed),
                     steps_used,
                 }
             }
@@ -518,6 +526,10 @@ mod tests {
         for (err, want) in [
             (PlaneError::FrameTooLarge, StopReason::FrameBound),
             (PlaneError::Refused, StopReason::PromptRefused),
+            // Its OWN reason, never folded into `PromptRefused`: the CLI
+            // prints a different line for it, because a pre-gate `BadRequest`
+            // provably never reached the provider.
+            (PlaneError::Malformed, StopReason::PromptMalformed),
             (
                 PlaneError::Transport("t".into()),
                 StopReason::Transport("t".into()),

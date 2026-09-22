@@ -112,6 +112,33 @@ pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
     }
 }
 
+/// The prompt leg's mapper, pure and tested for the same reason the read and
+/// write mappers are: it is a CONTROL. A `BadRequest` on `session.prompt` is a
+/// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
+/// for carrying no text to send, and provably never reached the provider: no
+/// egress block was opened and no intent record was written. Reporting that as
+/// "whether the prompt reached the provider is in the audit trail" tells the
+/// subject to go read a trail that holds nothing, for a fault they can fix
+/// from the message. Every OTHER refusal code stays `Refused`, because the
+/// kernel answers `LandedUndelivered`, `DeadlineExpired` and `OutcomeUnknown`
+/// with the same generic `Unauthorized` and the prompt may well have landed.
+pub fn prompt_outcome(
+    sent: Result<SentOutcome, String>,
+) -> Result<maknae_proto::PromptReply, PlaneError> {
+    match sent {
+        Ok(SentOutcome::Payload(Payload::PromptReply(r))) => Ok(r),
+        Ok(SentOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::BadRequest,
+            ..
+        }) => Err(PlaneError::Malformed),
+        Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
+        Ok(other) => Err(PlaneError::Transport(format!(
+            "protocol error: unexpected reply to session.prompt: {other:?}"
+        ))),
+        Err(m) => Err(PlaneError::Transport(m)),
+    }
+}
+
 /// The real Plane: one authenticated client, one connection per verb.
 pub struct RealPlane<'a> {
     pub transport: &'a maknae_config::TransportConfig,
@@ -142,14 +169,7 @@ impl Plane for RealPlane<'_> {
         {
             return Err(PlaneError::FrameTooLarge);
         }
-        match send_verb(verb, None, self.transport, self.client, self.ca).await {
-            Ok(SentOutcome::Payload(Payload::PromptReply(r))) => Ok(r),
-            Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
-            Ok(other) => Err(PlaneError::Transport(format!(
-                "protocol error: unexpected reply to session.prompt: {other:?}"
-            ))),
-            Err(m) => Err(PlaneError::Transport(m)),
-        }
+        prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
     }
     async fn read(&mut self, path: &str) -> ReadOutcome {
         // The object is passed so the read is ARMED exactly as `maknae read`
@@ -229,6 +249,16 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         // reached the provider. Only the trail knows which.
         Some(StopReason::PromptRefused) => {
             "stopped: the kernel refused the exchange — whether the prompt reached the provider is in the audit trail".into()
+        }
+        // Distinct from the line above, and the distinction is the point: a
+        // `BadRequest` on the prompt leg is a pre-gate fault on the request's
+        // own shape, decided before any exchange was attempted, so there is
+        // nothing in the trail to go and read and nothing reached the
+        // provider. Sending the subject to the audit trail for a fault the
+        // message already names is a false lead (#241 CR1 SF2).
+        Some(StopReason::PromptMalformed) => {
+            "stopped: the kernel refused the prompt as malformed — it did not reach the provider"
+                .into()
         }
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         None => "stopped".into(),
@@ -322,6 +352,57 @@ mod tests {
             write_outcome(Err("no response from daemon within 5000ms".into())),
             WriteOutcome::Unknown
         );
+    }
+    #[test]
+    fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code() {
+        // The control: `maknae agent "   "` is refused `BadRequest` for
+        // carrying no text to send, and that refusal is decided BEFORE any
+        // exchange — no egress block, no intent record, so nothing reached the
+        // provider and nothing is in the trail. Every other refusal code keeps
+        // `Refused`, because `LandedUndelivered`, `DeadlineExpired` and
+        // `OutcomeUnknown` all arrive as the same generic `Unauthorized` and
+        // the prompt may well have landed.
+        use maknae_proto::{Payload, PromptReply, ProtoErrCode};
+        let refused = |code| {
+            prompt_outcome(Ok(SentOutcome::Refused {
+                code,
+                message: "prompt carries no text to send".into(),
+                armed: false,
+            }))
+        };
+        assert_eq!(
+            refused(ProtoErrCode::BadRequest),
+            Err(PlaneError::Malformed)
+        );
+        for code in [
+            ProtoErrCode::Unauthorized,
+            ProtoErrCode::Internal,
+            ProtoErrCode::TooLarge,
+            ProtoErrCode::UnknownVerb,
+            ProtoErrCode::NotImplemented,
+        ] {
+            assert_eq!(refused(code.clone()), Err(PlaneError::Refused), "{code:?}");
+        }
+        assert_eq!(
+            prompt_outcome(Ok(SentOutcome::Payload(Payload::PromptReply(
+                PromptReply {
+                    blocks: vec![],
+                    tool_calls: vec![],
+                }
+            )))),
+            Ok(PromptReply {
+                blocks: vec![],
+                tool_calls: vec![]
+            })
+        );
+        assert!(matches!(
+            prompt_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
+            Err(PlaneError::Transport(_))
+        ));
+        assert!(matches!(
+            prompt_outcome(Err("handshake timed out".into())),
+            Err(PlaneError::Transport(_))
+        ));
     }
     #[test]
     fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
