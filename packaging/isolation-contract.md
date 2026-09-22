@@ -51,11 +51,16 @@ Profiles not yet enabled (K8s) carry `deferred` cells and are exempt from the li
 
 The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the edge ever appears.
 "via X" = reached transitively through crate X. (The lint above skips this table by column count.)
-*(Scoped 2026-09-22, #344: "enforce this" claimed more than the gates do. They enforce the
-FORBIDDEN cells — `PRIVILEGED_CRATES` × `maknae`, in `p1-manifest-lint.sh` and
-`p2-invert-tree.sh`; the rest of this matrix is un-gated prose, since
-`isolation-contract-lint.sh` skips a 4-column table. The 2026-09-22 `maknae-mcp` correction
-below is what an un-gated cell drifting looks like.)*
+*(Scoped 2026-09-22, #344: "enforce this" claimed more than the gates do, and a first attempt
+at scoping it claimed less. What the gates enforce is the PRIVILEGED rows — the crates in
+`ci/gates/lib.sh`'s `PRIVILEGED_CRATES`. For those rows they enforce the FORBIDDEN cells of the
+`maknae` column three ways (`p1-manifest-lint.sh` on direct dependencies, `p2-invert-tree.sh` on
+transitive reachability, `p2-artifact-witness.sh` on the BUILT binary's `cargo auditable`
+inventory) and, through p1's per-consumer allowlist `TRUST_CONSUMER_ALLOW`, those same crates'
+OTHER columns too — so `maknaed` → `maknae-spif-compile` fails P1 although its cell here reads
+`—`. The NON-PRIVILEGED rows are un-gated prose, since `isolation-contract-lint.sh` skips a
+4-column table. The 2026-09-22 `maknae-mcp` correction below is what such a cell drifting looks
+like.)*
 
 | Crate | maknaed | maknae | maknae-spifc |
 |---|---|---|---|

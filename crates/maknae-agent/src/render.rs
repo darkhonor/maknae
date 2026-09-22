@@ -82,8 +82,9 @@ const SUFFIX_HEADROOM: usize = 32;
 /// reallocates depends on the digit counts (measured with `rustc -O`:
 /// `format!` capacity is 44 and the finished string is
 /// `41 + digits(len) + digits(steps)`, so the append fits exactly while
-/// `41 + digits(len) + digits(steps) <= 44` — no realloc for a body under
-/// ~100 bytes with a low step counter, a realloc above) — and either way what
+/// `41 + digits(len) + digits(steps) <= 44`, i.e. exactly while
+/// `digits(len) + digits(steps) <= 3` — no realloc for a body under 100 bytes
+/// and a single-digit step counter, a realloc above) — and either way what
 /// it holds is a short renderer-authored
 /// length (`binary content, N bytes`), not a file.
 ///

@@ -142,10 +142,12 @@ pub async fn fulfil<S: KeySource>(
     // "trail == wire", the same overclaim the kernel struck at
     // `content_measure`): the deputy sends every `Text` block and every
     // `arguments` payload that `content_measure` digested, in order, with
-    // nothing dropped. A tool call's `name` and `call_id`, and a `Tool` turn's
-    // `call_id`, ride alongside undigested — as do the compiled preamble and
-    // the advertised tool definitions this deputy adds (#264), which the
-    // kernel never sees and therefore never digested.
+    // nothing dropped. A tool call's `name` and `call_id`, a `Tool` turn's
+    // `call_id`, and the frame's own `model` ride alongside undigested —
+    // `content_measure` feeds on `Text` blocks and `arguments` only — as do
+    // the compiled preamble, the advertised tool definitions this deputy adds
+    // (#264) and its `stream: false`, which the kernel never sees and
+    // therefore never digested.
     //
     // The CONTENT judgement is `handle::decide`'s (pure, directly testable,
     // and `Refusal` is the right taxonomy): it refuses a non-text block and a
@@ -391,10 +393,11 @@ mod tests {
             // fourth term is not turn-count alone: the three-role test below,
             // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`,
             // is 2339 with an envelope of 293, and 86 of that 293 is values --
-            // 47 of them the assistant turn's tool call, its `name`, the two
-            // `c1` ids and 18 bytes of `arguments` -- so a longer tool name or
-            // a longer `arguments` payload moves it as surely as another turn
-            // does. Nothing asserts either total -- the loop reads
+            // 47 of them the assistant tool call's `"function"` type (10), its
+            // `name` (11), the assistant `id` and the tool turn's
+            // `tool_call_id` (8), and 18 bytes of `arguments` -- so a longer
+            // tool name or a longer `arguments` payload moves it as surely as
+            // another turn does. Nothing asserts either total -- the loop reads
             // `Content-Length` -- so the figures are orientation, and the way
             // to re-measure either is to print `seen.len() - (brk + 4)`, the
             // body length this loop already computes, under the test whose

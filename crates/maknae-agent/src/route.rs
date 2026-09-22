@@ -52,11 +52,17 @@ pub enum RouteError {
     /// Non-canonical, over-long, or NUL-bearing: an empty (`//`), `.` or `..`
     /// segment; longer than `maknae_proto::MAX_MUTATION_PATH_BYTES`; or
     /// carrying a NUL byte. A trailing `/` is subsumed by the empty-segment
-    /// rule and has no branch of its own — past the bare-`/` early return, a
-    /// path ending in `/` always splits to a trailing empty segment (see
-    /// `checked_path`). All three causes are pinned in the model-facing
+    /// rule and has no branch of its own HERE — past the bare-`/` early
+    /// return, a path ending in `/` always splits to a trailing empty segment
+    /// (see `checked_path`). All three causes are pinned in the model-facing
     /// tool-error text by `drive.rs`'s
-    /// `the_malformed_path_tool_error_names_every_rule_that_produces_it`.
+    /// `the_malformed_path_tool_error_names_every_rule_that_produces_it` —
+    /// and that text still LISTS a trailing `/` as a rule, which is right on
+    /// both counts: the kernel's `lexical_pregate` does carry a
+    /// `"trailing slash"` branch of its own (`maknae-kernel`'s `handler.rs`),
+    /// and what the model needs is the rule it broke rather than which branch
+    /// here caught it. `checked_path` records why this crate needs no such
+    /// branch.
     MalformedPath,
 }
 
