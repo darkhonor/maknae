@@ -621,9 +621,25 @@ mod tests {
         assert_eq!(keys, ["arguments", "name"]);
     }
 
-    /// Every refusal renders something an operator can act on, and NONE of
-    /// them renders provider content. `UnknownTool` names the tool (a name the
-    /// model proposed, not a secret), and nothing else echoes the body.
+    /// Each of the five refusals this test constructs renders something an
+    /// operator can act on, and for those five values none carries provider
+    /// content: `UnknownTool` names the tool (a name the model proposed, not a
+    /// secret), and the other four carry text this crate wrote.
+    ///
+    /// *(Corrected 2026-09-22, #344: the earlier wording generalised to "NONE
+    /// of them renders provider content … and nothing else echoes the body",
+    /// which these five fixed examples cannot establish and which is FALSE of
+    /// one variant. `Malformed` carries serde_json's own diagnostic verbatim —
+    /// `client.rs` builds it as `ReplyError::Malformed(e.to_string())` and
+    /// `Display` renders `provider reply is malformed: {m}` — and serde quotes
+    /// the offending value: measured 2026-09-22, a body of
+    /// `{"choices":"SENTINEL-PROVIDER-BODY"}` renders
+    /// `invalid type: string "SENTINEL-PROVIDER-BODY", expected a sequence`. A
+    /// malformed-response diagnostic CAN echo provider-controlled bytes; what
+    /// this test shows is only that the five constructed cases here do not.
+    /// The kernel already reasons this way about the same serde behaviour and
+    /// logs `e.category()` rather than `{e}` for exactly this reason — see
+    /// `maknae-kernel`'s `run.rs` at its decode-failure record.)*
     ///
     /// *(Corrected 2026-09-22, #344: this said "these strings reach the audit
     /// trail and the terminal". They reach the TERMINAL only. A `ReplyError`

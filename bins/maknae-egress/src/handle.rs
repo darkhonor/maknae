@@ -14,8 +14,16 @@
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;
 
-/// Why the deputy refused a frame. Every variant is a refusal the kernel sees;
-/// there is no "carry on anyway".
+/// Why the deputy refused a frame. Each variant refuses rather than carrying
+/// on — there is no "carry on anyway" arm in `decide`.
+///
+/// *(Scoped 2026-09-22, #344: this said "Every variant is a refusal the kernel
+/// SEES". The kernel does not see which variant: `serve_one` turns a `Refusal`
+/// into `ServeError::Refused` and returns through `?` before writing any
+/// reply, so the deputy renders the named diagnostic to its own stderr in
+/// `main.rs` and the kernel records the exchange's failure. The names below
+/// are for the operator reading that stderr, and for the reader of this
+/// file.)*
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The frame named a Vault path outside the deputy's granted prefix. The

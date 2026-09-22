@@ -25,10 +25,15 @@ maknae-config = { path = "../../crates/maknae-config" }
 maknae-io = { path = "../../crates/maknae-io" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 maknae-msgs = { path = "../../crates/maknae-msgs" }
-# The runtime loop's BRAIN (#241): transcript, routing, rendering, drive. Non-privileged
-# and I/O-free by construction — it links maknae-proto, serde, serde_json and zeroize, and
-# no I/O crate — so the hands (`src/agent.rs`) are the only thing here that touches a
-# socket.
+# The runtime loop's BRAIN (#241): transcript, routing, rendering, drive. Non-privileged,
+# and its four direct dependencies are maknae-proto, serde, serde_json and zeroize — so the
+# hands (`src/agent.rs`) are what reaches a socket on this binary's wire path.
+# (Corrected 2026-09-22, #344: this said "I/O-free by construction … and no I/O crate".
+# maknae-agent's own graph reaches tokio through maknae-proto, and inside THIS binary Cargo
+# unifies features, so that tokio carries this binary's `process` too. The property that
+# holds is about code rather than the graph: nothing in crates/maknae-agent names a
+# filesystem, socket or process API. Its own lib.rs states it that way and says why the
+# feature-set framing was wrong.)
 maknae-agent = { path = "../../crates/maknae-agent" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
@@ -58,9 +63,13 @@ security-framework = "3"
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, clap,
 # tokio, nix, zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no
-# maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and
-# links maknae-proto, serde, serde_json and zeroize — no I/O crate. No gate enforces this
+# maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
+# four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
 # set, so this comment IS the record.
+# (Corrected 2026-09-22, #344: "— no I/O crate" struck here as well. tokio arrives in
+# maknae-agent's graph transitively, via maknae-proto; what holds is the absence of
+# filesystem, socket and process CALLS in that crate's code, not the absence of an I/O
+# crate from its graph.)
 # (Corrected 2026-09-22, #241: maknae-io was absent from this enumeration and from the
 # wire-path sentence below, and maknae-agent was described as linking maknae-proto alone.)
 # `nix`/`zeroize`/`yaml-rust2`/`rpassword`/`security-framework` are `enroll/`-only

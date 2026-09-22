@@ -667,8 +667,16 @@ mod tests {
         assert!(sent.contains("alpha-user") && sent.contains("omega-tool"));
     }
 
-    /// A provider failure is a NAMED refusal the kernel reads, and the
-    /// credential appears nowhere in it.
+    /// A provider failure is a NAMED refusal in the DEPUTY's own error value,
+    /// and the key appears in neither that error nor the bytes this test
+    /// inspects. Where the name goes is the deputy's stderr, not the trail:
+    /// `serve_one` propagates `fulfil`'s error through `?` before it writes
+    /// any reply, `main.rs` renders it with
+    /// `eprintln!("maknae-egress: connection refused: …")` and closes the
+    /// connection, so what the kernel observes is a failed exchange after
+    /// send. What this test checks is the error's own text for the one
+    /// provider response it scripts (corrected 2026-09-22, #344: this said the
+    /// kernel reads the name).
     #[tokio::test]
     async fn a_provider_failure_is_a_named_refusal_that_never_echoes_the_key() {
         fips();

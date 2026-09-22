@@ -363,14 +363,18 @@ pub(crate) enum SentOutcome {
     /// the MUTATION lane it is always true, including when `prepare` recorded a
     /// `preparation_error` and `descriptor()` is `Ok(None)` so nothing was armed; that
     /// costs nothing, because `write_outcome` never reads it and every non-`Applied` write
-    /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached. An
-    /// unarmed refusal is the kernel's want-of-descriptor deny (ADR-0009 decision 2), and
-    /// which of the two branches produced it decides what it means: on the first it is the
-    /// subject's own OS-DAC or a path that does not exist, surfacing as that deny; on the
-    /// second it is a stream that cannot arm a descriptor at all (documented unreachable
-    /// today, fail-closed anyway), which says nothing about the subject's rights. Neither
-    /// is a decision about the object's content, and a caller must not report either as
-    /// one.
+    /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached:
+    /// `armed: false` records failed descriptor PREPARATION on the CLIENT, on either of two
+    /// branches — `open_for_delegation` returned `Err` (the subject's own OS-DAC, or a path
+    /// that does not exist), or the stream could not arm one, which attempts no open and so
+    /// says nothing about the subject's rights (documented unreachable today, fail-closed
+    /// anyway). What the kernel then refuses, and why, depends on the gates the request
+    /// meets first: the lexical pre-gate, then the descriptor, then the PDP. A nonexistent
+    /// path that also carries `..` travels unarmed and comes back `BadRequest` for its
+    /// shape — `run.rs`'s pre-gate runs before any descriptor evaluation — not as a
+    /// want-of-descriptor deny (ADR-0009 decision 2), which is what the other orderings
+    /// reach. Neither branch is a decision about the object's content, and a caller must
+    /// not report either as one.
     Refused {
         code: maknae_proto::ProtoErrCode,
         message: String,

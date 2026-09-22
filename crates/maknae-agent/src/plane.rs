@@ -8,10 +8,16 @@ use std::future::Future;
 /// word is honest (no side effect). `Unavailable` is everything else, and it
 /// is wider than a transport failure (widened 2026-09-22, #241): a missing
 /// frame or a timeout, yes, but also a `BadRequest` — a client-shape fault the
-/// subject can fix, not a decision — and an UNARMED refusal of any code, where
-/// the subject's own open failed, so the kernel's want-of-descriptor deny
-/// reflects the subject's OS-DAC or a path that does not exist rather than a
-/// verdict on content. The mapping is made and tested in `read_outcome`, in
+/// subject can fix, not a decision — and an UNARMED refusal of any code.
+/// `armed: false` records that the CLIENT could not prepare a descriptor, on
+/// either of two branches: `open_for_delegation` returned `Err`, or the stream
+/// could not arm one — and only the first attempts an open, so only the first
+/// says anything about the path. What the kernel then refuses, and why,
+/// depends on which gate the request meets first (lexical pre-gate, then the
+/// descriptor, then the PDP): a path that is both nonexistent and
+/// non-canonical travels unarmed and comes back `BadRequest` for its shape,
+/// never reaching a want-of-descriptor deny. Either way it is not a verdict on
+/// content. The mapping is made and tested in `read_outcome`, in
 /// `bins/maknae`'s `agent`.
 ///
 /// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
