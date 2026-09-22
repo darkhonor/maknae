@@ -1366,8 +1366,11 @@ mod tests {
 
     #[test]
     fn content_measure_covers_every_turn_and_every_tool_argument_in_order() {
-        // TRAIL == WIRE: tool ARGUMENTS leave the process too, as
-        // tool_calls[].function.arguments, so they are digested in order.
+        // Tool ARGUMENTS leave the process too, as
+        // tool_calls[].function.arguments, so they are digested in order
+        // alongside every `Text` block. Not "trail == wire": the names and ids
+        // that ride with them are shape-admitted but not digest input —
+        // `content_measure`'s own doc above states the scope.
         let turns = [
             Turn::User {
                 content: vec![text("ab")],

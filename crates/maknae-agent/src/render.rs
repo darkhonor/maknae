@@ -68,18 +68,31 @@ const SUFFIX_HEADROOM: usize = 32;
 /// until the allocator reused the page.
 ///
 /// The property that holds, stated exactly (corrected 2026-09-22, #241 — the
-/// earlier text claimed the append alone was enough): the read arm allocates
+/// earlier text claimed the append alone was enough; scoped again
+/// 2026-09-22, #344 — it was stated over the whole `ReadContent` arm, and the
+/// arm has two sub-arms): on the UTF-8 TEXT path, the only path that carries
+/// kernel-served content, the read arm allocates
 /// ONCE, with `SUFFIX_HEADROOM` for the suffix, appends in place, and hands
 /// that single zeroizing buffer to the transcript. There is no second plain
 /// buffer and no reallocation of the body. Without the headroom the first
-/// `push_str` reallocated: capacity equalled length, so the body was memcpy'd
-/// into a fresh allocation and the old one — kernel-served content — was freed
-/// unzeroized.
+/// `push_str` reallocated: capacity equalled length, so the body was
+/// memcpy'd into a fresh allocation and the old one — kernel-served content —
+/// was freed unzeroized. The non-UTF-8
+/// sub-arm has no headroom and DOES reallocate on the suffix: it allocates a
+/// short renderer-authored description (`binary content, N bytes`) that
+/// carries no served content at all, so what the realloc frees is a length,
+/// not a file.
 ///
 /// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
-/// into a `SecretText`, which zeroizes too, so the content never lands in a
-/// plain buffer on the whole path. Same discipline as
-/// [`crate::plane::ReadOutcome`] one layer up.
+/// into a `SecretText`, which zeroizes too — so on the READ direction the
+/// content lands in no plain buffer anywhere in THIS crate's chain, from
+/// `maknae_proto::Bytes` through to the transcript's `SecretText`. Scoped by
+/// component deliberately (2026-09-22, #344): once a `Tool` turn leaves the
+/// trust plane the deputy hands it to `reqwest`'s `.json()`, which serialises
+/// through `serde_json::to_vec` into a plain body buffer, so the bytes do sit
+/// in un-zeroized heap there. Same discipline as
+/// [`crate::plane::ReadOutcome`] one layer up, whose doc also names the write
+/// direction's residue.
 ///
 /// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
 /// `String`'s — it is NOT redacting, unlike [`ToolOutcome`]'s above — so a
@@ -99,6 +112,20 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
             // Never lossily converted: the model would act on U+FFFD as if it were the file.
             Err(_) => Zeroizing::new(format!("binary content, {} bytes", bytes.len())),
         },
+        // The non-read arms do NOT pre-size, and that is the inverse of the
+        // read arm's discipline above, deliberately: `CONST.to_string()`
+        // allocates at exactly `len`, so `render`'s suffix `push_str`
+        // reallocates and frees each of these buffers. What it frees is a
+        // compiled-in constant — `NOT_AUTHORIZED`, `READ_UNAVAILABLE`,
+        // `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT` — already in the
+        // binary's read-only data, so nothing secret is freed and headroom
+        // would buy nothing. One arm is different, and is the reason this is
+        // written down: `BadCall(why)` formats router-authored text that can
+        // quote the model's own tool arguments through a serde message, so its
+        // realloc frees model-authored bytes. Accepted — those bytes already
+        // transit the deputy's plain HTTP buffers, the same deferred residual
+        // #241 recorded for serde_json's scratch — and named here so the
+        // asymmetry reads as a decision rather than an omission.
         ToolOutcome::ReadRefused => Zeroizing::new(NOT_AUTHORIZED.to_string()),
         ToolOutcome::ReadUnavailable => Zeroizing::new(READ_UNAVAILABLE.to_string()),
         ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),

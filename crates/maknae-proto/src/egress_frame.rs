@@ -53,6 +53,12 @@ pub struct EgressFrameRequest {
 
 impl std::fmt::Debug for EgressFrameRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `<N turns>` is pluralised unconditionally, so a one-turn frame
+        // prints `<1 turns>`. Deliberate, not an oversight: this is a
+        // redaction marker in a `{:?}`, its exact text is pinned by the test
+        // below, and a singular branch would add a branch no mutant can
+        // distinguish from a typo — and change a string an assertion depends
+        // on — for grammar in a debug line.
         f.debug_struct("EgressFrameRequest")
             .field("destination", &self.destination)
             .field("endpoint", &self.endpoint)
@@ -144,9 +150,15 @@ pub const EGRESS_REPLY_FRAME_MAX_BYTES: usize = 1024 * 1024;
 /// the cap is pinned in the tests below, where no mutation reaches.
 pub const EGRESS_REPLY_FRAME_ENCODE_BYTES: usize = 1_052_672;
 
-/// Shape admission, applied by the kernel before a byte reaches the socket.
-/// Deliberately shape-only: whether this subject may reach this destination
-/// was decided by the PDP long before the frame existed.
+/// Shape admission for a whole frame. The
+/// only production caller is the DEPUTY — `maknae-egress`'s `handle::decide`,
+/// before it will act on a decoded frame. The kernel does not call this: it
+/// applies the subset piecemeal on the prompt leg (`turn_is_acceptable` per
+/// turn, in
+/// `maknae-kernel`'s `egress`), because it composes the frame rather than
+/// receiving one. Deliberately shape-only either way: whether this subject may
+/// reach this destination was decided by the PDP long before the frame
+/// existed.
 pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
     crate::conversation_id_is_acceptable(&r.conversation)
         && !r.destination.is_empty()
@@ -256,8 +268,9 @@ mod tests {
         assert_eq!(back, r);
     }
 
-    /// Shape admission is the kernel's, applied before anything is written to
-    /// the socket. `conversation` reuses the existing bound rather than
+    /// Shape admission is the DEPUTY's — `handle::decide` is its only
+    /// production caller, and it runs before the deputy writes anything to the
+    /// provider. `conversation` reuses the existing bound rather than
     /// inventing a second one.
     #[test]
     fn an_over_long_conversation_is_refused() {

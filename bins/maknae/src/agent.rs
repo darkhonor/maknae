@@ -70,6 +70,22 @@ pub fn mint_conversation_id() -> String {
 /// `Unavailable`. The wire carries no reason (ADR-0019); it does carry the
 /// code.
 ///
+/// What `Refused` does NOT mean, stated here because the mapping invites the
+/// opposite reading: an armed `Unauthorized` is not proof that the PDP weighed
+/// this object's content. The kernel's `map_read_error` sends EVERY
+/// `maknae_io::IoError` except `TargetTooLarge` into `ReadRefusal::Refused`,
+/// and `read_refusal_disposition` answers that with `Unauthorized` and the
+/// wire message `not authorized`. So a model that names a directory, or a path
+/// whose fstat or object-kind check (`regular_file`, `nlink_exactly_one`)
+/// fails, gets a successful subject-side open, an ARMED request, and
+/// `Not authorized` — the one outcome the compiled prompt forbids it to
+/// diagnose or retry. This mapper cannot tell those apart from a real deny:
+/// the wire carries no reason (ADR-0019). Whether such faults should ride
+/// `Internal` / `read unavailable` instead is a kernel-disposition question,
+/// which is wire semantics and the maintainer's; it is recorded as a residual
+/// in #344 and listed under that pull request's "Not done here", and it is not
+/// a change this mapper can make.
+///
 /// Corrected 2026-09-22 (#241): an UNARMED refusal is `Unavailable`, not
 /// `Refused`. When the subject's own `open_for_delegation` fails — a typo'd
 /// path, ENOENT, EACCES — `send_verb` sends the request anyway, unarmed, so
@@ -117,9 +133,16 @@ pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
 /// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
 /// for carrying no text to send, and provably never reached the provider: no
 /// egress block was opened and no intent record was written. Reporting that as
-/// "whether the prompt reached the provider is in the audit trail" tells the
-/// subject to go read a trail that holds nothing, for a fault they can fix
-/// from the message. Every OTHER refusal code stays `Refused`, because the
+/// "whether the prompt reached the provider is in the audit trail" points the
+/// subject at the EGRESS INTENT, which does not exist for this case — no
+/// exchange was attempted — for a fault they can fix from the message. What
+/// the trail does hold is the pre-gate deny: the kernel appends
+/// `emit_request_outcome` with a `deny` and the reason
+/// `prompt fails operand pre-gate: …` before it writes the `BadRequest` back,
+/// and it writes that error only under `may_respond(appended)`, so a subject
+/// who saw it is proof the record landed. Both facts, and neither more: no
+/// provider contact, and a recorded pre-gate deny. Every OTHER refusal code
+/// stays `Refused`, because the
 /// kernel answers `LandedUndelivered`, `DeadlineExpired` and `OutcomeUnknown`
 /// with the same generic `Unauthorized` and the prompt may well have landed.
 pub fn prompt_outcome(

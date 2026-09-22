@@ -688,8 +688,11 @@ pub fn encode_response_zeroizing(
 /// rest of the wire, so `maknae-kernel` needs no CBOR dependency of its own —
 /// a new dependency in the TCB is a security decision, not a convenience.
 ///
-/// BOUNDED and PREALLOCATED, on the `encode_request_zeroizing` precedent
-/// above, and for the reason [`crate::EGRESS_REQUEST_FRAME_ENCODE_BYTES`]
+/// BOUNDED and PREALLOCATED on `encode_request_zeroizing`'s precedent — the
+/// fixed `max_bytes` buffer written through a `Cursor`, not the
+/// `capacity`-hinted growable `Vec` of `encode_response_zeroizing`, which is
+/// the weaker discipline and is the function this one directly follows in the
+/// file — and for the reason [`crate::EGRESS_REQUEST_FRAME_ENCODE_BYTES`]
 /// records: this buffer carries kernel-served file content once a step's
 /// `Tool` turns ride the frame, and the growing `Vec` it replaces freed a
 /// partly-written copy of that content on every realloc. A frame that will
@@ -748,8 +751,10 @@ pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }
 
-/// Encode a reply into a zeroizing buffer, BOUNDED and PREALLOCATED on the
-/// request encoder's precedent above and for the reason
+/// Encode a reply into a zeroizing buffer, BOUNDED and PREALLOCATED on
+/// `encode_egress_frame_request`'s precedent — the fixed `max_bytes` buffer
+/// through a `Cursor`, not `encode_response_zeroizing`'s growable
+/// `Vec::with_capacity` form — and for the reason
 /// [`crate::EGRESS_REPLY_FRAME_ENCODE_BYTES`] records (#241, codex round 2
 /// item B): a reply carries whatever kernel-served content the model quoted
 /// back, and the growing `Vec` this replaces freed a partly-written copy of it

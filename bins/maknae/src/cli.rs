@@ -52,9 +52,14 @@ pub fn resolve_config_dir() -> PathBuf {
 /// realistic `vault`+`transport` config load without each section's own loader rejecting
 /// the other as `UnknownSection` (the P1-B fix).
 ///
-/// One list serves every verb, so `agent` is accepted (and validated) for `ping` as much
-/// as for `agent` — a documented residual of the single-registry design, not a per-verb
-/// grammar.
+/// One list serves every verb, so `agent` is ACCEPTED — but not validated — for `ping` as
+/// much as for `agent`: the combined registry is what the unknown-section check consults,
+/// so the section's presence never fails any verb, while its BOUNDS are read only by
+/// `agent_from_section`, whose one production caller is `maknae agent`'s own `run`. A
+/// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
+/// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
+/// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
+/// which `execute` never does).
 pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {
@@ -302,8 +307,11 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 /// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
-/// Everything that writes to a terminal lives HERE; the sendable core is [`send_verb`],
-/// which prints nothing so a caller that sends many verbs is not also a printer.
+/// Everything that prints a RESULT to a terminal lives HERE; the sendable core is
+/// [`send_verb`], which prints no result, so a caller that sends many verbs is not also a
+/// printer. `send_verb` is not silent: it writes three arming diagnostics to stderr
+/// (`cannot prepare filesystem operation`, `cannot open`, `cannot delegate`), and
+/// `mutation::execute`, which it calls on the `MutationAttempt` path, prints too.
 async fn round_trip(
     verb: Verb,
     request_verb: maknae_proto::Verb,
@@ -346,12 +354,16 @@ pub(crate) enum SentOutcome {
     /// The daemon refused, with the wire's own code and message and no reason beyond them
     /// (ADR-0019).
     ///
-    /// `armed` records whether this request carried a delegated descriptor (ADR-0009): true
-    /// when one was attached, true for a verb that names no object (there is nothing to
-    /// delegate), and FALSE only when the subject's own `open_for_delegation` failed and
-    /// [`send_verb`] sent unarmed anyway. An unarmed refusal is the subject's own
-    /// OS-DAC/ENOENT surfacing as the kernel's want-of-descriptor deny (decision 2) — it is
-    /// not a decision about the object's content, and a caller must not report it as one.
+    /// `armed` belongs to the READ/delegated-object lane, the only lane that reads it. On
+    /// that lane it is false in exactly two cases — `maknae_io::open_for_delegation`
+    /// returned `Err`, or the stream could not arm a descriptor — and true otherwise. On
+    /// the MUTATION lane it is always true, including when `prepare` recorded a
+    /// `preparation_error` and `descriptor()` is `Ok(None)` so nothing was armed; that
+    /// costs nothing, because `write_outcome` never reads it and every non-`Applied` write
+    /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached. An
+    /// unarmed refusal is the subject's own OS-DAC/ENOENT surfacing as the kernel's
+    /// want-of-descriptor deny (ADR-0009 decision 2) — not a decision about the object's
+    /// content, and a caller must not report it as one.
     Refused {
         code: maknae_proto::ProtoErrCode,
         message: String,
@@ -359,7 +371,9 @@ pub(crate) enum SentOutcome {
     },
 }
 
-/// Send ONE verb over the post-mint plane and report what came back, printing nothing.
+/// Send ONE verb over the post-mint plane and report what came back, printing no RESULT —
+/// the caller decides what a terminal (or a model) is told. Not silent: the three arming
+/// failures below go to stderr, and `mutation::execute` prints on the write path.
 ///
 /// `object` is the path to open and delegate a descriptor for, passed EXPLICITLY rather
 /// than derived here: the delegated object is keyed by the CLI's own [`Verb`] (see

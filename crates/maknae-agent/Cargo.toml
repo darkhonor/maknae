@@ -12,8 +12,18 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-# The wire types the loop composes over. Pulls tokio with `io-util` ONLY (the
-# framing traits) — no fs, no net, no process. Verified 2026-09-22.
+# The wire types the loop composes over, and the only edge that brings tokio in
+# at all: THIS crate declares no tokio dependency, and `maknae-proto`'s
+# declaration asks for `io-util` ONLY (the framing traits) — no fs, no net, no
+# process. Reproduce with `cargo tree -p maknae-agent -e no-dev`, where tokio
+# appears once, under `maknae-proto`, with only `bytes` and `pin-project-lite`
+# beneath it; `-e no-dev` is load-bearing, because this crate's own
+# dev-dependencies add `macros` and `rt`. Scoped 2026-09-22, #344: that is a
+# property of this crate's own graph and NOT of the binary. Cargo unifies
+# features per build graph, so inside `bins/maknae` — which asks tokio for
+# `rt-multi-thread, macros, time, process, io-util` — the tokio in this crate's
+# graph carries `process` too. What holds unconditionally is that no code here
+# calls any of it.
 maknae-proto = { path = "../maknae-proto" }
 serde = { workspace = true, features = ["derive"] }
 # Tool ARGUMENTS arrive as a JSON string the model produced; parsing them is the
@@ -23,7 +33,12 @@ serde = { workspace = true, features = ["derive"] }
 # the manifest is written once.)
 serde_json = "1"
 # Same pin form as maknae-proto's: tool arguments and write content are
-# secret-adjacent and must not linger in freed heap; alloc-only, no defaults.
+# secret-adjacent and must not linger in freed heap once THIS crate owns them;
+# alloc-only, no defaults. The qualifier is load-bearing (scoped 2026-09-22,
+# #344): on the write lane serde_json un-escapes an escaped JSON string into
+# its own scratch allocation and frees it unwiped before this crate sees the
+# bytes — accepted residual, #241, stated in full at `route.rs`'s
+# `ZeroizingString`.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]

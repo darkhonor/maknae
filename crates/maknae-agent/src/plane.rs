@@ -4,8 +4,15 @@
 use maknae_proto::{PromptReply, Turn};
 use std::future::Future;
 
-/// `Refused` is the wire's `Unauthorized` — for a READ that word is honest (no
-/// side effect). `Unavailable` is a transport failure: no frame, a timeout.
+/// `Refused` is the wire's `Unauthorized` on an ARMED read — for a read that
+/// word is honest (no side effect). `Unavailable` is everything else, and it
+/// is wider than a transport failure (widened 2026-09-22, #241): a missing
+/// frame or a timeout, yes, but also a `BadRequest` — a client-shape fault the
+/// subject can fix, not a decision — and an UNARMED refusal of any code, where
+/// the subject's own open failed, so the kernel's want-of-descriptor deny
+/// reflects the subject's OS-DAC or a path that does not exist rather than a
+/// verdict on content. The mapping is made and tested in `read_outcome`, in
+/// `bins/maknae`'s `agent`.
 ///
 /// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
 /// kernel-served home-file content, and `maknae_proto::Bytes::new` states the
@@ -19,10 +26,18 @@ use std::future::Future;
 /// headroom for its suffix — appended in place, so the body is never
 /// reallocated and no old allocation is freed unzeroized (corrected
 /// 2026-09-22, #241: before the headroom it was) — and copied from there into
-/// a `maknae_proto::SecretText`, which zeroizes too. So the CONTENT never
-/// lands in a plain buffer anywhere on the path. It is not a claim that
-/// nothing is ever copied: the render and the `SecretText` are copies, both
-/// into zeroizing destinations, and that is the property, not zero-copy.
+/// a `maknae_proto::SecretText`, which zeroizes too. So on the READ direction
+/// the content never lands in a plain buffer anywhere in this crate's chain.
+/// It is not a claim that nothing is ever copied: the render and the
+/// `SecretText` are copies, both into zeroizing destinations, and that is the
+/// property, not zero-copy. Nor is it a claim about the platform beyond this
+/// crate — the deputy hands the same bytes to `reqwest`'s `.json()`, which
+/// serialises through `serde_json::to_vec` into a plain body buffer. And it is
+/// not a claim about the WRITE direction, which has a known residue: the
+/// model's write content arrives as a JSON string, and any escape in it is
+/// un-escaped into a scratch allocation serde_json owns and frees outside
+/// anything this crate can reach — accepted residual, #241, stated in full at
+/// `route.rs`'s `ZeroizingString`.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(zeroize::Zeroizing<Vec<u8>>),
@@ -130,7 +145,11 @@ mod tests {
         assert!(format!("{:?}", errs[1]).contains("Transport"));
         // `Malformed` is NOT `Refused`: a `BadRequest` on the prompt leg is a
         // shape fault the subject can fix, and the loop must report it as one
-        // instead of sending them to an audit trail that holds nothing.
+        // instead of sending them to look for an
+        // egress intent that was never written. The refusal itself IS recorded
+        // — the kernel appends a pre-gate deny before answering — so what
+        // distinguishes the two is where the subject is pointed, not whether
+        // anything was audited.
         assert_ne!(PlaneError::Malformed, PlaneError::Refused);
     }
 

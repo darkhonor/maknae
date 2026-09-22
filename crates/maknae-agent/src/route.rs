@@ -49,7 +49,14 @@ pub enum RouteError {
     BadArguments(String),
     EmptyPath,
     RelativePath,
-    /// Non-canonical: a trailing `/`, or an empty (`//`), `.` or `..` segment.
+    /// Non-canonical, over-long, or NUL-bearing: an empty (`//`), `.` or `..`
+    /// segment; longer than `maknae_proto::MAX_MUTATION_PATH_BYTES`; or
+    /// carrying a NUL byte. A trailing `/` is subsumed by the empty-segment
+    /// rule and has no branch of its own — past the bare-`/` early return, a
+    /// path ending in `/` always splits to a trailing empty segment (see
+    /// `checked_path`). All three causes are pinned in the model-facing
+    /// tool-error text by `drive.rs`'s
+    /// `the_malformed_path_tool_error_names_every_rule_that_produces_it`.
     MalformedPath,
 }
 
