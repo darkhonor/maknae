@@ -707,6 +707,43 @@ pub fn encode_egress_frame_request(
     Ok(buf)
 }
 
+/// How many bytes [`encode_egress_frame_request`] will produce, WITHOUT
+/// producing them (#241, codex round 2 item C).
+///
+/// A counting `io::Write` sink: ciborium serializes through it exactly as it
+/// would to a real buffer, and every byte is added to a total and discarded.
+/// No allocation holds frame content at any point, so this is safe to run on a
+/// frame far too large to encode — which is the whole purpose.
+///
+/// **Why the kernel needs it.** The frame cap is refused by the KERNEL, with
+/// an operator-readable message naming the measured size and the cap
+/// (`egress_socket.rs`). With a fixed encode buffer that refusal was reachable
+/// only while the frame fit the buffer: anything further over died inside the
+/// encoder as an opaque `failed to write whole buffer`, with no size, no cap
+/// and no operator line. Measuring first makes the kernel's own refusal what
+/// EVERY over-cap frame meets, and removes the headroom the buffer needed to
+/// avoid shadowing it.
+pub fn egress_frame_request_encoded_len(
+    r: &crate::EgressFrameRequest,
+) -> Result<usize, ProtoCodecError> {
+    /// Counts, stores nothing. Not `io::sink()`, which discards without
+    /// reporting, and not a `Vec`, which would hold the content this exists
+    /// to avoid allocating.
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    ciborium::into_writer(r, &mut counter).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(counter.0)
+}
+
 pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest, ProtoCodecError> {
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }

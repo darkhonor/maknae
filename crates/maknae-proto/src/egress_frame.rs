@@ -82,8 +82,9 @@ pub struct EgressFrameReply {
 /// any allocation). Two copies of `1024 * 1024` drifted apart in review.
 pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
 
-/// The fixed buffer a request frame is encoded INTO: allocated once, written
-/// once, never grown (#241, codex round 1 critical 3). The encoder began at
+/// The fixed buffer a request frame is encoded INTO when the caller has not
+/// measured the frame itself: allocated once, written once, never grown
+/// (#241, codex round 1 critical 3). The encoder began at
 /// `Zeroizing<Vec::new()>` and grew, and every realloc frees a partly-written
 /// buffer while `Zeroizing` wipes only the allocation that survives to the
 /// drop — measured 18850 bytes of capacity for an 18434-byte frame, so a
@@ -92,23 +93,22 @@ pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
 /// carry kernel-served file content, which is what the runtime loop routes
 /// through here.
 ///
-/// Why it is the cap PLUS one page, and not the cap itself: the cap is refused
-/// by the KERNEL, before the first write, by the `frame_len_within_cap`
-/// predicate with its own operator-readable message and its own pre-send
-/// `Failed` classification. Sized at exactly the cap, this buffer would
-/// shadow that refusal — an over-cap frame would die inside the encoder
-/// instead and the kernel's branch would become code no input could reach.
-/// One page of headroom keeps the kernel's refusal the one a marginally-over
-/// frame meets; a frame past the headroom too is refused by the encoder,
-/// which is also pre-send, so nothing fails open either way.
+/// **It is the cap EXACTLY.** *(Corrected 2026-09-22, codex round 2 item C:
+/// this was the cap plus one page, `1_052_672`, and the page was there so an
+/// over-cap frame would meet the KERNEL's operator-readable cap refusal rather
+/// than dying inside the encoder. That worked only within the page: a frame
+/// further over the cap — 2 MiB over, say — still died in the encoder as
+/// `failed to write whole buffer`, with no size, no cap and no operator line.
+/// Measured and observed RED. The kernel now calls
+/// [`crate::egress_frame_request_encoded_len`] BEFORE it allocates, so its own
+/// refusal is what every over-cap size meets and the headroom has nothing left
+/// to protect.)*
 ///
-/// Written OUT rather than as `EGRESS_REQUEST_FRAME_MAX_BYTES + 4096`, which
-/// is what it is: measured 2026-09-22, `cargo mutants` replaces that `+` with
-/// `*`, and a 4 GiB `vec![0; …]` in the encoder times the whole test binary
-/// out instead of failing an assertion — a gate violation for a mutant the
-/// by-value test does kill. The relation to the cap is pinned in the tests
-/// below, where no mutation reaches.
-pub const EGRESS_REQUEST_FRAME_ENCODE_BYTES: usize = 1_052_672;
+/// The production caller no longer uses this const at all — it passes the
+/// measured length. It remains as the bound for a caller that cannot measure
+/// first, and the cap is the only defensible value for one: a buffer larger
+/// than the cap can only produce a frame nobody may send.
+pub const EGRESS_REQUEST_FRAME_ENCODE_BYTES: usize = EGRESS_REQUEST_FRAME_MAX_BYTES;
 
 /// The largest reply frame that crosses the deputy→kernel socket, stated ONCE
 /// for both ends: the kernel refuses to READ a larger one (checked against the
@@ -168,20 +168,15 @@ mod tests {
     #[test]
     fn the_request_frame_cap_is_one_mebibyte_by_value() {
         assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 1_048_576);
-        // By VALUE too, and its relation to the cap stated separately: a
-        // mutant turning `+` into `-` or dropping the page keeps every
-        // symbolic use compiling, and would silently make the encoder the
-        // thing that refuses an over-cap frame.
-        assert_eq!(EGRESS_REQUEST_FRAME_ENCODE_BYTES, 1_048_576 + 4096);
+        // By VALUE too, and its relation to the cap stated separately
+        // (corrected 2026-09-22, codex round 2 item C: this asserted the cap
+        // plus one page, and the page is gone — the kernel measures the frame
+        // before it allocates, so no headroom is needed to keep the kernel's
+        // own cap refusal from being shadowed by an encoder overflow).
+        assert_eq!(EGRESS_REQUEST_FRAME_ENCODE_BYTES, 1_048_576);
         assert_eq!(
-            EGRESS_REQUEST_FRAME_ENCODE_BYTES,
-            EGRESS_REQUEST_FRAME_MAX_BYTES + 4096,
-            "the encode buffer IS the cap plus one page; the const is spelled out, so this is what ties the two together"
-        );
-        assert_eq!(
-            EGRESS_REQUEST_FRAME_ENCODE_BYTES - EGRESS_REQUEST_FRAME_MAX_BYTES,
-            4096,
-            "one page of headroom, so the kernel's own pre-send cap refusal is not shadowed by an encoder overflow"
+            EGRESS_REQUEST_FRAME_ENCODE_BYTES, EGRESS_REQUEST_FRAME_MAX_BYTES,
+            "a buffer larger than the cap can only produce a frame nobody may send"
         );
     }
 
@@ -367,6 +362,53 @@ mod tests {
                 .len(),
             buf.len()
         );
+    }
+
+    /// codex round 2, item C. The kernel's cap refusal carries the measured
+    /// size and the cap, and an operator `eprintln!`; the encoder's overflow
+    /// carries `failed to write whole buffer` and nothing else. Which one an
+    /// over-cap frame meets was decided by 4 KiB of buffer headroom, so a
+    /// frame 2 MiB over the cap got the codec string. The counting pass is
+    /// what makes the length knowable before anything is allocated.
+    #[test]
+    fn the_counting_pass_is_the_encoder_length_at_every_size() {
+        // Small, and a frame FAR over the cap — the case the fixed buffer
+        // cannot encode at all, and the reason this function exists.
+        for n in [
+            8usize,
+            9 * 1024,
+            EGRESS_REQUEST_FRAME_MAX_BYTES + 2 * 1024 * 1024,
+        ] {
+            let r = req(
+                "conv1",
+                vec![crate::Turn::Tool {
+                    call_id: "c1".into(),
+                    content: vec![text(&"x".repeat(n))],
+                }],
+            );
+            let counted = crate::egress_frame_request_encoded_len(&r).unwrap();
+            // The oracle is the ENCODER, not a second length formula: any
+            // divergence would put the kernel's refusal on the wrong side of
+            // the cap by exactly that amount.
+            let mut reference = Vec::new();
+            ciborium::into_writer(&r, &mut reference).unwrap();
+            assert_eq!(counted, reference.len(), "n = {n}");
+            assert!(counted > n, "n = {n}: the content must be in the count");
+            // And the count is what the fixed-buffer encoder needs: exactly
+            // the measured length succeeds, one byte less does not.
+            if n <= 9 * 1024 {
+                assert_eq!(
+                    crate::encode_egress_frame_request(&r, counted)
+                        .unwrap()
+                        .len(),
+                    counted
+                );
+                assert!(matches!(
+                    crate::encode_egress_frame_request(&r, counted - 1),
+                    Err(crate::ProtoCodecError::Encode(_))
+                ));
+            }
+        }
     }
 
     #[test]
