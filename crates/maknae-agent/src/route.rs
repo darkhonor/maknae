@@ -185,8 +185,11 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// splits to a trailing EMPTY segment, so the segment pass already refuses it.
 /// The kernel keeps the two apart only to name two audit strings; this variant
 /// is one, so a separate branch would be code no input can distinguish — a
-/// surviving mutant, measured 2026-09-22 (dropping the explicit `ends_with`
-/// check left all 30 tests green).
+/// surviving mutant, measured 2026-09-22 on the branch that removed it
+/// (`69dc510`) and re-measured 2026-09-22 against this tree: adding the
+/// explicit `ends_with` branch back leaves the WHOLE crate suite green, so no
+/// test discriminates it in either direction. (The earlier wording named a
+/// test count, which went stale the next time the crate grew a test.)
 ///
 /// Why it is refused HERE and not left to the kernel: the pre-gate fails as
 /// the malformed-request class, before the PDP and before anything is opened.

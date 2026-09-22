@@ -142,12 +142,16 @@ pub async fn fulfil<S: KeySource>(
     // "trail == wire", the same overclaim the kernel struck at
     // `content_measure`): the deputy sends every `Text` block and every
     // `arguments` payload that `content_measure` digested, in order, with
-    // nothing dropped. A tool call's `name` and `call_id`, a `Tool` turn's
-    // `call_id`, and the frame's own `model` ride alongside undigested —
-    // `content_measure` feeds on `Text` blocks and `arguments` only — as do
-    // the compiled preamble, the advertised tool definitions this deputy adds
-    // (#264) and its `stream: false`, which the kernel never sees and
-    // therefore never digested.
+    // nothing dropped. The rule on the other side, stated rather than
+    // enumerated: the digest covers exactly the `Text` bytes and every
+    // proposed tool call's `arguments`, in order, and everything else on the
+    // frame and on the wire rides alongside undigested — among them the tool
+    // call's `name` and `call_id`, a `Tool` turn's `call_id`, the message
+    // roles and the tool call's `"function"` type, the frame's `model`, and
+    // the preamble and tool definitions this deputy adds (#264), which the
+    // kernel never sees at all. `content_measure`'s own doc is the
+    // authoritative statement, including the consequence that the feed has no
+    // separator and no role tag.
     //
     // The CONTENT judgement is `handle::decide`'s (pure, directly testable,
     // and `Refusal` is the right taxonomy): it refuses a non-text block and a
@@ -383,25 +387,16 @@ mod tests {
             // socket is not one message, and since #264 the request body is
             // ~2.1 KB rather than ~70 bytes -- a short read would make every
             // `contains` assertion below silently weaker rather than failing
-            // loudly. Computed at 2154 bytes for the `frame()` shape, and
-            // observed at 2154 from this loop: 1109 for the preamble as a JSON
-            // string (1084 on disk, plus 21 escaped newlines, 2 escaped quotes
-            // and the 2 delimiters), 911 for the tool schemas, 28 for the one
-            // user block's content string, and 106 of ENVELOPE -- keys,
-            // braces, and the short role/model/stream values (22 of the 106
-            // are those values: `"m"`, `"system"`, `"user"`, `false`). The
-            // fourth term is not turn-count alone: the three-role test below,
-            // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`,
-            // is 2339 with an envelope of 293, and 86 of that 293 is values --
-            // 47 of them the assistant tool call's `"function"` type (10), its
-            // `name` (11), the assistant `id` and the tool turn's
-            // `tool_call_id` (8), and 18 bytes of `arguments` -- so a longer
-            // tool name or a longer `arguments` payload moves it as surely as
-            // another turn does. Nothing asserts either total -- the loop reads
-            // `Content-Length` -- so the figures are orientation, and the way
-            // to re-measure either is to print `seen.len() - (brk + 4)`, the
-            // body length this loop already computes, under the test whose
-            // shape is wanted.
+            // loudly. Observed: 2154 bytes for the `frame()` shape, and 2339
+            // for the three-role shape of
+            // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`
+            // below. Every term of either total moves when `core-prompt.txt`
+            // or `baseline-tools.json` changes -- which is how ADR-0023's tool
+            // schemas went from 893 bytes to 911 -- so these are orientation,
+            // not invariants, and nothing asserts them: the loop reads
+            // `Content-Length`. To re-measure, print `seen.len() - (brk + 4)`,
+            // the body length this loop already computes, under whichever of
+            // those two tests has the shape you want.
             let mut seen = Vec::new();
             let mut buf = vec![0u8; 8192];
             loop {

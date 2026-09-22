@@ -84,7 +84,8 @@ const SUFFIX_HEADROOM: usize = 32;
 /// `41 + digits(len) + digits(steps)`, so the append fits exactly while
 /// `41 + digits(len) + digits(steps) <= 44`, i.e. exactly while
 /// `digits(len) + digits(steps) <= 3` — no realloc for a body under 100 bytes
-/// and a single-digit step counter, a realloc above) — and either way what
+/// and a single-digit step counter, a realloc once the two digit counts
+/// exceed three) — and either way what
 /// it holds is a short renderer-authored
 /// length (`binary content, N bytes`), not a file.
 ///

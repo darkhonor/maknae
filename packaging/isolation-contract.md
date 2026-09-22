@@ -56,11 +56,14 @@ at scoping it claimed less. What the gates enforce is the PRIVILEGED rows — th
 `ci/gates/lib.sh`'s `PRIVILEGED_CRATES`. For those rows they enforce the FORBIDDEN cells of the
 `maknae` column three ways (`p1-manifest-lint.sh` on direct dependencies, `p2-invert-tree.sh` on
 transitive reachability, `p2-artifact-witness.sh` on the BUILT binary's `cargo auditable`
-inventory) and, through p1's per-consumer allowlist `TRUST_CONSUMER_ALLOW`, those same crates'
-OTHER columns too — so `maknaed` → `maknae-spif-compile` fails P1 although its cell here reads
-`—`. The NON-PRIVILEGED rows are un-gated prose, since `isolation-contract-lint.sh` skips a
-4-column table. The 2026-09-22 `maknae-mcp` correction below is what such a cell drifting looks
-like.)*
+inventory), and `p1_check.py` refuses a direct privileged dependency declared by ANY
+non-privileged package in the workspace — not only the three binaries in these columns — with
+`TRUST_CONSUMER_ALLOW` naming the only permitted edges, so `maknaed` → `maknae-spif-compile`
+fails P1 although its cell here reads `—`. The NON-PRIVILEGED rows are un-gated prose because
+all three gates iterate `PRIVILEGED_CRATES` and nothing else; that `isolation-contract-lint.sh`
+skips a 4-column table is a separate fact, and it is why no cell in this table carries a
+`✓<check>` token. The 2026-09-22 `maknae-mcp` correction below is what such a cell drifting
+looks like.)*
 
 | Crate | maknaed | maknae | maknae-spifc |
 |---|---|---|---|
