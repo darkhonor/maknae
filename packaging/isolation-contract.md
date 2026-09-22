@@ -69,5 +69,5 @@ The P1/P2 gates (`ci/gates/`) enforce this. "forbidden" = the gates fail if the 
 | maknae-vault | linked | linked | — |
 | maknae-config | via kernel | linked | — |
 | maknae-llm | — *(2026-09-15, #240: linked by `maknae-egress` and nothing else; the deputy's fourth binary column, and the five-cell lint row it needs, are the deferred follow-up named in #240's closing body — until then this row says where the crate lives in prose)* | — | — |
-| maknae-agent | — | linked | — |
+| maknae-agent | — *(2026-09-22, #241: the `maknaed` dash is about the BINARY. `maknae-kernel` takes `maknae-agent` as a **dev**-dependency, for `crates/maknae-kernel/tests/agent_loop.rs` — the brain driven against the real kernel — so no shipped `maknaed` edge exists; same prose-until-a-column treatment as the `maknae-llm` row above)* | linked | — |
 | maknae-mcp | linked | linked | — |

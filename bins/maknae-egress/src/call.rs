@@ -70,9 +70,15 @@ pub async fn fulfil<S: KeySource>(
     // the kernel's `content_measure` digests every `Text` block into the
     // write-ahead intent record, so skipping one would make the trail attest
     // bytes that never left the process — measured 6 for
-    // `[Text("  "), Text("real")]` and sent 4 (#264 review round 4, a
-    // regression this branch introduced in round 2 and three rounds missed).
-    // Trail == wire is the property.
+    // `[Text("  "), Text("real")]` and sent 4 (#264 review, a regression this
+    // branch introduced and three reviews missed).
+    //
+    // The property, stated precisely (scoped 2026-09-22, #241 — this read
+    // "trail == wire", the same overclaim the kernel struck at
+    // `content_measure`): the deputy sends every `Text` block and every
+    // `arguments` payload that `content_measure` digested, in order, with
+    // nothing dropped. A tool call's `name` and `call_id`, and a `Tool` turn's
+    // `call_id`, ride alongside undigested.
     //
     // The CONTENT judgement is `handle::decide`'s (pure, directly testable,
     // and `Refusal` is the right taxonomy): it refuses a non-text block and a
@@ -93,8 +99,10 @@ pub async fn fulfil<S: KeySource>(
     // written as a refusal rather than a drop so that the day admission
     // loosens, the failure is loud instead of a truncated prompt.
     // A turn's several `Text` blocks become ONE message with their bytes
-    // concatenated in order, no separator — exactly what `content_measure`
-    // digests, so trail == wire.
+    // concatenated in order, no separator — exactly the bytes
+    // `content_measure` digested, nothing dropped and nothing added (scoped
+    // 2026-09-22, #241: this said "so trail == wire"; the digest covers the
+    // text and `arguments` bytes, not the names and ids that ride with them).
     let text_of = |content: &[maknae_proto::ContentBlock]| -> Result<String, FulfilError> {
         let mut s = String::new();
         for b in content {
