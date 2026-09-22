@@ -189,10 +189,12 @@ impl Plane for FixturePlane {
             // green for a kernel that answered a PDP deny with `Internal` —
             // the trail records the "deny" class for `Unavailable`/`TimedOut`
             // too (`handler.rs:480-501`) — while the real CLI rendered
-            // "read unavailable". And an UNARMED refusal is the subject's own
-            // ENOENT/EACCES reaching the kernel's want-of-descriptor deny, not
-            // a verdict on content, so it is `Unavailable` here as it is there
-            // (#241).
+            // "read unavailable". And an UNARMED refusal is not a verdict on
+            // content either way: on the paths this file sends it is the
+            // subject's own ENOENT/EACCES reaching the kernel's
+            // want-of-descriptor deny, and a path that also fails the lexical
+            // pre-gate would come back `BadRequest` before that — so it is
+            // `Unavailable` here as it is there (#241).
             RespResult::Err(_) if !armed => ReadOutcome::Unavailable,
             RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
                 ReadOutcome::Refused

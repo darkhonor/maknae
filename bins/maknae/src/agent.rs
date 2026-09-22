@@ -94,6 +94,16 @@ pub fn mint_conversation_id() -> String {
 /// content: it is the subject's own OS-DAC or a path that does not exist.
 /// Rendering it as "Not authorized" told the model a decision had been made,
 /// and the compiled prompt forbids the model to diagnose or retry that.
+///
+/// *(Scoped 2026-09-22, #344: the record above says the kernel "refuses it for
+/// want of a descriptor". That is what happens when the path is lexically
+/// canonical and so reaches the descriptor check. A path that ALSO fails
+/// `lexical_pregate` — an empty, `.` or `..` segment, or a trailing `/` — is
+/// answered `BadRequest` first, because `maknae-kernel`'s `run.rs` runs that
+/// gate before descriptor evaluation; this mapper then sends it to
+/// `Unavailable` through the `BadRequest` arm rather than the unarmed one. The
+/// record's point is unchanged either way: neither outcome is a PDP verdict on
+/// the object's content.)*
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
         // The buffer is MOVED, never copied: `b.0` is already a `Zeroizing`,

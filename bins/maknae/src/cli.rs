@@ -425,9 +425,13 @@ pub(crate) async fn send_verb(
     // otherwise consume the descriptor.
     //
     // If the open FAILS — or, on the branch below, the stream cannot arm at all — the
-    // request is still sent, unarmed. That is not a fallback — the daemon denies for want
-    // of a descriptor (ADR-0009 decision 2) and the refusal lands in the audit trail,
-    // which is the whole reason not to fail silently here.
+    // request is still sent, unarmed. That is not a fallback — the request is DECIDED
+    // rather than dropped, and the refusal lands in the audit trail, which is the whole
+    // reason not to fail silently here. WHICH refusal depends on the gate it meets first:
+    // a lexically canonical path reaches the descriptor check and is denied for want of
+    // one (ADR-0009 decision 2); a path the kernel's lexical pre-gate rejects — an empty,
+    // `.` or `..` segment, or a trailing `/` — comes back `BadRequest` for its shape,
+    // before descriptor evaluation runs at all.
     let prepared = crate::mutation::prepare(request_verb.clone());
     // True unless the read lane below clears it, which it does on EITHER of two
     // branches: `open_for_delegation` returned `Err`, or the stream could not arm a

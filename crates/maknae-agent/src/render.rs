@@ -28,7 +28,13 @@ pub enum ToolOutcome {
 /// `ReadContent(Zeroizing([83, 69, …]))`, dumping kernel-served home-file
 /// content into any `{:?}`, including a test's `panic!("{other:?}")`.
 /// Length only. `BadCall`'s `String` IS printed — it is router-authored text
-/// (a tool name, a serde message), never served content.
+/// (a tool name, a serde message), and it carries nothing this crate received
+/// as `ReadContent`.
+///
+/// *(Scoped 2026-09-22, #344: this ended "never served content", which holds
+/// for the direct path and not for a provider echo — a serde message can quote
+/// arguments the model built out of bytes it was shown. `render`'s suffix
+/// comment states the same scope and why it is accepted.)*
 impl std::fmt::Debug for ToolOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -155,8 +161,17 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
     // compiled-in constant's heap copy, the renderer's own
     // `binary content, N bytes`, or the router's error text, which MAY quote
     // the model's own arguments through a serde diagnostic (`BadCall` above
-    // says so, and why it is accepted). Never kernel-served content — see
-    // `render`'s doc.
+    // says so, and why it is accepted). What none of these arms holds is
+    // content this renderer received DIRECTLY as `ReadContent` — that is the
+    // zeroizing path above.
+    //
+    // Corrected 2026-09-22, #344: this read "Never kernel-served content",
+    // which is true of the direct path and NOT of a provider echo. The model
+    // is shown what it read, so it can quote those bytes back into its next
+    // tool call's arguments; a malformed argument carrying them returns
+    // `BadArguments` — serde quotes the offending value — and renders through
+    // `BadCall` right here. Accepted for the reason `BadCall` above gives, and
+    // named so the arm is not read as excluding served bytes by origin.
     out.push_str("\n\nsteps remaining: ");
     out.push_str(&steps_remaining.to_string());
     out
