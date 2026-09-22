@@ -69,13 +69,23 @@ impl Default for CallBounds {
 /// nothing), so the allocation property below is directly observable in a
 /// test — the same reason `maknae-agent`'s renderer proves its own headroom by
 /// asserting `capacity()`.
-fn text_of(content: &[maknae_proto::ContentBlock]) -> Result<String, FulfilError> {
-    // Allocated ONCE, at the exact byte sum. A growing `String` memcpy's the
-    // model's text into a bigger allocation and frees the old one WITHOUT
-    // zeroizing it, leaving a readable fragment of the conversation on the
-    // heap — so a multi-block turn must never reallocate. Non-text blocks
-    // contribute 0 and never reach the push: the loop below refuses them.
-    let mut s = String::with_capacity(
+fn text_of(
+    content: &[maknae_proto::ContentBlock],
+) -> Result<maknae_proto::SecretText, FulfilError> {
+    // ZEROIZING FROM ALLOCATION, never a plain `String` wrapped at the end
+    // (codex round 2, item A). On a `Turn::Tool` these bytes ARE kernel-served
+    // file content: as a plain `String` this buffer was freed unwiped when
+    // `fulfil` returned — including on the credential-failure path below,
+    // where nothing was ever sent — and printed in full by the derived `Debug`
+    // of every type that ends up owning it.
+    //
+    // Allocated ONCE, at the exact byte sum, for the reason that survives the
+    // type change: a growing buffer memcpy's the text into a bigger allocation
+    // and frees the old one, and `Zeroizing` wipes only the allocation that
+    // lives to the drop — so a multi-block turn must never reallocate.
+    // Non-text blocks contribute 0 and never reach the push: the loop below
+    // refuses them.
+    let mut s = zeroize::Zeroizing::new(String::with_capacity(
         content
             .iter()
             .map(|b| match b {
@@ -83,7 +93,7 @@ fn text_of(content: &[maknae_proto::ContentBlock]) -> Result<String, FulfilError
                 _ => 0,
             })
             .sum(),
-    );
+    ));
     for b in content {
         match b {
             maknae_proto::ContentBlock::Text { text } => s.push_str(&text.0),
@@ -95,7 +105,10 @@ fn text_of(content: &[maknae_proto::ContentBlock]) -> Result<String, FulfilError
             }
         }
     }
-    Ok(s)
+    // MOVED, not copied: `SecretText` is a newtype over the very
+    // `Zeroizing<String>` built above, so the single allocation changes owner
+    // and is never duplicated or freed here.
+    Ok(maknae_proto::SecretText(s))
 }
 
 /// Read the credential (first use per destination) and make the call.
@@ -259,9 +272,9 @@ mod tests {
             })
             .collect();
         let got = text_of(&blocks).expect("all text");
-        assert_eq!(got, want, "verbatim, in order, no separator");
+        assert_eq!(got.0.as_str(), want, "verbatim, in order, no separator");
         assert_eq!(
-            got.capacity(),
+            got.0.capacity(),
             want.len(),
             "the buffer GREW: a block was memcpy'd and the old allocation freed unzeroized"
         );
@@ -278,7 +291,7 @@ mod tests {
             Err(FulfilError::Provider(_))
         ));
         // The empty content case allocates nothing at all.
-        assert_eq!(text_of(&[]).expect("empty").capacity(), 0);
+        assert_eq!(text_of(&[]).expect("empty").0.capacity(), 0);
     }
 
     struct Denied;
