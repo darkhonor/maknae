@@ -53,7 +53,7 @@ impl maknae_kernel::Egress for Recording {
         r: maknae_kernel::EgressRequest,
     ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
         self.calls.lock().unwrap().push("send");
-        // Mirrors `content_measure` (R9): every `Text` block across every turn,
+        // Mirrors `content_measure`: every `Text` block across every turn,
         // PLUS every assistant turn's tool-call arguments — both leave the
         // process, so the recorded sum is what the trail digests.
         let text_len = r
@@ -691,7 +691,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
             },
             "no text to send",
         ),
-        // #241 R4: a client-supplied tool call over its argument bound is
+        // #241: a client-supplied tool call over its argument bound is
         // refused by SHAPE admission at the pre-gate — before any intent
         // record, before the PDP. The payload is well under the default
         // `frame_max_bytes`, so the frame itself is accepted and the pre-gate

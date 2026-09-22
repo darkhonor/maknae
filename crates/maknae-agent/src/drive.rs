@@ -274,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_then_write_then_answer_drives_to_completion_with_the_right_transcript() {
-        // Absolute paths throughout: R10's `route()` refuses relative ones.
+        // Absolute paths throughout: `route()` refuses relative ones.
         let mut p = scripted(vec![
             PromptReply {
                 blocks: vec![],
@@ -423,7 +423,7 @@ mod tests {
     }
     #[tokio::test]
     async fn a_bad_tool_call_is_answered_as_a_tool_error_with_no_plane_call() {
-        // Every RouteError arm, by name and by args (R16: each is a render
+        // Every RouteError arm, by name and by args (each is a render
         // arm in `drive`, and the T1 floor is measured on this module alone).
         for (name, bad) in [
             ("read_file", "not json"),
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn a_reply_carrying_a_non_text_block_contributes_no_text_to_the_answer() {
         // `admitted_reply` refuses non-text before it reaches the loop; this
-        // pins `text_of`'s behaviour if that ever loosens (R16).
+        // pins `text_of`'s behaviour if that ever loosens.
         let r = PromptReply {
             blocks: vec![
                 ContentBlock::Image {

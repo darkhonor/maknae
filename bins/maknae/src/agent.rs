@@ -19,7 +19,7 @@ pub struct AgentConfig {
 
 /// Advisory bounds (ADR-0023 d7), from the subject's own config — a file the
 /// subject may edit, which is fine precisely because they are advisory.
-/// String-errored like the rest of the CLI (R3); the closed vocabulary is
+/// String-errored like the rest of the CLI; the closed vocabulary is
 /// maknae-config's public `reject_unknown_keys` (#210).
 pub fn agent_from_section(v: Option<&Value>) -> Result<AgentConfig, String> {
     let Some(section) = v else {
@@ -152,7 +152,8 @@ impl Plane for RealPlane<'_> {
         }
     }
     async fn read(&mut self, path: &str) -> ReadOutcome {
-        // R1: the object is passed so the read is ARMED exactly as `maknae read` is.
+        // The object is passed so the read is ARMED exactly as `maknae read`
+        // is (ADR-0009).
         read_outcome(
             send_verb(
                 Verb::Read {
@@ -167,7 +168,7 @@ impl Plane for RealPlane<'_> {
         )
     }
     async fn write(&mut self, path: &str, content: &[u8]) -> WriteOutcome {
-        // R13: the frame-budget refusal is LOCAL and pre-send — nothing left
+        // The frame-budget refusal is LOCAL and pre-send — nothing left
         // the process, nothing is on the trail, the file is untouched.
         let Ok(verb) = write_request(
             path.to_string(),
@@ -275,7 +276,7 @@ mod tests {
             agent_from_section(Some(&yaml("disabled"))).is_err(),
             "a non-map section fails closed"
         );
-        // R15's actual case: a BARE `agent:` key reaches this function as
+        // The actual case: a BARE `agent:` key reaches this function as
         // `Some(&Value::Null)` (loader assembles sections as (key, val) pairs
         // from the root map). Loud, not silently defaulted.
         assert!(
@@ -291,10 +292,10 @@ mod tests {
     }
     #[test]
     fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
-        // R29/ADR-0023 d4: the wire cannot distinguish uncertain from refused
+        // ADR-0023 d4: the wire cannot distinguish uncertain from refused
         // on the write lane, so only a clean `applied: true` may claim
         // certainty. `NotSent` is absent by construction — it is decided from
-        // `write_request`'s `Err`, before `send_verb` is called (R13).
+        // `write_request`'s `Err`, before `send_verb` is called.
         use maknae_proto::{Payload, ProtoErrCode};
         assert_eq!(
             write_outcome(Ok(SentOutcome::WriteDone { applied: true })),
@@ -324,9 +325,10 @@ mod tests {
     }
     #[test]
     fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
-        // R11 is a CONTROL, so it is tested: only the authorization code is a
-        // refusal the model may not appeal; a BadRequest (`/a/../b`), a
-        // protocol error, or a transport error is "unavailable".
+        // This mapper is a CONTROL, so it is tested: only the authorization
+        // code is a refusal the model may not appeal; a BadRequest
+        // (`/a/../b`), a protocol error, or a transport error is
+        // "unavailable".
         use maknae_proto::{Payload, ProtoErrCode};
         let content = maknae_proto::Bytes::new(zeroize::Zeroizing::new(b"x".to_vec()));
         assert_eq!(

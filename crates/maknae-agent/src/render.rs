@@ -10,8 +10,8 @@ use zeroize::Zeroizing;
 
 /// `ReadContent` carries a `Zeroizing<Vec<u8>>` for the reason
 /// [`crate::plane::ReadOutcome`] states: the read path MOVES its buffer
-/// through and never copies content out of a `Zeroizing` into a plain `Vec`
-/// (R28). `from_utf8` below reads it through `Deref`.
+/// through and never copies content out of a `Zeroizing` into a plain `Vec`.
+/// `from_utf8` below reads it through `Deref`.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ToolOutcome {
     ReadContent(Zeroizing<Vec<u8>>),
@@ -26,7 +26,7 @@ pub enum ToolOutcome {
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
 /// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
 /// `ReadContent(Zeroizing([83, 69, …]))`, dumping kernel-served home-file
-/// content into any `{:?}`, including a test's `panic!("{other:?}")` (R31).
+/// content into any `{:?}`, including a test's `panic!("{other:?}")`.
 /// Length only. `BadCall`'s `String` IS printed — it is router-authored text
 /// (a tool name, a serde message), never served content.
 impl std::fmt::Debug for ToolOutcome {
@@ -48,10 +48,10 @@ impl std::fmt::Debug for ToolOutcome {
 
 pub const NOT_AUTHORIZED: &str = "Not authorized";
 pub const APPLIED: &str = "applied";
-/// The prompt's own clause, in full (R8).
+/// The prompt's own clause, in full.
 pub const OUTCOME_UNKNOWN: &str = "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again";
 pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
-/// R13: a LOCAL pre-send refusal is a tool error, not an unknown outcome.
+/// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
 
 /// Headroom the read arm pre-allocates for the suffix `render` appends, so the
@@ -69,7 +69,7 @@ const SUFFIX_HEADROOM: usize = 32;
 ///
 /// The property that holds, stated exactly (corrected 2026-09-22, #241 — the
 /// earlier text claimed the append alone was enough): the read arm allocates
-/// ONCE, with [`SUFFIX_HEADROOM`] for the suffix, appends in place, and hands
+/// ONCE, with `SUFFIX_HEADROOM` for the suffix, appends in place, and hands
 /// that single zeroizing buffer to the transcript. There is no second plain
 /// buffer and no reallocation of the body. Without the headroom the first
 /// `push_str` reallocated: capacity equalled length, so the body was memcpy'd
@@ -136,8 +136,8 @@ mod tests {
     #[test]
     fn the_renderer_only_strings_are_exact() {
         // NOT promised by the compiled prompt (see the module doc): these
-        // describe transport and argument faults, not decisions. R24 pins the
-        // text LITERALLY and not via the const, so swapping the arm to
+        // describe transport and argument faults, not decisions. This pins
+        // the text LITERALLY and not via the const, so swapping the arm to
         // NOT_AUTHORIZED goes red — a transport fault rendered as a refusal
         // would tell the model the kernel decided.
         assert_eq!(
@@ -168,7 +168,7 @@ mod tests {
             render(&ToolOutcome::BadCall("missing field `path`".into()), 4)
                 .starts_with("tool error: missing field `path`")
         );
-        // R13: never "may have happened" for a write that never left the process.
+        // Never "may have happened" for a write that never left the process.
         assert_eq!(
             render(&ToolOutcome::WriteNotSent, 4).as_str(),
             "tool error: write not sent — content exceeds the frame bound\n\nsteps remaining: 4"
@@ -184,7 +184,7 @@ mod tests {
         }
     }
 
-    /// R31: the read bytes are kernel-served home-file content, so
+    /// The read bytes are kernel-served home-file content, so
     /// `ToolOutcome`'s `Debug` is hand-written and redacting — the crate
     /// convention `route.rs`'s `ToolRequest` already follows.
     #[test]

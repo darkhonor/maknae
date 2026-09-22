@@ -10,7 +10,7 @@ use std::future::Future;
 /// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
 /// kernel-served home-file content, and `maknae_proto::Bytes::new` states the
 /// rule the read path obeys — MOVE the buffer through, never copy content out
-/// of a `Zeroizing` into a plain `Vec` (R28).
+/// of a `Zeroizing` into a plain `Vec`.
 ///
 /// What that buys, precisely: the served bytes are moved from
 /// `maknae_proto::Bytes` into this variant, moved on into
@@ -33,7 +33,7 @@ pub enum ReadOutcome {
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
 /// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
 /// `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
-/// into any `{:?}`, including a test's `panic!("{other:?}")` (R31). Length
+/// into any `{:?}`, including a test's `panic!("{other:?}")`. Length
 /// only. The other two arms carry nothing but their own names.
 impl std::fmt::Debug for ReadOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,7 +55,7 @@ impl std::fmt::Debug for ReadOutcome {
 /// (ADR-0023 d4). `NotSent` is the one LOCAL refusal (the encoded request
 /// exceeds the frame bound, judged before a byte leaves the process): nothing
 /// is on the trail and the file is untouched, so "may have happened" would be
-/// false (R13).
+/// false.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
     Applied,
@@ -125,7 +125,7 @@ mod tests {
         assert!(format!("{:?}", errs[1]).contains("Transport"));
     }
 
-    /// R31: the served bytes are kernel-served home-file content, so
+    /// The served bytes are kernel-served home-file content, so
     /// `ReadOutcome`'s `Debug` is hand-written and redacting — the crate
     /// convention `route.rs`'s `ToolRequest` already follows.
     #[test]

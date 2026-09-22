@@ -1154,11 +1154,12 @@ mod tests {
         zeroize::Zeroizing::new(v)
     }
 
-    /// The future `send_verb` returns must be `Send`: Task 7's `impl Plane` returns it
-    /// behind a trait bound that carries `+ Send`, and a guard held across an `.await`
-    /// inside `send_verb` would otherwise only surface there. Compile-time only — never
-    /// called, and that is the point: it checks the FUTURE, not a closure. It lives
-    /// inside `mod tests` so a future re-tiering of `cli.rs` cannot trip
+    /// The future `send_verb` returns must be `Send`: the CLI's `impl Plane`
+    /// (`agent.rs`) returns it behind a trait bound that carries `+ Send`, and a
+    /// guard held across an `.await` inside `send_verb` would otherwise only
+    /// surface there. Compile-time only — never called, and that is the point:
+    /// it checks the FUTURE, not a closure. It lives inside `mod tests` so a
+    /// future re-tiering of `cli.rs` cannot trip
     /// `coverage_check.py`'s column-0-after-the-test-module rule.
     #[allow(dead_code)]
     fn assert_send_verb_future_is_send(

@@ -63,7 +63,7 @@ struct WriteArgs {
     content: String,
 }
 
-/// R10: absolute only. Never resolved against the CWD.
+/// Absolute only. Never resolved against the CWD.
 fn checked_path(p: String) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);
@@ -137,7 +137,7 @@ mod tests {
     }
     #[test]
     fn a_relative_path_is_a_tool_error_never_silently_resolved_against_the_cwd() {
-        // R10: resolving against the CLI's CWD would let the launch directory
+        // Resolving against the CLI's CWD would let the launch directory
         // decide what the model's path means, and would make the delegated
         // descriptor's path differ from the wire's — the `object_requested`
         // symlink-probe signal. Refused here, as a tool error the model can fix.
@@ -149,7 +149,7 @@ mod tests {
             route(&call("write_file", r#"{"path":"./a","content":"x"}"#)),
             Err(RouteError::RelativePath)
         ));
-        // R22: a home-relative path is refused, never expanded — this crate has
+        // A home-relative path is refused, never expanded — this crate has
         // no environment to expand `~` against, and must never acquire one.
         assert!(matches!(
             route(&call("read_file", r#"{"path":"~/foo"}"#)),
@@ -194,7 +194,7 @@ mod tests {
         .unwrap();
         let d = format!("{r:?}");
         assert!(!d.contains("SECRET-BYTES"), "{d}");
-        // R22: a `#[derive(Debug)]` substitution prints `Zeroizing([...])`, so the
+        // A `#[derive(Debug)]` substitution prints `Zeroizing([...])`, so the
         // absence assertion fails on its own — not only the `<12 bytes>` marker.
         assert!(!d.contains("Zeroizing"), "{d}");
         assert!(d.contains("<12 bytes>"), "{d}");

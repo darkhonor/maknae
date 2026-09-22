@@ -46,7 +46,7 @@ pub enum Refusal {
     NoTextToSend,
     /// The transcript does not begin with a user turn. Names a kernel bug
     /// (`admitted_turns` refuses it at the PDP); a record must never call a
-    /// transcript-shape fault "no text" (#241 R6).
+    /// transcript-shape fault "no text" (#241).
     TranscriptShape,
 }
 
@@ -134,7 +134,7 @@ pub fn decide<'a>(
         _ => return Err(Refusal::TranscriptShape),
     }
     // EVERY user turn and every tool turn — the same set the kernel's
-    // `admitted_turns` checks (#241 R14), so the "defence in depth" claim is
+    // `admitted_turns` checks (#241), so the "defence in depth" claim is
     // about the same predicate rather than a looser one. An assistant turn may
     // legitimately be tool calls with no text at all.
     let blank = |content: &[maknae_proto::ContentBlock]| {

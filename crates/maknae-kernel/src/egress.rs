@@ -295,7 +295,7 @@ pub fn admitted_blocks(content: &[ContentBlock]) -> Result<(), String> {
 /// The transcript must be the USER's and every turn must be admissible: the
 /// first turn is a user turn bearing text (the #264 property — "the preamble
 /// must never be the whole request" — extended across roles), every turn
-/// passes shape admission (R4: client-supplied tool calls are bounded HERE,
+/// passes shape admission (client-supplied tool calls are bounded HERE,
 /// before any intent record and before the PDP), and content is text only.
 pub fn admitted_turns(turns: &[Turn]) -> Result<(), String> {
     let Some(first) = turns.first() else {
@@ -1328,7 +1328,7 @@ mod tests {
         // own T1 region in a mutation-gated file, and every other row here
         // builds Assistant turns with `content: vec![]`, so without these the
         // Assistant arm's `find` is unconditionally `None` and its negation
-        // survives mutation (round 8, measured class).
+        // survives mutation (#241, measured).
         let asst_img = Turn::Assistant {
             content: vec![img_b()],
             tool_calls: vec![call("c1", "{}")],
@@ -1345,7 +1345,7 @@ mod tests {
             admitted_turns(&[u("q"), asst(), tool_img]).unwrap_err(),
             "content block type not admitted in this deployment: image"
         );
-        // R4: an over-bound client-supplied tool call is refused at the
+        // An over-bound client-supplied tool call is refused at the
         // pre-gate — before any intent record, before the PDP.
         let over = Turn::Assistant {
             content: vec![],

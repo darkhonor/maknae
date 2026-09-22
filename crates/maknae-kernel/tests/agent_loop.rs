@@ -142,8 +142,8 @@ impl Plane for FixturePlane {
         // it sent the request unarmed anyway, which is this `None`.
         let armed = fd.is_some();
         match self.verb(Verb::Read { path: path.into() }, fd).await.result {
-            // The buffer is MOVED, never copied out of its `Zeroizing` (R28,
-            // `maknae_proto::Bytes::new`) — the same hop `read_outcome` makes.
+            // The buffer is MOVED, never copied out of its `Zeroizing`
+            // (`maknae_proto::Bytes::new`) — the same hop `read_outcome` makes.
             RespResult::Ok(Payload::ReadContent(b)) => ReadOutcome::Content(b.0),
             // Exactly as production's `read_outcome` decides it: ONLY an
             // authorization refusal of an ARMED request is `Refused`.
@@ -289,7 +289,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
 
 #[tokio::test]
 async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_trail() {
-    // The shipped deny, written into the fixture policy (R2): the default
+    // The shipped deny, written into the fixture policy: the default
     // fixture has an EMPTY deny list, so this must be explicit.
     let fx = Fixture::with_rules("agent-deny", &["Read"], &["Read(~/.ssh/**)"], GRANTED);
     let secret = fx.root.join(".ssh").join("id_rsa");
@@ -332,7 +332,7 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
     // The WHOLE string, literal: `starts_with` would stay green if a refusal
     // reason were appended, and a refusal carries none (ADR-0019, ADR-0023 d4).
     // Pinned as text, not via `maknae_agent::render`'s const, for the reason
-    // render.rs's own R24 test states.
+    // render.rs's own literal-text test states.
     assert_eq!(
         tool_text(&transcript.turns()[2]),
         "Not authorized\n\nsteps remaining: 2"
