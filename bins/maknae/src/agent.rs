@@ -252,12 +252,25 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         }
         // Distinct from the line above, and the distinction is the point: a
         // `BadRequest` on the prompt leg is a pre-gate fault on the request's
-        // own shape, decided before any exchange was attempted, so there is
-        // nothing in the trail to go and read and nothing reached the
-        // provider. Sending the subject to the audit trail for a fault the
-        // message already names is a false lead (#241 CR1 SF2).
+        // own shape, decided before any exchange was attempted, so nothing
+        // reached the provider.
+        //
+        // Corrected 2026-09-22 (codex round 1): this said "there is nothing in
+        // the trail to go and read", and that is false. The kernel DOES append
+        // a record for this case — `emit_request_outcome` with a `deny` and
+        // the reason `prompt fails operand pre-gate: …` — before it writes the
+        // `BadRequest` back. What is absent is the durable EGRESS INTENT,
+        // because no exchange was attempted. So the line names both facts and
+        // neither more: no provider contact, and a pre-gate deny that is on
+        // the record. The earlier wording risked an operator concluding the
+        // refusal went unaudited (#241 CR1 SF2 set the first half of this).
+        //
+        // The claim is not merely usually true: `run.rs`'s prompt pre-gate
+        // writes the `BadRequest` only under `may_respond(appended)`, so a
+        // subject that SAW this error is proof the record was appended. That
+        // pre-gate is also the only `BadRequest` the prompt leg can produce.
         Some(StopReason::PromptMalformed) => {
-            "stopped: the kernel refused the prompt as malformed — it did not reach the provider"
+            "stopped: the kernel refused the prompt as malformed before any provider contact (the trail records the pre-gate deny)"
                 .into()
         }
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
