@@ -52,9 +52,14 @@ pub fn resolve_config_dir() -> PathBuf {
 /// realistic `vault`+`transport` config load without each section's own loader rejecting
 /// the other as `UnknownSection` (the P1-B fix).
 ///
-/// One list serves every verb, so `agent` is accepted (and validated) for `ping` as much
-/// as for `agent` — a documented residual of the single-registry design, not a per-verb
-/// grammar.
+/// One list serves every verb, so `agent` is ACCEPTED — but not validated — for `ping` as
+/// much as for `agent`: the combined registry is what the unknown-section check consults,
+/// so the section's presence never fails any verb, while its BOUNDS are read only by
+/// `agent_from_section`, whose one production caller is `maknae agent`'s own `run`. A
+/// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
+/// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
+/// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
+/// which `execute` never does).
 pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {
@@ -302,8 +307,13 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 /// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
-/// Everything that writes to a terminal lives HERE; the sendable core is [`send_verb`],
-/// which prints nothing so a caller that sends many verbs is not also a printer.
+/// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
+/// `maknae agent` prints its own (`agent::run`'s `println!` of the final answer). The
+/// sendable core is [`send_verb`], which prints no result, so a caller that sends many
+/// verbs is not also a printer. `send_verb` is not silent: it writes three arming
+/// diagnostics to stderr (`cannot prepare filesystem operation`, `cannot open`,
+/// `cannot delegate`), and
+/// `mutation::execute`, which it calls on the `MutationAttempt` path, prints too.
 async fn round_trip(
     verb: Verb,
     request_verb: maknae_proto::Verb,
@@ -328,8 +338,9 @@ async fn round_trip(
     }
 }
 
-/// What one sent verb came back as, with NOTHING printed — the caller decides what a
-/// terminal (or a model) is told.
+/// What one sent verb came back as, with no RESULT printed — the caller decides what a
+/// terminal (or a model) is told. (`send_verb`'s three arming diagnostics go to stderr;
+/// see [`send_verb`].)
 ///
 /// `Refused` carries the code AND the message because [`round_trip`] prints both; dropping
 /// the message would be a silent behaviour change no CLI test captures. `Debug` because a
@@ -346,12 +357,24 @@ pub(crate) enum SentOutcome {
     /// The daemon refused, with the wire's own code and message and no reason beyond them
     /// (ADR-0019).
     ///
-    /// `armed` records whether this request carried a delegated descriptor (ADR-0009): true
-    /// when one was attached, true for a verb that names no object (there is nothing to
-    /// delegate), and FALSE only when the subject's own `open_for_delegation` failed and
-    /// [`send_verb`] sent unarmed anyway. An unarmed refusal is the subject's own
-    /// OS-DAC/ENOENT surfacing as the kernel's want-of-descriptor deny (decision 2) — it is
-    /// not a decision about the object's content, and a caller must not report it as one.
+    /// `armed` belongs to the READ/delegated-object lane, the only lane that reads it. On
+    /// that lane it is false in exactly two cases — `maknae_io::open_for_delegation`
+    /// returned `Err`, or the stream could not arm a descriptor — and true otherwise. On
+    /// the MUTATION lane it is always true, including when `prepare` recorded a
+    /// `preparation_error` and `descriptor()` is `Ok(None)` so nothing was armed; that
+    /// costs nothing, because `write_outcome` never reads it and every non-`Applied` write
+    /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached:
+    /// `armed: false` records failed descriptor PREPARATION on the CLIENT, on either of two
+    /// branches — `open_for_delegation` returned `Err` (the subject's own OS-DAC, or a path
+    /// that does not exist), or the stream could not arm one, which attempts no open and so
+    /// says nothing about the subject's rights (documented unreachable today, fail-closed
+    /// anyway). What the kernel then refuses, and why, depends on the gates the request
+    /// meets first: the lexical pre-gate, then the descriptor, then the PDP. A nonexistent
+    /// path that also carries `..` travels unarmed and comes back `BadRequest` for its
+    /// shape — `run.rs`'s pre-gate runs before any descriptor evaluation — not as a
+    /// want-of-descriptor deny (ADR-0009 decision 2), which is what the other orderings
+    /// reach. Neither branch is a decision about the object's content, and a caller must
+    /// not report either as one.
     Refused {
         code: maknae_proto::ProtoErrCode,
         message: String,
@@ -359,7 +382,9 @@ pub(crate) enum SentOutcome {
     },
 }
 
-/// Send ONE verb over the post-mint plane and report what came back, printing nothing.
+/// Send ONE verb over the post-mint plane and report what came back, printing no RESULT —
+/// the caller decides what a terminal (or a model) is told. Not silent: the three arming
+/// failures below go to stderr, and `mutation::execute` prints on the write path.
 ///
 /// `object` is the path to open and delegate a descriptor for, passed EXPLICITLY rather
 /// than derived here: the delegated object is keyed by the CLI's own [`Verb`] (see
@@ -399,12 +424,19 @@ pub(crate) async fn send_verb(
     // Armed AFTER the handshake, deliberately: the handshake's own writes would
     // otherwise consume the descriptor.
     //
-    // If the open FAILS the request is still sent, unarmed. That is not a fallback —
-    // the daemon denies for want of a descriptor (ADR-0009 decision 2) and the refusal
-    // lands in the audit trail, which is the whole reason not to fail silently here.
+    // If the open FAILS — or, on the branch below, the stream cannot arm at all — the
+    // request is still sent, unarmed. That is not a fallback — the request is DECIDED
+    // rather than dropped, and the refusal lands in the audit trail, which is the whole
+    // reason not to fail silently here. WHICH refusal depends on the gate it meets first:
+    // a lexically canonical path reaches the descriptor check and is denied for want of
+    // one (ADR-0009 decision 2); a path the kernel's lexical pre-gate rejects — an empty,
+    // `.` or `..` segment, or a trailing `/` — comes back `BadRequest` for its shape,
+    // before descriptor evaluation runs at all.
     let prepared = crate::mutation::prepare(request_verb.clone());
-    // True unless the open below fails: a verb that names no object has nothing to
-    // delegate and is armed by definition (see [`SentOutcome::Refused`]).
+    // True unless the read lane below clears it, which it does on EITHER of two
+    // branches: `open_for_delegation` returned `Err`, or the stream could not arm a
+    // descriptor. A verb that names no object has nothing to delegate and is armed by
+    // definition (see [`SentOutcome::Refused`], which states the iff).
     let mut armed = true;
     if let Some(prepared) = &prepared {
         if let Some(error) = prepared.preparation_error() {

@@ -621,10 +621,37 @@ mod tests {
         assert_eq!(keys, ["arguments", "name"]);
     }
 
-    /// Every refusal renders something an operator can act on, and NONE of
-    /// them renders provider content. These strings reach the audit trail and
-    /// the terminal; `UnknownTool` names the tool (a name the model proposed,
-    /// not a secret), and nothing else echoes the body.
+    /// Each of the five refusals this test constructs renders something an
+    /// operator can act on, and for those five values none carries provider
+    /// content: `UnknownTool` names the tool (a name the model proposed, not a
+    /// secret), and the other four carry text this crate wrote.
+    ///
+    /// *(Corrected 2026-09-22, #344: the earlier wording generalised to "NONE
+    /// of them renders provider content … and nothing else echoes the body",
+    /// which these five fixed examples cannot establish and which is FALSE of
+    /// one variant. `Malformed` carries serde_json's own diagnostic verbatim —
+    /// `client.rs` builds it as `ReplyError::Malformed(e.to_string())` and
+    /// `Display` renders `provider reply is malformed: {m}` — and serde quotes
+    /// the offending value: measured 2026-09-22, a body of
+    /// `{"choices":"SENTINEL-PROVIDER-BODY"}` renders
+    /// `invalid type: string "SENTINEL-PROVIDER-BODY", expected a sequence`. A
+    /// malformed-response diagnostic CAN echo provider-controlled bytes; what
+    /// this test shows is only that the five constructed cases here do not.
+    /// The kernel already reasons this way about the same serde behaviour and
+    /// logs `e.category()` rather than `{e}` for exactly this reason — see
+    /// `maknae-kernel`'s `run.rs` at its decode-failure record.)*
+    ///
+    /// *(Corrected 2026-09-22, #344: this said "these strings reach the audit
+    /// trail and the terminal". They reach the TERMINAL only. A `ReplyError`
+    /// becomes a provider error inside `maknae-egress`, which `main.rs` turns
+    /// into `ServeError::Fulfil` and reports with
+    /// `eprintln!("maknae-egress: connection refused: …")` before closing the
+    /// connection — and the deputy has no audit sink at all. The kernel then
+    /// records what it can see, a generic transport/outcome failure, never
+    /// this diagnostic: so an operator reading the trail learns that an
+    /// exchange failed, and only the deputy's stderr says the reply named an
+    /// unadvertised tool. `crates/maknae-kernel/tests/agent_loop.rs`'s module
+    /// doc records the same limit from the other side.)*
     #[test]
     fn every_refusal_renders_actionably_and_echoes_no_content() {
         let cases = [

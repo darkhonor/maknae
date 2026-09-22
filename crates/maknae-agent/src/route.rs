@@ -49,7 +49,20 @@ pub enum RouteError {
     BadArguments(String),
     EmptyPath,
     RelativePath,
-    /// Non-canonical: a trailing `/`, or an empty (`//`), `.` or `..` segment.
+    /// Non-canonical, over-long, or NUL-bearing: an empty (`//`), `.` or `..`
+    /// segment; longer than `maknae_proto::MAX_MUTATION_PATH_BYTES`; or
+    /// carrying a NUL byte. A trailing `/` is subsumed by the empty-segment
+    /// rule and has no branch of its own HERE — past the bare-`/` early
+    /// return, a path ending in `/` always splits to a trailing empty segment
+    /// (see `checked_path`). All three causes are pinned in the model-facing
+    /// tool-error text by `drive.rs`'s
+    /// `the_malformed_path_tool_error_names_every_rule_that_produces_it` —
+    /// and that text still LISTS a trailing `/` as a rule, which is right on
+    /// both counts: the kernel's `lexical_pregate` does carry a
+    /// `"trailing slash"` branch of its own (`maknae-kernel`'s `handler.rs`),
+    /// and what the model needs is the rule it broke rather than which branch
+    /// here caught it. `checked_path` records why this crate needs no such
+    /// branch.
     MalformedPath,
 }
 
@@ -172,8 +185,11 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// splits to a trailing EMPTY segment, so the segment pass already refuses it.
 /// The kernel keeps the two apart only to name two audit strings; this variant
 /// is one, so a separate branch would be code no input can distinguish — a
-/// surviving mutant, measured 2026-09-22 (dropping the explicit `ends_with`
-/// check left all 30 tests green).
+/// surviving mutant, measured 2026-09-22 on the branch that removed it
+/// (`69dc510`) and re-measured 2026-09-22 against this tree: adding the
+/// explicit `ends_with` branch back leaves the WHOLE crate suite green, so no
+/// test discriminates it in either direction. (The earlier wording named a
+/// test count, which went stale the next time the crate grew a test.)
 ///
 /// Why it is refused HERE and not left to the kernel: the pre-gate fails as
 /// the malformed-request class, before the PDP and before anything is opened.
@@ -188,10 +204,15 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// neither shape can ever be SERVED. Such a read travels, and then the
 /// subject's own `open_for_delegation` cannot open it — a NUL byte is not a
 /// filename, and `MAX_MUTATION_PATH_BYTES` is 4096, the whole of Linux's
-/// `PATH_MAX` and four times macOS's — so the request goes UNARMED and the
-/// kernel denies it for want of a descriptor (ADR-0009 decision 2). The model
-/// was told `read unavailable — do not retry`, just as unappealable as the
-/// write lane's "may have happened", for a path it could have corrected.
+/// `PATH_MAX` and four times macOS's — so the request goes UNARMED. What the
+/// kernel answers then depends on the gate the path meets first: a NUL byte
+/// and an over-long length are not things `lexical_pregate` looks at, so such
+/// a path, if otherwise canonical, reaches the descriptor check and is denied
+/// for want of one (ADR-0009 decision 2); one that also carries an empty, `.`
+/// or `..` segment is answered `BadRequest` for its shape before that. Both
+/// render the same way, which is the point here: the model was told
+/// `read unavailable — do not retry`, just as unappealable as the write lane's
+/// "may have happened", for a path it could have corrected.
 fn checked_path(p: String) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);
@@ -393,10 +414,13 @@ mod tests {
         // NUL or length rule, so such a read travels — and then the subject's
         // own `open_for_delegation` cannot open it (a NUL byte is not a
         // filename; the constant is 4096, which is the whole of Linux's
-        // PATH_MAX and four times macOS's), the request goes UNARMED, and the
-        // kernel denies it for want of a descriptor. That renders as `read
-        // unavailable — do not retry`, equally unappealable. Refused here, on
-        // both legs, as a tool error the model can fix.
+        // PATH_MAX and four times macOS's), the request goes UNARMED — and,
+        // if the path is otherwise lexically canonical, the kernel denies it
+        // for want of a descriptor; if it also carries an empty, `.` or `..`
+        // segment, the lexical pre-gate answers `BadRequest` for the shape
+        // first. Both render as `read unavailable — do not retry`, equally
+        // unappealable, which is the point. Refused here, on both legs, as a
+        // tool error the model can fix.
         //
         // A NUL rides in as JSON's `\u0000`, which serde decodes to the byte;
         // a raw NUL in the JSON would be a control character serde rejects

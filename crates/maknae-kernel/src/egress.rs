@@ -363,6 +363,20 @@ pub struct ContentMeasure {
 /// identifier for the content, never an integrity control over the whole frame
 /// — record.rs says why, and the 32-hex truncation is why it could not be one.*
 ///
+/// *(Corrected 2026-09-22, #344: the rider list above reads as exhaustive and
+/// is not, and two other sites had each grown their own partial copy of it.
+/// The RULE, stated as a rule: the digest covers exactly the `Text` bytes and
+/// every proposed tool call's `arguments`, in order. Everything else on the
+/// frame and on the wire leaves the process undigested — among them the tool
+/// call's `name` and `call_id`, a `Tool` turn's `call_id`, the message roles
+/// and the tool call's `"function"` type, the frame's `model`, and the
+/// preamble and tool definitions the deputy adds after the kernel is done
+/// with the frame. One consequence, stated because it is easy to assume
+/// otherwise: the feed carries NO separator and NO role tag, so
+/// `[User("ab"), Tool("c")]` and `[User("abc")]` digest identically and to the
+/// same length. The trail attests the bytes, not which role each block rode
+/// under.)*
+///
 /// Never the text; fed incrementally so no second copy of secret text is
 /// made, and truncated to 32 hex characters (record.rs says why).
 pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
@@ -1366,8 +1380,11 @@ mod tests {
 
     #[test]
     fn content_measure_covers_every_turn_and_every_tool_argument_in_order() {
-        // TRAIL == WIRE: tool ARGUMENTS leave the process too, as
-        // tool_calls[].function.arguments, so they are digested in order.
+        // Tool ARGUMENTS leave the process too, as
+        // tool_calls[].function.arguments, so they are digested in order
+        // alongside every `Text` block. Not "trail == wire": the names and ids
+        // that ride with them are shape-admitted but not digest input —
+        // `content_measure`'s own doc above states the scope.
         let turns = [
             Turn::User {
                 content: vec![text("ab")],

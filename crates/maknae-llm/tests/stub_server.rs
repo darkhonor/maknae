@@ -207,9 +207,18 @@ async fn a_body_with_no_declared_length_is_bounded_as_it_arrives() {
     }
 }
 
-/// Every call refusal renders actionably, and none renders provider content:
-/// `Status` carries the CODE alone, because a provider error body is
-/// third-party content that must not reach the trail through a Display impl.
+/// Each of the three call refusals below renders actionably, and none of those
+/// three carries provider content: `Status` carries the CODE alone, because a
+/// provider error body is third-party content that must not reach the trail
+/// through a Display impl.
+///
+/// *(Scoped 2026-09-22, #344: this read "Every call refusal renders actionably,
+/// and none renders provider content", which generalises past the three cases
+/// below and is false of a fourth. `CallError::Reply(ReplyError::Malformed(_))`
+/// carries serde_json's diagnostic, and serde quotes the offending value — so
+/// a malformed provider body does reach a Display impl. `maknae-llm`'s
+/// `every_refusal_renders_actionably_and_echoes_no_content` records the
+/// measurement.)*
 #[test]
 fn every_call_refusal_renders_actionably() {
     let cases = [

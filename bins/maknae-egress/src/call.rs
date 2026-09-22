@@ -142,8 +142,16 @@ pub async fn fulfil<S: KeySource>(
     // "trail == wire", the same overclaim the kernel struck at
     // `content_measure`): the deputy sends every `Text` block and every
     // `arguments` payload that `content_measure` digested, in order, with
-    // nothing dropped. A tool call's `name` and `call_id`, and a `Tool` turn's
-    // `call_id`, ride alongside undigested.
+    // nothing dropped. The rule on the other side, stated rather than
+    // enumerated: the digest covers exactly the `Text` bytes and every
+    // proposed tool call's `arguments`, in order, and everything else on the
+    // frame and on the wire rides alongside undigested — among them the tool
+    // call's `name` and `call_id`, a `Tool` turn's `call_id`, the message
+    // roles and the tool call's `"function"` type, the frame's `model`, and
+    // the preamble and tool definitions this deputy adds (#264), which the
+    // kernel never sees at all. `content_measure`'s own doc is the
+    // authoritative statement, including the consequence that the feed has no
+    // separator and no role tag.
     //
     // The CONTENT judgement is `handle::decide`'s (pure, directly testable,
     // and `Refusal` is the right taxonomy): it refuses a non-text block and a
@@ -313,7 +321,11 @@ mod tests {
             // satisfied by the PREAMBLE itself ("nothing", "something",
             // "anything"), so the one assertion that watched real
             // wire bytes proved nothing about client content reaching the
-            // provider (#264 critical review).
+            // provider (#264 critical review). The `264` in the string is
+            // that provenance and nothing more: #241 reshaped this fixture's
+            // flat content list into a `Turn::User`, and the sentinel's VALUE
+            // is arbitrary — only its uniqueness is load-bearing, and the
+            // assertion below names the same literal, so it is left as it is.
             turns: vec![maknae_proto::Turn::User {
                 content: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new(
@@ -373,10 +385,19 @@ mod tests {
             let (mut s, _) = l.accept().await.unwrap();
             // Read until the whole body has arrived. One `read(2)` on a stream
             // socket is not one message, and since #264 the request body is
-            // ~2.1 KB (2136 bytes: 1084-byte preamble + 893 bytes of tool
-            // schemas + envelope) rather than ~70 bytes -- a
-            // short read would make every `contains` assertion below silently
-            // weaker rather than failing loudly.
+            // ~2.1 KB rather than ~70 bytes -- a short read would make every
+            // `contains` assertion below silently weaker rather than failing
+            // loudly. Observed: 2154 bytes for the `frame()` shape, and 2339
+            // for the three-role shape of
+            // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`
+            // below. These totals change when the serialized preamble, the
+            // tool definitions, or the fixture's turns change -- which is how
+            // ADR-0023's tool schemas went from 893 bytes to 911 -- so these
+            // are orientation, not invariants, and nothing asserts them: the
+            // loop reads `Content-Length`. To re-measure, print
+            // `seen.len() - (brk + 4)`, the body length this loop already
+            // computes, under whichever of those two tests has the shape you
+            // want.
             let mut seen = Vec::new();
             let mut buf = vec![0u8; 8192];
             loop {
@@ -543,7 +564,11 @@ mod tests {
         }
     }
 
-    /// #264 review round 4: TRAIL == WIRE.
+    /// #264: every digested block must ride the wire. (Not "trail == wire" —
+    /// the digest covers the `Text` bytes and the tool-call `arguments` bytes,
+    /// not the names and ids that ride with them; the kernel's
+    /// `content_measure` states the scope, and this test's name predates that
+    /// narrowing.)
     ///
     /// The kernel's `content_measure` digests EVERY `Text` block into the
     /// write-ahead intent record. Round 2 skipped blank blocks in the deputy,
@@ -642,8 +667,16 @@ mod tests {
         assert!(sent.contains("alpha-user") && sent.contains("omega-tool"));
     }
 
-    /// A provider failure is a NAMED refusal the kernel reads, and the
-    /// credential appears nowhere in it.
+    /// A provider failure is a NAMED refusal in the DEPUTY's own error value,
+    /// and the key appears in neither that error nor the bytes this test
+    /// inspects. Where the name goes is the deputy's stderr, not the trail:
+    /// `serve_one` propagates `fulfil`'s error through `?` before it writes
+    /// any reply, `main.rs` renders it with
+    /// `eprintln!("maknae-egress: connection refused: …")` and closes the
+    /// connection, so what the kernel observes is a failed exchange after
+    /// send. What this test checks is the error's own text for the one
+    /// provider response it scripts (corrected 2026-09-22, #344: this said the
+    /// kernel reads the name).
     #[tokio::test]
     async fn a_provider_failure_is_a_named_refusal_that_never_echoes_the_key() {
         fips();

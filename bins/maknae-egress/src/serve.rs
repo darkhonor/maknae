@@ -25,8 +25,17 @@ pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MA
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
     /// The frame was admitted and the provider call failed. Distinct from
-    /// `Refused`: the deputy was WILLING, and something downstream did not
-    /// work — the kernel needs to tell those apart.
+    /// `Refused` HERE, inside the deputy: it records that the deputy was
+    /// WILLING and something downstream did not work.
+    ///
+    /// *(Scoped 2026-09-22, #344: this ended "— the kernel needs to tell those
+    /// apart", which reads as a property of the wire and is not one. Both
+    /// variants leave `serve_one` through `?` before it writes a reply, so
+    /// neither reaches the kernel as a name: `main.rs` renders the diagnostic
+    /// to the deputy's stderr and closes the connection, and the kernel
+    /// records a failed exchange. The distinction is real for the operator
+    /// reading that stderr and for this file's own reader; carrying it on the
+    /// wire would be a protocol change, which is the maintainer's.)*
     Fulfil(String),
     /// The connected peer is not the kernel, or could not be identified at
     /// all. One variant, because the deputy treats them identically: a peer we

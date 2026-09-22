@@ -35,7 +35,18 @@ pub enum Next {
 /// path's `Zeroizing` buffers — the one deliberate asymmetry: this text is
 /// bound for the subject's own stdout, where it is printed in the clear, so a
 /// zeroizing buffer would protect nothing the terminal does not already
-/// disclose. Served file content never reaches here.
+/// disclose. What does not reach here is served content on the DIRECT path: a
+/// `ReadContent` buffer stays zeroizing from [`crate::plane::ReadOutcome`]
+/// through the transcript's `SecretText`, and is never copied into this
+/// `String`.
+///
+/// *(Corrected 2026-09-22, #344: this said "Served file content never reaches
+/// here". A provider ECHO can bring it: the model is shown what it read, and
+/// it may quote those bytes back into the answer, which this function then
+/// copies and `agent::run` prints. The asymmetry stays deliberate — the
+/// destination is the subject's own terminal, which already discloses it — but
+/// it is a statement about the direct path, not about every byte that can
+/// arrive in this string.)*
 fn text_of(blocks: &[ContentBlock]) -> String {
     let mut s = String::new();
     for b in blocks {

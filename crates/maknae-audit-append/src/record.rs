@@ -104,6 +104,19 @@ pub enum EgressStatus {
 /// NOT digest input — they are length-bounded and shape-admitted, not
 /// attested. `maknae_kernel::egress`'s `content_measure` is the producer and
 /// states the same thing.*
+///
+/// *(Scoped 2026-09-22, #344: the rider list in the record above reads as
+/// exhaustive and is not — it was one of three partial copies. The RULE,
+/// stated as a rule: the digest covers exactly the `Text` bytes and every
+/// proposed tool call's `arguments`, in order, and everything else on the
+/// frame and on the wire rides undigested — among them the tool call's `name`
+/// and `call_id`, a `Tool` turn's `call_id`, the message roles and the tool
+/// call's `"function"` type, the frame's `model`, and the preamble and tool
+/// definitions the deputy adds after the kernel is done with the frame.
+/// `content_measure`'s own doc is the authoritative statement, including the
+/// consequence that the feed carries no separator and no role tag. The #241
+/// record above is unchanged and its point stands: what is listed there is not
+/// attested by this value.)*
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressAudit {
     pub status: EgressStatus,

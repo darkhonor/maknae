@@ -3,6 +3,29 @@
 //! no Vault, no certificates. The sequence #241's body names: prompt egress
 //! (write-ahead + outcome), the read verdict, the second prompt, the write
 //! intent and completion, the final answer — in order, in the trail.
+//!
+//! Four limits of this file, so its coverage is not read wider than it is.
+//! First, the write lane driven here is the REPLACEMENT lane and only that:
+//! `FixturePlane::write` sends `WriteMode::Existing`, so the kernel executes
+//! through a delegated writable fd and answers `MutationComplete`. The CREATE
+//! lane — `WriteMode::CreateExclusive`, a `MutationAttempt` grant,
+//! `mutation::execute` — is never driven against the brain from here (#241);
+//! its coverage lives where the lane lives, in `bins/maknae`'s `mutation`
+//! module (`create_reports_effect_then_distinct_completion_and_preserves_bytes`)
+//! and in `crates/maknae-kernel/tests/mutation_loop.rs`
+//! (`namespace_grant_requires_durable_intent_and_never_creates_as_daemon`).
+//! Second, the unknown-tool refusal is NOT audited and nothing here should be
+//! read as proving it is: `maknae-llm`'s `to_prompt_reply` refuses a reply
+//! naming an unadvertised tool inside the deputy, a process with no audit sink
+//! at all. Third, the egress backend here is a scripted in-process `Egress`;
+//! the full chain — brain to kernel to `maknae-egress` to a provider in one
+//! process — is #242's evidence, not this file's. Fourth, and the widest:
+//! `FixturePlane` re-implements the CLI's `read_outcome`, `write_outcome` and
+//! `prompt_outcome` mappings BY HAND, because `bins/maknae` is a binary crate
+//! and unreachable from a kernel integration test. Nothing here can go red if
+//! one of those mappers changes; their faithfulness to this fixture is by
+//! inspection, and the mappers' own discriminating tests live beside them in
+//! `bins/maknae`'s `agent` module.
 mod common;
 use common::{Fixture, Records};
 use maknae_agent::drive::{drive, Budget, StopReason};
@@ -144,9 +167,17 @@ impl Plane for FixturePlane {
         let fd = std::fs::File::open(path)
             .ok()
             .map(std::os::fd::OwnedFd::from);
-        // Production's `armed` flag, learned the same way: `send_verb` sets it
-        // false exactly when its own `open_for_delegation` returned `Err` and
-        // it sent the request unarmed anyway, which is this `None`.
+        // Production's `armed` flag, learned from the same trigger: `send_verb`
+        // sets it false when its own `open_for_delegation` returned `Err`, or
+        // when its stream could not arm a descriptor, and sent the request
+        // unarmed anyway — which is this `None`. One real divergence, and it is
+        // liveness rather than permission: production sets `O_NONBLOCK` and
+        // this does not. A writer-less FIFO opens immediately there — armed —
+        // and the daemon's `regular_file` requirement refuses the object; here
+        // the same open would block the test forever. Neither open adds a
+        // check beyond the operating system's own `open(2)`; the kernel
+        // decides on the delegated descriptor. So the `armed` derivation is
+        // faithful.
         let armed = fd.is_some();
         match self.verb(Verb::Read { path: path.into() }, fd).await.result {
             // The buffer is MOVED, never copied out of its `Zeroizing`
@@ -158,10 +189,12 @@ impl Plane for FixturePlane {
             // green for a kernel that answered a PDP deny with `Internal` —
             // the trail records the "deny" class for `Unavailable`/`TimedOut`
             // too (`handler.rs:480-501`) — while the real CLI rendered
-            // "read unavailable". And an UNARMED refusal is the subject's own
-            // ENOENT/EACCES reaching the kernel's want-of-descriptor deny, not
-            // a verdict on content, so it is `Unavailable` here as it is there
-            // (#241).
+            // "read unavailable". And an UNARMED refusal is not a verdict on
+            // content either way: on the paths this file sends it is the
+            // subject's own ENOENT/EACCES reaching the kernel's
+            // want-of-descriptor deny, and a path that also fails the lexical
+            // pre-gate would come back `BadRequest` before that — so it is
+            // `Unavailable` here as it is there (#241).
             RespResult::Err(_) if !armed => ReadOutcome::Unavailable,
             RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
                 ReadOutcome::Refused
@@ -287,6 +320,17 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         .iter()
         .filter(|r| r.action == "session.prompt")
         .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
+    // The drained count, and it detects UNDER-consumption only:
+    // `Scripted::send` answers an empty queue with
+    // `EgressFailure::Transport("script exhausted")` rather than panicking, so
+    // a loop that asked for MORE than was scripted also leaves
+    // `remaining() == 0`. Zero means "nothing went unasked", never "exactly
+    // these were asked". The same holds at the other two sites in this file
+    // that assert zero. Over-consumption is pinned separately by `seen_roles`,
+    // whose per-prompt role lists this test asserts exactly (the assertion
+    // above) and whose length the budget test asserts — two of this file's
+    // four tests. The denied-read and denied-write tests assert neither, so
+    // there the zero is the only bound and it is the weaker one.
     assert_eq!(
         egress.remaining(),
         0,

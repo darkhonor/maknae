@@ -14,8 +14,16 @@
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;
 
-/// Why the deputy refused a frame. Every variant is a refusal the kernel sees;
-/// there is no "carry on anyway".
+/// Why the deputy refused a frame. Each variant refuses rather than carrying
+/// on — there is no "carry on anyway" arm in `decide`.
+///
+/// *(Scoped 2026-09-22, #344: this said "Every variant is a refusal the kernel
+/// SEES". The kernel does not see which variant: `serve_one` turns a `Refusal`
+/// into `ServeError::Refused` and returns through `?` before writing any
+/// reply, so the deputy renders the named diagnostic to its own stderr in
+/// `main.rs` and the kernel records the exchange's failure. The names below
+/// are for the operator reading that stderr, and for the reader of this
+/// file.)*
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The frame named a Vault path outside the deputy's granted prefix. The
@@ -248,9 +256,12 @@ mod tests {
 
     /// #264 review rounds 2-4: THE PREAMBLE MUST NEVER BE THE WHOLE REQUEST.
     ///
-    /// Frame admission requires each turn to carry a non-empty content VEC,
-    /// not a `Text` block bearing text. Before #264 that was harmless — the
-    /// deputy produced no messages and the provider rejected the request.
+    /// Frame admission requires a non-empty content VEC on the `User` and
+    /// `Tool` turns, not a `Text` block bearing text — and NOT on `Assistant`,
+    /// where empty content with a non-empty `tool_calls` is the valid
+    /// tool-call-only turn (`turn_is_acceptable`). Before #264 an
+    /// empty payload was harmless — the deputy produced no messages and the
+    /// provider rejected the request.
     /// After #264 prepends a trusted preamble it stops being harmless: the
     /// request becomes well formed and the provider ANSWERS it from the system
     /// prompt alone, so "sent nothing" would masquerade as a turn.

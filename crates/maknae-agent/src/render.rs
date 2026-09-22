@@ -28,7 +28,13 @@ pub enum ToolOutcome {
 /// `ReadContent(Zeroizing([83, 69, …]))`, dumping kernel-served home-file
 /// content into any `{:?}`, including a test's `panic!("{other:?}")`.
 /// Length only. `BadCall`'s `String` IS printed — it is router-authored text
-/// (a tool name, a serde message), never served content.
+/// (a tool name, a serde message), and it carries nothing this crate received
+/// as `ReadContent`.
+///
+/// *(Scoped 2026-09-22, #344: this ended "never served content", which holds
+/// for the direct path and not for a provider echo — a serde message can quote
+/// arguments the model built out of bytes it was shown. `render`'s suffix
+/// comment states the same scope and why it is accepted.)*
 impl std::fmt::Debug for ToolOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -54,11 +60,13 @@ pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
 
-/// Headroom the read arm pre-allocates for the suffix `render` appends, so the
-/// append never reallocates: 19 bytes of `"\n\nsteps remaining: "` plus the 10
-/// digits of a `u32` at its maximum, plus slack. Sized here rather than
-/// measured at each call because the body it protects is kernel-served content
-/// (see [`render`]).
+/// Headroom the UTF-8 read sub-arm pre-allocates for the suffix `render`
+/// appends, so THAT append never reallocates: 19 bytes of
+/// `"\n\nsteps remaining: "` plus the 10 digits of a `u32` at its maximum,
+/// plus slack. No other arm reserves it, and none needs to — see [`render`],
+/// whose doc scopes the guarantee to this sub-arm and says what the others
+/// hold instead. Sized here rather than measured at each call because the body
+/// it protects is kernel-served content.
 const SUFFIX_HEADROOM: usize = 32;
 
 /// The output is a `Zeroizing<String>`, and it is BUILT as one. On the read
@@ -68,18 +76,42 @@ const SUFFIX_HEADROOM: usize = 32;
 /// until the allocator reused the page.
 ///
 /// The property that holds, stated exactly (corrected 2026-09-22, #241 — the
-/// earlier text claimed the append alone was enough): the read arm allocates
+/// earlier text claimed the append alone was enough; scoped again
+/// 2026-09-22, #344 — it was stated over the whole `ReadContent` arm, and the
+/// arm has two sub-arms): on the UTF-8 TEXT path, the only path that carries
+/// kernel-served content, the read arm allocates
 /// ONCE, with `SUFFIX_HEADROOM` for the suffix, appends in place, and hands
 /// that single zeroizing buffer to the transcript. There is no second plain
 /// buffer and no reallocation of the body. Without the headroom the first
-/// `push_str` reallocated: capacity equalled length, so the body was memcpy'd
-/// into a fresh allocation and the old one — kernel-served content — was freed
-/// unzeroized.
+/// `push_str` reallocated: capacity equalled length, so the body was
+/// memcpy'd into a fresh allocation and the old one — kernel-served content —
+/// was freed unzeroized. The non-UTF-8 sub-arm relies on `format!`'s
+/// over-allocation rather than on named headroom, so whether the suffix
+/// reallocates depends on the digit counts (measured with `rustc -O`:
+/// `format!` capacity is 44 and the finished string is
+/// `41 + digits(len) + digits(steps)`, so the append fits exactly while
+/// `41 + digits(len) + digits(steps) <= 44`, i.e. exactly while
+/// `digits(len) + digits(steps) <= 3` — no realloc for a body under 100 bytes
+/// and a single-digit step counter, a realloc once the two digit counts
+/// exceed three) — and either way what
+/// it holds is a short renderer-authored
+/// length (`binary content, N bytes`), not a file.
 ///
 /// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
-/// into a `SecretText`, which zeroizes too, so the content never lands in a
-/// plain buffer on the whole path. Same discipline as
-/// [`crate::plane::ReadOutcome`] one layer up.
+/// into a `SecretText`, which zeroizes too — so on the READ direction the
+/// content lands in no plain buffer anywhere in THIS crate's chain, from
+/// `maknae_proto::Bytes` through to the transcript's `SecretText`. Scoped by
+/// component deliberately (2026-09-22, #344): once a `Tool` turn leaves the
+/// trust plane the deputy hands it to `reqwest`'s `.json()`, which serialises
+/// through `serde_json::to_vec` into a plain body buffer, so the bytes do sit
+/// in un-zeroized heap there — and the NEARER residue is the CLI's own, two
+/// frames below the `ReadOutcome` this renders (`RealPlane::read` →
+/// `send_verb` → `read_frame`): `maknae_proto::read_frame`
+/// is `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))`,
+/// so the served frame is moved out of its `Zeroizing` into a plain
+/// `Vec<u8>` before the brain ever sees it. A #241 code gap, not fixed by
+/// #344's prose pass. Same discipline as [`crate::plane::ReadOutcome`] one
+/// layer up, whose doc also names the write direction's residue.
 ///
 /// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
 /// `String`'s — it is NOT redacting, unlike [`ToolOutcome`]'s above — so a
@@ -99,6 +131,21 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
             // Never lossily converted: the model would act on U+FFFD as if it were the file.
             Err(_) => Zeroizing::new(format!("binary content, {} bytes", bytes.len())),
         },
+        // The non-read arms do NOT pre-size, and that is the inverse of the
+        // read arm's discipline above, deliberately: `CONST.to_string()`
+        // allocates at exactly `len`, so `render`'s suffix `push_str`
+        // reallocates and frees each of these buffers. What it frees is a
+        // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
+        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`
+        // — never the `.rodata` original, which is not freed at all, so
+        // nothing secret is freed and headroom would buy nothing. One arm is
+        // different, and is the reason this is written down: `BadCall(why)`
+        // formats router-authored text that can
+        // quote the model's own tool arguments through a serde message, so its
+        // realloc frees model-authored bytes. Accepted — those bytes already
+        // transit the deputy's plain HTTP buffers, the same deferred residual
+        // #241 recorded for serde_json's scratch — and named here so the
+        // asymmetry reads as a decision rather than an omission.
         ToolOutcome::ReadRefused => Zeroizing::new(NOT_AUTHORIZED.to_string()),
         ToolOutcome::ReadUnavailable => Zeroizing::new(READ_UNAVAILABLE.to_string()),
         ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),
@@ -108,8 +155,23 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
     };
     // The live step count rides HERE, in per-turn content — never in the
     // compiled prompt, which ships verbatim (#264). Appended IN PLACE into the
-    // headroom the read arm reserved, so the body is never copied into a
-    // second buffer and the first one is never freed.
+    // headroom the UTF-8 read sub-arm reserved, so a SERVED body is never
+    // copied into a second buffer and the first one is never freed. The other
+    // arms reserve no headroom and may grow right here; what they hold is a
+    // compiled-in constant's heap copy, the renderer's own
+    // `binary content, N bytes`, or the router's error text, which MAY quote
+    // the model's own arguments through a serde diagnostic (`BadCall` above
+    // says so, and why it is accepted). What none of these arms holds is
+    // content this renderer received DIRECTLY as `ReadContent` — that is the
+    // zeroizing path above.
+    //
+    // Corrected 2026-09-22, #344: this read "Never kernel-served content",
+    // which is true of the direct path and NOT of a provider echo. The model
+    // is shown what it read, so it can quote those bytes back into its next
+    // tool call's arguments; a malformed argument carrying them returns
+    // `BadArguments` — serde quotes the offending value — and renders through
+    // `BadCall` right here. Accepted for the reason `BadCall` above gives, and
+    // named so the arm is not read as excluding served bytes by origin.
     out.push_str("\n\nsteps remaining: ");
     out.push_str(&steps_remaining.to_string());
     out
@@ -219,13 +281,20 @@ mod tests {
         }
     }
 
-    /// The read arm allocates ONCE, with headroom, and never grows: a growth
+    /// The UTF-8 read sub-arm — the only one that carries kernel-served
+    /// content — allocates ONCE, with headroom, and never grows: a growth
     /// memcpy's the kernel-served body into a fresh buffer and frees the old
     /// allocation WITHOUT zeroizing it (measured on #241 — the earlier
     /// `String::from(s)` had capacity == len, so the first `push_str` moved
     /// the body). The observable from outside the function: the returned
     /// buffer's capacity is still EXACTLY what `with_capacity` asked for;
     /// any reallocation replaces it with an amortized-doubled capacity.
+    ///
+    /// Scoped deliberately, and the test body matches the scope: the
+    /// non-UTF-8 sub-arm is OUTSIDE this property and does grow on the suffix
+    /// once the digit counts allow (a 100-byte body with a one-digit step
+    /// counter is 45 bytes into `format!`'s capacity of 44). What it holds is
+    /// a renderer-authored length, so a growth there frees no served bytes.
     #[test]
     fn a_read_body_is_never_moved_to_make_room_for_the_suffix() {
         let body = b"SENTINEL-READ-BODY-long-enough-that-doubling-shows\n".to_vec();
