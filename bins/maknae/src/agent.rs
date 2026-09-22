@@ -63,26 +63,39 @@ pub fn mint_conversation_id() -> String {
     format!("c{secs:x}p{:x}", std::process::id())
 }
 
-/// R11, as a pure function so it is testable: only an AUTHORIZATION refusal
-/// is `Refused` — the one outcome the model may not appeal. Any other code (a
-/// `BadRequest` for `/a/../b` is a client-shape fault, not a decision), any
-/// protocol surprise, and any transport error is `Unavailable`. The wire
-/// carries no reason (ADR-0019); it does carry the code.
+/// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
+/// refusal of an ARMED request is `Refused` — the one outcome the model may
+/// not appeal. Any other code (a `BadRequest` for `/a/../b` is a client-shape
+/// fault, not a decision), any protocol surprise, and any transport error is
+/// `Unavailable`. The wire carries no reason (ADR-0019); it does carry the
+/// code.
+///
+/// Corrected 2026-09-22 (#241): an UNARMED refusal is `Unavailable`, not
+/// `Refused`. When the subject's own `open_for_delegation` fails — a typo'd
+/// path, ENOENT, EACCES — `send_verb` sends the request anyway, unarmed, so
+/// the deny lands in the audit trail (ADR-0009 decision 2), and the kernel
+/// refuses it for want of a descriptor. That arrives as the same generic
+/// `Unauthorized` as a real deny, but it is not a PDP verdict on the object's
+/// content: it is the subject's own OS-DAC or a path that does not exist.
+/// Rendering it as "Not authorized" told the model a decision had been made,
+/// and the compiled prompt forbids the model to diagnose or retry that.
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
         // The buffer is MOVED, never copied: `b.0` is already a `Zeroizing`,
         // and `maknae_proto::Bytes::new` forbids copying content out of one
-        // into a plain `Vec` (R28). `ReadOutcome::Content` carries the same
-        // type, so the secrecy survives the hop into the brain.
+        // into a plain `Vec`. `ReadOutcome::Content` carries the same type, so
+        // the secrecy survives the hop into the brain.
         Ok(SentOutcome::Payload(Payload::ReadContent(b))) => ReadOutcome::Content(b.0),
-        Ok(SentOutcome::Refused(maknae_proto::ProtoErrCode::Unauthorized, _)) => {
-            ReadOutcome::Refused
-        }
+        Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
+        Ok(SentOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::Unauthorized,
+            ..
+        }) => ReadOutcome::Refused,
         _ => ReadOutcome::Unavailable,
     }
 }
 
-/// R29, the write half of R11's treatment and pure for the same reason: ONLY a
+/// The write half of the same treatment, and pure for the same reason: ONLY a
 /// clean `WriteDone { applied: true }` is `Applied`.
 ///
 /// Everything else is `Unknown` — a non-applied completion, a refusal, a
@@ -90,7 +103,8 @@ pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
 /// `String` error cannot tell a pre-send connect failure from a post-send read
 /// timeout, and guessing would manufacture certainty. `NotSent` is NOT decided
 /// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
-/// before `send_verb` is ever called (R13).
+/// before `send_verb` is ever called. `armed` does not enter the write
+/// decision: every non-`Applied` write is already `Unknown`.
 pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
     match sent {
         Ok(SentOutcome::WriteDone { applied: true }) => WriteOutcome::Applied,
@@ -130,7 +144,7 @@ impl Plane for RealPlane<'_> {
         }
         match send_verb(verb, None, self.transport, self.client, self.ca).await {
             Ok(SentOutcome::Payload(Payload::PromptReply(r))) => Ok(r),
-            Ok(SentOutcome::Refused(..)) => Err(PlaneError::Refused),
+            Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
             Ok(other) => Err(PlaneError::Transport(format!(
                 "protocol error: unexpected reply to session.prompt: {other:?}"
             ))),
@@ -208,7 +222,13 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         Some(StopReason::FrameBound) => {
             "stopped: the conversation has reached the platform's frame bound".into()
         }
-        Some(StopReason::PromptRefused) => "stopped: the kernel refused the prompt".into(),
+        // NOT "refused the prompt" (corrected 2026-09-22, #241): the kernel
+        // answers `LandedUndelivered`, `DeadlineExpired` and `OutcomeUnknown`
+        // with the same generic `Unauthorized`, so the prompt may well have
+        // reached the provider. Only the trail knows which.
+        Some(StopReason::PromptRefused) => {
+            "stopped: the kernel refused the exchange — whether the prompt reached the provider is in the audit trail".into()
+        }
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         None => "stopped".into(),
     };
@@ -285,10 +305,11 @@ mod tests {
             WriteOutcome::Unknown
         );
         assert_eq!(
-            write_outcome(Ok(SentOutcome::Refused(
-                ProtoErrCode::Unauthorized,
-                "not authorized".into()
-            ))),
+            write_outcome(Ok(SentOutcome::Refused {
+                code: ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+                armed: true
+            })),
             WriteOutcome::Unknown,
             "a refusal is not a certainty on the write lane"
         );
@@ -313,17 +334,43 @@ mod tests {
             ReadOutcome::Content(zeroize::Zeroizing::new(b"x".to_vec()))
         );
         assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused(
-                ProtoErrCode::Unauthorized,
-                "not authorized".into()
-            ))),
+            read_outcome(Ok(SentOutcome::Refused {
+                code: ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+                armed: true
+            })),
             ReadOutcome::Refused
         );
         assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused(
-                ProtoErrCode::BadRequest,
-                "not absolute".into()
-            ))),
+            read_outcome(Ok(SentOutcome::Refused {
+                code: ProtoErrCode::BadRequest,
+                message: "not absolute".into(),
+                armed: true
+            })),
+            ReadOutcome::Unavailable
+        );
+        // #241: an UNARMED refusal is not a PDP verdict on the content. The
+        // subject's own `open_for_delegation` failed (ENOENT, EACCES), the
+        // request went out without a descriptor, and the kernel denied it for
+        // want of one (ADR-0009 d2) — which arrives as the same generic
+        // `Unauthorized`. Telling the model "Not authorized" for a typo'd path
+        // asserts a decision nobody made, and the compiled prompt forbids the
+        // model to diagnose or retry it.
+        assert_eq!(
+            read_outcome(Ok(SentOutcome::Refused {
+                code: ProtoErrCode::Unauthorized,
+                message: "no delegated descriptor".into(),
+                armed: false
+            })),
+            ReadOutcome::Unavailable,
+            "a read the subject could not arm was never decided"
+        );
+        assert_eq!(
+            read_outcome(Ok(SentOutcome::Refused {
+                code: ProtoErrCode::BadRequest,
+                message: "not absolute".into(),
+                armed: false
+            })),
             ReadOutcome::Unavailable
         );
         assert_eq!(

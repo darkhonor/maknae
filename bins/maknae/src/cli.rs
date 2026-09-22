@@ -6,10 +6,14 @@
 //!
 //! **Closed dependency enumeration** (recorded here and in `Cargo.toml`; no gate
 //! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `maknae-agent`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`, `rpassword`,
-//! and macOS-only `security-framework` (`bins/maknae/Cargo.toml`). The
-//! `ping`/`whoami` wire path below uses only `maknae-proto`, `maknae-vault`,
-//! `maknae-config`, `maknae-msgs` and `clap`; `maknae-agent` is the agent loop's
+//! `maknae-io`, `maknae-agent`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`,
+//! `rpassword`, and macOS-only `security-framework` (`bins/maknae/Cargo.toml`).
+//! *(Corrected 2026-09-22, #241: `maknae-io` was missing from both this list and
+//! the "wire path" sentence below, though it has been a direct dependency and on
+//! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
+//! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
+//! `clap` and `maknae-io` (delegation arming — `open_for_delegation` in
+//! `send_verb`, and `mutation.rs`); `maknae-agent` is the agent loop's
 //! (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
 //! `security-framework` are `enroll/`-only. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
@@ -317,7 +321,7 @@ async fn round_trip(
             Ok(true)
         }
         SentOutcome::WriteDone { applied } => Ok(applied),
-        SentOutcome::Refused(code, message) => {
+        SentOutcome::Refused { code, message, .. } => {
             eprintln!("maknae: daemon refused: {code:?}: {message}");
             Ok(false)
         }
@@ -341,7 +345,18 @@ pub(crate) enum SentOutcome {
     WriteDone { applied: bool },
     /// The daemon refused, with the wire's own code and message and no reason beyond them
     /// (ADR-0019).
-    Refused(maknae_proto::ProtoErrCode, String),
+    ///
+    /// `armed` records whether this request carried a delegated descriptor (ADR-0009): true
+    /// when one was attached, true for a verb that names no object (there is nothing to
+    /// delegate), and FALSE only when the subject's own `open_for_delegation` failed and
+    /// [`send_verb`] sent unarmed anyway. An unarmed refusal is the subject's own
+    /// OS-DAC/ENOENT surfacing as the kernel's want-of-descriptor deny (decision 2) — it is
+    /// not a decision about the object's content, and a caller must not report it as one.
+    Refused {
+        code: maknae_proto::ProtoErrCode,
+        message: String,
+        armed: bool,
+    },
 }
 
 /// Send ONE verb over the post-mint plane and report what came back, printing nothing.
@@ -388,6 +403,9 @@ pub(crate) async fn send_verb(
     // the daemon denies for want of a descriptor (ADR-0009 decision 2) and the refusal
     // lands in the audit trail, which is the whole reason not to fail silently here.
     let prepared = crate::mutation::prepare(request_verb.clone());
+    // True unless the open below fails: a verb that names no object has nothing to
+    // delegate and is armed by definition (see [`SentOutcome::Refused`]).
+    let mut armed = true;
     if let Some(prepared) = &prepared {
         if let Some(error) = prepared.preparation_error() {
             eprintln!("maknae: cannot prepare filesystem operation: {error}");
@@ -405,6 +423,7 @@ pub(crate) async fn send_verb(
             }
             Err(e) => {
                 eprintln!("maknae: cannot open {object}: {e}");
+                armed = false;
             }
         }
     }
@@ -474,7 +493,11 @@ pub(crate) async fn send_verb(
             Ok(SentOutcome::WriteDone { applied: true })
         }
         RespResult::Ok(payload) => Ok(SentOutcome::Payload(payload)),
-        RespResult::Err(e) => Ok(SentOutcome::Refused(e.code, e.message)),
+        RespResult::Err(e) => Ok(SentOutcome::Refused {
+            code: e.code,
+            message: e.message,
+            armed,
+        }),
     }
 }
 

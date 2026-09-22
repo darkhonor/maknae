@@ -78,7 +78,9 @@ impl maknae_kernel::Egress for Scripted {
         // inside the spawned kernel task, where it reaches the test only as
         // `verb`'s missing frame and names the wrong cause. As a failure it
         // travels the kernel's own egress-failure path, and each test body
-        // asserts what the script had left (`remaining`).
+        // asserts what the script had left (`remaining`) — which detects
+        // UNDER-consumption. Over-consumption is pinned by `seen_roles`,
+        // whose per-prompt role lists the e2e test asserts exactly.
         let Some(reply) = self.replies.lock().unwrap().pop_front() else {
             return Err(maknae_kernel::EgressFailure::Transport(
                 "script exhausted".into(),
@@ -135,17 +137,25 @@ impl Plane for FixturePlane {
         let fd = std::fs::File::open(path)
             .ok()
             .map(std::os::fd::OwnedFd::from);
+        // Production's `armed` flag, learned the same way: `send_verb` sets it
+        // false exactly when its own `open_for_delegation` returned `Err` and
+        // it sent the request unarmed anyway, which is this `None`.
+        let armed = fd.is_some();
         match self.verb(Verb::Read { path: path.into() }, fd).await.result {
             // The buffer is MOVED, never copied out of its `Zeroizing` (R28,
             // `maknae_proto::Bytes::new`) — the same hop `read_outcome` makes.
             RespResult::Ok(Payload::ReadContent(b)) => ReadOutcome::Content(b.0),
-            // R11, exactly as production's `read_outcome` decides it: ONLY an
-            // authorization refusal is `Refused`. Collapsing every code into
-            // `Refused` would leave the deny test green for a kernel that
-            // answered a PDP deny with `Internal` — the trail records the
-            // "deny" class for `Unavailable`/`TimedOut` too
-            // (`handler.rs:480-501`) — while the real CLI rendered
-            // "read unavailable".
+            // Exactly as production's `read_outcome` decides it: ONLY an
+            // authorization refusal of an ARMED request is `Refused`.
+            // Collapsing every code into `Refused` would leave the deny test
+            // green for a kernel that answered a PDP deny with `Internal` —
+            // the trail records the "deny" class for `Unavailable`/`TimedOut`
+            // too (`handler.rs:480-501`) — while the real CLI rendered
+            // "read unavailable". And an UNARMED refusal is the subject's own
+            // ENOENT/EACCES reaching the kernel's want-of-descriptor deny, not
+            // a verdict on content, so it is `Unavailable` here as it is there
+            // (#241).
+            RespResult::Err(_) if !armed => ReadOutcome::Unavailable,
             RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
                 ReadOutcome::Refused
             }
@@ -439,4 +449,21 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
     // fail HERE, by name, rather than as a missing frame from the panic inside
     // the kernel task that the old `expect` would have raised.
     assert_eq!(egress.remaining(), 1, "the third reply was never asked for");
+    // #241: `/nonexistent` is a path the SUBJECT could not open, so the
+    // request went out unarmed and the kernel refused it for want of a
+    // descriptor (ADR-0009 d2) — an `Unauthorized` that is not a verdict on
+    // any content. The model must be told the read was unavailable, never
+    // "Not authorized": the compiled prompt forbids it to diagnose or retry a
+    // refusal, and there was no decision to accept.
+    let tool_turns: Vec<String> = transcript
+        .turns()
+        .iter()
+        .filter(|t| matches!(t, Turn::Tool { .. }))
+        .map(tool_text)
+        .collect();
+    assert_eq!(
+        tool_turns,
+        vec!["read unavailable — do not retry\n\nsteps remaining: 1".to_string()],
+        "an unarmable read is reported as unavailable, not as a refusal"
+    );
 }
