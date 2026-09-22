@@ -65,10 +65,14 @@ struct WriteArgs {
     content: String,
 }
 
-/// Absolute AND canonical only. Never resolved against the CWD.
+/// Absolute AND canonical only, within the kernel's byte bound, and never NUL
+/// bearing. Never resolved against the CWD.
 ///
-/// MIRRORS the kernel's `lexical_pregate` (`maknae-kernel/src/handler.rs`) by
-/// RE-STATING its rules, never by importing it — the brain links no kernel.
+/// MIRRORS both of the kernel's pre-PDP path gates by RE-STATING their rules,
+/// never by importing them — the brain links no kernel: `lexical_pregate`
+/// (`maknae-kernel/src/handler.rs`), which both legs run, and `checked`
+/// (`maknae-kernel/src/mutation.rs`), which the WRITE leg runs before
+/// `authorize` and which adds the length and NUL rules below.
 /// Rule for rule: absolute; bare `/` passes vacuously (it matches no glob
 /// downstream, so the kernel answers it with a decision rather than a shape
 /// fault); no trailing `/`; no empty (`//`), `.` or `..` segment. A divergence
@@ -90,9 +94,26 @@ struct WriteArgs {
 /// have happened". Both are false, and both are outcomes the compiled prompt
 /// forbids the model to appeal — for a typo the model could fix from a tool
 /// error.
+///
+/// The length and NUL rules are applied to READS as well, although the read
+/// leg states neither, and that is not the router outrunning the kernel:
+/// neither shape can ever be SERVED. Such a read travels, and then the
+/// subject's own `open_for_delegation` cannot open it — a NUL byte is not a
+/// filename, and `MAX_MUTATION_PATH_BYTES` is 4096, the whole of Linux's
+/// `PATH_MAX` and four times macOS's — so the request goes UNARMED and the
+/// kernel denies it for want of a descriptor (ADR-0009 decision 2). The model
+/// was told `read unavailable — do not retry`, just as unappealable as the
+/// write lane's "may have happened", for a path it could have corrected.
 fn checked_path(p: String) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);
+    }
+    // The kernel's write gate runs these two BEFORE its lexical pre-gate, so
+    // they are mirrored in that order, with its constant and its comparator:
+    // `>`, so a path of exactly `MAX_MUTATION_PATH_BYTES` is accepted. `>=`
+    // would refuse a write the kernel takes.
+    if p.len() > maknae_proto::MAX_MUTATION_PATH_BYTES || p.contains('\0') {
+        return Err(RouteError::MalformedPath);
     }
     if !p.starts_with('/') {
         return Err(RouteError::RelativePath);
@@ -259,6 +280,69 @@ mod tests {
         ));
         assert!(matches!(
             route(&call("write_file", r#"{"path":"/","content":"x"}"#)),
+            Ok(ToolRequest::Write { .. })
+        ));
+        // The kernel's WRITE gate adds two rules its READ pre-gate does not
+        // state (`maknae-kernel/src/mutation.rs`'s `checked`, run BEFORE
+        // `authorize`): a NUL byte, and a path longer than
+        // `MAX_MUTATION_PATH_BYTES`. Pre-PDP they answer `Unauthorized`, which
+        // the write lane cannot tell from a decision — so a typo rendered as
+        // "the write may have happened … do not touch that file again".
+        //
+        // Applied to READS too, and that is NOT the router being stricter than
+        // the kernel: neither shape can ever be SERVED. The read leg states no
+        // NUL or length rule, so such a read travels — and then the subject's
+        // own `open_for_delegation` cannot open it (a NUL byte is not a
+        // filename; the constant is 4096, which is the whole of Linux's
+        // PATH_MAX and four times macOS's), the request goes UNARMED, and the
+        // kernel denies it for want of a descriptor. That renders as `read
+        // unavailable — do not retry`, equally unappealable. Refused here, on
+        // both legs, as a tool error the model can fix.
+        //
+        // A NUL rides in as JSON's `\u0000`, which serde decodes to the byte;
+        // a raw NUL in the JSON would be a control character serde rejects
+        // first, and would prove nothing about this rule.
+        assert!(matches!(
+            route(&call("read_file", r#"{"path":"/home/u/a\u0000.txt"}"#)),
+            Err(RouteError::MalformedPath)
+        ));
+        assert!(matches!(
+            route(&call(
+                "write_file",
+                r#"{"path":"/home/u/a\u0000.txt","content":"x"}"#
+            )),
+            Err(RouteError::MalformedPath)
+        ));
+        // Built the way the kernel's own `checked` vector table builds them
+        // (mutation.rs): the leading `/` counts toward the length.
+        let over = format!("/{}", "x".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES));
+        let exact = format!("/{}", "x".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES - 1));
+        assert_eq!(over.len(), maknae_proto::MAX_MUTATION_PATH_BYTES + 1);
+        assert_eq!(exact.len(), maknae_proto::MAX_MUTATION_PATH_BYTES);
+        assert!(matches!(
+            route(&call("read_file", &format!(r#"{{"path":"{over}"}}"#))),
+            Err(RouteError::MalformedPath)
+        ));
+        assert!(matches!(
+            route(&call(
+                "write_file",
+                &format!(r#"{{"path":"{over}","content":"x"}}"#)
+            )),
+            Err(RouteError::MalformedPath)
+        ));
+        // The comparator is the kernel's `>`, not `>=`: a path of EXACTLY
+        // `MAX_MUTATION_PATH_BYTES` is accepted, on both legs. Without these
+        // two rows a `>` → `>=` mutant survives, and the router would refuse
+        // a write the kernel would have taken.
+        assert!(matches!(
+            route(&call("read_file", &format!(r#"{{"path":"{exact}"}}"#))),
+            Ok(ToolRequest::Read { .. })
+        ));
+        assert!(matches!(
+            route(&call(
+                "write_file",
+                &format!(r#"{{"path":"{exact}","content":"x"}}"#)
+            )),
             Ok(ToolRequest::Write { .. })
         ));
     }

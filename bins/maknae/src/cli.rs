@@ -416,13 +416,30 @@ pub(crate) async fn send_verb(
         ) {
             armer.arm(fd);
         }
-    } else if let (Some(object), Some(armer)) = (object, stream.armer()) {
-        match maknae_io::open_for_delegation(std::path::Path::new(object)) {
-            Ok(fd) => {
-                armer.arm(fd);
-            }
-            Err(e) => {
-                eprintln!("maknae: cannot open {object}: {e}");
+    } else if let Some(object) = object {
+        // Split from the armer, deliberately: the single `if let` tuple this
+        // replaces conflated "this verb names no object" with "this stream
+        // cannot arm a descriptor", and left `armed` TRUE on the second. The
+        // kernel would then deny for want of a descriptor, and the CLI would
+        // report that generic `Unauthorized` as an ARMED refusal — the loop
+        // renders an armed one as "Not authorized", asserting a decision
+        // nobody made, which is exactly the class #241 fixed at
+        // `read_outcome`. Unreachable today (a client stream always has an
+        // armer) and therefore carries no test: there is no way to construct
+        // the state from outside, and a test that could would be testing its
+        // own fixture. Fail closed anyway.
+        match stream.armer() {
+            Some(armer) => match maknae_io::open_for_delegation(std::path::Path::new(object)) {
+                Ok(fd) => {
+                    armer.arm(fd);
+                }
+                Err(e) => {
+                    eprintln!("maknae: cannot open {object}: {e}");
+                    armed = false;
+                }
+            },
+            None => {
+                eprintln!("maknae: cannot delegate {object}: this stream cannot arm a descriptor");
                 armed = false;
             }
         }
