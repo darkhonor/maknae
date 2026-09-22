@@ -93,12 +93,23 @@ pub enum EgressStatus {
 /// macOS unified-log mirror drops lines over `MACOS_SYSLOG_MAX`, and every
 /// field here was measured against that cap. The destination is the record's
 /// `object`; the ceiling is the boot record's; the phase is `status`.
-/// `content_digest` is the first 32 hex characters (128 bits) of the SHA-256
-/// of the concatenated text blocks: an identifier for matching, not an
-/// integrity control (the cap is why it is not the full 64).
+/// `content_digest` is the first 32 hex characters (128 bits) of a SHA-256: an
+/// identifier for matching, not an integrity control (the cap is why it is not
+/// the full 64).
+///
+/// *Corrected 2026-09-22, #241: this said "of the concatenated text blocks".
+/// The digest covers every `Text` block's bytes AND every proposed tool call's
+/// `arguments` bytes, across every turn in order. A tool call's `name` and
+/// `call_id`, and a `Tool` turn's `call_id`, also leave the process and are
+/// NOT digest input — they are length-bounded and shape-admitted, not
+/// attested. `maknae_kernel::egress`'s `content_measure` is the producer and
+/// states the same thing.*
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressAudit {
     pub status: EgressStatus,
+    /// The bytes the digest covers, counted: text-block bytes plus tool-call
+    /// `arguments` bytes, across every turn. *Widened with the digest on
+    /// 2026-09-22, #241 — it counted text blocks alone before.*
     pub content_length: u64,
     pub content_digest: String,
     pub conversation: String,

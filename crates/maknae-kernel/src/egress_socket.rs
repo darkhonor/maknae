@@ -249,29 +249,44 @@ impl Egress for SocketEgress {
             key_vault_path: req.key_vault_path,
             key_field: req.key_field,
             conversation: req.conversation,
-            content: req.content,
+            turns: req.turns,
         };
-        let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
+        // MEASURED FIRST, allocated second (#241, codex round 2 item C). The
+        // counting pass serializes through a sink that stores nothing, so the
+        // exact encoded length is known before a byte of frame content is
+        // held anywhere — including for a frame far too large to encode.
+        //
+        // The ordering is the fix: with the encode buffer sized at the cap
+        // plus one page, the cap refusal below was reachable only inside that
+        // 4 KiB band, and anything further over died in the encoder as an
+        // opaque `failed to write whole buffer` — no size, no cap, and none of
+        // the operator line below. Now every over-cap size meets this
+        // refusal, and the buffer needs no headroom to avoid shadowing it.
+        let len =
+            maknae_proto::egress_frame_request_encoded_len(&frame).map_err(Self::transport)?;
         // BEFORE the first write, so an over-cap request is a pre-send failure
         // (`Failed`, nothing left) and never "outcome unknown" (the deputy
         // would refuse it as oversize only after reading it).
         // The comparison is the T1 predicate's (`frame_len_within_cap`, proven
         // at the boundary), the same one the reply cap uses below.
-        if !crate::egress::frame_len_within_cap(
-            buf.len(),
-            crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES,
-        ) {
+        if !crate::egress::frame_len_within_cap(len, crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES)
+        {
             eprintln!(
-                "maknaed: egress request frame of {} bytes over the {}-byte cap — refused before sending",
-                buf.len(),
+                "maknaed: egress request frame of {len} bytes over the {}-byte cap — refused before sending",
                 crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES
             );
             return Err(EgressFailure::Transport(format!(
-                "request frame of {} bytes over the {}-byte cap",
-                buf.len(),
+                "request frame of {len} bytes over the {}-byte cap",
                 crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES
             )));
         }
+        // Into ONE fixed preallocation, at EXACTLY the measured length, that
+        // never grows (#241, codex round 1 critical 3): a `Tool` turn carries
+        // kernel-served file content, and the growing buffer this replaces
+        // freed a partly-written copy of it on every realloc. The encode
+        // cannot overflow — it was measured — and an `Encode` here would still
+        // be pre-send: nothing written, nothing left with the peer.
+        let buf = encode_egress_frame_request(&frame, len).map_err(Self::transport)?;
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
@@ -325,7 +340,7 @@ impl Egress for SocketEgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::{ContentBlock, SecretText};
+    use maknae_proto::{ContentBlock, SecretText, Turn};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
@@ -338,10 +353,12 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             conversation: "conv1".into(),
-            content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new(
-                    "the president flies at 0300".into(),
-                )),
+            turns: vec![Turn::User {
+                content: vec![ContentBlock::Text {
+                    text: SecretText(maknae_io::Zeroizing::new(
+                        "the president flies at 0300".into(),
+                    )),
+                }],
             }],
         }
     }
@@ -367,6 +384,7 @@ mod tests {
                         if let Some(r) = reply {
                             let out = maknae_proto::encode_egress_frame_reply(
                                 &maknae_proto::EgressFrameReply { reply: r },
+                                maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
                             )
                             .unwrap();
                             let _ = c.write_all(&(out.len() as u32).to_be_bytes());
@@ -515,8 +533,10 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let mut big = req();
         // under the request cap, over any socket buffer
-        big.content = vec![ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+        big.turns = vec![Turn::User {
+            content: vec![ContentBlock::Text {
+                text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+            }],
         }];
         let started = std::time::Instant::now();
         let out = e.send(&intent, big);
@@ -532,27 +552,50 @@ mod tests {
     /// write — a pre-send `Transport` (`Failed`), and the peer sees nothing —
     /// rather than written, refused by the deputy as oversize, and recorded
     /// "outcome unknown" for a prompt no provider ever saw.
+    ///
+    /// A TABLE OF SIZES, and that is the point (codex round 2, item C). With
+    /// the fixed encode buffer sized at the cap plus one page, this refusal
+    /// was reachable only inside that 4 KiB band: anything further over died
+    /// in the encoder as `Transport("proto encode: failed to write whole
+    /// buffer")` — no size, no cap, and none of the operator `eprintln!`
+    /// below. A counting pass now gives the exact encoded length BEFORE
+    /// anything is allocated, so every over-cap size meets this one message.
+    /// The 2-MiB-over row is the one that was RED.
     #[test]
     fn an_over_cap_request_is_refused_before_anything_is_written() {
-        let d = tempfile::tempdir().unwrap();
-        let (path, seen) = fake_deputy(d.path(), None);
-        let me = nix::unistd::getuid().as_raw();
-        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
-        let intent = crate::egress::DurableEgressIntent::canned_for_test();
-        let mut big = req();
-        big.content = vec![ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new(
-                "x".repeat(crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES),
-            )),
-        }];
-        match e.send(&intent, big) {
-            Err(EgressFailure::Transport(m)) => {
-                assert!(m.contains("request frame"), "{m}")
+        let cap = crate::egress::EGRESS_MAX_REQUEST_FRAME_BYTES;
+        for over in [cap, cap + 2 * 1024 * 1024] {
+            let d = tempfile::tempdir().unwrap();
+            let (path, seen) = fake_deputy(d.path(), None);
+            let me = nix::unistd::getuid().as_raw();
+            let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+            let intent = crate::egress::DurableEgressIntent::canned_for_test();
+            let mut big = req();
+            big.turns = vec![Turn::User {
+                content: vec![ContentBlock::Text {
+                    text: SecretText(maknae_io::Zeroizing::new("x".repeat(over))),
+                }],
+            }];
+            match e.send(&intent, big) {
+                Err(EgressFailure::Transport(m)) => {
+                    // The OPERATOR-READABLE refusal, not the codec's string:
+                    // it names the measured size and the cap it exceeded.
+                    assert!(m.contains("request frame"), "{over}: {m}");
+                    assert!(m.contains(&cap.to_string()), "{over}: {m}");
+                    assert!(
+                        !m.contains("proto encode"),
+                        "{over}: the encoder answered first, shadowing the cap refusal: {m}"
+                    );
+                }
+                other => panic!("expected a pre-send cap refusal at {over}, got {other:?}"),
             }
-            other => panic!("expected a pre-send cap refusal, got {other:?}"),
+            std::thread::sleep(Duration::from_millis(120));
+            assert_eq!(
+                seen.load(Ordering::SeqCst),
+                0,
+                "{over}: bytes reached the peer"
+            );
         }
-        std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(seen.load(Ordering::SeqCst), 0, "bytes reached the peer");
     }
 
     /// The client-side check is the LISTENER predicate, by name. Reverting it

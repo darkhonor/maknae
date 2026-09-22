@@ -243,6 +243,21 @@ files = [
   # filesystem/NSS backend or fail open instead of refusing before spawn.
   "crates/maknae-kernel/src/blocking_guard.rs",
   "crates/maknae-audit-append/src/blocking_guard.rs",
+  # #241: the runtime loop's decision code. T1 by the line-drawing rule: a router
+  # that maps a tool to the wrong verb, or a renderer that tells the model
+  # "applied" for an uncertain write, is false assurance the model acts on —
+  # it retries a write the kernel may have half-applied. No I/O in the crate.
+  "crates/maknae-agent/src/transcript.rs",
+  # plane.rs is here, not in T3 (moved 2026-09-22, #241 CR1): it is not the
+  # bare-declarations file its T3 entry called it. `ReadOutcome`'s `Debug` is
+  # hand-written and REDACTING — a derived one prints
+  # `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
+  # into any `{:?}`, including a test's `panic!("{other:?}")`. A redaction
+  # control is executable logic and belongs under the T1 floor.
+  "crates/maknae-agent/src/plane.rs",
+  "crates/maknae-agent/src/route.rs",
+  "crates/maknae-agent/src/render.rs",
+  "crates/maknae-agent/src/drive.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -250,7 +265,8 @@ files = [
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm"]
+# It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -398,6 +414,10 @@ path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
 [[t3]]
+path = "crates/maknae-agent/src/lib.rs"
+why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs)"
+
+[[t3]]
 path = "crates/maknae-llm/src/lib.rs"
 why = "scaffold stub — re-tier at body landing"
 
@@ -535,6 +555,10 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 [[t3]]
 path = "bins/maknae/src/cli.rs"
 why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto)"
+
+[[t3]]
+path = "bins/maknae/src/agent.rs"
+why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome and write_outcome live here, and both are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty). Both are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in the PR body. The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the two mappers landed here."
 
 # PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
 # constraint (decision logic that needed 0-missed lives in the library crates

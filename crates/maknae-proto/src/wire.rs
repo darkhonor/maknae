@@ -140,6 +140,59 @@ pub fn proposed_tool_call_is_acceptable(c: &ProposedToolCall) -> bool {
         && c.arguments.0.len() <= MAX_TOOL_CALL_ARGS_BYTES
 }
 
+/// One turn of the transcript the loop re-sends every call (ADR-0023 d7: the
+/// loop is stateless; the kernel holds no conversation). Roles are the
+/// PROVIDER's vocabulary — `user`, `assistant`, `tool` — and there is
+/// deliberately **no `System` variant**: the trusted preamble is composed inside
+/// `maknae-egress` (#264), so a client cannot even express a system turn. That
+/// makes "the client cannot emit a system message" a fact of the type rather
+/// than of a mapping.
+///
+/// Why roles are on the wire at all (#241): a tool RESULT sent as `user`
+/// content tells the model the human said it — a file's contents at the
+/// user's authority, which contradicts the compiled prompt's own rule that tool
+/// output is data. The `Tool` role is what keeps a poisoned file from speaking
+/// as the user, and what lets the model see which call a result answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Turn {
+    User {
+        content: Vec<ContentBlock>,
+    },
+    /// The model's own prior output, echoed back so the provider can see which
+    /// tool calls the tool turns below answer. `content` may be empty when the
+    /// reply was tool calls only.
+    Assistant {
+        content: Vec<ContentBlock>,
+        tool_calls: Vec<ProposedToolCall>,
+    },
+    /// A tool result answering `call_id` from the preceding assistant turn.
+    Tool {
+        call_id: String,
+        content: Vec<ContentBlock>,
+    },
+}
+
+/// Shape-only admission for one turn — every field bounded before anything
+/// reads it. Client-supplied tool calls are bounded HERE, because on the
+/// prompt leg the untrusted loop is their author; `admitted_reply` bounds the
+/// provider's. Content ADMISSION (text only, content-bearing) is the kernel's
+/// `admitted_turns`.
+pub fn turn_is_acceptable(t: &Turn) -> bool {
+    match t {
+        Turn::User { content } => !content.is_empty(),
+        Turn::Assistant {
+            content,
+            tool_calls,
+        } => {
+            (!content.is_empty() || !tool_calls.is_empty())
+                && tool_calls.iter().all(proposed_tool_call_is_acceptable)
+        }
+        Turn::Tool { call_id, content } => {
+            !call_id.is_empty() && call_id.len() <= MAX_TOOL_CALL_ID_BYTES && !content.is_empty()
+        }
+    }
+}
+
 /// The response leg of `session.prompt`. In Cooky the release to the requesting
 /// loop is the prompt verdict itself (ADR-0023); the shape exists so #240 has
 /// something to fill. `Unavailable` never returns one.
@@ -287,12 +340,13 @@ pub enum Verb {
     /// term #147's destination governance attaches to; its default is #153's.
     /// Un-recallable once sent — which is why it is two-phase, not audited
     /// after the fact. **Operands (#172, Cooky):** `conversation` is the loop's
-    /// identifier (#241), bounded by [`conversation_id_is_acceptable`],
-    /// informational, never an input to a verdict; `content` is ACP content,
-    /// text only in Cooky. Additive payload on the existing variant name.
+    /// identifier, bounded by [`conversation_id_is_acceptable`],
+    /// informational, never a verdict input; `turns` is the transcript — text
+    /// only in Cooky, roles per [`Turn`]. Additive payload on the existing
+    /// variant name.
     SessionPrompt {
         conversation: String,
-        content: Vec<ContentBlock>,
+        turns: Vec<Turn>,
     },
     /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: NOT built
     /// in Cooky — the operand names a session and no session identity exists
@@ -633,23 +687,85 @@ pub fn encode_response_zeroizing(
 /// Encode a request into a zeroizing buffer. The codec lives here, with the
 /// rest of the wire, so `maknae-kernel` needs no CBOR dependency of its own —
 /// a new dependency in the TCB is a security decision, not a convenience.
+///
+/// BOUNDED and PREALLOCATED, on the `encode_request_zeroizing` precedent
+/// above, and for the reason [`crate::EGRESS_REQUEST_FRAME_ENCODE_BYTES`]
+/// records: this buffer carries kernel-served file content once a step's
+/// `Tool` turns ride the frame, and the growing `Vec` it replaces freed a
+/// partly-written copy of that content on every realloc. A frame that will
+/// not fit in `max_bytes` is an [`ProtoCodecError::Encode`], never a silent
+/// growth — and, at every caller, a PRE-SEND failure.
 pub fn encode_egress_frame_request(
     r: &crate::EgressFrameRequest,
+    max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
-    let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    ciborium::into_writer(r, &mut writer).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
     Ok(buf)
+}
+
+/// How many bytes [`encode_egress_frame_request`] will produce, WITHOUT
+/// producing them (#241, codex round 2 item C).
+///
+/// A counting `io::Write` sink: ciborium serializes through it exactly as it
+/// would to a real buffer, and every byte is added to a total and discarded.
+/// No allocation holds frame content at any point, so this is safe to run on a
+/// frame far too large to encode — which is the whole purpose.
+///
+/// **Why the kernel needs it.** The frame cap is refused by the KERNEL, with
+/// an operator-readable message naming the measured size and the cap
+/// (`egress_socket.rs`). With a fixed encode buffer that refusal was reachable
+/// only while the frame fit the buffer: anything further over died inside the
+/// encoder as an opaque `failed to write whole buffer`, with no size, no cap
+/// and no operator line. Measuring first makes the kernel's own refusal what
+/// EVERY over-cap frame meets, and removes the headroom the buffer needed to
+/// avoid shadowing it.
+pub fn egress_frame_request_encoded_len(
+    r: &crate::EgressFrameRequest,
+) -> Result<usize, ProtoCodecError> {
+    /// Counts, stores nothing. Not `io::sink()`, which discards without
+    /// reporting, and not a `Vec`, which would hold the content this exists
+    /// to avoid allocating.
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    ciborium::into_writer(r, &mut counter).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    Ok(counter.0)
 }
 
 pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest, ProtoCodecError> {
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }
 
+/// Encode a reply into a zeroizing buffer, BOUNDED and PREALLOCATED on the
+/// request encoder's precedent above and for the reason
+/// [`crate::EGRESS_REPLY_FRAME_ENCODE_BYTES`] records (#241, codex round 2
+/// item B): a reply carries whatever kernel-served content the model quoted
+/// back, and the growing `Vec` this replaces freed a partly-written copy of it
+/// on every realloc. A reply that will not fit in `max_bytes` is a
+/// [`ProtoCodecError::Encode`] — never a panic, never a silent growth — and at
+/// its one production caller it is a pre-write failure: the deputy has read
+/// nothing to the kernel yet.
 pub fn encode_egress_frame_reply(
     r: &crate::EgressFrameReply,
+    max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
-    let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    ciborium::into_writer(r, &mut writer).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
     Ok(buf)
 }
 
@@ -707,7 +823,9 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "conv-1".into(),
-                content: vec![text("the secret plan")],
+                turns: vec![Turn::User {
+                    content: vec![text("the secret plan")],
+                }],
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -760,7 +878,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: blocks,
+                turns: vec![Turn::User { content: blocks }],
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -1205,5 +1323,91 @@ mod tests {
             ..c
         };
         assert!(proposed_tool_call_is_acceptable(&ok));
+    }
+
+    fn t_call(id: &str) -> ProposedToolCall {
+        ProposedToolCall {
+            name: "read_file".into(),
+            call_id: id.into(),
+            arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+        }
+    }
+
+    #[test]
+    fn a_turn_has_no_system_variant_and_round_trips_through_cbor() {
+        let turns = vec![
+            Turn::User {
+                content: vec![text("hi")],
+            },
+            Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![t_call("c1")],
+            },
+            Turn::Tool {
+                call_id: "c1".into(),
+                content: vec![text("contents")],
+            },
+        ];
+        let v = Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: turns.clone(),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&v, &mut buf).unwrap();
+        let back: Verb = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, v);
+        // A compile-time assertion, not a runtime one: adding a `System`
+        // variant to `Turn` makes this match non-exhaustive and the test
+        // fails to COMPILE. That is the point; do not "clean it up".
+        for t in &turns {
+            match t {
+                Turn::User { .. } | Turn::Assistant { .. } | Turn::Tool { .. } => {}
+            }
+        }
+    }
+
+    #[test]
+    fn turn_shape_admission_is_per_role_and_bounds_client_supplied_tool_calls() {
+        assert!(turn_is_acceptable(&Turn::User {
+            content: vec![text("x")]
+        }));
+        assert!(
+            !turn_is_acceptable(&Turn::User { content: vec![] }),
+            "a user turn must carry content"
+        );
+        assert!(turn_is_acceptable(&Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![t_call("c1")]
+        }));
+        assert!(
+            !turn_is_acceptable(&Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![]
+            }),
+            "says nothing"
+        );
+        // Client-supplied tool calls are bounded HERE, on the prompt leg —
+        // the loop is untrusted and this is the first predicate that sees them.
+        let over = ProposedToolCall {
+            name: "x".repeat(MAX_TOOL_CALL_NAME_BYTES + 1),
+            call_id: "c1".into(),
+            arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+        };
+        assert!(!turn_is_acceptable(&Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![over]
+        }));
+        assert!(turn_is_acceptable(&Turn::Tool {
+            call_id: "c1".into(),
+            content: vec![text("r")]
+        }));
+        assert!(!turn_is_acceptable(&Turn::Tool {
+            call_id: "".into(),
+            content: vec![text("r")]
+        }));
+        assert!(!turn_is_acceptable(&Turn::Tool {
+            call_id: "c".repeat(MAX_TOOL_CALL_ID_BYTES + 1),
+            content: vec![text("r")]
+        }));
     }
 }

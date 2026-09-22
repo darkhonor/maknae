@@ -1,0 +1,30 @@
+[package]
+name = "maknae-agent"
+publish.workspace = true
+description = "The runtime loop's decision code (#241): transcript, routing, rendering, drive. PURE — no I/O; every effect goes through the Plane trait the untrusted CLI implements."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The wire types the loop composes over. Pulls tokio with `io-util` ONLY (the
+# framing traits) — no fs, no net, no process. Verified 2026-09-22.
+maknae-proto = { path = "../maknae-proto" }
+serde = { workspace = true, features = ["derive"] }
+# Tool ARGUMENTS arrive as a JSON string the model produced; parsing them is the
+# one place this crate reads untrusted structure. Already in the workspace graph
+# via maknae-llm — no new supply-chain surface. Same major as that pin.
+# (serde and serde_json are first USED by route.rs; declared here so
+# the manifest is written once.)
+serde_json = "1"
+# Same pin form as maknae-proto's: tool arguments and write content are
+# secret-adjacent and must not linger in freed heap; alloc-only, no defaults.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

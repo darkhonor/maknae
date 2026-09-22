@@ -104,7 +104,18 @@ crates/maknae-kernel/src/handler.rs|mode_mask: None,
 # require, on this very descriptor, and duplicating them here would put policy in an
 # untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
 # lifecycle stays in one crate and the client needs no exemption of its own.
-crates/maknae-io/src/delegated.rs|Ok(OwnedFd::from(std::fs::File::open(path)?))
+#
+# Updated 2026-09-22 (#241, codex round 2): the call is now an OpenOptions chain
+# carrying O_NONBLOCK (nix::fcntl::OFlag, via OpenOptionsExt::custom_flags) and the
+# inventory line moved with it. The flag is NOT a requirement — it is what makes the
+# open TERMINATE: a model-chosen read_file of a writer-less FIFO blocked the untrusted
+# CLI forever, outside every transport timeout, so the request never reached the PDP.
+# The daemon's regular_file requirement still refuses the object. Kept as std::fs
+# under this same exemption rather than moved to syscall.rs, where a nix::fcntl::open
+# would need a new disjoint-bitflag exemption in the mutation inventory for a flag a
+# behavioural test already holds
+# (delegated.rs::open_for_delegation_does_not_block_on_a_writerless_fifo).
+crates/maknae-io/src/delegated.rs|std::fs::OpenOptions::new()
 
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,

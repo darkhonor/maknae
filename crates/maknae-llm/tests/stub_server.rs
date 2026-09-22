@@ -56,10 +56,9 @@ async fn stub(
 fn req<'a>(model: &'a str) -> ChatRequest<'a> {
     ChatRequest {
         model,
-        messages: vec![ChatMessage {
-            role: "user".into(),
-            content: "hi".into(),
-        }],
+        messages: vec![ChatMessage::user(maknae_proto::SecretText(
+            zeroize::Zeroizing::new("hi".to_string()),
+        ))],
         tools: vec![],
         tool_choice: None,
         stream: false,

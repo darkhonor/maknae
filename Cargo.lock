@@ -1029,6 +1029,7 @@ name = "maknae"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "maknae-agent",
  "maknae-config",
  "maknae-io",
  "maknae-msgs",
@@ -1039,6 +1040,17 @@ dependencies = [
  "security-framework",
  "tokio",
  "yaml-rust2",
+ "zeroize",
+]
+
+[[package]]
+name = "maknae-agent"
+version = "0.0.0"
+dependencies = [
+ "maknae-proto",
+ "serde",
+ "serde_json",
+ "tokio",
  "zeroize",
 ]
 
@@ -1115,6 +1127,7 @@ dependencies = [
 name = "maknae-kernel"
 version = "0.0.0"
 dependencies = [
+ "maknae-agent",
  "maknae-audit",
  "maknae-audit-append",
  "maknae-authz-basic",

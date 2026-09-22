@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(
             dispatch_verb(&Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![]
+                turns: vec![]
             }),
             Dispatch::PromptRequested
         );
@@ -534,7 +534,7 @@ mod tests {
     fn the_request_carries_the_registered_provider_as_the_destination_and_nothing_when_none() {
         let v = Verb::SessionPrompt {
             conversation: "c".into(),
-            content: vec![],
+            turns: vec![],
         };
         let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, None, Some("openai"));
         assert_eq!(
@@ -1167,7 +1167,7 @@ mod tests {
             Verb::SessionFork,
             Verb::SessionPrompt {
                 conversation: "c".into(),
-                content: vec![],
+                turns: vec![],
             },
             Verb::SessionCancel,
             Verb::SessionSetconfigoption,

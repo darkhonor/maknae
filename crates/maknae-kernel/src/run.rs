@@ -665,13 +665,13 @@ pub async fn handle<S, E, P>(
     // gated on the append: `emit_request_deny` is for legs that serve nothing.
     if let Verb::SessionPrompt {
         conversation,
-        content,
+        turns,
     } = &request.verb
     {
         let shape = if !maknae_proto::conversation_id_is_acceptable(conversation) {
             Err("conversation identifier not acceptable".to_string())
         } else {
-            crate::egress::admitted_blocks(content)
+            crate::egress::admitted_turns(turns)
         };
         if let Err(reason) = shape {
             let appended = emit_request_outcome(
@@ -1278,7 +1278,7 @@ pub async fn handle<S, E, P>(
         Dispatch::PromptRequested => {
             let Verb::SessionPrompt {
                 conversation,
-                content,
+                turns,
             } = &request.verb
             else {
                 unreachable!("dispatch keyed on the verb")
@@ -1321,7 +1321,7 @@ pub async fn handle<S, E, P>(
             };
             let name = pcfg.name.as_str();
             let destination = format!("provider:{name}");
-            let m = crate::egress::content_measure(content);
+            let m = crate::egress::content_measure(turns);
             let egress_meta = |status| EgressAudit {
                 status,
                 content_length: m.length,
@@ -1458,7 +1458,7 @@ pub async fn handle<S, E, P>(
                         key_vault_path: pcfg.key_vault_path.clone(),
                         key_field: pcfg.key_field.clone(),
                         conversation: conversation.clone(),
-                        content: content.clone(),
+                        turns: turns.clone(),
                     };
                     let deadline = egress.deadline();
                     let sent = tokio::time::timeout(

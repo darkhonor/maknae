@@ -42,3 +42,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 # requirement-parameterized seam (nothing stubbed); dev-only — the
 # feature-resolution-pin gate proves production resolution stays featureless.
 maknae-authz-basic = { path = "../maknae-authz-basic", features = ["hermetic-test-seam"] }
+# #241: the brain under test against the real PDP. DEV-ONLY — the kernel's
+# production graph must never link the loop's decision code (the isolation
+# contract's matrix links `maknae-agent` into `maknae` alone).
+maknae-agent = { path = "../maknae-agent" }

@@ -153,10 +153,36 @@ pub struct Received {
 /// So the client's job is to open, honestly, as itself — and to send the request even
 /// when this fails, so the refusal is DECIDED and audited rather than lost (decision 2).
 ///
+/// **`O_NONBLOCK` is the one flag it sets**, and it is not a requirement — it is what
+/// makes the open TERMINATE (#241, codex round 2). A model-chosen `read_file` of a
+/// FIFO with no writer blocked this open forever: a synchronous open inside the
+/// untrusted CLI, outside every transport timeout, so the request never reached the
+/// kernel, the PDP never decided it, and normal credential shutdown never ran. With
+/// the flag, a writer-less read-side FIFO opens immediately and the DAEMON's
+/// `regular_file` requirement refuses the object exactly as before — the judgement
+/// stays on the trusted side. It applies no requirement of its own, changes nothing
+/// the daemon checks (those are `fstat`-based), and has no effect on a regular file's
+/// reads. `open_writable_for_delegation` has carried the same flag, for the same
+/// reason, since it was written (`syscall::open_writable_delegation`).
+///
+/// The flag comes from `nix::fcntl::OFlag`, the same typed family every other open in
+/// this crate composes from, by way of `OpenOptionsExt::custom_flags` — a single flag,
+/// so there is no bitflag union here for a mutant to rewrite. `std::fs` is kept (this
+/// is the crate's one reviewed exemption, `ci/gates/std-fs-allowlist.txt`) rather than
+/// moved to `syscall.rs`, because a `nix::fcntl::open` there would need a new
+/// disjoint-union exemption in the mutation inventory for a flag that is already
+/// held by a behavioural test.
+///
 /// Returns `std::io::Result` because the OS's refusal is the meaningful outcome and
 /// this function applies no requirement of its own to fail.
 pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
-    Ok(OwnedFd::from(std::fs::File::open(path)?))
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(OwnedFd::from(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+            .open(path)?,
+    ))
 }
 
 /// Subject-side, nontruncating writable open for existing-file delegation.
@@ -836,6 +862,68 @@ mod tests {
             std::fs::File::from(fd).metadata().expect("stat").ino(),
             want
         );
+    }
+
+    /// codex round 2, IMPORTANT 1. A model-chosen `read_file` of a FIFO with no
+    /// writer blocked this open FOREVER — a synchronous `File::open` inside the
+    /// untrusted CLI, outside every transport timeout. The request never reached the
+    /// kernel, so the PDP never decided it, the step budget could not advance, and
+    /// normal credential shutdown never ran. `O_NONBLOCK` makes the open return at
+    /// once; the DAEMON's `regular_file` requirement is still what refuses the object
+    /// (`a_delegated_fd_to_a_non_regular_file_is_refused` directly above), so nothing
+    /// moved into the untrusted process.
+    ///
+    /// A watchdog in the TEST, not a killable child process (which is what this
+    /// crate's other FIFO controls use): the failure mode here is detectable — the
+    /// open either answers within the budget or it does not — so `recv_timeout` turns
+    /// the hang into a RED assertion instead of a stalled worker. The spawned thread
+    /// is left blocked on a RED run and reaped at process exit.
+    #[test]
+    fn open_for_delegation_does_not_block_on_a_writerless_fifo() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipe = root.path().join("waiting");
+        nix::unistd::mkfifo(
+            &pipe,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("mkfifo");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = pipe.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_for_delegation(&probe).map(|_| ()));
+        });
+        // PROMPTLY, and either answer is correct: the kind of object is the
+        // daemon's to require, never this function's.
+        let got = rx.recv_timeout(std::time::Duration::from_secs(2));
+        assert!(
+            got.is_ok(),
+            "open_for_delegation blocked on a writerless FIFO: the request never reaches the PDP"
+        );
+
+        // And a REGULAR file is unaffected, THROUGH THE DAEMON'S OWN PATH:
+        // `read_delegated` re-applies the named requirements to this very
+        // descriptor (`fstat`-based, so the file-status flag is invisible to
+        // them) and reads from it. `O_NONBLOCK` has no effect on a regular
+        // file's reads, and this is the control that says so rather than
+        // assuming it — the crate's other end-to-end read test opens with a
+        // plain `File::open` and would not notice.
+        let home = confinement_root(root.path());
+        let notes = home.join("notes.bin");
+        let content: &[u8] = &[0x4d, 0x41, 0x4b, 0xff, 0x00, 0x4e];
+        std::fs::write(&notes, content).expect("write");
+        let fd = open_for_delegation(&notes).expect("a regular file still opens");
+        let (got_path, bytes) = read_delegated(
+            &fd,
+            DelegatedRequired {
+                confined_beneath: home,
+                root_required: maknae_io_root_req(),
+                target: target(),
+            },
+        )
+        .expect("verified and read");
+        assert_eq!(got_path, notes);
+        assert_eq!(&*bytes, content);
     }
 
     /// When the OS refuses the SUBJECT, there is nothing to delegate — and the caller
