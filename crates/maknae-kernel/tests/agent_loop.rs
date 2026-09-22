@@ -4,7 +4,7 @@
 //! (write-ahead + outcome), the read verdict, the second prompt, the write
 //! intent and completion, the final answer — in order, in the trail.
 //!
-//! Three limits of this file, so its coverage is not read wider than it is.
+//! Four limits of this file, so its coverage is not read wider than it is.
 //! First, the write lane driven here is the REPLACEMENT lane and only that:
 //! `FixturePlane::write` sends `WriteMode::Existing`, so the kernel executes
 //! through a delegated writable fd and answers `MutationComplete`. The CREATE
@@ -19,7 +19,13 @@
 //! naming an unadvertised tool inside the deputy, a process with no audit sink
 //! at all. Third, the egress backend here is a scripted in-process `Egress`;
 //! the full chain — brain to kernel to `maknae-egress` to a provider in one
-//! process — is #242's evidence, not this file's.
+//! process — is #242's evidence, not this file's. Fourth, and the widest:
+//! `FixturePlane` re-implements the CLI's `read_outcome`, `write_outcome` and
+//! `prompt_outcome` mappings BY HAND, because `bins/maknae` is a binary crate
+//! and unreachable from a kernel integration test. Nothing here can go red if
+//! one of those mappers changes; their faithfulness to this fixture is by
+//! inspection, and the mappers' own discriminating tests live beside them in
+//! `bins/maknae`'s `agent` module.
 mod common;
 use common::{Fixture, Records};
 use maknae_agent::drive::{drive, Budget, StopReason};

@@ -393,8 +393,9 @@ mod tests {
         // The control: `maknae agent "   "` is refused `BadRequest` for
         // carrying no text to send, and that refusal is decided BEFORE any
         // exchange — no egress block, no intent record, so nothing reached the
-        // provider and nothing is in the trail. Every other refusal code keeps
-        // `Refused`, because `LandedUndelivered`, `DeadlineExpired` and
+        // provider; what the trail holds is the pre-gate deny, not an egress
+        // intent. Every other refusal code keeps `Refused`, because
+        // `LandedUndelivered`, `DeadlineExpired` and
         // `OutcomeUnknown` all arrive as the same generic `Unauthorized` and
         // the prompt may well have landed.
         use maknae_proto::{Payload, PromptReply, ProtoErrCode};

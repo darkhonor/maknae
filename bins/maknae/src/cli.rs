@@ -307,10 +307,12 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 /// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
-/// Everything that prints a RESULT to a terminal lives HERE; the sendable core is
-/// [`send_verb`], which prints no result, so a caller that sends many verbs is not also a
-/// printer. `send_verb` is not silent: it writes three arming diagnostics to stderr
-/// (`cannot prepare filesystem operation`, `cannot open`, `cannot delegate`), and
+/// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
+/// `maknae agent` prints its own (`agent::run`'s `println!` of the final answer). The
+/// sendable core is [`send_verb`], which prints no result, so a caller that sends many
+/// verbs is not also a printer. `send_verb` is not silent: it writes three arming
+/// diagnostics to stderr (`cannot prepare filesystem operation`, `cannot open`,
+/// `cannot delegate`), and
 /// `mutation::execute`, which it calls on the `MutationAttempt` path, prints too.
 async fn round_trip(
     verb: Verb,
@@ -336,8 +338,9 @@ async fn round_trip(
     }
 }
 
-/// What one sent verb came back as, with NOTHING printed — the caller decides what a
-/// terminal (or a model) is told.
+/// What one sent verb came back as, with no RESULT printed — the caller decides what a
+/// terminal (or a model) is told. (`send_verb`'s three arming diagnostics go to stderr;
+/// see [`send_verb`].)
 ///
 /// `Refused` carries the code AND the message because [`round_trip`] prints both; dropping
 /// the message would be a silent behaviour change no CLI test captures. `Debug` because a

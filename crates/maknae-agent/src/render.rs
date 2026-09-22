@@ -79,9 +79,12 @@ const SUFFIX_HEADROOM: usize = 32;
 /// memcpy'd into a fresh allocation and the old one — kernel-served content —
 /// was freed unzeroized. The non-UTF-8 sub-arm relies on `format!`'s
 /// over-allocation rather than on named headroom, so whether the suffix
-/// reallocates depends on the digit counts (measured: `format!` capacity 44,
-/// so no realloc for a body under ~100 bytes with a low step counter, and a
-/// realloc above) — and either way what it holds is a short renderer-authored
+/// reallocates depends on the digit counts (measured with `rustc -O`:
+/// `format!` capacity is 44 and the finished string is
+/// `41 + digits(len) + digits(steps)`, so the append fits exactly while
+/// `41 + digits(len) + digits(steps) <= 44` — no realloc for a body under
+/// ~100 bytes with a low step counter, a realloc above) — and either way what
+/// it holds is a short renderer-authored
 /// length (`binary content, N bytes`), not a file.
 ///
 /// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
@@ -91,14 +94,14 @@ const SUFFIX_HEADROOM: usize = 32;
 /// component deliberately (2026-09-22, #344): once a `Tool` turn leaves the
 /// trust plane the deputy hands it to `reqwest`'s `.json()`, which serialises
 /// through `serde_json::to_vec` into a plain body buffer, so the bytes do sit
-/// in un-zeroized heap there — and the NEARER residue is the CLI's own, one
-/// stack frame below the `ReadOutcome` this renders: `maknae_proto::read_frame`
+/// in un-zeroized heap there — and the NEARER residue is the CLI's own, two
+/// frames below the `ReadOutcome` this renders (`RealPlane::read` →
+/// `send_verb` → `read_frame`): `maknae_proto::read_frame`
 /// is `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))`,
 /// so the served frame is moved out of its `Zeroizing` into a plain
 /// `Vec<u8>` before the brain ever sees it. A #241 code gap, not fixed by
 /// #344's prose pass. Same discipline as [`crate::plane::ReadOutcome`] one
-/// layer up, whose doc also names the write
-/// direction's residue.
+/// layer up, whose doc also names the write direction's residue.
 ///
 /// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
 /// `String`'s — it is NOT redacting, unlike [`ToolOutcome`]'s above — so a

@@ -385,15 +385,20 @@ mod tests {
             // observed at 2154 from this loop: 1109 for the preamble as a JSON
             // string (1084 on disk, plus 21 escaped newlines, 2 escaped quotes
             // and the 2 delimiters), 911 for the tool schemas, 28 for the one
-            // user block's content string, 106 of keys and braces. A test that
-            // replaces the turns with another single `User` turn changes only
-            // that third term; one that changes the number or roles of the
-            // turns moves the fourth term too -- the three-role test below is
-            // 2339, of which 293 is keys and braces. Nothing asserts the total
-            // -- the loop reads `Content-Length` -- so the figure is
-            // orientation, and the way to re-measure it is to print
-            // `seen.len() - (brk + 4)`, the body length this loop already
-            // computes.
+            // user block's content string, and 106 of ENVELOPE -- keys,
+            // braces, and the short role/model/stream values (22 of the 106
+            // are those values: `"m"`, `"system"`, `"user"`, `false`). The
+            // fourth term is not turn-count alone: the three-role test below,
+            // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`,
+            // is 2339 with an envelope of 293, and 86 of that 293 is values --
+            // 47 of them the assistant turn's tool call, its `name`, the two
+            // `c1` ids and 18 bytes of `arguments` -- so a longer tool name or
+            // a longer `arguments` payload moves it as surely as another turn
+            // does. Nothing asserts either total -- the loop reads
+            // `Content-Length` -- so the figures are orientation, and the way
+            // to re-measure either is to print `seen.len() - (brk + 4)`, the
+            // body length this loop already computes, under the test whose
+            // shape is wanted.
             let mut seen = Vec::new();
             let mut buf = vec![0u8; 8192];
             loop {

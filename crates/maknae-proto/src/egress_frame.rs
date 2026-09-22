@@ -55,10 +55,10 @@ impl std::fmt::Debug for EgressFrameRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `<N turns>` is pluralised unconditionally, so a one-turn frame
         // prints `<1 turns>`. Deliberate, not an oversight: this is a
-        // redaction marker in a `{:?}`, its exact text is pinned by the test
-        // below, and a singular branch would add a branch no mutant can
-        // distinguish from a typo — and change a string an assertion depends
-        // on — for grammar in a debug line.
+        // redaction marker in a `{:?}`, and the plural-only form is what keeps
+        // the pinned literal in the test below a single exact string. A
+        // singular branch would buy grammar in a debug line at the cost of a
+        // second expected text to pin.
         f.debug_struct("EgressFrameRequest")
             .field("destination", &self.destination)
             .field("endpoint", &self.endpoint)

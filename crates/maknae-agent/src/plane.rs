@@ -36,10 +36,10 @@ use std::future::Future;
 /// CLI that implements this trait reads the frame through
 /// `maknae_proto::read_frame`, which is
 /// `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))` and
-/// so hands the served bytes on in a plain `Vec<u8>` one stack frame below
-/// this variant (a #241 code gap, named here rather than fixed by #344's
-/// prose pass). And it is not a claim about the WRITE direction, which has a
-/// known residue: the
+/// so hands the served bytes on in a plain `Vec<u8>` two frames below this
+/// variant (`RealPlane::read` → `send_verb` → `read_frame`) — a #241 code
+/// gap, named here rather than fixed by #344's prose pass. And it is not a
+/// claim about the WRITE direction, which has a known residue: the
 /// model's write content arrives as a JSON string, and any escape in it is
 /// un-escaped into a scratch allocation serde_json owns and frees outside
 /// anything this crate can reach — accepted residual, #241, stated in full at
