@@ -364,9 +364,13 @@ pub(crate) enum SentOutcome {
     /// `preparation_error` and `descriptor()` is `Ok(None)` so nothing was armed; that
     /// costs nothing, because `write_outcome` never reads it and every non-`Applied` write
     /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached. An
-    /// unarmed refusal is the subject's own OS-DAC/ENOENT surfacing as the kernel's
-    /// want-of-descriptor deny (ADR-0009 decision 2) — not a decision about the object's
-    /// content, and a caller must not report it as one.
+    /// unarmed refusal is the kernel's want-of-descriptor deny (ADR-0009 decision 2), and
+    /// which of the two branches produced it decides what it means: on the first it is the
+    /// subject's own OS-DAC or a path that does not exist, surfacing as that deny; on the
+    /// second it is a stream that cannot arm a descriptor at all (documented unreachable
+    /// today, fail-closed anyway), which says nothing about the subject's rights. Neither
+    /// is a decision about the object's content, and a caller must not report either as
+    /// one.
     Refused {
         code: maknae_proto::ProtoErrCode,
         message: String,
@@ -416,12 +420,15 @@ pub(crate) async fn send_verb(
     // Armed AFTER the handshake, deliberately: the handshake's own writes would
     // otherwise consume the descriptor.
     //
-    // If the open FAILS the request is still sent, unarmed. That is not a fallback —
-    // the daemon denies for want of a descriptor (ADR-0009 decision 2) and the refusal
-    // lands in the audit trail, which is the whole reason not to fail silently here.
+    // If the open FAILS — or, on the branch below, the stream cannot arm at all — the
+    // request is still sent, unarmed. That is not a fallback — the daemon denies for want
+    // of a descriptor (ADR-0009 decision 2) and the refusal lands in the audit trail,
+    // which is the whole reason not to fail silently here.
     let prepared = crate::mutation::prepare(request_verb.clone());
-    // True unless the open below fails: a verb that names no object has nothing to
-    // delegate and is armed by definition (see [`SentOutcome::Refused`]).
+    // True unless the read lane below clears it, which it does on EITHER of two
+    // branches: `open_for_delegation` returned `Err`, or the stream could not arm a
+    // descriptor. A verb that names no object has nothing to delegate and is armed by
+    // definition (see [`SentOutcome::Refused`], which states the iff).
     let mut armed = true;
     if let Some(prepared) = &prepared {
         if let Some(error) = prepared.preparation_error() {

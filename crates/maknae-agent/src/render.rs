@@ -152,8 +152,11 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
     // headroom the UTF-8 read sub-arm reserved, so a SERVED body is never
     // copied into a second buffer and the first one is never freed. The other
     // arms reserve no headroom and may grow right here; what they hold is a
-    // compiled-in constant's heap copy or the renderer's own
-    // `binary content, N bytes`, never served content — see `render`'s doc.
+    // compiled-in constant's heap copy, the renderer's own
+    // `binary content, N bytes`, or the router's error text, which MAY quote
+    // the model's own arguments through a serde diagnostic (`BadCall` above
+    // says so, and why it is accepted). Never kernel-served content — see
+    // `render`'s doc.
     out.push_str("\n\nsteps remaining: ");
     out.push_str(&steps_remaining.to_string());
     out

@@ -622,9 +622,20 @@ mod tests {
     }
 
     /// Every refusal renders something an operator can act on, and NONE of
-    /// them renders provider content. These strings reach the audit trail and
-    /// the terminal; `UnknownTool` names the tool (a name the model proposed,
-    /// not a secret), and nothing else echoes the body.
+    /// them renders provider content. `UnknownTool` names the tool (a name the
+    /// model proposed, not a secret), and nothing else echoes the body.
+    ///
+    /// *(Corrected 2026-09-22, #344: this said "these strings reach the audit
+    /// trail and the terminal". They reach the TERMINAL only. A `ReplyError`
+    /// becomes a provider error inside `maknae-egress`, which `main.rs` turns
+    /// into `ServeError::Fulfil` and reports with
+    /// `eprintln!("maknae-egress: connection refused: …")` before closing the
+    /// connection — and the deputy has no audit sink at all. The kernel then
+    /// records what it can see, a generic transport/outcome failure, never
+    /// this diagnostic: so an operator reading the trail learns that an
+    /// exchange failed, and only the deputy's stderr says the reply named an
+    /// unadvertised tool. `crates/maknae-kernel/tests/agent_loop.rs`'s module
+    /// doc records the same limit from the other side.)*
     #[test]
     fn every_refusal_renders_actionably_and_echoes_no_content() {
         let cases = [
