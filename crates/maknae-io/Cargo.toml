@@ -45,7 +45,7 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       it to "std" + "net"; the fs/process/thread/event APIs are not compiled in.
 #       Already resolved at 1.1.4 in Cargo.lock (transitively via tempfile), so this
 #       promotes a vetted edge rather than widening the graph.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "net"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
