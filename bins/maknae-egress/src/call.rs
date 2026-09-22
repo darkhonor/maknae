@@ -163,7 +163,12 @@ pub async fn fulfil<S: KeySource>(
                         kind: "function".into(),
                         function: maknae_llm::OutboundToolFn {
                             name: c.name.clone(),
-                            arguments: c.arguments.0.to_string(),
+                            // CLONED as the zeroizing type, never through a
+                            // plain `String` (codex round 1, critical 2):
+                            // these bytes are the model's proposed file
+                            // content, and the intermediate was freed
+                            // unwiped on every path out of here.
+                            arguments: c.arguments.clone(),
                         },
                     })
                     .collect(),

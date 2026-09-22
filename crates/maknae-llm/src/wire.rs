@@ -68,10 +68,21 @@ pub struct OutboundToolCall {
 
 /// The function half of an outbound tool call. `arguments` is the provider's
 /// own shape — a JSON STRING, not an object.
+///
+/// `arguments` is [`maknae_proto::SecretText`], NOT `String`, for the reason
+/// `ProposedToolCall` gives for the inbound direction, which applies with
+/// full force on the way back out (codex round 1, critical 2): a `write_file`
+/// call's arguments ARE the subject's file content, they arrive as
+/// `SecretText`, and copying them into a plain `String` here freed them
+/// unwiped — including when credential acquisition failed and nothing was
+/// ever sent — and printed them in full through every enclosing derived
+/// `Debug` up to `ChatRequest`. `SecretText` serializes with
+/// `serialize_str`, so the wire is byte-identical to the plain `String` it
+/// replaces, and its hand-written `Debug` prints a length.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutboundToolFn {
     pub name: String,
-    pub arguments: String,
+    pub arguments: maknae_proto::SecretText,
 }
 
 /// Deserialized ONLY from the compiled-in `baseline-tools.json`; a provider's
@@ -487,7 +498,9 @@ mod tests {
                 kind: "function".into(),
                 function: OutboundToolFn {
                     name: "read_file".into(),
-                    arguments: r#"{"path":"a"}"#.into(),
+                    arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                        r#"{"path":"a"}"#.into(),
+                    )),
                 },
             }],
             tool_call_id: None,
@@ -515,6 +528,61 @@ mod tests {
         assert_eq!(keys, ["content", "role"]);
         let v = serde_json::to_value(&with_preamble(vec![ChatMessage::user("x")])[0]).unwrap();
         assert!(v.get("tool_calls").is_none() && v.get("tool_call_id").is_none());
+    }
+
+    /// codex round 1, critical 2. An assistant turn echoes the model's own
+    /// prior tool calls, and a `write_file` call's `arguments` ARE the
+    /// subject's file content. They reach the deputy as `SecretText` and were
+    /// copied into a plain `String` here: freed unwiped — including when
+    /// credential acquisition then failed and the request was never sent —
+    /// and printed in full by every enclosing derived `Debug`
+    /// (`OutboundToolFn`, `OutboundToolCall`, `ChatMessage`, `ChatRequest`),
+    /// each of which an error line can render to an operator's terminal.
+    #[test]
+    fn an_outbound_tool_calls_arguments_redact_through_every_enclosing_debug() {
+        let sentinel = r#"{"path":"/home/u/a","content":"SECRET-ARGUMENTS"}"#;
+        let msg = ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: vec![OutboundToolCall {
+                id: "c1".into(),
+                kind: "function".into(),
+                function: OutboundToolFn {
+                    name: "write_file".into(),
+                    arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(sentinel.into())),
+                },
+            }],
+            tool_call_id: None,
+        };
+        let req = ChatRequest {
+            model: "m",
+            messages: vec![msg.clone()],
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+        };
+        for d in [
+            format!("{:?}", msg.tool_calls[0].function),
+            format!("{:?}", msg.tool_calls[0]),
+            format!("{msg:?}"),
+            format!("{req:?}"),
+        ] {
+            assert!(!d.contains("SECRET-ARGUMENTS"), "{d}");
+            assert!(!d.contains("/home/u/a"), "{d}");
+        }
+        // The WIRE is unchanged by the redaction: `arguments` is still the
+        // provider's own shape — a JSON STRING — byte for byte what the plain
+        // `String` produced, and the message's key set is untouched.
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["tool_calls"][0]["function"]["arguments"], sentinel);
+        let mut keys: Vec<&str> = v["tool_calls"][0]["function"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["arguments", "name"]);
     }
 
     /// Every refusal renders something an operator can act on, and NONE of
