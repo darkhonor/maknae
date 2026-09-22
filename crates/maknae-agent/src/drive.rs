@@ -30,6 +30,11 @@ pub enum Next {
     Stop(StopReason),
 }
 
+/// The assistant's answer is copied into a PLAIN `String`, unlike the read
+/// path's `Zeroizing` buffers — the one deliberate asymmetry: this text is
+/// bound for the subject's own stdout, where it is printed in the clear, so a
+/// zeroizing buffer would protect nothing the terminal does not already
+/// disclose. Served file content never reaches here.
 fn text_of(blocks: &[ContentBlock]) -> String {
     let mut s = String::new();
     for b in blocks {

@@ -15,11 +15,14 @@ use std::future::Future;
 /// What that buys, precisely: the served bytes are moved from
 /// `maknae_proto::Bytes` into this variant, moved on into
 /// [`crate::render::ToolOutcome::ReadContent`], rendered into a
-/// `Zeroizing<String>` (R32), and copied from there into a
-/// `maknae_proto::SecretText`, which zeroizes too — so the CONTENT never lands
-/// in a plain buffer anywhere on the path. It is not a claim that nothing is
-/// ever copied: the render and the `SecretText` are copies, both into
-/// zeroizing destinations, and that is the property, not zero-copy.
+/// `Zeroizing<String>` that [`crate::render::render`] allocates ONCE with
+/// headroom for its suffix — appended in place, so the body is never
+/// reallocated and no old allocation is freed unzeroized (corrected
+/// 2026-09-22, #241: before the headroom it was) — and copied from there into
+/// a `maknae_proto::SecretText`, which zeroizes too. So the CONTENT never
+/// lands in a plain buffer anywhere on the path. It is not a claim that
+/// nothing is ever copied: the render and the `SecretText` are copies, both
+/// into zeroizing destinations, and that is the property, not zero-copy.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(zeroize::Zeroizing<Vec<u8>>),

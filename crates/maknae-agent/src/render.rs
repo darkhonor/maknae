@@ -54,18 +54,48 @@ pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// R13: a LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
 
-/// R32: the output is a `Zeroizing<String>`, and it is BUILT as one. On the
-/// read path this text IS the kernel-served file content, so a plain `String`
+/// Headroom the read arm pre-allocates for the suffix `render` appends, so the
+/// append never reallocates: 19 bytes of `"\n\nsteps remaining: "` plus the 10
+/// digits of a `u32` at its maximum, plus slack. Sized here rather than
+/// measured at each call because the body it protects is kernel-served content
+/// (see [`render`]).
+const SUFFIX_HEADROOM: usize = 32;
+
+/// The output is a `Zeroizing<String>`, and it is BUILT as one. On the read
+/// path this text IS the kernel-served file content, so a plain `String`
 /// anywhere on the way — including a `format!` that copies a finished body into
 /// a fresh buffer — would leave a non-zeroizing copy of home-file bytes behind
-/// until the allocator reused the page. The caller
-/// ([`crate::transcript::Transcript::push_tool_result`]) copies this into a
-/// `SecretText`, which zeroizes too, so the content never lands in a plain
-/// buffer on the whole path. Same discipline as R28 one layer up.
+/// until the allocator reused the page.
+///
+/// The property that holds, stated exactly (corrected 2026-09-22, #241 — the
+/// earlier text claimed the append alone was enough): the read arm allocates
+/// ONCE, with [`SUFFIX_HEADROOM`] for the suffix, appends in place, and hands
+/// that single zeroizing buffer to the transcript. There is no second plain
+/// buffer and no reallocation of the body. Without the headroom the first
+/// `push_str` reallocated: capacity equalled length, so the body was memcpy'd
+/// into a fresh allocation and the old one — kernel-served content — was freed
+/// unzeroized.
+///
+/// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
+/// into a `SecretText`, which zeroizes too, so the content never lands in a
+/// plain buffer on the whole path. Same discipline as
+/// [`crate::plane::ReadOutcome`] one layer up.
+///
+/// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
+/// `String`'s — it is NOT redacting, unlike [`ToolOutcome`]'s above — so a
+/// `{:?}` of this return value prints the served body. Never format it; the
+/// only production caller passes it as a `&str`.
 pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> {
     let mut out = match outcome {
         ToolOutcome::ReadContent(bytes) => match std::str::from_utf8(bytes) {
-            Ok(s) => Zeroizing::new(String::from(s)),
+            Ok(s) => {
+                // Capacity for the body AND the suffix, so the `push_str`
+                // below never reallocates — a realloc memcpy's the body and
+                // frees the old buffer unzeroized (measured on #241).
+                let mut z = Zeroizing::new(String::with_capacity(s.len() + SUFFIX_HEADROOM));
+                z.push_str(s);
+                z
+            }
             // Never lossily converted: the model would act on U+FFFD as if it were the file.
             Err(_) => Zeroizing::new(format!("binary content, {} bytes", bytes.len())),
         },
@@ -77,8 +107,9 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
     };
     // The live step count rides HERE, in per-turn content — never in the
-    // compiled prompt, which ships verbatim (#264). Appended IN PLACE, so the
-    // body is never copied into a second buffer (R32).
+    // compiled prompt, which ships verbatim (#264). Appended IN PLACE into the
+    // headroom the read arm reserved, so the body is never copied into a
+    // second buffer and the first one is never freed.
     out.push_str("\n\nsteps remaining: ");
     out.push_str(&steps_remaining.to_string());
     out
@@ -186,5 +217,37 @@ mod tests {
         ] {
             assert_eq!(format!("{o:?}"), want);
         }
+    }
+
+    /// The read arm allocates ONCE, with headroom, and never grows: a growth
+    /// memcpy's the kernel-served body into a fresh buffer and frees the old
+    /// allocation WITHOUT zeroizing it (measured on #241 — the earlier
+    /// `String::from(s)` had capacity == len, so the first `push_str` moved
+    /// the body). The observable from outside the function: the returned
+    /// buffer's capacity is still EXACTLY what `with_capacity` asked for;
+    /// any reallocation replaces it with an amortized-doubled capacity.
+    #[test]
+    fn a_read_body_is_never_moved_to_make_room_for_the_suffix() {
+        let body = b"SENTINEL-READ-BODY-long-enough-that-doubling-shows\n".to_vec();
+        // `u32::MAX` renders the LONGEST suffix the renderer can produce.
+        let r = render(
+            &ToolOutcome::ReadContent(Zeroizing::new(body.clone())),
+            u32::MAX,
+        );
+        assert!(r.starts_with("SENTINEL-READ-BODY"), "{}", *r);
+        assert_eq!(
+            r.len(),
+            body.len() + "\n\nsteps remaining: 4294967295".len(),
+            "the worst-case suffix, measured"
+        );
+        assert!(
+            r.len() <= body.len() + SUFFIX_HEADROOM,
+            "the headroom does not cover the worst-case suffix"
+        );
+        assert_eq!(
+            r.capacity(),
+            body.len() + SUFFIX_HEADROOM,
+            "the read buffer GREW: the body was memcpy'd and the old allocation freed unzeroized"
+        );
     }
 }
