@@ -248,6 +248,13 @@ files = [
   # "applied" for an uncertain write, is false assurance the model acts on —
   # it retries a write the kernel may have half-applied. No I/O in the crate.
   "crates/maknae-agent/src/transcript.rs",
+  # plane.rs is here, not in T3 (moved 2026-09-22, #241 CR1): it is not the
+  # bare-declarations file its T3 entry called it. `ReadOutcome`'s `Debug` is
+  # hand-written and REDACTING — a derived one prints
+  # `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
+  # into any `{:?}`, including a test's `panic!("{other:?}")`. A redaction
+  # control is executable logic and belongs under the T1 floor.
+  "crates/maknae-agent/src/plane.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
   "crates/maknae-agent/src/drive.rs",
@@ -409,10 +416,6 @@ why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is b
 [[t3]]
 path = "crates/maknae-agent/src/lib.rs"
 why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs)"
-
-[[t3]]
-path = "crates/maknae-agent/src/plane.rs"
-why = "bare Plane trait + bare outcome enums with derives; no hand-written executable logic (zero production regions) — the maknae-config/src/value.rs precedent"
 
 [[t3]]
 path = "crates/maknae-llm/src/lib.rs"

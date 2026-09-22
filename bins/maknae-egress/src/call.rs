@@ -46,6 +46,58 @@ impl Default for CallBounds {
     }
 }
 
+/// A turn's several `Text` blocks become ONE message with their bytes
+/// concatenated in order, no separator — exactly the bytes `content_measure`
+/// digested, nothing dropped and nothing added (scoped 2026-09-22, #241: this
+/// said "so trail == wire"; the digest covers the text and `arguments` bytes,
+/// not the names and ids that ride with them).
+///
+/// FAIL CLOSED, never `filter_map`. `_ => None` would be a SILENT DROP —
+/// exactly the defect round 2 fixed at the refusal and round 4 reintroduced
+/// here: if #229 ever loosens admission to permit a non-text block, a dropped
+/// block means the model answers a TRUNCATED prompt while the kernel's
+/// `content_measure` still attests the full content.
+///
+/// That arm is UNREACHABLE today and therefore untested and unmutatable:
+/// `decide` refuses non-text, and `Admitted` has no public constructor, so no
+/// non-text frame can reach `fulfil`. Reinstating `_ => None` keeps the suite
+/// green for exactly that reason — measured, not assumed. It is written as a
+/// refusal rather than a drop so that the day admission loosens, the failure
+/// is loud instead of a truncated prompt.
+///
+/// A free function rather than a closure inside `fulfil` (it captured
+/// nothing), so the allocation property below is directly observable in a
+/// test — the same reason `maknae-agent`'s renderer proves its own headroom by
+/// asserting `capacity()`.
+fn text_of(content: &[maknae_proto::ContentBlock]) -> Result<String, FulfilError> {
+    // Allocated ONCE, at the exact byte sum. A growing `String` memcpy's the
+    // model's text into a bigger allocation and frees the old one WITHOUT
+    // zeroizing it, leaving a readable fragment of the conversation on the
+    // heap — so a multi-block turn must never reallocate. Non-text blocks
+    // contribute 0 and never reach the push: the loop below refuses them.
+    let mut s = String::with_capacity(
+        content
+            .iter()
+            .map(|b| match b {
+                maknae_proto::ContentBlock::Text { text } => text.0.len(),
+                _ => 0,
+            })
+            .sum(),
+    );
+    for b in content {
+        match b {
+            maknae_proto::ContentBlock::Text { text } => s.push_str(&text.0),
+            other => {
+                return Err(FulfilError::Provider(format!(
+                    "frame carried a non-text {} block the prompt leg cannot send",
+                    other.kind()
+                )))
+            }
+        }
+    }
+    Ok(s)
+}
+
 /// Read the credential (first use per destination) and make the call.
 ///
 /// The key is fetched, used as a bearer header inside `maknae-llm`, and
@@ -86,38 +138,6 @@ pub async fn fulfil<S: KeySource>(
     // constructor — is proof that neither case reaches here. That is why this
     // is a straight map with no re-judgement, and why the preamble can never
     // be the whole request.
-    // FAIL CLOSED, never `filter_map`. `_ => None` would be a SILENT DROP —
-    // exactly the defect round 2 fixed at the refusal and round 4 reintroduced
-    // here: if #229 ever loosens admission to permit a non-text block, a
-    // dropped block means the model answers a TRUNCATED prompt while the
-    // kernel's `content_measure` still attests the full content.
-    //
-    // This arm is UNREACHABLE today and therefore untested and unmutatable:
-    // `decide` refuses non-text, and `Admitted` has no public constructor, so
-    // no non-text frame can reach `fulfil`. Reinstating `_ => None` keeps the
-    // suite green for exactly that reason — measured, not assumed. It is
-    // written as a refusal rather than a drop so that the day admission
-    // loosens, the failure is loud instead of a truncated prompt.
-    // A turn's several `Text` blocks become ONE message with their bytes
-    // concatenated in order, no separator — exactly the bytes
-    // `content_measure` digested, nothing dropped and nothing added (scoped
-    // 2026-09-22, #241: this said "so trail == wire"; the digest covers the
-    // text and `arguments` bytes, not the names and ids that ride with them).
-    let text_of = |content: &[maknae_proto::ContentBlock]| -> Result<String, FulfilError> {
-        let mut s = String::new();
-        for b in content {
-            match b {
-                maknae_proto::ContentBlock::Text { text } => s.push_str(&text.0),
-                other => {
-                    return Err(FulfilError::Provider(format!(
-                        "frame carried a non-text {} block the prompt leg cannot send",
-                        other.kind()
-                    )))
-                }
-            }
-        }
-        Ok(s)
-    };
     let mut messages: Vec<maknae_llm::ChatMessage> = Vec::with_capacity(req.turns.len());
     for t in &req.turns {
         // ONE `text_of` call site, not one per role. The refusal arm inside
@@ -206,6 +226,55 @@ pub async fn fulfil<S: KeySource>(
 mod tests {
     use super::*;
     use zeroize::Zeroizing;
+
+    fn txt(s: &str) -> maknae_proto::ContentBlock {
+        maknae_proto::ContentBlock::Text {
+            text: maknae_proto::SecretText(Zeroizing::new(s.into())),
+        }
+    }
+
+    /// A GROWING `String` memcpy's the model's text into a bigger allocation
+    /// and frees the old one WITHOUT zeroizing it, leaving a readable fragment
+    /// of the conversation on the heap for whatever allocates next. The exact
+    /// byte sum is known before the loop, so the buffer is allocated ONCE.
+    /// Asserted the way the renderer asserts its own headroom: on `capacity`,
+    /// because `len` is identical either way and proves nothing.
+    #[test]
+    fn a_multi_block_turn_is_concatenated_into_one_buffer_that_never_grows() {
+        let blocks = [
+            txt("SENTINEL-FIRST-BLOCK-long-enough-that-doubling-shows\n"),
+            txt("SENTINEL-SECOND"),
+            txt("SENTINEL-THIRD"),
+        ];
+        let want: String = blocks
+            .iter()
+            .map(|b| match b {
+                maknae_proto::ContentBlock::Text { text } => text.0.to_string(),
+                _ => unreachable!(),
+            })
+            .collect();
+        let got = text_of(&blocks).expect("all text");
+        assert_eq!(got, want, "verbatim, in order, no separator");
+        assert_eq!(
+            got.capacity(),
+            want.len(),
+            "the buffer GREW: a block was memcpy'd and the old allocation freed unzeroized"
+        );
+        // A non-text block still fails CLOSED, never a silent drop — the
+        // pre-size must not have turned the refusal into a `filter_map`.
+        assert!(matches!(
+            text_of(&[
+                txt("a"),
+                maknae_proto::ContentBlock::Image {
+                    data: "AA==".into(),
+                    mime_type: "image/png".into(),
+                },
+            ]),
+            Err(FulfilError::Provider(_))
+        ));
+        // The empty content case allocates nothing at all.
+        assert_eq!(text_of(&[]).expect("empty").capacity(), 0);
+    }
 
     struct Denied;
     impl KeySource for Denied {
