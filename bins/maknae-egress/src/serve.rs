@@ -145,9 +145,12 @@ mod tests {
                 }],
             }],
         };
-        maknae_proto::encode_egress_frame_request(&r)
-            .unwrap()
-            .to_vec()
+        maknae_proto::encode_egress_frame_request(
+            &r,
+            maknae_proto::EGRESS_REQUEST_FRAME_ENCODE_BYTES,
+        )
+        .unwrap()
+        .to_vec()
     }
 
     /// Serve one connection from a peer that writes `bytes`, optionally

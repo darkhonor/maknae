@@ -82,6 +82,34 @@ pub struct EgressFrameReply {
 /// any allocation). Two copies of `1024 * 1024` drifted apart in review.
 pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
 
+/// The fixed buffer a request frame is encoded INTO: allocated once, written
+/// once, never grown (#241, codex round 1 critical 3). The encoder began at
+/// `Zeroizing<Vec::new()>` and grew, and every realloc frees a partly-written
+/// buffer while `Zeroizing` wipes only the allocation that survives to the
+/// drop — measured 18850 bytes of capacity for an 18434-byte frame, so a
+/// dozen intermediate buffers each holding a prefix of the content. Harmless
+/// while a frame was one short prompt; not harmless once a step's `Tool` turns
+/// carry kernel-served file content, which is what the runtime loop routes
+/// through here.
+///
+/// Why it is the cap PLUS one page, and not the cap itself: the cap is refused
+/// by the KERNEL, before the first write, by the `frame_len_within_cap`
+/// predicate with its own operator-readable message and its own pre-send
+/// `Failed` classification. Sized at exactly the cap, this buffer would
+/// shadow that refusal — an over-cap frame would die inside the encoder
+/// instead and the kernel's branch would become code no input could reach.
+/// One page of headroom keeps the kernel's refusal the one a marginally-over
+/// frame meets; a frame past the headroom too is refused by the encoder,
+/// which is also pre-send, so nothing fails open either way.
+///
+/// Written OUT rather than as `EGRESS_REQUEST_FRAME_MAX_BYTES + 4096`, which
+/// is what it is: measured 2026-09-22, `cargo mutants` replaces that `+` with
+/// `*`, and a 4 GiB `vec![0; …]` in the encoder times the whole test binary
+/// out instead of failing an assertion — a gate violation for a mutant the
+/// by-value test does kill. The relation to the cap is pinned in the tests
+/// below, where no mutation reaches.
+pub const EGRESS_REQUEST_FRAME_ENCODE_BYTES: usize = 1_052_672;
+
 /// Shape admission, applied by the kernel before a byte reaches the socket.
 /// Deliberately shape-only: whether this subject may reach this destination
 /// was decided by the PDP long before the frame existed.
@@ -106,6 +134,21 @@ mod tests {
     #[test]
     fn the_request_frame_cap_is_one_mebibyte_by_value() {
         assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 1_048_576);
+        // By VALUE too, and its relation to the cap stated separately: a
+        // mutant turning `+` into `-` or dropping the page keeps every
+        // symbolic use compiling, and would silently make the encoder the
+        // thing that refuses an over-cap frame.
+        assert_eq!(EGRESS_REQUEST_FRAME_ENCODE_BYTES, 1_048_576 + 4096);
+        assert_eq!(
+            EGRESS_REQUEST_FRAME_ENCODE_BYTES,
+            EGRESS_REQUEST_FRAME_MAX_BYTES + 4096,
+            "the encode buffer IS the cap plus one page; the const is spelled out, so this is what ties the two together"
+        );
+        assert_eq!(
+            EGRESS_REQUEST_FRAME_ENCODE_BYTES - EGRESS_REQUEST_FRAME_MAX_BYTES,
+            4096,
+            "one page of headroom, so the kernel's own pre-send cap refusal is not shadowed by an encoder overflow"
+        );
     }
 
     fn text(s: &str) -> crate::ContentBlock {
@@ -217,6 +260,61 @@ mod tests {
         assert!(!egress_frame_request_is_acceptable(&r));
     }
 
+    /// codex round 1, critical 3. The request encoder began at
+    /// `Zeroizing<Vec::new()>` and GREW: every realloc frees a partly-written
+    /// buffer, and `Zeroizing` wipes only the allocation that survives to the
+    /// drop. Harmless while a frame was one short prompt; not harmless once a
+    /// step's `Tool` turns carry kernel-served file content, which is exactly
+    /// what the runtime loop routes through here. One fixed preallocation, no
+    /// growth, and the bytes on the wire unchanged.
+    #[test]
+    fn the_request_encoder_writes_one_preallocation_and_never_grows() {
+        // Two results in one step, each over 8 KiB — the trace codex gave.
+        let big = "x".repeat(9 * 1024);
+        let r = req(
+            "conv1",
+            vec![
+                crate::Turn::Tool {
+                    call_id: "c1".into(),
+                    content: vec![text(&big)],
+                },
+                crate::Turn::Tool {
+                    call_id: "c2".into(),
+                    content: vec![text(&big)],
+                },
+            ],
+        );
+        let buf =
+            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
+        // Byte-identical to what the growing encoder produced: this is a
+        // buffer change, not a wire change.
+        let mut reference = Vec::new();
+        ciborium::into_writer(&r, &mut reference).unwrap();
+        assert_eq!(&buf[..], &reference[..]);
+        assert!(
+            buf.len() > 18 * 1024,
+            "both results must be in there: {}",
+            buf.len()
+        );
+        // The ONE allocation it was given, still — a grown buffer reports the
+        // doubling sequence it climbed, never the preallocation.
+        assert_eq!(buf.capacity(), EGRESS_REQUEST_FRAME_ENCODE_BYTES);
+        // The bound is enforced, not decorative: one byte short of what the
+        // frame needs is the codec's own error, never a silent realloc. The
+        // exact length is the discriminator — it is the largest bound that
+        // fails under a `<`-shaped mutant and the smallest that succeeds.
+        assert!(matches!(
+            crate::encode_egress_frame_request(&r, buf.len() - 1),
+            Err(crate::ProtoCodecError::Encode(_))
+        ));
+        assert_eq!(
+            crate::encode_egress_frame_request(&r, buf.len())
+                .unwrap()
+                .len(),
+            buf.len()
+        );
+    }
+
     #[test]
     fn the_request_codec_round_trips_and_refuses_garbage() {
         let r = req(
@@ -225,7 +323,8 @@ mod tests {
                 content: vec![text("hello")],
             }],
         );
-        let buf = crate::encode_egress_frame_request(&r).unwrap();
+        let buf =
+            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
         assert_eq!(crate::decode_egress_frame_request(&buf).unwrap(), r);
         assert!(crate::decode_egress_frame_request(&[0xffu8, 0xff, 0xff]).is_err());
     }

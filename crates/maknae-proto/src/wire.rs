@@ -687,11 +687,23 @@ pub fn encode_response_zeroizing(
 /// Encode a request into a zeroizing buffer. The codec lives here, with the
 /// rest of the wire, so `maknae-kernel` needs no CBOR dependency of its own —
 /// a new dependency in the TCB is a security decision, not a convenience.
+///
+/// BOUNDED and PREALLOCATED, on the `encode_request_zeroizing` precedent
+/// above, and for the reason [`crate::EGRESS_REQUEST_FRAME_ENCODE_BYTES`]
+/// records: this buffer carries kernel-served file content once a step's
+/// `Tool` turns ride the frame, and the growing `Vec` it replaces freed a
+/// partly-written copy of that content on every realloc. A frame that will
+/// not fit in `max_bytes` is an [`ProtoCodecError::Encode`], never a silent
+/// growth — and, at every caller, a PRE-SEND failure.
 pub fn encode_egress_frame_request(
     r: &crate::EgressFrameRequest,
+    max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
-    let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    ciborium::into_writer(r, &mut writer).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
     Ok(buf)
 }
 

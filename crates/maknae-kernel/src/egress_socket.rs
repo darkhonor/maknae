@@ -251,7 +251,15 @@ impl Egress for SocketEgress {
             conversation: req.conversation,
             turns: req.turns,
         };
-        let buf = encode_egress_frame_request(&frame).map_err(Self::transport)?;
+        // Into ONE fixed preallocation that never grows (#241, codex round 1
+        // critical 3): a `Tool` turn carries kernel-served file content, and
+        // the growing buffer this replaces freed a partly-written copy of it
+        // on every realloc. A frame past the headroom is a codec error here,
+        // classified exactly like the cap refusal below — pre-send, nothing
+        // written, nothing left with the peer.
+        let buf =
+            encode_egress_frame_request(&frame, maknae_proto::EGRESS_REQUEST_FRAME_ENCODE_BYTES)
+                .map_err(Self::transport)?;
         // BEFORE the first write, so an over-cap request is a pre-send failure
         // (`Failed`, nothing left) and never "outcome unknown" (the deputy
         // would refuse it as oversize only after reading it).
