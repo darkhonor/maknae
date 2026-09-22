@@ -136,6 +136,9 @@ pub async fn drive<P: Plane>(
                         Err(RouteError::RelativePath) => {
                             ToolOutcome::BadCall("path must be absolute".into())
                         }
+                        Err(RouteError::MalformedPath) => ToolOutcome::BadCall(
+                            "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"".into(),
+                        ),
                         Ok(ToolRequest::Read { path, .. }) => match plane.read(&path).await {
                             ReadOutcome::Content(b) => ToolOutcome::ReadContent(b),
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
@@ -429,6 +432,10 @@ mod tests {
             ("read_file", "not json"),
             ("read_file", r#"{"path":"relative.txt"}"#),
             ("read_file", r#"{"path":""}"#),
+            // Non-canonical: the kernel would answer this `BadRequest` before
+            // the PDP, which renders as an unappealable `read unavailable`.
+            // The router refuses it as a fixable tool error instead.
+            ("read_file", r#"{"path":"/home/u/p/../q/f.txt"}"#),
             ("nope", r#"{"path":"/a"}"#),
         ] {
             let mut p = scripted(vec![
