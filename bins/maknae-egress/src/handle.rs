@@ -252,8 +252,8 @@ mod tests {
     /// `Tool` turns, not a `Text` block bearing text — and NOT on `Assistant`,
     /// where empty content with a non-empty `tool_calls` is the valid
     /// tool-call-only turn (`turn_is_acceptable`). Before #264 an
-    /// empty-content `User` or `Tool` turn was harmless — the deputy produced
-    /// no messages and the provider rejected the request.
+    /// empty payload was harmless — the deputy produced no messages and the
+    /// provider rejected the request.
     /// After #264 prepends a trusted preamble it stops being harmless: the
     /// request becomes well formed and the provider ANSWERS it from the system
     /// prompt alone, so "sent nothing" would masquerade as a turn.

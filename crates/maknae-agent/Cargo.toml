@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 # The wire types the loop composes over, and the only edge that brings tokio in
-# at all: THIS crate declares no tokio dependency, and `maknae-proto`'s
+# at all: THIS crate declares no non-dev tokio dependency, and `maknae-proto`'s
 # declaration asks for `io-util` ONLY (the framing traits) — no fs, no net, no
 # process. Reproduce with `cargo tree -p maknae-agent -e no-dev`, where tokio
 # appears once, under `maknae-proto`, with only `bytes` and `pin-project-lite`

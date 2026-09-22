@@ -82,9 +82,8 @@ pub fn mint_conversation_id() -> String {
 /// diagnose or retry. This mapper cannot tell those apart from a real deny:
 /// the wire carries no reason (ADR-0019). Whether such faults should ride
 /// `Internal` / `read unavailable` instead is a kernel-disposition question,
-/// which is wire semantics and the maintainer's; it is recorded as a residual
-/// in #344 and listed under that pull request's "Not done here", and it is not
-/// a change this mapper can make.
+/// which is wire semantics and the maintainer's; it is recorded as
+/// residual 1 in issue #344, and it is not a change this mapper can make.
 ///
 /// Corrected 2026-09-22 (#241): an UNARMED refusal is `Unavailable`, not
 /// `Refused`. When the subject's own `open_for_delegation` fails — a typo'd

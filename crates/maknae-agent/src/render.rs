@@ -77,11 +77,12 @@ const SUFFIX_HEADROOM: usize = 32;
 /// buffer and no reallocation of the body. Without the headroom the first
 /// `push_str` reallocated: capacity equalled length, so the body was
 /// memcpy'd into a fresh allocation and the old one — kernel-served content —
-/// was freed unzeroized. The non-UTF-8
-/// sub-arm has no headroom and DOES reallocate on the suffix: it allocates a
-/// short renderer-authored description (`binary content, N bytes`) that
-/// carries no served content at all, so what the realloc frees is a length,
-/// not a file.
+/// was freed unzeroized. The non-UTF-8 sub-arm relies on `format!`'s
+/// over-allocation rather than on named headroom, so whether the suffix
+/// reallocates depends on the digit counts (measured: `format!` capacity 44,
+/// so no realloc for a body under ~100 bytes with a low step counter, and a
+/// realloc above) — and either way what it holds is a short renderer-authored
+/// length (`binary content, N bytes`), not a file.
 ///
 /// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
 /// into a `SecretText`, which zeroizes too — so on the READ direction the
@@ -90,8 +91,13 @@ const SUFFIX_HEADROOM: usize = 32;
 /// component deliberately (2026-09-22, #344): once a `Tool` turn leaves the
 /// trust plane the deputy hands it to `reqwest`'s `.json()`, which serialises
 /// through `serde_json::to_vec` into a plain body buffer, so the bytes do sit
-/// in un-zeroized heap there. Same discipline as
-/// [`crate::plane::ReadOutcome`] one layer up, whose doc also names the write
+/// in un-zeroized heap there — and the NEARER residue is the CLI's own, one
+/// stack frame below the `ReadOutcome` this renders: `maknae_proto::read_frame`
+/// is `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))`,
+/// so the served frame is moved out of its `Zeroizing` into a plain
+/// `Vec<u8>` before the brain ever sees it. A #241 code gap, not fixed by
+/// #344's prose pass. Same discipline as [`crate::plane::ReadOutcome`] one
+/// layer up, whose doc also names the write
 /// direction's residue.
 ///
 /// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
@@ -116,11 +122,12 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         // read arm's discipline above, deliberately: `CONST.to_string()`
         // allocates at exactly `len`, so `render`'s suffix `push_str`
         // reallocates and frees each of these buffers. What it frees is a
-        // compiled-in constant — `NOT_AUTHORIZED`, `READ_UNAVAILABLE`,
-        // `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT` — already in the
-        // binary's read-only data, so nothing secret is freed and headroom
-        // would buy nothing. One arm is different, and is the reason this is
-        // written down: `BadCall(why)` formats router-authored text that can
+        // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
+        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`
+        // — never the `.rodata` original, which is not freed at all, so
+        // nothing secret is freed and headroom would buy nothing. One arm is
+        // different, and is the reason this is written down: `BadCall(why)`
+        // formats router-authored text that can
         // quote the model's own tool arguments through a serde message, so its
         // realloc frees model-authored bytes. Accepted — those bytes already
         // transit the deputy's plain HTTP buffers, the same deferred residual

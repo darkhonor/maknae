@@ -319,7 +319,7 @@ mod tests {
             // that provenance and nothing more: #241 reshaped this fixture's
             // flat content list into a `Turn::User`, and the sentinel's VALUE
             // is arbitrary — only its uniqueness is load-bearing, and the
-            // assertion below reads it by name, so it is left as it is.
+            // assertion below names the same literal, so it is left as it is.
             turns: vec![maknae_proto::Turn::User {
                 content: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new(
@@ -381,15 +381,19 @@ mod tests {
             // socket is not one message, and since #264 the request body is
             // ~2.1 KB rather than ~70 bytes -- a short read would make every
             // `contains` assertion below silently weaker rather than failing
-            // loudly. Measured at 2154 bytes for the `frame()` shape: 1109 for
-            // the preamble as a JSON string (1084 on disk, plus 21 escaped
-            // newlines, 2 escaped quotes and the 2 delimiters), 911 for the
-            // tool schemas, 28 for the one user block, 106 of keys and braces.
-            // A test that replaces the turns changes only that third term.
-            // Nothing asserts the total -- the loop reads `Content-Length` --
-            // so the figure is orientation, and the way to re-measure it is to
-            // print `seen.len() - (brk + 4)`, the body length this loop
-            // already computes.
+            // loudly. Computed at 2154 bytes for the `frame()` shape, and
+            // observed at 2154 from this loop: 1109 for the preamble as a JSON
+            // string (1084 on disk, plus 21 escaped newlines, 2 escaped quotes
+            // and the 2 delimiters), 911 for the tool schemas, 28 for the one
+            // user block's content string, 106 of keys and braces. A test that
+            // replaces the turns with another single `User` turn changes only
+            // that third term; one that changes the number or roles of the
+            // turns moves the fourth term too -- the three-role test below is
+            // 2339, of which 293 is keys and braces. Nothing asserts the total
+            // -- the loop reads `Content-Length` -- so the figure is
+            // orientation, and the way to re-measure it is to print
+            // `seen.len() - (brk + 4)`, the body length this loop already
+            // computes.
             let mut seen = Vec::new();
             let mut buf = vec![0u8; 8192];
             loop {

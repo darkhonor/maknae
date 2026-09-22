@@ -32,8 +32,14 @@ use std::future::Future;
 /// `SecretText` are copies, both into zeroizing destinations, and that is the
 /// property, not zero-copy. Nor is it a claim about the platform beyond this
 /// crate — the deputy hands the same bytes to `reqwest`'s `.json()`, which
-/// serialises through `serde_json::to_vec` into a plain body buffer. And it is
-/// not a claim about the WRITE direction, which has a known residue: the
+/// serialises through `serde_json::to_vec` into a plain body buffer, and the
+/// CLI that implements this trait reads the frame through
+/// `maknae_proto::read_frame`, which is
+/// `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))` and
+/// so hands the served bytes on in a plain `Vec<u8>` one stack frame below
+/// this variant (a #241 code gap, named here rather than fixed by #344's
+/// prose pass). And it is not a claim about the WRITE direction, which has a
+/// known residue: the
 /// model's write content arrives as a JSON string, and any escape in it is
 /// un-escaped into a scratch allocation serde_json owns and frees outside
 /// anything this crate can reach — accepted residual, #241, stated in full at

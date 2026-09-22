@@ -168,8 +168,10 @@ impl Plane for FixturePlane {
         // liveness rather than permission: production sets `O_NONBLOCK` and
         // this does not. A writer-less FIFO opens immediately there — armed —
         // and the daemon's `regular_file` requirement refuses the object; here
-        // the same open would block the test forever. Neither open applies a
-        // permission check of its own, so the `armed` derivation is faithful.
+        // the same open would block the test forever. Neither open adds a
+        // check beyond the operating system's own `open(2)`; the kernel
+        // decides on the delegated descriptor. So the `armed` derivation is
+        // faithful.
         let armed = fd.is_some();
         match self.verb(Verb::Read { path: path.into() }, fd).await.result {
             // The buffer is MOVED, never copied out of its `Zeroizing`
@@ -317,10 +319,10 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     // `remaining() == 0`. Zero means "nothing went unasked", never "exactly
     // these were asked". The same holds at the other two sites in this file
     // that assert zero. Over-consumption is pinned separately by `seen_roles`,
-    // whose per-prompt role lists the test below asserts exactly and whose
-    // length the budget test asserts — two of this file's four tests. The
-    // denied-read and denied-write tests assert neither, so there the zero is
-    // the only bound and it is the weaker one.
+    // whose per-prompt role lists this test asserts exactly (the assertion
+    // above) and whose length the budget test asserts — two of this file's
+    // four tests. The denied-read and denied-write tests assert neither, so
+    // there the zero is the only bound and it is the weaker one.
     assert_eq!(
         egress.remaining(),
         0,
