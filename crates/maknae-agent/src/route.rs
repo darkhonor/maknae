@@ -58,11 +58,99 @@ pub enum RouteError {
 struct ReadArgs {
     path: String,
 }
-#[derive(Deserialize)]
+
+/// The model's write bytes, owned by a zeroizing allocation from the moment
+/// serde hands them over — and never by a plain `String` on the way in.
+///
+/// Why the field cannot just be a `String` moved into `Zeroizing` on the
+/// success path (codex round 1, critical 1): the whole argument object is
+/// deserialized BEFORE `checked_path` is consulted, so a write refused for
+/// its path — and a deserialization that fails on a later field after
+/// `content` was read — drops a plain owned allocation that nothing wipes.
+/// There must be no plain owner to drop, which means the zeroizing type has
+/// to be the field's own type.
+///
+/// What this does NOT protect, stated here because the doc comment is the
+/// only place a reader will look: serde_json's own scratch buffer. A JSON
+/// string carrying an escape is un-escaped into an allocation serde_json
+/// owns and frees, outside anything this crate can reach — ruled deferred
+/// (R39), not fixed here. The `visit_str` arm below receives a borrow of that
+/// buffer and copies out of it; the copy is zeroizing, the scratch is not.
+struct ZeroizingString(Zeroizing<String>);
+
+/// Redacting, by hand — the crate convention (`ToolRequest` above,
+/// `maknae-proto`'s `Bytes` and `SecretText`). `WriteArgs` derives `Debug`
+/// and prints through this, so a `{:?}` of the parsed arguments — the value
+/// that exists before any path check — shows a length and not the bytes.
+/// zeroize 1.9 derives `Debug` on `Zeroizing` and forwards to the inner
+/// value, so a derive here would print the content in full.
+impl std::fmt::Debug for ZeroizingString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+struct ZeroizingStringVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ZeroizingStringVisitor {
+    type Value = ZeroizingString;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON string")
+    }
+    /// serde_json's only arm for a `&str` input, for both a borrowed
+    /// fragment and one copied out of its un-escaping scratch. The
+    /// destination is the ZEROIZING owner from the first byte written — the
+    /// fragment is never copied into a plain `String` and moved afterwards.
+    /// (`with_capacity` is for clarity about the one allocation, not a
+    /// control: `push_str` from an empty `String` also allocates exactly
+    /// once, so no test can tell the two apart and none pretends to.)
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        let mut s = Zeroizing::new(String::with_capacity(v.len()));
+        s.push_str(v);
+        Ok(ZeroizingString(s))
+    }
+    /// MOVED, never copied: a `String` the deserializer already owns becomes
+    /// the zeroizing allocation itself. Unreachable through `serde_json::
+    /// from_str` (it hands out `&str`), implemented because serde permits
+    /// either call and a silent fall-back to `visit_str` would copy.
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(ZeroizingString(Zeroizing::new(v)))
+    }
+}
+
+impl<'de> Deserialize<'de> for ZeroizingString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_string(ZeroizingStringVisitor)
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WriteArgs {
     path: String,
-    content: String,
+    content: ZeroizingString,
+}
+
+/// serde's DERIVED struct visitor accepts a positional ARRAY as well as a
+/// map, and `#[serde(deny_unknown_fields)]` does not turn that off — so
+/// `["/allowed/file"]` deserialized into `ReadArgs` and executed, for a tool
+/// whose published schema declares an object with named properties (codex
+/// round 1, important 1). Required before deserializing, on both legs.
+///
+/// A CHARACTER check on the trimmed text, deliberately, and never a
+/// `serde_json::Value` round-trip: parsing into a `Value` first to inspect
+/// its shape would copy the model's write bytes into a plain `String`, which
+/// is exactly what [`ZeroizingString`] exists to prevent. It is a shape
+/// admission, not a parse: anything that starts with `{` and is not a valid
+/// object still fails in `from_str` below, with serde's own message.
+fn require_object(args: &str) -> Result<(), RouteError> {
+    if args.trim_start().starts_with('{') {
+        Ok(())
+    } else {
+        Err(RouteError::BadArguments(
+            "tool arguments must be a JSON object".into(),
+        ))
+    }
 }
 
 /// Absolute AND canonical only, within the kernel's byte bound, and never NUL
@@ -133,6 +221,7 @@ pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
     let args: &str = &call.arguments.0;
     match call.name.as_str() {
         "read_file" => {
+            require_object(args)?;
             let a: ReadArgs =
                 serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
             Ok(ToolRequest::Read {
@@ -141,12 +230,22 @@ pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
             })
         }
         "write_file" => {
-            let a: WriteArgs =
+            require_object(args)?;
+            let mut a: WriteArgs =
                 serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            let path = checked_path(a.path)?;
+            // The ONE allocation, handed along: `mem::take` moves the
+            // `String` out of its zeroizing owner (which is left holding an
+            // unallocated `String`), and `into_bytes` re-labels that same
+            // buffer as the `Vec<u8>` the new owner wipes. Nothing is copied
+            // and nothing is freed, so there is no window in which the bytes
+            // sit in an allocation with no zeroizing owner. `Zeroizing` has
+            // no `into_inner` — it implements `Drop` — so this is the move.
+            let content = Zeroizing::new(std::mem::take(&mut *a.content.0).into_bytes());
             Ok(ToolRequest::Write {
                 call_id: call.call_id.clone(),
-                path: checked_path(a.path)?,
-                content: Zeroizing::new(a.content.into_bytes()),
+                path,
+                content,
             })
         }
         other => Err(RouteError::UnknownTool(other.to_string())),
@@ -366,5 +465,89 @@ mod tests {
             route(&call("read_file", r#"{"path":"/a"}"#)).unwrap()
         );
         assert!(rd.contains("Read") && rd.contains("/a"), "{rd}");
+    }
+    /// codex round 1, critical 1 — the REFUSAL path. `checked_path` is
+    /// consulted only after the whole argument object has been deserialized,
+    /// so on a bad path the model's write bytes are already an owned
+    /// allocation that nothing wipes; a deserialization failure occurring
+    /// after `content` was read is the same shape. The bytes must sit in a
+    /// zeroizing owner from the moment serde hands them over, not from the
+    /// success path onward — and the value that exists before `checked_path`
+    /// runs must redact, because that is the one a `{:?}` of a parse error
+    /// or a debug line would print.
+    #[test]
+    fn a_write_refused_for_its_path_never_owned_the_content_in_a_plain_string() {
+        // The refusal itself, unchanged.
+        assert!(matches!(
+            route(&call(
+                "write_file",
+                r#"{"path":"relative.txt","content":"SECRET-CONTENT"}"#
+            )),
+            Err(RouteError::RelativePath)
+        ));
+        let args: WriteArgs =
+            serde_json::from_str(r#"{"path":"relative.txt","content":"SECRET-CONTENT"}"#).unwrap();
+        let d = format!("{args:?}");
+        assert!(!d.contains("SECRET-CONTENT"), "{d}");
+        // A `#[derive(Debug)]` substitution on the newtype prints
+        // `Zeroizing("SECRET-CONTENT")` (zeroize 1.9 derives `Debug` on
+        // `Zeroizing` and names it), so the marker assertion below fails on
+        // its own, not only the absence one.
+        assert!(!d.contains("Zeroizing"), "{d}");
+        assert!(d.contains("<14 bytes>"), "{d}");
+    }
+    /// The visitor's two arms and its `expecting` text. `visit_string` — the
+    /// arm that MOVES an owned `String` instead of copying it — is
+    /// unreachable through `serde_json::from_str`, which hands out `&str`
+    /// for every input, so it is exercised directly rather than left as an
+    /// uncovered region in a T1 file.
+    #[test]
+    fn the_content_visitor_takes_an_owned_string_by_move_and_a_borrowed_one_by_copy() {
+        use serde::de::Visitor;
+        let moved = ZeroizingStringVisitor
+            .visit_string::<serde_json::Error>("SECRET-MOVED".to_string())
+            .unwrap();
+        assert_eq!(&*moved.0, "SECRET-MOVED");
+        let copied = ZeroizingStringVisitor
+            .visit_str::<serde_json::Error>("SECRET-COPIED")
+            .unwrap();
+        assert_eq!(&*copied.0, "SECRET-COPIED");
+        // `expecting` reaches the model as the tool error's own text, and a
+        // non-string `content` is the input that produces it.
+        let e = serde_json::from_str::<WriteArgs>(r#"{"path":"/a","content":7}"#).unwrap_err();
+        assert!(e.to_string().contains("a JSON string"), "{e}");
+    }
+    /// codex round 1, important 1: serde's DERIVED struct visitor accepts a
+    /// positional ARRAY as well as a map, and `deny_unknown_fields` does not
+    /// turn that representation off — `["/allowed/file"]` deserialized into
+    /// `ReadArgs` and EXECUTED. The tool schemas the model is handed declare
+    /// objects with named properties, so an array is a malformed call, and it
+    /// is refused before anything is deserialized: parsing it into a
+    /// `serde_json::Value` first to inspect its shape would copy the model's
+    /// write bytes into a plain `String`, which is the very thing critical 1
+    /// above closes.
+    #[test]
+    fn positional_array_arguments_are_refused_never_deserialized_by_position() {
+        for (name, args) in [
+            ("read_file", r#"["/allowed/file"]"#),
+            ("write_file", r#"["/allowed/file","SECRET-POSITIONAL"]"#),
+            // Leading whitespace is skipped exactly as the parser would skip
+            // it, so a padded array is still an array.
+            ("read_file", "  [\"/allowed/file\"]"),
+            // Every other JSON value meets the same check.
+            ("read_file", "null"),
+            ("write_file", r#""just a string""#),
+        ] {
+            assert!(
+                matches!(route(&call(name, args)), Err(RouteError::BadArguments(m)) if m == "tool arguments must be a JSON object"),
+                "{name} {args} routed"
+            );
+        }
+        // And a padded OBJECT still routes — the check trims first, so this
+        // row is the discriminator against a mutant dropping the trim.
+        assert!(matches!(
+            route(&call("read_file", "\n\t {\"path\":\"/a\"}")),
+            Ok(ToolRequest::Read { .. })
+        ));
     }
 }

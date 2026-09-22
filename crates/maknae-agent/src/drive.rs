@@ -144,9 +144,18 @@ pub async fn drive<P: Plane>(
                         Err(RouteError::RelativePath) => {
                             ToolOutcome::BadCall("path must be absolute".into())
                         }
-                        Err(RouteError::MalformedPath) => ToolOutcome::BadCall(
-                            "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"".into(),
-                        ),
+                        // Every cause, by name: the segment rules, AND the
+                        // length and NUL rules the router mirrors from the
+                        // kernel's write gate, which land on this same
+                        // variant. Naming only the segments told a model
+                        // that had sent a 5000-byte path to fix its
+                        // segments (codex round 1, R44). Built at runtime
+                        // so the bound IS the constant's value and cannot
+                        // drift from it.
+                        Err(RouteError::MalformedPath) => ToolOutcome::BadCall(format!(
+                            "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most {} bytes and no NUL byte",
+                            maknae_proto::MAX_MUTATION_PATH_BYTES
+                        )),
                         Ok(ToolRequest::Read { path, .. }) => match plane.read(&path).await {
                             ReadOutcome::Content(b) => ToolOutcome::ReadContent(b),
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
@@ -445,6 +454,11 @@ mod tests {
             // The router refuses it as a fixable tool error instead.
             ("read_file", r#"{"path":"/home/u/p/../q/f.txt"}"#),
             ("nope", r#"{"path":"/a"}"#),
+            // codex round 1, important 1: serde's derived struct visitor
+            // accepts a positional array, so these two USED to reach the
+            // plane. Both legs, because the shape check is per-arm.
+            ("read_file", r#"["/allowed/file"]"#),
+            ("write_file", r#"["/allowed/file","SECRET-POSITIONAL"]"#),
         ] {
             let mut p = scripted(vec![
                 PromptReply {
@@ -464,6 +478,39 @@ mod tests {
                 "{name} {bad}"
             );
         }
+    }
+    /// The tool-error TEXT is the whole of what the model is told, so it must
+    /// name every rule that actually produces the variant. codex round 1
+    /// observed that this line named the segment rules only, while
+    /// `MalformedPath` is also how the router refuses an over-length path and
+    /// a NUL-bearing one — so a model that sent a 5000-byte path was told to
+    /// fix its segments. Pinned by value, on all three causes.
+    #[tokio::test]
+    async fn the_malformed_path_tool_error_names_every_rule_that_produces_it() {
+        let over = format!("/{}", "x".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES));
+        for bad in [
+            r#"{"path":"/home/u/p/../q/f.txt"}"#.to_string(),
+            r#"{"path":"/home/u/a\u0000.txt"}"#.to_string(),
+            format!(r#"{{"path":"{over}"}}"#),
+        ] {
+            let mut p = scripted(vec![
+                PromptReply {
+                    blocks: vec![],
+                    tool_calls: vec![call("c1", "read_file", &bad)],
+                },
+                PromptReply {
+                    blocks: vec![text("sorry")],
+                    tool_calls: vec![],
+                },
+            ]);
+            let mut t = Transcript::new("conv", "q");
+            drive(&mut p, &mut t, &budget()).await;
+            let got = tool_text(&t.turns()[2]);
+            assert!(got.starts_with("tool error: path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most 4096 bytes and no NUL byte"), "{got}");
+        }
+        // By VALUE, so a mutant substituting another number for the constant
+        // is caught here too, not only at the router's own boundary table.
+        assert_eq!(maknae_proto::MAX_MUTATION_PATH_BYTES, 4096);
     }
     #[test]
     fn a_reply_carrying_a_non_text_block_contributes_no_text_to_the_answer() {
