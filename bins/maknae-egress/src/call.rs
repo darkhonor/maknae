@@ -390,13 +390,14 @@ mod tests {
             // loudly. Observed: 2154 bytes for the `frame()` shape, and 2339
             // for the three-role shape of
             // `every_turn_rides_with_its_own_role_and_only_the_preamble_is_system`
-            // below. Every term of either total moves when `core-prompt.txt`
-            // or `baseline-tools.json` changes -- which is how ADR-0023's tool
-            // schemas went from 893 bytes to 911 -- so these are orientation,
-            // not invariants, and nothing asserts them: the loop reads
-            // `Content-Length`. To re-measure, print `seen.len() - (brk + 4)`,
-            // the body length this loop already computes, under whichever of
-            // those two tests has the shape you want.
+            // below. These totals change when the serialized preamble, the
+            // tool definitions, or the fixture's turns change -- which is how
+            // ADR-0023's tool schemas went from 893 bytes to 911 -- so these
+            // are orientation, not invariants, and nothing asserts them: the
+            // loop reads `Content-Length`. To re-measure, print
+            // `seen.len() - (brk + 4)`, the body length this loop already
+            // computes, under whichever of those two tests has the shape you
+            // want.
             let mut seen = Vec::new();
             let mut buf = vec![0u8; 8192];
             loop {

@@ -23,9 +23,16 @@ use std::future::Future;
 /// `maknae_proto::Bytes` into this variant, moved on into
 /// [`crate::render::ToolOutcome::ReadContent`], rendered into a
 /// `Zeroizing<String>` that [`crate::render::render`] allocates ONCE with
-/// headroom for its suffix — appended in place, so the body is never
-/// reallocated and no old allocation is freed unzeroized (corrected
-/// 2026-09-22, #241: before the headroom it was) — and copied from there into
+/// headroom for its suffix on the UTF-8 content path — appended in place, so
+/// the served body is never reallocated and no old allocation is freed
+/// unzeroized (corrected 2026-09-22, #241: before the headroom it was; scoped
+/// 2026-09-22, #344: the guarantee belongs to the UTF-8 sub-arm, the only one
+/// that carries served content. The non-UTF-8 sub-arm returns a
+/// renderer-authored `binary content, N bytes` out of `format!`'s own
+/// over-allocation and MAY grow on the suffix — measured at a 100-byte body
+/// with a one-digit step counter: 45 bytes into a capacity doubled from 44.
+/// Nothing served is freed there, because nothing served is in it) — and
+/// copied from there into
 /// a `maknae_proto::SecretText`, which zeroizes too. So on the READ direction
 /// the content never lands in a plain buffer anywhere in this crate's chain.
 /// It is not a claim that nothing is ever copied: the render and the

@@ -54,11 +54,13 @@ pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
 
-/// Headroom the read arm pre-allocates for the suffix `render` appends, so the
-/// append never reallocates: 19 bytes of `"\n\nsteps remaining: "` plus the 10
-/// digits of a `u32` at its maximum, plus slack. Sized here rather than
-/// measured at each call because the body it protects is kernel-served content
-/// (see [`render`]).
+/// Headroom the UTF-8 read sub-arm pre-allocates for the suffix `render`
+/// appends, so THAT append never reallocates: 19 bytes of
+/// `"\n\nsteps remaining: "` plus the 10 digits of a `u32` at its maximum,
+/// plus slack. No other arm reserves it, and none needs to — see [`render`],
+/// whose doc scopes the guarantee to this sub-arm and says what the others
+/// hold instead. Sized here rather than measured at each call because the body
+/// it protects is kernel-served content.
 const SUFFIX_HEADROOM: usize = 32;
 
 /// The output is a `Zeroizing<String>`, and it is BUILT as one. On the read
@@ -147,8 +149,11 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
     };
     // The live step count rides HERE, in per-turn content — never in the
     // compiled prompt, which ships verbatim (#264). Appended IN PLACE into the
-    // headroom the read arm reserved, so the body is never copied into a
-    // second buffer and the first one is never freed.
+    // headroom the UTF-8 read sub-arm reserved, so a SERVED body is never
+    // copied into a second buffer and the first one is never freed. The other
+    // arms reserve no headroom and may grow right here; what they hold is a
+    // compiled-in constant's heap copy or the renderer's own
+    // `binary content, N bytes`, never served content — see `render`'s doc.
     out.push_str("\n\nsteps remaining: ");
     out.push_str(&steps_remaining.to_string());
     out
@@ -258,13 +263,20 @@ mod tests {
         }
     }
 
-    /// The read arm allocates ONCE, with headroom, and never grows: a growth
+    /// The UTF-8 read sub-arm — the only one that carries kernel-served
+    /// content — allocates ONCE, with headroom, and never grows: a growth
     /// memcpy's the kernel-served body into a fresh buffer and frees the old
     /// allocation WITHOUT zeroizing it (measured on #241 — the earlier
     /// `String::from(s)` had capacity == len, so the first `push_str` moved
     /// the body). The observable from outside the function: the returned
     /// buffer's capacity is still EXACTLY what `with_capacity` asked for;
     /// any reallocation replaces it with an amortized-doubled capacity.
+    ///
+    /// Scoped deliberately, and the test body matches the scope: the
+    /// non-UTF-8 sub-arm is OUTSIDE this property and does grow on the suffix
+    /// once the digit counts allow (a 100-byte body with a one-digit step
+    /// counter is 45 bytes into `format!`'s capacity of 44). What it holds is
+    /// a renderer-authored length, so a growth there frees no served bytes.
     #[test]
     fn a_read_body_is_never_moved_to_make_room_for_the_suffix() {
         let body = b"SENTINEL-READ-BODY-long-enough-that-doubling-shows\n".to_vec();
