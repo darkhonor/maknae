@@ -143,9 +143,14 @@ pub const EGRESS_USER: &str = "_maknae-egress";
 /// The largest reply frame the kernel accepts from the deputy — mirrors the
 /// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
 /// delivered reply is bounded again by `transport.frame_max_bytes`.
-pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = 1024 * 1024;
-// (The REQUEST cap below is `maknae-proto`'s, shared with the deputy; this
-// reply cap is the kernel's own and is pinned by value in the tests.)
+///
+/// The VALUE is `maknae-proto`'s, shared with the deputy so the two ends
+/// cannot drift (corrected 2026-09-22, #241 item B: this was its own
+/// `1024 * 1024` literal, and the deputy's reply encoder now needs the same
+/// number to size its fixed buffer — two copies of `1024 * 1024` drifting
+/// apart is the failure `EGRESS_REQUEST_FRAME_MAX_BYTES` already records on
+/// the other leg).
+pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = maknae_proto::EGRESS_REPLY_FRAME_MAX_BYTES;
 
 /// The largest request frame the kernel will WRITE to the deputy — the
 /// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte

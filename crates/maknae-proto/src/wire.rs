@@ -711,11 +711,24 @@ pub fn decode_egress_frame_request(b: &[u8]) -> Result<crate::EgressFrameRequest
     ciborium::from_reader(b).map_err(|e| ProtoCodecError::Decode(e.to_string()))
 }
 
+/// Encode a reply into a zeroizing buffer, BOUNDED and PREALLOCATED on the
+/// request encoder's precedent above and for the reason
+/// [`crate::EGRESS_REPLY_FRAME_ENCODE_BYTES`] records (#241, codex round 2
+/// item B): a reply carries whatever kernel-served content the model quoted
+/// back, and the growing `Vec` this replaces freed a partly-written copy of it
+/// on every realloc. A reply that will not fit in `max_bytes` is a
+/// [`ProtoCodecError::Encode`] — never a panic, never a silent growth — and at
+/// its one production caller it is a pre-write failure: the deputy has read
+/// nothing to the kernel yet.
 pub fn encode_egress_frame_reply(
     r: &crate::EgressFrameReply,
+    max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
-    let mut buf = zeroize::Zeroizing::new(Vec::new());
-    ciborium::into_writer(r, &mut *buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
+    let mut writer = std::io::Cursor::new(buf.as_mut_slice());
+    ciborium::into_writer(r, &mut writer).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let len = writer.position() as usize;
+    buf.truncate(len);
     Ok(buf)
 }
 

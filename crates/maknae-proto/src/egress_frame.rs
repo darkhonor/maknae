@@ -110,6 +110,40 @@ pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
 /// below, where no mutation reaches.
 pub const EGRESS_REQUEST_FRAME_ENCODE_BYTES: usize = 1_052_672;
 
+/// The largest reply frame that crosses the deputy→kernel socket, stated ONCE
+/// for both ends: the kernel refuses to READ a larger one (checked against the
+/// declared length before any allocation, `maknae-kernel`'s
+/// `EGRESS_MAX_REPLY_FRAME_BYTES`, which aliases this const so the two cannot
+/// drift). Mirrors [`EGRESS_REQUEST_FRAME_MAX_BYTES`] on the other leg.
+pub const EGRESS_REPLY_FRAME_MAX_BYTES: usize = 1024 * 1024;
+
+/// The fixed buffer a reply frame is encoded INTO: allocated once, written
+/// once, never grown (#241, codex round 2 item B). The reply encoder began at
+/// `Zeroizing<Vec::new()>` and grew, and every realloc frees a partly-written
+/// buffer while `Zeroizing` wipes only the allocation that survives to the
+/// drop. The reply is not just provider prose: `ContentBlock::Text.text` is
+/// `SecretText` because a model that read a file quotes that content straight
+/// back, so the same finding the request encoder carried applies here.
+///
+/// The cap PLUS one page, for the reason [`EGRESS_REQUEST_FRAME_ENCODE_BYTES`]
+/// gave before its counting pass removed the need there — and which still
+/// holds on this leg, because the reply's cap is refused by the KERNEL, on the
+/// declared length, with its own operator-readable message
+/// (`deputy declared a N-byte reply frame over the M-byte cap`). Sized at
+/// exactly the cap this buffer would shadow that refusal: a marginally-over
+/// reply would die inside the deputy's encoder and the kernel's branch would
+/// answer only a lying length prefix. One page of headroom keeps the kernel's
+/// refusal the one a marginally-over reply meets; a reply past the headroom is
+/// a [`crate::ProtoCodecError::Encode`] in the deputy, before a byte is
+/// written, so nothing fails open either way.
+///
+/// Written OUT rather than as `EGRESS_REPLY_FRAME_MAX_BYTES + 4096`, which is
+/// what it is, for the measurement the request const records: `cargo mutants`
+/// replaces that `+` with `*`, and a 4 GiB `vec![0; …]` in the encoder times
+/// the whole test binary out instead of failing an assertion. The relation to
+/// the cap is pinned in the tests below, where no mutation reaches.
+pub const EGRESS_REPLY_FRAME_ENCODE_BYTES: usize = 1_052_672;
+
 /// Shape admission, applied by the kernel before a byte reaches the socket.
 /// Deliberately shape-only: whether this subject may reach this destination
 /// was decided by the PDP long before the frame existed.
@@ -148,6 +182,26 @@ mod tests {
             EGRESS_REQUEST_FRAME_ENCODE_BYTES - EGRESS_REQUEST_FRAME_MAX_BYTES,
             4096,
             "one page of headroom, so the kernel's own pre-send cap refusal is not shadowed by an encoder overflow"
+        );
+    }
+
+    /// The reply's bound, pinned by the SAME three relations as the request's
+    /// above and for the same reasons: by value, as the cap plus one page, and
+    /// by the difference. The kernel's own `EGRESS_MAX_REPLY_FRAME_BYTES` IS
+    /// this cap (it aliases this const), so the two ends cannot drift.
+    #[test]
+    fn the_reply_frame_cap_is_one_mebibyte_by_value() {
+        assert_eq!(EGRESS_REPLY_FRAME_MAX_BYTES, 1_048_576);
+        assert_eq!(EGRESS_REPLY_FRAME_ENCODE_BYTES, 1_048_576 + 4096);
+        assert_eq!(
+            EGRESS_REPLY_FRAME_ENCODE_BYTES,
+            EGRESS_REPLY_FRAME_MAX_BYTES + 4096,
+            "the encode buffer IS the cap plus one page; the const is spelled out, so this is what ties the two together"
+        );
+        assert_eq!(
+            EGRESS_REPLY_FRAME_ENCODE_BYTES - EGRESS_REPLY_FRAME_MAX_BYTES,
+            4096,
+            "one page of headroom, so the KERNEL's named reply-cap refusal is what a marginally-over reply meets"
         );
     }
 
@@ -329,6 +383,52 @@ mod tests {
         assert!(crate::decode_egress_frame_request(&[0xffu8, 0xff, 0xff]).is_err());
     }
 
+    /// codex round 2, item B — the request encoder's finding, on the reply.
+    /// The reply carries the provider's prose AND whatever kernel-served
+    /// content the model quoted back (`ContentBlock::Text.text` is already
+    /// `SecretText`), and this encoder still began at `Zeroizing<Vec::new()>`
+    /// and grew: every realloc frees a partly-written copy, and `Zeroizing`
+    /// wipes only the allocation that lives to the drop.
+    #[test]
+    fn the_reply_encoder_writes_one_preallocation_and_never_grows() {
+        // Over 8 KiB of quoted content — the size codex's trace used on the
+        // request leg, and what a model echoing a read file produces here.
+        let big = "y".repeat(9 * 1024);
+        let r = EgressFrameReply {
+            reply: crate::PromptReply {
+                blocks: vec![text(&big), text(&big)],
+                tool_calls: vec![],
+            },
+        };
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        // Byte-identical to what the growing encoder produced: a buffer
+        // change, not a wire change.
+        let mut reference = Vec::new();
+        ciborium::into_writer(&r, &mut reference).unwrap();
+        assert_eq!(&buf[..], &reference[..]);
+        assert!(
+            buf.len() > 18 * 1024,
+            "both blocks must be in there: {}",
+            buf.len()
+        );
+        // The ONE allocation it was given, still — a grown buffer reports the
+        // doubling sequence it climbed, never the preallocation.
+        assert_eq!(buf.capacity(), EGRESS_REPLY_FRAME_ENCODE_BYTES);
+        // The bound is enforced, not decorative: one byte short of what the
+        // frame needs is the codec's own error — never a panic, and never a
+        // silent realloc. The exact length is the discriminator.
+        assert!(matches!(
+            crate::encode_egress_frame_reply(&r, buf.len() - 1),
+            Err(crate::ProtoCodecError::Encode(_))
+        ));
+        assert_eq!(
+            crate::encode_egress_frame_reply(&r, buf.len())
+                .unwrap()
+                .len(),
+            buf.len()
+        );
+    }
+
     #[test]
     fn the_reply_codec_round_trips_and_refuses_garbage() {
         let r = EgressFrameReply {
@@ -337,7 +437,7 @@ mod tests {
                 tool_calls: vec![],
             },
         };
-        let buf = crate::encode_egress_frame_reply(&r).unwrap();
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
         assert!(crate::decode_egress_frame_reply(&[0xffu8, 0xff, 0xff]).is_err());
     }

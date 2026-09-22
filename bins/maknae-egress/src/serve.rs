@@ -94,7 +94,16 @@ where
     let admitted = decide(&req, bounds).map_err(ServeError::Refused)?;
     let reply = fulfil(&admitted)?;
 
-    let out = maknae_proto::encode_egress_frame_reply(&reply).map_err(io)?;
+    // Into ONE fixed preallocation that never grows (#241, codex round 2 item
+    // B): a reply carries whatever kernel-served content the model quoted
+    // back, and the growing buffer this replaces freed a partly-written copy
+    // of it on every realloc. A reply past the headroom is a codec error
+    // here — before the length prefix, so the kernel reads nothing.
+    let out = maknae_proto::encode_egress_frame_reply(
+        &reply,
+        maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
+    )
+    .map_err(io)?;
     stream
         .write_all(&(out.len() as u32).to_be_bytes())
         .map_err(io)?;

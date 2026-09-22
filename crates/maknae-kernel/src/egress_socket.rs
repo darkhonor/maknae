@@ -377,6 +377,7 @@ mod tests {
                         if let Some(r) = reply {
                             let out = maknae_proto::encode_egress_frame_reply(
                                 &maknae_proto::EgressFrameReply { reply: r },
+                                maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
                             )
                             .unwrap();
                             let _ = c.write_all(&(out.len() as u32).to_be_bytes());
