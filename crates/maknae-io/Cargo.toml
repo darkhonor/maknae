@@ -45,6 +45,20 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       it to "std" + "net"; the fs/process/thread/event APIs are not compiled in.
 #       Already resolved at 1.1.4 in Cargo.lock (transitively via tempfile), so this
 #       promotes a vetted edge rather than widening the graph.
+#       HELD AT 1.1.4 (2026-09-23). 1.1.5 does not compile under exactly the
+#       feature set above. Both backends' `net` sockopt code references
+#       `crate::timespec` for SO_RCVTIMEO/SO_SNDTIMEO, but `mod timespec` is
+#       gated on fs/event/process/runtime/thread/time and NOT on `net`, so a
+#       net-only build fails with `error[E0433]: cannot find timespec in crate`
+#       -- six times via linux_raw, three via libc. This is the cost of the
+#       minimal feature set, not a fault in it: taking default features would
+#       mask it by compiling in the APIs this pin exists to exclude.
+#       Fixed upstream by bytecodealliance/rustix#1681 (one line, adds `net`
+#       to the gate; green, awaiting merge). Lift to >=1.1.6 once it releases.
+#       No Dependabot ignore rule backs this: .github/dependabot.yml carries
+#       none by decision (#320, 2026-09-19). A bump to 1.1.5 is an ordinary
+#       bump reviewed against this comment, and it cannot keep it true, so it
+#       is closed -- which is what happened to #340.
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.

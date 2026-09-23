@@ -36,5 +36,9 @@ tokio = { version = "1", default-features = false, features = ["net", "io-util"]
 # Fixtures CREATE the objects they delegate rather than borrowing a system file:
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
 tempfile = "3"
+# HELD AT 1.1.4 (2026-09-23) for the same reason as maknae-io's production pin:
+# rustix 1.1.5 does not compile with only "std"+"net" -- `mod timespec` is not
+# gated on `net` while the net sockopt code uses it. Upstream
+# bytecodealliance/rustix#1681 is the upstream fix. Lift both pins at >=1.1.6.
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros"] }
