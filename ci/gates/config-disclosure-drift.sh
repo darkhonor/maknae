@@ -295,7 +295,7 @@ for sec in $registered; do
   fi
 done
 
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/maknae-config-disclosure-drift.XXXXXXXX"); trap 'rm -rf "$tmp"' EXIT
 
 # 1. What the CODE classifies. `"[^"]+"` deliberately, NOT a charset: the first
 #    version used /"[a-z0-9_.]+"/ with the print INSIDE the match, so an entry

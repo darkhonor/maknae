@@ -292,7 +292,7 @@ if [ "$need_default" -eq 1 ]; then
     # filling is what silently turned this gate's own mutation stage into a
     # vacuous pass (#301). Only set when WE allocate; an injected
     # COVERAGE_TIERS_FILELIST belongs to the caller and must not be deleted.
-    universe_file="$(mktemp -t maknae-covtiers.XXXXXXXX)"
+    universe_file="$(mktemp "${TMPDIR:-/tmp}/maknae-covtiers.XXXXXXXX")"
     trap 'rm -f -- "$universe_file"' EXIT INT TERM
     if ! env -u GIT_DIR -u GIT_WORK_TREE git -C "$root" ls-files '*.rs' >"$universe_file"; then
       fail "git ls-files failed enumerating the universe"; exit 1

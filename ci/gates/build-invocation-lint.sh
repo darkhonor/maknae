@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="${1:-$(git rev-parse --show-toplevel)}"; fail=0   # arg override for the negative-control
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-build-invocation-lint.XXXXXXXX")"; trap 'rm -rf "$tmp"' EXIT
 
 # THE SCAN'S OWN SOUNDNESS, established before its result is trusted (#219).
 # This was `find … 2>/dev/null` inside a process substitution, which discarded

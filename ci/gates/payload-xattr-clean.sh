@@ -84,7 +84,7 @@ fail=0
 # That is the SAME defect class this gate exists to catch — a control reporting
 # success while doing no work — reintroduced inside the fix for it. Every query
 # now captures its status separately and REFUSES on an inspection error.
-work="$(mktemp -d -t maknae-pxc.XXXXXXXX)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/maknae-pxc.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM
 
 # The payload ROOT's own attributes are checked, but are NOT counted as an entry:

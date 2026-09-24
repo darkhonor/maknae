@@ -2,7 +2,7 @@
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 allow="$root/ci/gates/std-fs-allowlist.txt"
-tmp="$(mktemp)"
+tmp="$(mktemp "${TMPDIR:-/tmp}/maknae-std-fs-drift.XXXXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
 python3 - "$root" >"$tmp" <<'PY'
@@ -186,7 +186,7 @@ if grep -q '^__VIOLATION__' "$tmp"; then
   exit 1
 fi
 
-reviewed="$(mktemp)"
+reviewed="$(mktemp "${TMPDIR:-/tmp}/maknae-std-fs-drift.XXXXXXXX")"
 trap 'rm -f "$tmp" "$reviewed"' EXIT
 awk '!/^#/ && NF' "$allow" | LC_ALL=C sort >"$reviewed"
 if ! diff -u "$reviewed" "$tmp" >/dev/null; then

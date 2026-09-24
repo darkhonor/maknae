@@ -176,6 +176,8 @@ jobs:
         run: ci/gates/negative-control.sh
       - name: Direct std::fs production drift is forbidden
         run: ci/gates/std-fs-drift.sh .
+      - name: Gate — every mktemp in the gates names its parent (macOS ignores TMPDIR otherwise)
+        run: ci/gates/scratch-lint.sh
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
       - name: Mutation lane status (paused by default — operator ruling 2026-09-07)

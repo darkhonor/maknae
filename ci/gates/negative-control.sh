@@ -20,7 +20,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # tinguishable from every other program's mktemp output — which is how it went
 # unnoticed for two weeks. Every allocation below is a child of this root, so the
 # single trap covers all sixty.
-NC_TMP="$(mktemp -d -t maknae-negctl.XXXXXXXX)"
+NC_TMP="$(mktemp -d "${TMPDIR:-/tmp}/maknae-negctl.XXXXXXXX")"
 trap 'rm -rf -- "$NC_TMP"' EXIT INT TERM
 # Materialize contaminated workspaces in temp dirs and assert the REAL gate scripts reject each
 # (root-override arg). A gate that cannot be shown to fire is not a control (spec §3 P2c).
@@ -3735,7 +3735,7 @@ expect_no_leak() { # <label> <cmd...> — the gate must leave its TMPDIR as it f
 # The control on the control: a script that DOES leak must be caught, or the
 # checks above are satisfied by a helper that can only ever print pos-ok.
 leaker="$NC_TMP/leaker.sh"
-printf '#!/bin/sh\nmktemp -d >/dev/null\nmktemp >/dev/null\nexit 0\n' > "$leaker"
+printf '#!/bin/sh\nmktemp -d "${TMPDIR:-/tmp}/maknae-leaker.XXXXXX" >/dev/null\nmktemp "${TMPDIR:-/tmp}/maknae-leaker.XXXXXX" >/dev/null\nexit 0\n' > "$leaker"
 chmod +x "$leaker"
 total=$((total+1))
 leak_td="$(mktemp -d -p "$NC_TMP")"
@@ -3754,6 +3754,21 @@ expect_no_leak "leak/std-fs-drift"            "$here/std-fs-drift.sh"
 expect_no_leak "leak/external-authority-lint" "$here/external-authority-lint.sh"
 expect_no_leak "leak/isolation-contract-lint" "$here/isolation-contract-lint.sh"
 expect_no_leak "leak/p2-invert-tree"          "$here/p2-invert-tree.sh"
+expect_no_leak "leak/scratch-lint"            "$here/scratch-lint.sh"
+
+# ---- scratch-lint: a gate's mktemp must name its parent, or the leak checks above see nothing (macOS) ----
+sl_bare="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$sl_bare/ci/gates" "$sl_bare/ci/hooks"
+printf '#!/usr/bin/env bash\n# a comment mentioning %s -d is fine\nt="$(%s -d)"; trap '"'"'rm -rf "$t"'"'"' EXIT\n' mktemp mktemp > "$sl_bare/ci/gates/x.sh"
+expect_reject_because "scratch-lint/bare-mktemp-d" "without an explicit parent" "$here/scratch-lint.sh" "$sl_bare"
+sl_t="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$sl_t/ci/gates" "$sl_t/ci/hooks"
+printf '#!/usr/bin/env bash\nf="$(%s -t maknae-x.XXXXXXXX)"\n' mktemp > "$sl_t/ci/gates/x.sh"
+expect_reject_because "scratch-lint/dash-t-template" "without an explicit parent" "$here/scratch-lint.sh" "$sl_t"
+sl_hook="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$sl_hook/ci/gates" "$sl_hook/ci/hooks"
+printf '#!/usr/bin/env bash\ns="$(%s)"\n' mktemp > "$sl_hook/ci/hooks/pre-push"
+expect_reject_because "scratch-lint/hook-bare-mktemp" "without an explicit parent" "$here/scratch-lint.sh" "$sl_hook"
+sl_ok="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$sl_ok/ci/gates" "$sl_ok/ci/hooks"
+printf '#!/usr/bin/env bash\nt="$(mktemp -d "${TMPDIR:-/tmp}/maknae-x.XXXXXXXX")"\nu="$(mktemp -d -p "$t")"\nv="$(mktemp -d "$HOME/.cache/x.XXXXXX")"\n' > "$sl_ok/ci/gates/x.sh"
+expect_accept "scratch-lint/explicit-parents-pass" "every mktemp names its parent" "$here/scratch-lint.sh" "$sl_ok"
 expect_no_leak "leak/feature-resolution-pin"  "$here/feature-resolution-pin.sh"
 expect_no_leak "leak/packaged-binaries"       "$here/packaged-binaries.sh"
 
