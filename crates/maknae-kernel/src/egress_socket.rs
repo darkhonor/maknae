@@ -155,22 +155,34 @@ impl SocketEgress {
             }
             match s.write(&buf[written..]) {
                 Ok(n) => written += n,
-                Err(e) if Self::write_is_retried(&e) => continue,
-                Err(e) => break Err(Self::transport(format!("write: {e}"))),
+                // A plain `if`, not a match guard: the retry decision is
+                // mutated and proven once, in the predicate (#295).
+                Err(e) => {
+                    if Self::write_is_retried(&e) {
+                        continue; // EAGAIN or EINTR: re-ask the budget
+                    }
+                    break Err(Self::transport(format!("write: {e}")));
+                }
             }
         };
         s.set_nonblocking(false).map_err(Self::transport)?;
         out
     }
 
-    /// The write errors the budget loop absorbs: a signal mid-syscall, and a
-    /// non-blocking write with no space yet (`poll` reported writability a
-    /// moment ago; the next `poll` re-asks the budget).
+    /// Write errors the budget loop absorbs: EINTR, and EAGAIN after `poll`
+    /// reported writable. Anything else is fatal and reported at once.
     fn write_is_retried(e: &std::io::Error) -> bool {
         matches!(
             e.kind(),
             std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
         )
+    }
+
+    /// Read errors the budget loop absorbs: EINTR only, as `read_exact`
+    /// does. `WouldBlock` is `SO_RCVTIMEO` firing after `poll` reported
+    /// readable; refused (#349).
+    fn read_is_retried(e: &std::io::Error) -> bool {
+        matches!(e.kind(), std::io::ErrorKind::Interrupted)
     }
 
     /// `read_exact` under the budget: readability is awaited before EVERY
@@ -193,8 +205,14 @@ impl SocketEgress {
                     ))
                 }
                 Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(Self::transport(e)),
+                // Same shape as the write leg, for the same reason: the
+                // decision lives in `read_is_retried`, proven on a table.
+                Err(e) => {
+                    if Self::read_is_retried(&e) {
+                        continue; // EINTR: re-ask the budget
+                    }
+                    return Err(Self::transport(e));
+                }
             }
         }
         Ok(())
@@ -848,6 +866,94 @@ mod tests {
                 "a frame one byte over the cap was NOT refused as over-cap: {m}"
             ),
             other => panic!("expected an over-cap refusal, got {other:?}"),
+        }
+    }
+
+    /// A table, not a socket: neither retryable kind can be produced through
+    /// a real `UnixStream` on demand (EINTR needs a signal; EAGAIN cannot
+    /// follow `poll`). The hard-error direction is covered on the wire below.
+    #[test]
+    fn a_retryable_write_error_is_retried_and_a_hard_one_is_not() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::Interrupted, ErrorKind::WouldBlock] {
+            assert!(
+                SocketEgress::write_is_retried(&Error::from(kind)),
+                "{kind:?} must be retried"
+            );
+        }
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::TimedOut,
+            ErrorKind::NotConnected,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !SocketEgress::write_is_retried(&Error::from(kind)),
+                "{kind:?} must NOT be retried"
+            );
+        }
+    }
+
+    /// EINTR only. `WouldBlock` is the socket timer; refused, pinned so it
+    /// cannot drift (#349).
+    #[test]
+    fn only_an_interrupted_read_is_retried() {
+        use std::io::{Error, ErrorKind};
+        assert!(
+            SocketEgress::read_is_retried(&Error::from(ErrorKind::Interrupted)),
+            "Interrupted must be retried"
+        );
+        for kind in [
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !SocketEgress::read_is_retried(&Error::from(kind)),
+                "{kind:?} must NOT be retried"
+            );
+        }
+    }
+
+    /// The deputy hangs up mid-body. The write failure must be reported,
+    /// not the deadline: a loop that retried hard errors would spin until
+    /// the budget is spent. The deputy reads the prefix first because the
+    /// peer-credential check needs a live peer (macOS: `ENOTCONN` otherwise).
+    #[test]
+    fn a_peer_that_hangs_up_mid_write_is_reported_at_once_not_at_the_deadline() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                let _ = c.read_exact(&mut len);
+                drop(c);
+            }
+        });
+        let me = nix::unistd::getuid().as_raw();
+        // 2 s, like the sibling hang-up test: a tight budget gives a spurious
+        // DeadlineExpired on a loaded runner.
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        let mut big = req();
+        // over the default socket buffers, under the request cap
+        big.turns = vec![Turn::User {
+            content: vec![ContentBlock::Text {
+                text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+            }],
+        }];
+        match e.send(&intent, big) {
+            Err(EgressFailure::AfterSend(m)) => assert!(
+                m.starts_with("write: "),
+                "expected the write failure to be reported, got: {m}"
+            ),
+            other => {
+                panic!("a hard write error must be reported as AfterSend(write …), not {other:?}")
+            }
         }
     }
 }

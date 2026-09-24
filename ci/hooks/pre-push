@@ -4,7 +4,7 @@
 # MAKNAE_PRE_PUSH_MUTANTS=1 additionally runs selected whole-crate mutations.
 set -euo pipefail
 root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
-selection="$(mktemp)"
+selection="$(mktemp "${TMPDIR:-/tmp}/maknae-push.XXXXXXXX")"
 trap 'rm -f "$selection"' EXIT
 build=0
 mutants=""

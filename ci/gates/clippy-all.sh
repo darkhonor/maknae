@@ -187,7 +187,7 @@ CLIPPY_PIN=(--config 'env.CLIPPY_ARGS.value=""' --config 'env.CLIPPY_ARGS.force=
 # NOT closed here, named: `[lints.clippy] <lint> = "allow"` in a member
 # manifest -- the sanctioned spelling of `#![allow]`, i.e. source-level
 # suppression, which a lint gate cannot and should not override.
-meta_err="$(mktemp)"
+meta_err="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
 cleanup() {
   rm -f "$meta_err"
   [ -n "${pin_dir:-}" ] && rm -rf "$pin_dir"
@@ -278,7 +278,7 @@ benv() { (cd "$gate_cwd" && "${BASE_ENV[@]}" "$@"); }
 # caller's environment, a rustup DIRECTORY OVERRIDE for the root selected an
 # installed 1.94.1 while the proxy, asked under the pin, answered 1.98.1 (codex
 # r10: `ok, toolchain 1.98.1` with a 1.94.1 rustc doing the work).
-which_err="$(mktemp)"
+which_err="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
 if ! RUSTC="$(benv rustup which rustc 2>"$which_err")"; then
   sed 's/^/  /' "$which_err" >&2; rm -f "$which_err"
   fail "cannot resolve the pinned rustc (rustup which rustc failed — see above)"
@@ -325,7 +325,7 @@ count="$(printf '%s' "$meta" | python3 -c 'import json,sys; print(len(json.load(
 # container, which builds its own (a host without clippy or a warm registry
 # must still be able to drive the container lane).
 if [ "$mode" != linux ]; then
-which_err="$(mktemp)"
+which_err="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
 if ! CARGO_CLIPPY_BIN="$(benv rustup which cargo-clippy 2>"$which_err")"; then
   sed 's/^/  /' "$which_err" >&2; rm -f "$which_err"
   fail "cannot resolve the pinned cargo-clippy (rustup which cargo-clippy failed — see above)"
@@ -341,7 +341,7 @@ rm -f "$which_err"; [ -x "$CARGO_CLIPPY_BIN" ] || fail "resolved cargo-clippy '$
 if ! resolved_meta="$(gcargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 --locked 2>"$meta_err")"; then
   echo "FAIL: cargo metadata (resolving, --locked) failed — the lock file is stale or the graph cannot resolve:" >&2; sed 's/^/  /' "$meta_err" >&2; exit 1
 fi
-pin_dir="$(mktemp -d)"   # cleanup() removes it
+pin_dir="$(mktemp -d "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"   # cleanup() removes it
 pin_file="$pin_dir/profile-pins.toml"
 printf '%s' "$resolved_meta" | python3 -c 'import json, sys
 for n in sorted({p["name"] for p in json.load(sys.stdin)["packages"]}):

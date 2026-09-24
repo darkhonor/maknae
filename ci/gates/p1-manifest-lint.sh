@@ -24,7 +24,7 @@ grep -qE '^[[:space:]]*default-members' "$root/Cargo.toml" && { echo "FAIL: root
 # hypothetical: with a stray key in `$CARGO_HOME/config.toml`, `cargo metadata`
 # exits 0 and writes `warning: unused config key …` to stderr, which under a
 # merged capture prefixes the JSON and kills `json.load`.
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-p1-manifest-lint.XXXXXXXX")"; trap 'rm -rf "$tmp"' EXIT
 if ! cargo metadata --manifest-path "$root/Cargo.toml" --no-deps --format-version 1 \
      > "$tmp/meta.json" 2> "$tmp/meta.err"; then
   echo "FAIL: cargo metadata failed under '$root' — the package set could not be"

@@ -186,7 +186,7 @@ done
 # repo on Apple Silicon (50s with one wipe). A wipe that cannot happen is a
 # FAIL, not a mute death. The dir must sit under a REAL directory: `rm -rf`
 # through an attacker-chosen `target` symlink would reach outside the root.
-meta_err="$(mktemp)"
+meta_err="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"
 # ONE cleanup for every temp this script makes. Later temps used to re-set the
 # EXIT trap with their own `rm -f` list, and the list never learned about the
 # pin dir -- measured: six of eight runs left `profile-pins.toml` behind.
@@ -297,7 +297,7 @@ benv() { (cd "$gate_cwd" && "${BASE_ENV[@]}" "$@"); }
 # caller's environment, a rustup DIRECTORY OVERRIDE for the root selected an
 # installed 1.94.1 while the proxy, asked under the pin, answered 1.98.1 (codex
 # r10: `ok, toolchain 1.98.1` with a 1.94.1 rustc doing the work).
-which_err="$(mktemp)"
+which_err="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"
 if ! RUSTC="$(benv rustup which rustc 2>"$which_err")"; then
   sed 's/^/  /' "$which_err" >&2; rm -f "$which_err"
   fail "cannot resolve the pinned rustc (rustup which rustc failed — see above)"
@@ -383,7 +383,7 @@ fi
 # be ~1000 argv entries). Names are quoted: TOML bare keys refuse what cargo
 # accepts. Measured on the real graph: no unmatched-spec or ambiguous-spec
 # diagnostic for names resolved at several versions (`syn` x3).
-pin_dir="$(mktemp -d)"   # cleanup() removes it
+pin_dir="$(mktemp -d "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"   # cleanup() removes it
 pin_file="$pin_dir/profile-pins.toml"
 printf '%s' "$resolved_meta" | python3 -c 'import json, sys
 for n in sorted({p["name"] for p in json.load(sys.stdin)["packages"]}):
@@ -418,7 +418,7 @@ fi
 # abort the check of an unblocked one. The target dir is shared, so the
 # dependency graph compiles once; the rest are incremental.
 checked=(); blocked=(); hostonly=(); feature_blocked=(); feature_passes=0
-log="$(mktemp)"; json="$(mktemp)"   # cleanup() removes them
+log="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"; json="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"   # cleanup() removes them
 cd "$root" || fail "cannot enter '$root'"
 # Classification is CORROBORATED, not read off one line. Three rounds of review
 # each broke a text-only classifier: an unanchored regex let a build script that
@@ -480,7 +480,7 @@ run_pass() { # <member> <feature-or-empty>
 # a non-zero status (the caller exits), never a mute death.
 count_artifacts() { # <member>
   local m="$1" n
-  counter_err="$(mktemp)"
+  counter_err="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"
   if ! n="$(python3 - "${manifest_of[$m]}" "$json" "$CARGO_TARGET_DIR/$TARGET/" 2>"$counter_err" <<'PYA'
 import json, sys
 mp, tgt, n = sys.argv[1], sys.argv[3], 0
@@ -515,7 +515,7 @@ classify_blocked() { # <member> <feature-or-empty> <what>
   # and a spanned WARNING elsewhere in a blocked member's graph must not turn
   # a correct "blocked" into a FAIL.
   err_blocks="$(awk '/^error/{p=1; print; next} /^warning/{p=0} p' "$log")"
-  tree_err="$(mktemp)"   # cleanup() removes it
+  tree_err="$(mktemp "${TMPDIR:-/tmp}/maknae-darwin-cross-check.XXXXXXXX")"   # cleanup() removes it
   if [ -n "$sdk_line" ] \
      && ! printf '%s\n' "$err_blocks" | grep -Eq '^[[:space:]]*--> ' \
      && ! grep -Eq '^error(\[E[0-9]+\])?: ' <(grep -Ev "$sdk_re" "$log") \

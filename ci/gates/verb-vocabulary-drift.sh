@@ -20,7 +20,7 @@ for f in "$HANDLER" "$AUTHZ" "$DECIDE" "$MANIFEST"; do
   [ -f "$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/maknae-verb-vocabulary-drift.XXXXXXXX"); trap 'rm -rf "$tmp"' EXIT
 
 # 1. action strings — the arms of verb_to_action
 awk '/^pub fn verb_to_action/{f=1} f && /=> "/{ if (match($0, /"[a-z0-9_.]+"/)) { s=substr($0,RSTART+1,RLENGTH-2); print "action\t" s } } f && /^}/{f=0}' \

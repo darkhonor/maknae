@@ -4,7 +4,7 @@ here="$(cd "$(dirname "$0")" && pwd)"; source "$here/lib.sh"
 root="${1:-$(git rev-parse --show-toplevel)}"   # arg override lets the negative-control point at a fixture
 cd "$root"
 bin="$root/target/release/$UNTRUSTED_BIN"
-out="$(mktemp)"; trap 'rm -f "$out"' EXIT
+out="$(mktemp "${TMPDIR:-/tmp}/maknae-p2-artifact-witness.XXXXXXXX")"; trap 'rm -f "$out"' EXIT
 fail=0
 
 CARGO_PROFILE_RELEASE_STRIP=false cargo auditable build -p "$UNTRUSTED_BIN" --release
