@@ -60,7 +60,24 @@ That ratio is the contribution. It is independent of Jev, independent of TypeScr
 
 ## 6. What transfers to Maknae — APPLICABLE
 
-**A. Batch the plan, not the step — subject to the PDP on every action.** Maknae's runtime loop (#241) is a conventional turn loop today. A graph-shaped turn would let one model turn describe many actions, cutting round-trips on exactly the bulk work Jive is fastest at. **The precondition is absolute: every node still goes through `combine`+`finalize` at execution time.** A graph is a *proposal*, and a batched proposal must not become a batched authorization. This is the one idea worth a design discussion; it is also the one where getting it wrong would be a TCB defect rather than a performance regression.
+**A. Batch the plan, not the step — under two-phase authorization.** Maknae's runtime loop (#241) is a conventional turn loop today. A graph-shaped turn would let one model turn describe many actions, cutting round-trips on exactly the bulk work Jive is fastest at.
+
+**The maintainer's formulation (2026-09-25), which is the better one and supersedes an earlier draft of this section:** a plan held as a graph rather than a markdown document can be authorized *twice, against different questions*.
+
+| | When | What it asks | What it can see |
+|---|---|---|---|
+| **Structural** | at approval, over the whole graph | Are there invalid transitions? Node activities that are disallowed outright? | the shape — every path, every declared activity, before anything runs |
+| **Contextual** | at execution, per node | Is *this* activity permitted against policy *now*? | the state at that instant, including everything earlier nodes produced |
+
+Neither subsumes the other. The structural pass sees the whole shape and can reject a path that only becomes reachable three branches deep — something a per-action check evaluating one node at a time cannot see. The contextual pass sees the live state and the data earlier nodes produced — something a static read of the graph cannot know.
+
+**The precondition remains absolute: passing the structural pass authorizes nothing to execute.** Every node still goes through `combine`+`finalize` at execution time. The first pass is a *reject-early* filter over the proposal, not a grant. A batched proposal must not become a batched authorization.
+
+This also answers a cost objection to graph-shaped turns: structural rejection is cheap and happens once, so malformed plans die before any node runs, and the per-node PDP calls that remain are the ones that were always required.
+
+**Adjacent, same maintainer, same day:** graphs are already being tried elsewhere in this team's work — for memory recall and for associating related elements in the lake. A plan-as-graph shares that representation, and the progressive-disclosure property is the draw: a graph can be followed at a level of detail chosen per step, rather than re-reading a whole markdown plan into context on every turn. Context cost, not just round-trip cost.
+
+This is the one idea worth a design discussion; it is also the one where getting it wrong would be a TCB defect rather than a performance regression.
 
 **B. Plan edit by reference.** If Maknae ever emits multi-step proposals, editing by pointer rather than resending is free efficiency with no security content.
 
@@ -70,9 +87,10 @@ That ratio is the contribution. It is independent of Jev, independent of TypeScr
 
 ## 7. Open questions
 
-1. Does a graph-shaped turn survive per-action PDP evaluation without the PDP becoming the new bottleneck it was meant to avoid? Unknown; measurable once #241's loop has traces.
-2. Is there any Maknae analogue of a "fast" decision that is *not* a network call and *not* a model? The classification-ceiling operand already is one — deterministic, in-kernel, one attribute. That is closer to what Jive wants from Jev than Jev is.
-3. Would a batched proposal change the audit record's shape, and does the append-only sink still give one entry per decision?
+1. Does a graph-shaped turn survive per-node PDP evaluation without the PDP becoming the new bottleneck it was meant to avoid? Unknown; measurable once #241's loop has traces. Note the structural pass (§6A) removes malformed plans before any node runs, so the question is only about the per-node calls that were always required.
+2. **What is the structural pass actually evaluating, and is it the same PDP?** "Invalid transitions" and "disallowed node activities" are properties of a *graph*, not of a single request — the current `Composition` decides one request at a time. Whether that is a second operand, a separate admission step, or a shape the existing PDP can already express is an open design question and probably an ADR.
+3. Is there any Maknae analogue of a "fast" decision that is *not* a network call and *not* a model? The classification-ceiling operand already is one — deterministic, in-kernel, one attribute. That is closer to what Jive wants from Jev than Jev is.
+4. Would a batched proposal change the audit record's shape, and does the append-only sink still give one entry per decision?
 
 ## 8. Sources
 
