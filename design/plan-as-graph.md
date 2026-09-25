@@ -240,6 +240,8 @@ The inversion: **a classifier may propose a bin; it may never relax one.** A bin
 
 **This is where the graph-call primitive from the [Jive assessment](references/2026-09-25-jive-assessment.md) stops being a token optimisation and becomes load-bearing** — a runtime that walks the graph without returning to the model is what makes property 2 true.
 
+Property 2 has independent support from a direction unrelated to security — see §12: the loop-engineering literature reaches the same conclusion from quality, and reports that **making the generator more self-critical does not work** where a separate skeptical evaluator does. *"A loop without a real check is, at bottom, an agent repeatedly reaching consensus with itself."*
+
 **The trust regress terminates at the TCB, as it already does.** At some point the platform resolves to OS primitives that have been permitted; risk surface cannot be removed entirely. This is [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md)'s boundary, not a new one. What matters is that validation executes on the trusted side of a line this project already draws: [core principle 1](../AGENTS.md) holds the agent runtime untrusted by design, so **an agent-executed validation asks the untrusted side to attest to itself.**
 
 **Three constraints for expressibility:**
@@ -283,7 +285,7 @@ Two bodies of work bear on it, and neither transfers whole (ruling 5). Both are 
 From `references/lake/edges.yaml`, `edges.schema.json` v1 and `lib/lake/_edge_graph.py`:
 
 - **A closed edge vocabulary of six:** `supersedes`, `implements`, `governs` (directional), `companion`, `relates_to` (symmetric), `delegates_to`. `additionalProperties: false` and a `const` `schema_version` throughout — fail-closed, not advisory. A seventh type was **YAGNI-deferred by census**, not by taste: one case in the corpus did not earn a vocabulary entry.
-- **Targets are opaque UUIDs and the pattern enforces it.** The regex *structurally rejects* a filename-valued target. The sharpest transferable idea in the model: **the schema forbids the wrong thing rather than documenting that it is wrong.**
+- **Targets are opaque UUIDs and the pattern enforces it.** The regex *structurally rejects* a filename-valued target. The sharpest transferable idea in the model: **the schema forbids the wrong thing rather than documenting that it is wrong.** This is not taste — see §12, finding F9: four published KG-RAG systems key nodes on surface forms and none imposes a stable identifier at index time, and the Lake itself already retired one filename for the same document, which would have silently dangled any edge targeting it.
 - **One authored direction; the compiler materializes the typed inverse.** Symmetric edges are authored once on a **deterministic canonical side**. An authored surface that cannot express one fact two ways cannot drift between them.
 - **Derived artifacts are drift-gated by byte equality** (`writer == checker`) — the construction this repository already uses for content-keyed drift gates.
 - **Deterministic ids:** `uuid5(NAMESPACE_URL, "urn:lake:external:<slug>")`, so independent builds agree on identity.
@@ -387,6 +389,50 @@ The skill's job is **authoring plans into the schema against a declared profile*
 
 **The harder half is execution.** A skill that only *emits* a conformant graph has moved the checkbox, not removed it. The validating nodes have to be run by the platform walking the graph, not by the agent reporting on itself — and that half is a Maknae concern, not a skill-authoring one.
 
+## 12. What the research corpus supports, and what it does not
+
+The Knowledge Lake's `research/` corpus holds twenty ingested papers and industry guides with a findings synthesis (`design/research-retrieval-architecture.md`, F1–F13). It is **tier-less and non-authoritative by its own declaration** — it binds nothing and is excluded from that project's authority map. Cited here as evidence and as provenance, never as authority.
+
+**The honest scope first: most of this corpus is about *retrieval* graphs, not activity graphs.** It bears directly on §7 and only by analogy on §4–§6 — which is the same caveat the synthesis carries about its own domain transfer. The one exception is the loop-engineering material, which is directly on point.
+
+### Supports the knowledge graph (§7)
+
+- **F5 — typed first-class edges are required, and generic graph structure is not enough.** VersionRAG: *"version transitions are not explicit relationships that can be extracted from text; they must be modeled as first-class citizens."* Generic GraphRAG scored ~10% on implicit supersession detection against a purpose-built version-aware graph's ~60%. **The synthesis's own caveat travels with this and must not be dropped: those magnitudes are self-reported on a 100-question author-built benchmark. The structural claim is independent of the contested numbers; the numbers are not settled.**
+- **F4 — similarity-only retrieval structurally fails on supersession**, reaching 58–64% on version-sensitive questions because it has no temporal-validity or authority check and returns several versions at once. This is the Maknae use case exactly: STIG revisions and reissued DoD policy.
+- **F9 — the opaque-identifier rule is an evidence-based correction, not a preference.** GraphRAG, HippoRAG, HippoRAG 2 and LightRAG all key nodes on LLM-extracted surface forms; none imposes a stable opaque id at index time, and all treat name-based merging as an acknowledged unsolved problem. The Lake retired `DoDI-8140-02.md` in favour of `814002p.md` for the same document — any filename-targeted edge would have dangled silently. §7.1 praised the uuid regex as good instinct; it is better than that.
+- **F1–F3 — graphs are not universally better, and a discipline this document has been missing.** Vector retrieval wins single-hop and detail questions; graph wins multi-hop; **hybrid routing beats either alone**, and GraphRAG-Bench exists partly to document where graph retrieval *underperforms*. Nothing here argues for graph-always, and the knowledge graph should be a routing decision rather than a replacement.
+- **F10** — in the closest domain analog (regulatory-compliance KG-RAG), graph re-ranking was the single largest quality contributor.
+
+### Supports the execution model (§6.3), and from an unrelated direction
+
+The Orange Book's **generator-and-evaluator** chapter reaches this document's conclusion from quality rather than from security, which makes it genuine corroboration rather than the same argument restated:
+
+- An Anthropic engineer's finding, quoted there: agents asked to evaluate their own output *"tend to respond by confidently praising the work — even when, to a human observer, the quality is obviously mediocre."*
+- **And the attempted fix that failed:** making the generator more self-critical did not work; *"tuning a standalone evaluator to be skeptical turns out to be far more tractable."* **So the remedy is structural, not behavioural** — which is precisely §6.3's property 2, arrived at independently.
+- *"A loop without a real check is, at bottom, an agent repeatedly reaching consensus with itself."*
+
+Its **four costs** map onto decisions already taken here, with one that is not:
+
+| cost | the guide's guard | where it lands |
+|---|---|---|
+| verification debt | *install an evaluator that isn't the one doing the work* | §6.3 property 2 — platform-executed validation |
+| token blowout | *nail down budget and retry caps **before shipping*** | §6.3 constraint 3 — and "before shipping" argues the bound belongs in the **floor** (§6.1), not an organisation's profile |
+| cognitive surrender | *execution can be outsourced, deciding can't* | [`self-development.md`](self-development.md)'s standing ruling, unchanged |
+| **comprehension rot** | *read the output regularly; can't explain it means update it* | **a cost this proposal adds to, and does not yet answer** |
+
+**Comprehension rot is the honest one.** §1's objective is to delete prose *about* the task, and a graph of activities is by construction less readable to a human skimming for *why*. The design's answer is the issue citation in place of justification (§10.2) and the `delegates_to` pattern of one mandatory note where the relation is unreadable without it (§7.1) — but that is an argument, not a measurement, and the guide's warning is that this cost sounds no alarm while the loop is running.
+
+### Converges with the shape/payload split from a third direction
+
+Gorilla, ToolLLM and RAG-MCP all reach *"retrieve the relevant tools rather than registering all of them"* from the tool-selection side. **The 1.8% shape layer is the plan-graph instance of a pattern that literature already validated elsewhere** — which is mild independent support that progressive disclosure is the right axis, and none at all for any particular encoding.
+
+### What it does not support
+
+- **No evidence here bears on activity or plan graphs as such.** The transfer from retrieval graphs to §4–§6 is by analogy.
+- **No evidence on the authoring mechanism.** The synthesis's own open question 2 asks whether authored-edges-compiled-into-a-graph is endorsed over LLM-extracted edges; the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is therefore a decision, not a finding.
+- **No storage-backend guidance.** Explicitly under-evidenced in the synthesis, and flagged there as needing dedicated follow-up.
+- **SoL-Pi's caution transfers directly to profiles:** an evolved harness can **overfit the tasks used during search**, which is why held-out evaluation is load-bearing. A profile tuned on one team's plans is a harness tuned on one task set.
+
 ## 12. Open questions
 
 - Does the payload split (instruction / deliverable / expected output) hold on a plan with large expected-output blocks, or does it just move the p90?
@@ -400,6 +446,9 @@ The skill's job is **authoring plans into the schema against a declared profile*
 - Where does a bin's confidence floor come from, and who may set it? A floor the classifier's vendor sets is not a floor.
 - Does a long-lived scheduled graph hold node state **in** the artifact (no longer immutable) or **beside** it (the two can disagree)?
 - If obligations move out of `SKILL.md` into a profile, what stops a skill restating them in prose anyway? A rule with two homes drifts — the failure this repository already records for comments and issue bodies.
+- Should the knowledge graph be a routing decision rather than a default (F1–F3)? Nothing in this document currently asks *when not to use the graph*.
+- A profile is a harness tuned on a task set. What is the held-out evaluation that stops it overfitting one team's plans?
+- Comprehension rot: how is it measured? The design argues the issue citation carries the *why*; nothing tests whether a maintainer reading only graphs can still reconstruct it.
 - §5.3's retention conflict.
 
 *The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository. The conversion artifacts were throwaway and are not committed.*
