@@ -25,6 +25,8 @@ Per-node payload on the code-heavy plan: min 46, median 193, p90 2,801, max 5,56
 
 ### Constraint 1 — the win is disclosure, not size
 
+***Corrected 2026-09-25 (maintainer): the win is neither, primarily — it is focus.*** This section and the table above argue about tokens because tokens are what the experiment could measure. The stated objective is different and it reorders everything below it: **keep the model on the task at hand.** Context economy is a real secondary consideration, and a sharper one for smaller local models than for a frontier model with a large window, but it is not the reason to do this. See §"What the objective actually is".
+
 **For the code-heavy plan the two-layer form is 8% *larger* than the markdown it replaces.** JSONL escaping of fenced code costs more than the raw fences. Any claim that graph representation compresses a plan is false for exactly the plans that most need help. The real number to quote is 1.8% for the shape and ~12% for shape-plus-one-node, and both describe *what you read*, not *what you store*.
 
 ### Constraint 2 — payload weight is skewed, and the skew is the design
@@ -209,6 +211,59 @@ The approach is sound: classify the incoming task, let the bin select the enforc
 
 The inversion that keeps the useful part: **a classifier may propose a bin; it may never relax one.** Concretely — a bin resolves to a profile only when the mapping is configured and confidence clears a declared floor; otherwise the task takes the **most** restrictive profile available, not the loosest. **A classification failure must cost rigor, never remove it.** Under that rule a misclassified slide deck is merely annoying (it gets asked for tests), while a misclassified coding task cannot quietly escape the organisation's TDD profile — and the failure direction, not the accuracy, is what makes an untested classifier tolerable in the loop at all.
 
+## What the objective actually is
+
+*(Maintainer, 2026-09-25, and it reorders the constraints above: this was never fully about context savings.)*
+
+**The target is prose *about* the task, not prose *for* the task.** The distinction is the whole design:
+
+- **Prose for the task** — the code to write, the ADR text to produce, the command to run, the interface a later task consumes. This is the deliverable. A graph carries it unchanged.
+- **Prose about the task** — narration, justification, restatement of a decision already made, a reminder to do a thing later, an argument aimed at a reviewer. **A graph has no field for it, which is the point.**
+
+The measurement in §"What born-as-graph actually changes" reads differently under this framing and supports it better than it supported the size argument. Prose is **11%** of the code-heavy plan's payload against 83% code. That 11% is almost entirely prose-about-the-task — and the reason to remove it is not the 11% of tokens, it is **what those tokens do to attention**. A plan that argues its own case invites the executor to re-litigate it; a plan that states activities does not. The maintainer's recorded objection to this author's output has consistently been tokens spent on prose *about* a task rather than prose *for* it, and a schema with nowhere to put the former removes the failure structurally rather than by instruction.
+
+**The secondary consideration is real and should not be dropped:** a 27B-class local model has a materially smaller window and less tolerance for distractor text than a frontier model. Progressive disclosure at 1.8% for the shape layer matters much more there. But it is the second reason, not the first, and a design optimised only for it would be a different design.
+
+## Scheduled and unattended activity — the second consumer
+
+*(Maintainer: the same graph is useful for tracking activities the platform itself runs — cron jobs and scheduled work of the kind OpenClaw or Hermes Agent perform outside a direct operator engagement.)*
+
+This is a genuine second consumer and it stresses the model in ways an authored plan does not:
+
+- **A plan graph is authored, validated, executed, done.** A scheduled-activity graph is **long-lived and partially executed**: node state (pending / running / succeeded / failed / escalated) is part of the artifact, must survive restart, and is the thing an operator inspects when they return.
+- **No operator is watching.** The witness matters more here, not less, and the bounded-retry and escalate-to-human terminal stop being pedantic: an unattended back-edge with no bound is an unattended infinite loop.
+- **State transitions over a validated graph are an audit trail by construction**, which lines up with [ADR-0019](adr/ADR-0019-audit-record-model.md)'s record model rather than requiring a parallel one.
+
+**And it is where the two-phase authorization earns its shape.** A scheduled graph may outlive the profile and the policy that validated it — authored last month, still executing today, with `authz.yaml` changed in between. Phase one validated the *shape* at authoring; phase two evaluates each node **against policy at the moment of execution**. A node authorized last week is not authorized now by having been authorized then. For unattended work that is not a refinement, it is the only safe reading.
+
+## What a skill is, mechanically — and which half of it belongs in a graph
+
+*(Recorded because it decides what Maknae can define for itself and what it inherits from the model labs.)*
+
+**Observed mechanics.** The harness scans the skill directories, injects **only** each skill's `name` and `description` from its YAML frontmatter as a menu, and injects a full body **only after the model calls the skill tool**. The body is markdown that nothing validates and nothing executes. Its entire effect is that a model reads it and chooses to comply.
+
+**Evidence that the format is convention, not capability:** this workstation carries the same skill set under `~/.claude/skills/` and `~/.codex/skills/` — copied directories, identical `SKILL.md` shape, running unmodified under two independent vendors' harnesses. That portability exists precisely *because* no part of the format is enforced anywhere.
+
+| layer | owner | available to Maknae |
+|---|---|---|
+| file format, discovery | harness | fully — define anything |
+| injection: when, how much, in what order | harness | fully, and a large lever |
+| **selection** — which skill applies | **model** | the soft spot |
+| **compliance** — whether it is followed | **model** | the crux |
+
+**Both holes in the graph design already exist in `SKILL.md`; they are simply unnamed there.** Selection-by-model is the same self-labeling hole as task-type-declared-by-agent. Compliance-by-model is the unwitnessed checkbox.
+
+**What the labs actually control is the prior, not the protocol.** Any format can be defined and served; what cannot be done is make a model fluent in a format it has never seen. Models are tuned toward conventions in circulation, so a radically novel encoding is followed *worse* even when better designed. The practical consequence for Maknae: **let the graph be the enforcement artifact and render it to the model in a shape models are already fluent in.** The platform validates the graph; what reaches the context window may still be ordinary imperative text generated from it.
+
+### Therefore: a skill is two artifacts wearing one file
+
+- **Knowledge** — what a Fleet bundle is, an RE2 relabeling idiom, how CNSSI 4009 separates policy type from decision model. Prose is correct here; there is nothing to enforce.
+- **Obligations** — "write the test first", "watch it fail", "commit". These are **profile rules in prose clothing**.
+
+Today's `SKILL.md` conflates them, and that conflation explains a property of those files worth naming: the TDD skill is long, repetitive and heavily capitalised **because shouting is the only enforcement prose has**. Split on that seam and the obligations move to the profile, where they are checked, and the knowledge stays prose, where it belongs.
+
+The split is forced rather than merely tidy: [core principle 1](../AGENTS.md) holds that the agent runtime is untrusted by design, so **an obligation enforced by the agent is not enforced.** The answer to "LLM or platform?" follows from the posture already adopted — **the platform enforces obligations; the model consumes knowledge.**
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
@@ -231,6 +286,8 @@ The harder half is the witness. A skill that only *emits* a conformant graph has
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
 - Where does the bin's confidence floor come from, and who may set it? A floor the classifier's own vendor sets is not a floor.
+- A long-lived scheduled graph accumulates node state. Is that state in the graph or beside it? In it, and the artifact is no longer immutable; beside it, and the two can disagree.
+- If obligations move out of `SKILL.md` into a profile, what stops a skill from re-stating them in prose anyway? A rule with two homes drifts, which is the failure this repository already records for comments and issue bodies.
 - Does a `verifies` edge need to assert *what* was verified, or only *that* verification ran? Naming the subject makes the check stronger and the authoring burden higher.
 
 *Artifacts from this experiment were throwaway and are not committed. The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository.*
