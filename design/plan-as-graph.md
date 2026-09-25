@@ -171,7 +171,7 @@ The kernel's graph reaches host state and policy-granted restricted areas — an
 
 **Information crosses up the trust gradient only through validation; authority only ever flows down.**
 
-- **lake → plan.** Knowledge informs planning under measured access — this is the intended and load-bearing path, and §6.7 sets which tiers may shape a plan's *structure* versus only its *content*. It is legitimate because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — informing what a plan says is not the same as deciding what counts as a valid plan, and only the second would be untrusted data setting policy.
+- **lake → plan.** Knowledge informs planning under measured access — this is the intended and load-bearing path, and §6.6 sets which tiers may shape a plan's *structure* versus only its *content*. It is legitimate because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — informing what a plan says is not the same as deciding what counts as a valid plan, and only the second would be untrusted data setting policy.
 - **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
 - **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
 - **plan → shared knowledge.** **No content; demand crosses.** A task hitting a knowledge gap becomes a *request*, and what enters the Lake is an external document from an authorized source — never the user's work product. See §8.
@@ -236,7 +236,7 @@ The inversion: **a classifier may propose a bin; it may never relax one.** A bin
 **Two properties are needed together, and either alone fails:**
 
 1. **Adjacency makes the activity unskippable.** The graph does not permit reaching the next node without the validating one.
-2. **The platform executes the validating node, not the agent.** Adjacency alone proves *traversal*, never *honesty* — if the agent runs the check and announces the outcome, the arrow changes nothing and this is the markdown checkbox with an edge drawn on it. When the platform executes it and the exit status drives traversal, the agent is not party to the decision. **Failure does not travel back along an edge** — see §6.5.
+2. **The platform executes the validating node, not the agent.** Adjacency alone proves *traversal*, never *honesty* — if the agent runs the check and announces the outcome, the arrow changes nothing and this is the markdown checkbox with an edge drawn on it. When the platform executes it and the exit status drives traversal, the agent is not party to the decision. **Failure does not travel back along an edge** — see §6.4.
 
 **This is where the graph-call primitive from the [Jive assessment](references/2026-09-25-jive-assessment.md) stops being a token optimisation and becomes load-bearing** — a runtime that walks the graph without returning to the model is what makes property 2 true.
 
@@ -246,11 +246,11 @@ Property 2 has independent support from a direction unrelated to security — se
 
 **One constraint for expressibility:** the verifying relation is **its own edge kind**. If any edge satisfies "the validation is connected to the activity", an ordinary `write → commit` dependency satisfies it trivially. A `verifies` edge names its subject.
 
-*(Two further constraints appeared in an earlier draft — that retry needs a distinct edge kind excluded from the acyclicity pass, and that the back-edge needs a bound and a terminal. Both are superseded by §6.5: **there is no back-edge.**)*
+*(Two further constraints appeared in an earlier draft — that retry needs a distinct edge kind excluded from the acyclicity pass, and that the back-edge needs a bound and a terminal. Both are superseded by §6.4: **there is no back-edge.**)*
 
 **"A single edge" reads as adjacency, not cardinality.** Adjacency forbids `set-permissions → commit → check-permissions`, where the validation is real but arrives after the irreversible step. Cardinality remains *at least one*: one `cargo test` legitimately verifies several writes.
 
-### 6.5 Recovery is per-node state, not a graph edge
+### 6.4 Recovery is per-node state, not a graph edge
 
 Reading [SGH](https://arxiv.org/abs/2604.11378) in full replaced this document's retry design with a better one. **The failure path is not an edge.** Each node carries a recovery state, `pristine → retried → patched`, and a **three-level escalation ladder**:
 
@@ -272,7 +272,7 @@ Reading [SGH](https://arxiv.org/abs/2604.11378) in full replaced this document's
 
 A diagnosis is recorded as `(observed failure, root-cause hypothesis, recommended action, confidence)` — the confidence term connecting to §6.2's bin floor.
 
-### 6.6 Side-effect classification — the property this design lacked entirely
+### 6.5 Side-effect classification — the property this design lacked entirely
 
 SGH's fourth principle, and it is the most useful thing read this session: **classify every node by side-effect profile, and let the scheduler respect the classification.** *"A read-only API call can be freely retried; a database write cannot."*
 
@@ -283,7 +283,7 @@ This document treated all nodes as equally retryable and equally parallelisable.
 
 **The vocabulary is nearly free.** The activity classes already proposed — `read`, `write`, `test`, `verify`, `gate`, `commit` — map almost directly onto a side-effect profile, so this is a floor property (§6.1) rather than new machinery. It should be in the floor and not in an organisation's profile: irreversibility is not a discipline preference.
 
-### 6.7 Two rules taken from the security literature
+### 6.6 Two rules taken from the security literature
 
 **The planner reads trusted information — and the Lake is the trusted-information store, not a threat to planning.**
 
@@ -301,13 +301,15 @@ ACE's rule [R11] is that the abstract plan is built from **trusted information o
 
 **And the two-layer split (§3) gives a cleaner boundary than either source has.** The *shape* layer — which activities, in what order, with what dependencies — is control flow, and control flow is derived from trusted tiers only. The *payload* layer may draw on lower-tier material, with its mark travelling (§7). An attacker who poisons a Tier-3 document can then influence what a step's content says; they cannot add a node, remove a gate, or reorder a commit. That is the property ACE is protecting, achieved without blinding the planner.
 
-**Structural validation does not protect the data flowing between nodes.** [R3] §2.2 states it plainly: an attacker who controls a source can inject a payload that rides the plan's own data flow — the agent *"would correctly follow its plan"* while carrying malicious content into a later step. **This document has node authorization and no data-plane taint model at all.** ACE's answer is to verify concrete plans against **user-specified secure information-flow constraints**; APPA [R13] pursues recoverable information-flow control for the same problem. Named here as a gap rather than solved.
+**Structural validation does not protect the data flowing between nodes.** [R3] §2.2 states it plainly: an attacker who controls a source can inject a payload that rides the plan's own data flow — the agent *"would correctly follow its plan"* while carrying malicious content into a later step. **This document has node authorization and no data-plane taint model at all.** ACE's answer is to verify concrete plans against **user-specified secure information-flow constraints**. Named here as a gap rather than solved — but with one warning about the obvious fix.
 
-### 6.8 State the expressiveness boundary
+**The obvious fix is monotone taint, and monotone taint is known to fail on agent workflows.** APPA [R13] states it: conventional IFC *"relies on monotone taint tracking that either over-blocks benign operations or permanently strands downstream execution once an agent ingests unvetted data."* **This matters directly here because the KLC's high-water-mark rule — a derived object takes the maximum of its inputs — is monotone taint.** Applied across a long-running plan it does exactly what APPA describes: one Tier-3 read early in a graph raises the mark for everything downstream, and the plan strands. APPA's alternative is a **dual-phase reference monitor** — prospective evaluation before tool dispatch, then validation of realised outputs before they are admitted to context — turning IFC from an abort-only barrier into a policy-governed recovery. Whatever Maknae adopts, a naive high-water mark over a plan graph is the wrong starting point.
+
+### 6.7 State the expressiveness boundary
 
 SGH publishes what its design gives up — competitive parallelism, recursive sub-graph expansion, dynamic topology change, parent-chain rollback — and argues the boundary is appropriate rather than universal. **This document should do the same, and a reviewer will ask for it.** Notably it excludes speculative "first of" joins for the reason §4.7 raised independently: cancelling losers mid-execution requires compensation protocols for partial results. They declined the feature rather than solving it, which is a live option here too.
 
-### 6.9 The two phases
+### 6.8 The two phases
 
 **Phase one reads schema + profile** — is this graph well-formed, and does it satisfy its declared discipline. **Phase two runs at execution** — each node is authorized against policy at the moment it is reached, and the validating nodes the profile required are executed by the platform as the graph is walked.
 
@@ -477,7 +479,7 @@ Its **four costs** map onto decisions already taken here, with one that is not:
 | cognitive surrender | *execution can be outsourced, deciding can't* | [`self-development.md`](self-development.md)'s standing ruling, unchanged |
 | **comprehension rot** | *read the output regularly; can't explain it means update it* | **a cost this proposal adds to, and does not yet answer** |
 
-**Comprehension rot is the honest one.** §1's objective is to delete prose *about* the task, and a graph of activities is by construction less readable to a human skimming for *why*. The design's answer is the issue citation in place of justification (§10.2) and the `delegates_to` pattern of one mandatory note where the relation is unreadable without it (§7.1) — but that is an argument, not a measurement, and the guide's warning is that this cost sounds no alarm while the loop is running.
+**Comprehension rot is the honest one.** §1's objective is to delete prose *about* the task, and a graph of activities is by construction less readable to a human skimming for *why*. The design's answer is the issue citation in place of justification (§10 item 2) and the `delegates_to` pattern of one mandatory note where the relation is unreadable without it (§7.1) — but that is an argument, not a measurement, and the guide's warning is that this cost sounds no alarm while the loop is running.
 
 ### Converges with the shape/payload split from a third direction
 
@@ -501,6 +503,8 @@ Asked directly, because it decides how much of this is ours to invent.
 - **Google** ships an orchestration surface in Antigravity 2.0. Product, not position.
 - **The intellectual work is academic and framework-side.** LangGraph is the de facto standard implementation, and the 2026 arXiv literature carries the reasoning: [*From Agent Loops to Structured Graphs*](https://arxiv.org/abs/2604.11378) (scheduler-theoretic, position paper, no empirics), [*Atomic Task Graph*](https://arxiv.org/pdf/2607.01942), [*Plan-over-Graph*](https://arxiv.org/pdf/2502.14563), [*BatchDAG*](https://arxiv.org/abs/2607.18241), [*Architecting Resilient LLM Agents*](https://arxiv.org/pdf/2509.08646), and a survey of the shift [*From Static Templates to Dynamic Runtime Graphs*](https://arxiv.org/pdf/2603.22386).
 
+**The field also has a name for it, and a 32-author survey placing it.** [R6] calls this **Graph Engineering** and sets it after Prompt, Context, Harness and Loop Engineering in the same progression — the move from *individual* to *system* intelligence, motivated by tasks requiring *"heterogeneous expertise, interdependent subtasks, parallel execution, independent verification, and persistent state."* Its decomposition maps onto §5's taxonomy closely enough to be worth adopting as vocabulary: **task organization** (what to do), **agent coordination** (who works), **runtime state management** (how the system operates), and **system evolution**.
+
 **The takeaway is not comfortable: the field is converging on graph-structured execution, the labs are selling it as tooling rather than arguing for it, and the one lab that has argued anything cautions against the framework we are designing.** The governance layer — profiles, floors, validation as authorization — is genuinely ours, which means it also has the least external support.
 
 ## 14. What holds up
@@ -518,13 +522,14 @@ Recorded before the adversarial read so the document is not mistaken for a retra
   - **ACE — Abstract-Concrete-Execute** [R11] (NDSS 2026, Northeastern) formalises the trusted-planning half: planning is decoupled into an **abstract plan built from trusted information only**, then mapped to a concrete plan whose implementations are **verified against secure information-flow constraints** before execution. It was built after breaking IsolateGPT, a prior isolation-based defence.
   - The pattern also has a name in the practitioner literature: [R3] calls it **Plan-Validate-Execute**, with the verifier *"instantiated as another LLM, a rule-based engine, or a symbolic checker"*, independent of both planning and execution.
 - **LLM-judged alignment is not a control, which is why the platform must validate.** ControlValve's first result is *breaking* alignment-check defences — LlamaFirewall-style checks performed by Llama, o4-mini, 4o and 4o-mini were all evaded. §6.3's property 2 is not merely preferable; the alternative is measured to fail.
+- **A validated graph answers a threat per-request authorization structurally cannot.** ACP [R14] measures it: *"autonomous agents can produce harmful behavioral patterns from individually valid requests — a threat class that per-request policy evaluation cannot address, because stateless engines evaluate each request in isolation and cannot enforce properties that depend on execution history."* Under a 500-request workload where **every request is individually valid**, a stateless engine approves all 500. **A plan graph is the execution history, available before execution** — so sequence properties that no per-request PDP can see are checkable at phase one. This is an argument for the design that this document had not made, and it is a strong one.
 - **The category itself.** Anthropic's distinction — *workflows are LLMs orchestrated through predefined code paths; agents direct their own process* — is precisely what a validated plan graph is. We are not inventing a category, and the field is moving this way: a 2026 survey is titled *From Static Templates to Dynamic Runtime Graphs*.
 - **Plan-then-execute is a real security property, correctly bounded.** Separating planning from execution gives control-flow integrity against indirect prompt injection. Our caveat that it is insufficient alone is also the source's caveat, and Maknae already supplies the defence in depth it asks for at phase two.
 - **Progressive disclosure over loading everything.** Gorilla, ToolLLM and RAG-MCP converge on *retrieve the relevant tools rather than registering all of them*. The 1.8% shape layer is that pattern applied to plans.
 
 ### 14.2 Established by our own measurement
 
-Weak provenance (§16.1) — but these are real results, and **the experiment earned its keep by refuting rather than confirming.** A measurement that only agreed with its author would deserve less trust, not more.
+Weak provenance (§16 item 1) — but these are real results, and **the experiment earned its keep by refuting rather than confirming.** A measurement that only agreed with its author would deserve less trust, not more.
 
 - **The shape layer is 1.8% of the markdown**, and shape-plus-heaviest-node is 12%. Progressive disclosure at that ratio makes whole-plan structural checks affordable on every plan.
 - **Compression is not the win** — it refuted the obvious first claim, which was mine.
@@ -534,7 +539,7 @@ Weak provenance (§16.1) — but these are real results, and **the experiment ea
 
 ### 14.3 Correct because it reuses settled doctrine rather than inventing
 
-The security reasoning in this document is largely *not new*, and that is the point in its favour: deny-by-default, **policy over profile**, inform-but-not-authorize, the TCB as the terminus of the trust regress, the `config.d/` custody rule making a subject unable to choose its own profile, and ADR-0022's compiled-in/boot-selected split. **No new security model was invented for graphs.** Where this document does invent — the profile and floor construction (§16.2) — is exactly where it has the least support, and the two facts are related.
+The security reasoning in this document is largely *not new*, and that is the point in its favour: deny-by-default, **policy over profile**, inform-but-not-authorize, the TCB as the terminus of the trust regress, the `config.d/` custody rule making a subject unable to choose its own profile, and ADR-0022's compiled-in/boot-selected split. **No new security model was invented for graphs.** Where this document does invent — the profile and floor construction (§16 item 2) — is exactly where it has the least support, and the two facts are related.
 
 ## 15. Adversarial read: what we are proud of that may be a pitfall
 
@@ -552,7 +557,7 @@ This document has been written as though one idea serves both consumers. It does
 
 Read in full, [SGH](https://arxiv.org/abs/2604.11378) is stronger than the summary suggested. Its survey of **70 agent systems** found Agent Loop implementations *"commonly lacked any formal bounds on recovery attempts,"* producing two observed failure modes: **infinite retry** when the model insists on a failing approach, and **premature abandonment** when a transient error triggers an unnecessary replan. This document's design had the first hazard bounded and the second unguarded, because it had no Level 2.
 
-**Resolved, not merely flagged:** §6.5 adopts the per-node recovery ladder and §6.6 the side-effect classification. The back-edge is gone.
+**Resolved, not merely flagged:** §6.4 adopts the per-node recovery ladder and §6.5 the side-effect classification. The back-edge is gone.
 
 **Its standing as evidence, unchanged:** a single-author position paper with **no empirical results** — it says so itself, offering *"a theoretical framework, a design analysis, and an experimental protocol—not a production implementation."* What it does have is a formal state machine with termination and soundness arguments and a 70-system survey, which is more than an opinion and less than a finding. **It is adopted here because its design is better reasoned than ours was, not because it is validated.**
 
@@ -562,7 +567,7 @@ The control-flow-integrity argument — a validated plan resists indirect prompt
 
 **Reading the security literature answered it, and the field disagrees with itself in a way worth recording.** [R3] §7.1 recommends an LLM **re-planner node after every execution step**, given the objective, the original plan and all outcomes, with cyclic graphs routing back to the executor. [R1] forbids exactly that: plans immutable per version, replan only as Level 3 of an enforced ladder. **ControlValve [R12] settles which to prefer for this posture** — it names *"the fundamental conflict between safety and functionality when re-planning in response to errors"* as one of three root sources of control-flow hijacking, and its attacks land precisely there. An LLM re-planner reading execution outcomes is reading untrusted content and then rewriting control flow.
 
-**So Maknae takes [R1]'s ladder, and now for a stated reason rather than by accident:** re-planning is the attack surface, so it is the last rung, gated on an exhausted ladder, producing a new plan version, with diagnosis on a separate context (§6.5) and the planner unexposed to untrusted content (§6.7). The residual — who authors the Level-3 replan — is still ours to decide, but it is now one bounded question rather than an open door.
+**So Maknae takes [R1]'s ladder, and now for a stated reason rather than by accident:** re-planning is the attack surface, so it is the last rung, gated on an exhausted ladder, producing a new plan version, with diagnosis on a separate context (§6.4) and the planner unexposed to untrusted content (§6.6). The residual — who authors the Level-3 replan — is still ours to decide, but it is now one bounded question rather than an open door.
 
 ### 15.5 The parallelism speedup is measured on work unlike ours
 
@@ -574,7 +579,7 @@ The sharpest criticism a reviewer will level, raised here first because ControlV
 
 > *"the graph may be too lax (i.e., an over-approximation of the legitimate executions) and thus potentially permit executions that should not happen. In CFI research, there is a large body of work on evasion attacks that compromise programs while complying with the statically computed CFG. It is an open question whether similar CFH attacks are possible in multi-agent systems."*
 
-**Control-flow integrity is a twenty-year-old defence with a twenty-year-old literature on defeating it while remaining CFG-compliant.** Everything this document proposes inherits that literature. §15.2 (mediation) and §16.4 (validity is not correctness) are the same hazard seen from two other angles; this is its name, and the prior art is Abadi et al. 2005 onward.
+**Control-flow integrity is a twenty-year-old defence with a twenty-year-old literature on defeating it while remaining CFG-compliant.** Everything this document proposes inherits that literature. §15.2 (mediation) and §16 item 4 (validity is not correctness) are the same hazard seen from two other angles; this is its name, and the prior art is Abadi et al. 2005 onward.
 
 It also sets the honest ceiling on the claim. **A validated plan graph raises the cost of an attack and bounds its shape. It does not make one impossible**, and a proposal that implies otherwise will be dismissed by anyone who has read the CFI literature.
 
@@ -584,11 +589,21 @@ It also sets the honest ceiling on the claim. **A validated plan graph raises th
 
 - **Time-to-first-action.** The whole plan must be generated before anything happens.
 - **Planning-call token cost of roughly 3,000–4,500 tokens**, *"more than a ReAct agent might use for an entire simple task."* §1 argues graphs keep the model focused; that argument is about execution, and the planning call is a separate bill this document never put on the table.
-- **Wasted effort when a plan is flawed**, which compounds with §16.4.
+- **Wasted effort when a plan is flawed**, which compounds with §16 item 4.
 
-Their mitigation is worth taking: **hierarchical sub-planners** — a high-level blueprint decomposed into milestones, each planned independently and in parallel. Lower upfront token cost, and *"a natural failure containment boundary: if one sub-plan is flawed or requires re-planning, only that segment needs regeneration."* That maps onto the task/step hierarchy already present and bounds the blast radius of a Level-3 replan (§6.5).
+Their mitigation is worth taking: **hierarchical sub-planners** — a high-level blueprint decomposed into milestones, each planned independently and in parallel. Lower upfront token cost, and *"a natural failure containment boundary: if one sub-plan is flawed or requires re-planning, only that segment needs regeneration."* That maps onto the task/step hierarchy already present and bounds the blast radius of a Level-3 replan (§6.4).
 
-### 15.8 A closed schema forbids the unanticipated case too
+### 15.8 Phase two is per-request, which is the thing ACP breaks
+
+The finding above cuts both ways, and the second edge is aimed at us. **Maknae's PDP is a per-request evaluator, and phase two as described here is per-node authorization** — stateless with respect to what the graph has already done. ACP [R14] is precisely a demonstration that this is insufficient against sequences of individually-valid actions, and it proposes history-aware admission (risk accumulation, cooldown, escalation after *n* actions, denial after *m*) behind a ledger abstraction that separates decision logic from state.
+
+**Phase one covers part of this and not all of it.** A validated graph bounds the *planned* sequence, so behaviour that emerges from a plan the validator approved is still unbounded at run time — retries, fan-out cardinality, and anything a Level-2 patch changes are all post-validation.
+
+Two cautions from the same paper before adopting anything: they found and fixed a **cross-context interference** bug in their own v2.0, where high-frequency benign work in one context elevated risk in an unrelated one, *"producing false denials that a stateless engine would never generate"* — which is §15.1's false-positive hazard in a new place. And they show an adversary who knows the risk formula can suppress the behavioural signal to zero while every request stays compliant. **History-aware admission is not a substitute for the structural bound; it is another layer with its own evasion.**
+
+*(Provenance: a draft standard from a single author, but the most rigorously evidenced item in this corpus — TLA+ model-checked with 11 invariants and 4 temporal properties over 4.29 billion states, 73 signed conformance vectors, and its own negative results reported.)*
+
+### 15.9 A closed schema forbids the unanticipated case too
 
 *"The schema forbids the wrong thing rather than documenting it"* (§7.1) is the right instinct and has a cost. The Lake kept its vocabulary minimal by **census** — a human counted the cases. Under agent authoring (ruling 3) there is no census, and the seventh edge type nobody anticipated becomes an authoring failure rather than a schema request.
 
@@ -597,19 +612,37 @@ Their mitigation is worth taking: **hierarchical sub-planners** — a high-level
 Listed so nothing here is mistaken for evidence.
 
 1. **This experiment does not meet the standard this repository applied to Jive.** The [Jive assessment](references/2026-09-25-jive-assessment.md) §1 refused to treat that project's numbers as evidence because they were one author's runs of his own tasks against his own agent. **Every number in §4 is one author's conversion of his own plans, by a parser he wrote, checked by checks he wrote, n=2, no repetition, no independent review.** The same verdict applies: usable for a design read, disqualified as evidence.
-2. **The profile and floor construction is less unsupported than it looked, and the reason is the strongest positioning argument available.** ControlValve [R12] generates its control-flow graphs **and its per-edge rules with an LLM**, and names that as its own weakness: *"because control-flow graphs and edge-specific rules in ControlValve are created by LLMs, they can be incorrect, too permissive, or too restrictive… if the LLM makes a mistake creating the graph or the rules, the defense can fail."* **Maknae's profile is operator-authored, boot-validated and custody-protected (§6.2); the floor is compiled in (§6.1).** The published state of the art's acknowledged weak link is precisely the thing this design does not delegate to a model. What remains unsupported is the *shape* — a per-organisation profile over a shared vocabulary — for which there is still no published precedent.
+2. **The profile and floor construction is less unsupported than it looked, and the reason is the strongest positioning argument available.** ControlValve [R12] generates its control-flow graphs **and its per-edge rules with an LLM**, and names that as its own weakness: *"because control-flow graphs and edge-specific rules in ControlValve are created by LLMs, they can be incorrect, too permissive, or too restrictive… if the LLM makes a mistake creating the graph or the rules, the defense can fail."* **Maknae's profile is operator-authored, boot-validated and custody-protected (§6.2); the floor is compiled in (§6.1).** The published state of the art's acknowledged weak link is precisely the thing this design does not delegate to a model. **And the shape has a precedent too**, which a fuller read found: [R6] §5.2 argues an ontology for these systems *"should be layered and modular — a core ontology can define concepts shared across systems, while specialized modules describe goals and values, agents and capabilities, observations and evidence, actions and states, and evaluation criteria… without requiring every system or domain to adopt a single monolithic model."* **That is the vocabulary-plus-floor with per-organisation profiles, stated as the field's next step.** What remains genuinely unsupported is not the shape but the *enforcement posture* — a boot-validated, custody-protected profile that can refuse startup — which no surveyed system attempts.
 3. **Agent authorship of knowledge edges is explicitly unevaluated** — the Lake synthesis's own open question 2 notes the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is a decision, not a finding.
 4. **Validity is not correctness, and only validity is checkable — now settled by reading the paper.** BatchDAG's 98.8% means **structural and schema validity**: 255 of 258 plans *"produced valid, executable DAGs"*, and the three failures *"contained schema errors (referencing non-existent columns)."* Nothing about answering the question correctly. Three further details matter and none is in the abstract:
    - **The denominator is conditioned.** 42 of 300 calls failed on API errors and were excluded. End-to-end the rate is 255/300 = **85%**.
    - **Validity degrades with structural complexity.** 100% on SQL-only and search-only categories; *"all three failures occurred on complex fan-out queries requiring multi-source joins."* Maknae's plans are the complex kind.
-   - **Their limitations section states this document's §16.4 verbatim:** *"if the planner generates an incorrect DAG, the system executes the full fan-out before the error becomes apparent."* It is a real operational problem, not a theoretical worry — and they propose the mitigation §11 should adopt: **a probe phase that validates on a single batch first.** Run one instance of a fan-out and check the result before dispatching the rest.
+   - **Their limitations section states this document's §16 item 4 verbatim:** *"if the planner generates an incorrect DAG, the system executes the full fan-out before the error becomes apparent."* It is a real operational problem, not a theoretical worry — and they propose the mitigation §11 should adopt: **a probe phase that validates on a single batch first.** Run one instance of a fan-out and check the result before dispatching the rest.
 
    Provenance: single author, Brevian.ai, production self-report, n=12 queries, LLM-assisted drafting acknowledged. The architectural conclusion — *"for cross-entity analytical workloads, the LLM should plan, not execute"*, with four of six operation types requiring zero LLM calls — is independent support for §6.3's property 2.
 5. **The typed-edge magnitudes are contested.** F5's 10%-versus-60% is self-reported on a 100-question author-built benchmark. The structural claim survives; the size of the effect does not.
 6. **Comprehension rot is unmeasured** (§12), as is whether progressive disclosure actually reduces execution-time context (§17).
 7. **No storage-backend evidence** for a structured graph layer, air-gapped or otherwise.
 
-## 17. Open questions
+## 17. The limitation the field states, which is this document's deferred item
+
+[R6] §5.1 names the boundary of the whole approach, and it is the thing the maintainer deferred at the outset of this work:
+
+> *"Graph Engineering makes relationships among tasks, agents, and runtime states explicit, but explicit structures do not ensure that system components interpret them consistently. Agents may still disagree about what constitutes task completion, sufficient evidence, valid state, or authorized action."*
+
+**A graph fixes structure and not meaning.** Two agents can traverse the same validated plan and disagree about whether a `verify` node passed. The survey's answer is **Ontology Engineering** — *"a shared, machine-interpretable model… which entities exist, what their relations mean, which constraints must hold, and what conclusions can be derived"* — and it is explicit that this is a semantic foundation *connecting* Graph Engineering to something larger, not a solution to every system-level problem.
+
+This is the standardised schema deferred when this work began. It is not a refinement of the graph; it is the layer the graph rests on.
+
+### And the evaluation this document would need
+
+[R6] §5.1 also states why the measurements in §4 cannot carry the claim, more precisely than §16 item 1 does:
+
+> *"End-task success alone is insufficient… Performance gains may result from a stronger foundation model, longer context, additional reasoning samples, or greater computational cost rather than more effective task organization."*
+
+What it asks for instead — **intervention studies, structural ablations, and execution-trace analysis**, over tasks including *"incomplete objectives, concurrent workloads, distributed information, component failures, and environmental changes"* — is the protocol that would turn this proposal from a design into a finding. **Nothing in §4 is an ablation.** Proving the graph does the work, rather than a better model doing it, requires running the same tasks with the structure removed.
+
+## 18. Open questions
 
 - Does the payload split (instruction / deliverable / expected output) hold on a plan with large expected-output blocks, or does it just move the p90?
 - Is an S-expression shape layer worth it over JSON once a schema exists? It won on tokens here; a schema-validated form may not need the margin.
@@ -631,7 +664,7 @@ Listed so nothing here is mistaken for evidence.
 
 ---
 
-## 18. References
+## 19. References
 
 **Why this section exists:** every claim above that rests on outside work is cited here with its holding location, licence and **reading state**. The next reader — human or agent — should not repeat a search that has already been done, and should be able to see at a glance which sources were actually read.
 
@@ -643,9 +676,9 @@ Listed so nothing here is mistaken for evidence.
 
 | # | source | licence | read | cited in |
 |---|---|---|---|---|
-| **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | **full** | §6.5, §6.6, §6.7, §15.3 |
-| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **full** | §11, §14.1, §16.4 |
-| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | **full** | §6.7, §14.1, §15.4, §15.7 |
+| **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | **full** | §6.4, §6.5, §6.6, §15.3 |
+| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **full** | §11, §14.1, §16 item 4 |
+| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | **full** | §6.6, §14.1, §15.4, §15.7 |
 | **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **full text held; skimmed** | §4.6, §14.1 |
 | **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **full text held; skimmed** | §14.1 |
 | **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | abstract only | §13 |
@@ -654,10 +687,10 @@ Listed so nothing here is mistaken for evidence.
 | **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **full** | §9.1, §13, §14.1 |
 | **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | **full text held; skimmed** | §4.6, §15.5 |
 
-| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | abstract + mechanism | §6.7, §14.1 |
-| **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | arXiv non-excl. | **key sections in full** | §14.1, §15.4, §15.6, §16.2 |
-| **R13** | *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). | arXiv non-excl. | abstract only | §6.7 |
-| **R14** | *Agent Control Protocol: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829). Admission control per action — the shape of phase two. | arXiv non-excl. | abstract only | §6.9 |
+| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | abstract + mechanism | §6.6, §14.1 |
+| **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | arXiv non-excl. | **key sections in full** | §14.1, §15.4, §15.6, §16 item 2 |
+| **R13** | Kravchenko, Liventsev, Konstantinov, Iskhakov, Kukuy (Archestra AI). *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). Dual-phase reference monitor; monotone taint over-blocks or strands. | arXiv non-excl. | abstract + mechanism | §6.6 |
+| **R14** | Marcelo Fernandez (TraslaIA). *Agent Control Protocol v1.30: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829), draft standard, Apr 2026. History-aware admission; TLA+ model-checked over 4.29e9 states; reports its own v2.0 vulnerability and an evasion against its own risk formula. | arXiv non-excl. | abstract + mechanism | §14.1, §15.8 |
 
 ### Held in the Knowledge Lake
 
@@ -683,7 +716,7 @@ Full text at `knowledgebase/research/`, with the findings synthesis at `knowledg
 | [`AGENTS.md`](../AGENTS.md) — core principles 1 and 2; the standing rulings | throughout |
 | [ADR-0002](adr/ADR-0002-kernel-is-rust.md) static Rust TCB · [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md) modular authorization · [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md) TCB boundary · [ADR-0008](adr/ADR-0008-authorization-composition-contract.md) composition · [ADR-0019](adr/ADR-0019-audit-record-model.md) audit records · [ADR-0022](adr/ADR-0022-classification-policy-as-data.md) policy as data · [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) runtime loop | §5–§6, §15 |
 | [`design/diagrams/generated-operational-concept.svg`](diagrams/generated-operational-concept.svg) — the OV-1 and the governed learning loop | §8 |
-| [`references/2026-09-25-jive-assessment.md`](references/2026-09-25-jive-assessment.md) — the graph-call primitive; the provenance standard this document is held to | §Origin, §6.3, §16.1 |
+| [`references/2026-09-25-jive-assessment.md`](references/2026-09-25-jive-assessment.md) — the graph-call primitive; the provenance standard this document is held to | §Origin, §6.3, §16 item 1 |
 | [`references/2026-09-22-system-one-models-jev-assessment.md`](references/2026-09-22-system-one-models-jev-assessment.md) — untested classifier calibration | §6.2 |
 | [`design/knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) — object-layer governance; **not current on edges** | §7 |
 | [`design/self-development.md`](self-development.md) — PRs are human-gated | §12 |
@@ -691,4 +724,4 @@ Full text at `knowledgebase/research/`, with the findings synthesis at `knowledg
 
 ### Searched and deliberately not pursued
 
-Recorded so the search is not repeated: **OpenAI** (AgentKit, Agent Builder, the Symphony orchestration spec) and **Google** (Antigravity orchestration surface) ship graph-shaped agent tooling but publish no position on plan governance — product, not argument (§13). **LangGraph** is the de facto framework implementation and was not evaluated here. **Classical workflow engines** (Airflow, Luigi, Prefect) are surveyed in R1 §2.8 rather than read directly.
+Recorded so the search is not repeated: **OpenAI** (AgentKit, Agent Builder, the Symphony orchestration spec) and **Google** (Antigravity orchestration surface) ship graph-shaped agent tooling but publish no position on plan governance — product, not argument (§13). **LangGraph** is the de facto framework implementation and was not evaluated here. **Classical workflow engines** (Airflow, Luigi, Prefect) are surveyed in R1 (its §2.8) rather than read directly.
