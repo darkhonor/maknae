@@ -64,6 +64,12 @@ pub enum Refusal {
 /// returned `Ok`. `call::fulfil` takes one, so a provider call cannot be made
 /// on a frame whose bounds were never checked — the property is in the type
 /// rather than in a comment someone has to keep reading.
+///
+/// ```compile_fail,E0451
+/// fn forge(req: &maknae_proto::EgressFrameRequest) -> maknae_deputy::handle::Admitted<'_> {
+///     maknae_deputy::handle::Admitted { req }
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Admitted<'a> {
     req: &'a EgressFrameRequest,
