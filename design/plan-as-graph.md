@@ -283,11 +283,17 @@ This document treated all nodes as equally retryable and equally parallelisable.
 
 **The vocabulary is nearly free.** The activity classes already proposed — `read`, `write`, `test`, `verify`, `gate`, `commit` — map almost directly onto a side-effect profile, so this is a floor property (§6.1) rather than new machinery. It should be in the floor and not in an organisation's profile: irreversibility is not a discipline preference.
 
-### 6.7 State the expressiveness boundary
+### 6.7 Two rules taken from the security literature
+
+**The planner must not be exposed to untrusted content.** This is ACE's core mechanism [R11] — the abstract plan is built from **trusted information only** — and ControlValve [R12] notes the same property protects its own planning stage: *"the planning stage is not exposed to untrusted content, so there is less of a risk of prompt injection."* For Maknae this is a phase-one rule with teeth: a plan graph authored while the planner is reading tool output, retrieved documents or Lake content is authored in a tainted context, and §5.1's *lake → plan* crossing must therefore feed **execution**, not **planning**.
+
+**Structural validation does not protect the data flowing between nodes.** [R3] §2.2 states it plainly: an attacker who controls a source can inject a payload that rides the plan's own data flow — the agent *"would correctly follow its plan"* while carrying malicious content into a later step. **This document has node authorization and no data-plane taint model at all.** ACE's answer is to verify concrete plans against **user-specified secure information-flow constraints**; APPA [R13] pursues recoverable information-flow control for the same problem. Named here as a gap rather than solved.
+
+### 6.8 State the expressiveness boundary
 
 SGH publishes what its design gives up — competitive parallelism, recursive sub-graph expansion, dynamic topology change, parent-chain rollback — and argues the boundary is appropriate rather than universal. **This document should do the same, and a reviewer will ask for it.** Notably it excludes speculative "first of" joins for the reason §4.7 raised independently: cancelling losers mid-execution requires compensation protocols for partial results. They declined the feature rather than solving it, which is a live option here too.
 
-### 6.8 The two phases
+### 6.9 The two phases
 
 **Phase one reads schema + profile** — is this graph well-formed, and does it satisfy its declared discipline. **Phase two runs at execution** — each node is authorized against policy at the moment it is reached, and the validating nodes the profile required are executed by the platform as the graph is walked.
 
@@ -493,6 +499,11 @@ Recorded before the adversarial read so the document is not mistaken for a retra
 - **Stable opaque identifiers, not surface forms.** Not merely correct — correct *where the state of the art is not*. GraphRAG, HippoRAG, HippoRAG 2 and LightRAG all key on LLM-extracted surface forms and all treat name-based merging as unsolved (F9). The Lake imposed opaque ids anyway and has a concrete near-miss proving the point.
 - **Separating the evaluator from the generator.** **Two independent derivations converge here, which is the strongest support available short of a benchmark.** This document reached it from security — the agent runtime is untrusted, so it cannot attest to itself. Anthropic reached it from quality — agents confidently praise their own output, and *making the generator more self-critical did not work* where a separate skeptical evaluator did. Anthropic also names **evaluator-optimizer** as one of five composable patterns.
 - **Parallelism from declared dependencies.** Plan-over-Graph [R4], LLMCompiler [R10] and BatchDAG [R2] all do exactly this; the maintainer identified it independently while reading a draft. §15.5 disputes the *magnitude* transferring to our workload — it does not dispute the structure, which is field-standard.
+- **The two-phase design is published, peer-reviewed, and named — twice, independently.** This is the single strongest support in the document and it was found only by reading the security literature properly:
+  - **ControlValve** [R12] (ICLR 2026, Cornell + Microsoft) is our design: *"(1) generates permitted control-flow graphs for multi-agent systems, and (2) enforces that all executions comply with these graphs, along with contextual rules … for each agent invocation."* A permitted graph plus per-invocation rules **is** phase one plus phase two.
+  - **ACE — Abstract-Concrete-Execute** [R11] (NDSS 2026, Northeastern) formalises the trusted-planning half: planning is decoupled into an **abstract plan built from trusted information only**, then mapped to a concrete plan whose implementations are **verified against secure information-flow constraints** before execution. It was built after breaking IsolateGPT, a prior isolation-based defence.
+  - The pattern also has a name in the practitioner literature: [R3] calls it **Plan-Validate-Execute**, with the verifier *"instantiated as another LLM, a rule-based engine, or a symbolic checker"*, independent of both planning and execution.
+- **LLM-judged alignment is not a control, which is why the platform must validate.** ControlValve's first result is *breaking* alignment-check defences — LlamaFirewall-style checks performed by Llama, o4-mini, 4o and 4o-mini were all evaded. §6.3's property 2 is not merely preferable; the alternative is measured to fail.
 - **The category itself.** Anthropic's distinction — *workflows are LLMs orchestrated through predefined code paths; agents direct their own process* — is precisely what a validated plan graph is. We are not inventing a category, and the field is moving this way: a 2026 survey is titled *From Static Templates to Dynamic Runtime Graphs*.
 - **Plan-then-execute is a real security property, correctly bounded.** Separating planning from execution gives control-flow integrity against indirect prompt injection. Our caveat that it is insufficient alone is also the source's caveat, and Maknae already supplies the defence in depth it asks for at phase two.
 - **Progressive disclosure over loading everything.** Gorilla, ToolLLM and RAG-MCP converge on *retrieve the relevant tools rather than registering all of them*. The 1.8% shape layer is that pattern applied to plans.
@@ -533,13 +544,37 @@ Read in full, [SGH](https://arxiv.org/abs/2604.11378) is stronger than the summa
 
 ### 15.4 Plan-then-execute's security value evaporates at the re-plan, and we never said who may author one
 
-The control-flow-integrity argument — a validated plan resists indirect prompt injection because the actions are fixed in advance — holds while the plan is fixed. **Every failure path designed here involves retry or escalation, and none of them says who authors the revision.** If the untrusted runtime may re-plan, the injection surface reopens exactly when the system is already degraded. [*Architecting Resilient LLM Agents*](https://arxiv.org/pdf/2509.08646) states plainly that plan-then-execute alone is insufficient and requires defence in depth; Maknae has that at phase two, but **the re-plan authorship question is ours and is unanswered.**
+The control-flow-integrity argument — a validated plan resists indirect prompt injection because the actions are fixed in advance — holds while the plan is fixed. **Every failure path designed here involves retry or escalation, and none of them says who authors the revision.** If the untrusted runtime may re-plan, the injection surface reopens exactly when the system is already degraded. [R3] states plainly that plan-then-execute alone is insufficient and requires defence in depth; Maknae has that at phase two.
+
+**Reading the security literature answered it, and the field disagrees with itself in a way worth recording.** [R3] §7.1 recommends an LLM **re-planner node after every execution step**, given the objective, the original plan and all outcomes, with cyclic graphs routing back to the executor. [R1] forbids exactly that: plans immutable per version, replan only as Level 3 of an enforced ladder. **ControlValve [R12] settles which to prefer for this posture** — it names *"the fundamental conflict between safety and functionality when re-planning in response to errors"* as one of three root sources of control-flow hijacking, and its attacks land precisely there. An LLM re-planner reading execution outcomes is reading untrusted content and then rewriting control flow.
+
+**So Maknae takes [R1]'s ladder, and now for a stated reason rather than by accident:** re-planning is the attack surface, so it is the last rung, gated on an exhausted ladder, producing a new plan version, with diagnosis on a separate context (§6.5) and the planner unexposed to untrusted content (§6.7). The residual — who authors the Level-3 replan — is still ours to decide, but it is now one bounded question rather than an open door.
 
 ### 15.5 The parallelism speedup is measured on work unlike ours
 
 LLMCompiler's **3.7×** [R10] is on **I/O-bound** steps — web searches and API calls. A Maknae plan is Rust edits and `cargo test`, where the build serializes on the target-directory lock. Parallel branches would need separate worktrees or target directories, which is infrastructure nobody here has built. **§4.6's 89% file-disjointness is a real measurement; a speedup does not follow from it**, and this document should not be read as promising one.
 
-### 15.6 A closed schema forbids the unanticipated case too
+### 15.6 A validated graph can be complied with and still be malicious — and this has 20 years of prior art
+
+The sharpest criticism a reviewer will level, raised here first because ControlValve [R12] raises it against itself:
+
+> *"the graph may be too lax (i.e., an over-approximation of the legitimate executions) and thus potentially permit executions that should not happen. In CFI research, there is a large body of work on evasion attacks that compromise programs while complying with the statically computed CFG. It is an open question whether similar CFH attacks are possible in multi-agent systems."*
+
+**Control-flow integrity is a twenty-year-old defence with a twenty-year-old literature on defeating it while remaining CFG-compliant.** Everything this document proposes inherits that literature. §15.2 (mediation) and §16.4 (validity is not correctness) are the same hazard seen from two other angles; this is its name, and the prior art is Abadi et al. 2005 onward.
+
+It also sets the honest ceiling on the claim. **A validated plan graph raises the cost of an attack and bounds its shape. It does not make one impossible**, and a proposal that implies otherwise will be dismissed by anyone who has read the CFI literature.
+
+### 15.7 The planning phase has costs this document never measured
+
+[R3] §7.4 names three, and this document measured none of them because it measured the *artifact* and not the *act of producing it*:
+
+- **Time-to-first-action.** The whole plan must be generated before anything happens.
+- **Planning-call token cost of roughly 3,000–4,500 tokens**, *"more than a ReAct agent might use for an entire simple task."* §1 argues graphs keep the model focused; that argument is about execution, and the planning call is a separate bill this document never put on the table.
+- **Wasted effort when a plan is flawed**, which compounds with §16.4.
+
+Their mitigation is worth taking: **hierarchical sub-planners** — a high-level blueprint decomposed into milestones, each planned independently and in parallel. Lower upfront token cost, and *"a natural failure containment boundary: if one sub-plan is flawed or requires re-planning, only that segment needs regeneration."* That maps onto the task/step hierarchy already present and bounds the blast radius of a Level-3 replan (§6.5).
+
+### 15.8 A closed schema forbids the unanticipated case too
 
 *"The schema forbids the wrong thing rather than documenting it"* (§7.1) is the right instinct and has a cost. The Lake kept its vocabulary minimal by **census** — a human counted the cases. Under agent authoring (ruling 3) there is no census, and the seventh edge type nobody anticipated becomes an authoring failure rather than a schema request.
 
@@ -548,7 +583,7 @@ LLMCompiler's **3.7×** [R10] is on **I/O-bound** steps — web searches and API
 Listed so nothing here is mistaken for evidence.
 
 1. **This experiment does not meet the standard this repository applied to Jive.** The [Jive assessment](references/2026-09-25-jive-assessment.md) §1 refused to treat that project's numbers as evidence because they were one author's runs of his own tasks against his own agent. **Every number in §4 is one author's conversion of his own plans, by a parser he wrote, checked by checks he wrote, n=2, no repetition, no independent review.** The same verdict applies: usable for a design read, disqualified as evidence.
-2. **The profile and floor construction has no external support at all.** It is reasoned by analogy from the kernel's `Composition`. No published system governs plan graphs this way, successfully or otherwise.
+2. **The profile and floor construction is less unsupported than it looked, and the reason is the strongest positioning argument available.** ControlValve [R12] generates its control-flow graphs **and its per-edge rules with an LLM**, and names that as its own weakness: *"because control-flow graphs and edge-specific rules in ControlValve are created by LLMs, they can be incorrect, too permissive, or too restrictive… if the LLM makes a mistake creating the graph or the rules, the defense can fail."* **Maknae's profile is operator-authored, boot-validated and custody-protected (§6.2); the floor is compiled in (§6.1).** The published state of the art's acknowledged weak link is precisely the thing this design does not delegate to a model. What remains unsupported is the *shape* — a per-organisation profile over a shared vocabulary — for which there is still no published precedent.
 3. **Agent authorship of knowledge edges is explicitly unevaluated** — the Lake synthesis's own open question 2 notes the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is a decision, not a finding.
 4. **Validity is not correctness, and only validity is checkable — now settled by reading the paper.** BatchDAG's 98.8% means **structural and schema validity**: 255 of 258 plans *"produced valid, executable DAGs"*, and the three failures *"contained schema errors (referencing non-existent columns)."* Nothing about answering the question correctly. Three further details matter and none is in the abstract:
    - **The denominator is conditioned.** 42 of 300 calls failed on API errors and were excluded. End-to-end the rate is 255/300 = **85%**.
@@ -596,14 +631,19 @@ Listed so nothing here is mistaken for evidence.
 |---|---|---|---|---|
 | **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | **full** | §6.5, §6.6, §6.7, §15.3 |
 | **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **full** | §11, §14.1, §16.4 |
-| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | summary | §14.1, §15.4 |
-| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | abstract only | §4.6, §14.1 |
-| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | abstract only | §14.1 |
+| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | **full** | §6.7, §14.1, §15.4, §15.7 |
+| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **full text held; skimmed** | §4.6, §14.1 |
+| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **full text held; skimmed** | §14.1 |
 | **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | abstract only | §13 |
-| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | abstract only | §13, §14.1 |
-| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | abstract only | §13 |
+| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | **full text held; skimmed** | §13, §14.1 |
+| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | **full text held; skimmed** | §13 |
 | **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **full** | §9.1, §13, §14.1 |
-| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | abstract only | §4.6, §15.5 |
+| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | **full text held; skimmed** | §4.6, §15.5 |
+
+| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | abstract + mechanism | §6.7, §14.1 |
+| **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | arXiv non-excl. | **key sections in full** | §14.1, §15.4, §15.6, §16.2 |
+| **R13** | *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). | arXiv non-excl. | abstract only | §6.7 |
+| **R14** | *Agent Control Protocol: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829). Admission control per action — the shape of phase two. | arXiv non-excl. | abstract only | §6.9 |
 
 ### Held in the Knowledge Lake
 
