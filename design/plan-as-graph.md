@@ -448,49 +448,138 @@ A cheap partial answer to validity-versus-correctness, taken from BatchDAG: **pr
 
 **The harder half is execution.** A skill that only *emits* a conformant graph has moved the checkbox, not removed it. The validating nodes have to be run by the platform walking the graph, not by the agent reporting on itself — and that half is a Maknae concern, not a skill-authoring one.
 
-## 12. What the research corpus supports, and what it does not
+## 12. What the literature establishes
 
-The Knowledge Lake's `research/` corpus holds twenty ingested papers and industry guides with a findings synthesis (`design/research-retrieval-architecture.md`, F1–F13). It is **tier-less and non-authoritative by its own declaration** — it binds nothing and is excluded from that project's authority map. Cited here as evidence and as provenance, never as authority.
+Fourteen sources read in full (§19). This section reports what they measure, including where they contradict this document.
 
-**The honest scope first: most of this corpus is about *retrieval* graphs, not activity graphs.** It bears directly on §7 and only by analogy on §4–§6 — which is the same caveat the synthesis carries about its own domain transfer. The one exception is the loop-engineering material, which is directly on point.
+### 12.1 The validation gap — the most important result for this design
 
-### Supports the knowledge graph (§7)
+SGH [R1] Theorem 6.3. Let `p_v` be the probability that node *v*'s contract validation correctly identifies a passing output. If all nodes pass and validation errors are independent:
 
-- **F5 — typed first-class edges are required, and generic graph structure is not enough.** VersionRAG: *"version transitions are not explicit relationships that can be extracted from text; they must be modeled as first-class citizens."* Generic GraphRAG scored ~10% on implicit supersession detection against a purpose-built version-aware graph's ~60%. **The synthesis's own caveat travels with this and must not be dropped: those magnitudes are self-reported on a 100-question author-built benchmark. The structural claim is independent of the contested numbers; the numbers are not settled.**
-- **F4 — similarity-only retrieval structurally fails on supersession**, reaching 58–64% on version-sensitive questions because it has no temporal-validity or authority check and returns several versions at once. This is the Maknae use case exactly: STIG revisions and reissued DoD policy.
-- **F9 — the opaque-identifier rule is an evidence-based correction, not a preference.** GraphRAG, HippoRAG, HippoRAG 2 and LightRAG all key nodes on LLM-extracted surface forms; none imposes a stable opaque id at index time, and all treat name-based merging as an acknowledged unsolved problem. The Lake retired `DoDI-8140-02.md` in favour of `814002p.md` for the same document — any filename-targeted edge would have dangled silently. §7.1 praised the uuid regex as good instinct; it is better than that.
-- **F1–F3 — graphs are not universally better, and a discipline this document has been missing.** Vector retrieval wins single-hop and detail questions; graph wins multi-hop; **hybrid routing beats either alone**, and GraphRAG-Bench exists partly to document where graph retrieval *underperforms*. Nothing here argues for graph-always, and the knowledge graph should be a routing decision rather than a replacement.
-- **F10** — in the closest domain analog (regulatory-compliance KG-RAG), graph re-ranking was the single largest quality contributor.
+> **Pr[all outputs correct] ≥ ∏ p_v**
 
-### Supports the execution model (§6.3), and from an unrelated direction
+**Correctness is the *product* of per-node validation reliability, so it decays geometrically with plan length.** A 56-node plan at `p_v` = 0.95 bounds at **5.7%**; at 0.99, **57%**. The paper distinguishes two regimes: **syntactic validation** (field existence, types, format) performed by deterministic code, where `p_v ≈ 1`; and **semantic validation** ("is the fix correct?"), where test suites are good and *"LLM-based validation depends on model capability and task difficulty."*
 
-The Orange Book's **generator-and-evaluator** chapter reaches this document's conclusion from quality rather than from security, which makes it genuine corroboration rather than the same argument restated:
+**This is the quantified case for Maknae's posture.** Validation nodes here are `cargo test`, `cargo clippy`, `cargo mutants`, `ci/gates/*.sh` — code, with `p_v` near 1. A design in which a model judges whether each step succeeded degrades multiplicatively with plan length, and at our plan sizes it degrades to nothing. **Use code-based validation or keep plans short; there is no third option.**
 
-- An Anthropic engineer's finding, quoted there: agents asked to evaluate their own output *"tend to respond by confidently praising the work — even when, to a human observer, the quality is obviously mediocre."*
-- **And the attempted fix that failed:** making the generator more self-critical did not work; *"tuning a standalone evaluator to be skeptical turns out to be far more tractable."* **So the remedy is structural, not behavioural** — which is precisely §6.3's property 2, arrived at independently.
-- *"A loop without a real check is, at bottom, an agent repeatedly reaching consensus with itself."*
+SGH's own mitigations are worth taking: require code-based validation on high-side-effect nodes, provide a `waiting_human` node state for critical steps, and rely on downstream contract failures to catch upstream semantic errors at the next dependency boundary.
 
-Its **four costs** map onto decisions already taken here, with one that is not:
+### 12.2 Graph comprehension collapses with node count — and our plans are larger than anything tested
 
-| cost | the guide's guard | where it lands |
+Plan-over-Graph [R4] Table 1, Llama-3.1-8B-Instruct finding shortest paths on random graphs:
+
+| nodes | success rate | optimal rate |
+|---:|---:|---:|
+| 10 | 79% | 29% |
+| 30 | 35% | 16% |
+| 50 | **10%** | **6%** |
+
+Corroborated as a *"comprehension collapse"* phenomenon in two further studies the paper cites. **And the benchmarks are small:** WorFBench graphs are *"in the range of 2 to 10 steps"*; AsyncHow's `|V| + |E|` is mostly 10–20. **The ceiling plan converted in §4 is 65 nodes.**
+
+Two qualifications, then the conclusion. This is an 8B model on shortest-path *optimisation*, which is harder than traversing a validated plan; frontier models do better. And in this design **the model does not traverse the graph — the platform computes the ready set.** So comprehension collapse bites at **authoring**, not execution. That is still the exposed step: nothing else produces the graph.
+
+### 12.3 Planner error rates, by model — and the local-model story is the casualty
+
+Plan-over-Graph [R4] Table 5, proportion of test cases exhibiting each error:
+
+| model | invalid subtask (hallucinated) | unavailable source (dependency error) |
+|---|---:|---:|
+| Claude 3.5 Sonnet | **0.4%** | 9.6% |
+| GPT-4o | 4.7% | **44.0%** |
+| Llama-3.1-8B-Instruct | 17.6% | 30.1% |
+| Llama-3.1-8B *trained* | 11.6% | 4.8% |
+| Qwen2.5-7B-Instruct | **60.7%** | 26.1% |
+| Qwen2.5-7B *trained* | 19.9% | 4.3% |
+
+**An untrained 7B model hallucinates invalid subtasks in 61% of cases.** Training on synthetic task graphs cuts it to 20% and nearly eliminates dependency errors — but the authors state plainly that *"the hallucination of invalid subtasks is currently the performance bottleneck"* even after training. §1's secondary objective is a smaller local model; **this table says an untrained small model cannot author a valid task graph, and that authoring must either run on a frontier model or on a model fine-tuned for the schema.**
+
+### 12.4 The parallelism speedup, measured in the right regime
+
+§15.5 doubted that LLMCompiler's number transfers. Reading both papers settles it in both directions.
+
+LLMCompiler [R10] reports up to 3.7×, and its benchmarks are HotpotQA, Movie Recommendation, ParallelQA, Game of 24 and WebShop — **search and QA workloads, I/O-bound fan-out.** Plan-over-Graph [R4] Table 4 measures parallel-to-sequential execution-time ratio on **dependency-constrained task graphs**:
+
+| nodes | ratio (random topology) | ratio (tree topology) |
+|---:|---:|---:|
+| 10 | 0.88 | 0.92 |
+| 30 | 0.74 | 0.75 |
+| 50 | 0.68 | 0.62 |
+
+**1.1× at 10 nodes, at best 1.8× at 50.** And SGH [R1] §9.3.2 estimates from its 70-project survey that only **30–40% of agent tasks exhibit natural parallelism** at all. §4.6's 89% file-disjointness is a measure of *potential*, and the achievable figure is materially lower.
+
+### 12.5 What graph validation cannot catch
+
+SGH [R1] §3.7 enumerates five planning failures and, crucially, which survive validation:
+
+| failure | caught? | cost |
 |---|---|---|
-| verification debt | *install an evaluator that isn't the one doing the work* | §6.3 property 2 — platform-executed validation |
-| token blowout | *nail down budget and retry caps **before shipping*** | §6.3 constraint 3 — and "before shipping" argues the bound belongs in the **floor** (§6.1), not an organisation's profile |
-| cognitive surrender | *execution can be outsourced, deciding can't* | [`self-development.md`](self-development.md)'s standing ruling, unchanged |
-| **comprehension rot** | *read the output regularly; can't explain it means update it* | **a cost this proposal adds to, and does not yet answer** |
+| missing dependency | **yes** — at runtime, as a contract violation on the starved node | recovery protocol engages |
+| spurious dependency | **no** — the DAG is structurally valid | lost parallelism; time, not correctness |
+| wrong join semantics (`all_of` where `any_of` was meant) | **no** | repeated retry, escalation, eventual replan |
+| over-decomposition | **no** | overhead scales with node count; no automatic merge |
+| under-decomposition | **no** | lost parallelism and unattributable errors |
 
-**Comprehension rot is the honest one.** §1's objective is to delete prose *about* the task, and a graph of activities is by construction less readable to a human skimming for *why*. The design's answer is the issue citation in place of justification (§10 item 2) and the `delegates_to` pattern of one mandatory note where the relation is unreadable without it (§7.1) — but that is an argument, not a measurement, and the guide's warning is that this cost sounds no alarm while the loop is running.
+**Four of five are invisible to structural validation.** This is the precise, enumerated form of §16 item 4: a structurally perfect plan that is a bad plan passes every check, and only the *missing dependency* case is caught — and then at runtime, not at validation.
 
-### Converges with the shape/payload split from a third direction
+### 12.6 A graph alone does not buy controllability — the survey says the opposite
 
-Gorilla, ToolLLM and RAG-MCP all reach *"retrieve the relevant tools rather than registering all of them"* from the tool-selection side. **The 1.8% shape layer is the plan-graph instance of a pattern that literature already validated elsewhere** — which is mild independent support that progressive disclosure is the right axis, and none at all for any particular encoding.
+SGH's 70-project survey (Table 7) classifies systems by primary execution pattern:
 
-### What it does not support
+| category | share | expressiveness | controllability | implementability |
+|---|---:|---|---|---|
+| Agent Loop | 60% | Low | Low | High |
+| Event-driven | 15% | Low | Medium | High |
+| State-machine | 10% | Medium | **High** | Medium |
+| **Graph / flow orchestration** | 5% | **High** | **Low** | Low |
+| Hybrid | 10% | Medium | Medium | Medium |
 
-- **No evidence here bears on activity or plan graphs as such.** The transfer from retrieval graphs to §4–§6 is by analogy.
-- **No evidence on the authoring mechanism.** The synthesis's own open question 2 asks whether authored-edges-compiled-into-a-graph is endorsed over LLM-extracted edges; the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is therefore a decision, not a finding.
-- **No storage-backend guidance.** Explicitly under-evidenced in the synthesis, and flagged there as needing dedicated follow-up.
-- **SoL-Pi's caution transfers directly to profiles:** an evolved harness can **overfit the tasks used during search**, which is why held-out evaluation is load-bearing. A profile tuned on one team's plans is a harness tuned on one task set.
+And qualitatively: failure-loop behaviour was observed in **3 of 4** graph/flow projects and **0 of 7** state-machine projects (the authors flag this as subjective and unquantified).
+
+**Existing graph orchestration systems have the *worst* controllability of any category.** This document has been treating "graph" as a synonym for "controllable." It is not. **The controllability comes from the restrictions** — immutable plan versions, deterministic policy, bounded recovery — not from the graph. A graph without them is the least controllable option in the survey.
+
+### 12.7 Narrow the runtime check, and give the checker no discretion
+
+ControlValve [R12] breaks LlamaFirewall-style alignment checks across Llama, o4-mini, 4o and 4o-mini, and explains why its own check survives:
+
+> *"Alignment checks try to determine whether an action is aligned with the overall task, which is difficult and error-prone. By contrast, ControlValve only checks if an action corresponds to an edge in a graph and satisfies the edge-specific rules."*
+
+And the rule that follows from the failure analysis: **the judge is not asked to determine the merits of the rules or justifications for violating them** — *"this is how alignment checks in LlamaFirewall fail."*
+
+**A checker that can be reasoned with can be reasoned out of.** Phase two must ask "is this node permitted by the graph and its rules," never "is this a good idea." That is the reference-monitor posture Maknae already holds, arrived at from an attack paper rather than from doctrine.
+
+Two further parameters worth copying: ControlValve generates **at most three contextual rules per edge**, explicitly *"to avoid over-constraining executions and preventing legitimate tasks from being completed"* — a concrete answer to §15.1's false-positive hazard — and it caps re-planning at **three attempts**, with outcomes limited to permit / reject / re-plan. It also provides for *"organization-specific rules… added, if needed"*, which is §6.2's profile with a different name.
+
+### 12.8 Mechanisms worth adopting
+
+- **Two gates per call, not one** (APPA [R13]): a **pre-dispatch** gate judges the label the call *would* produce — so a composite read-and-send is checked *before* the read — and an **admission** gate re-checks the realised return before it folds into context. Their measured cost: **64–91% utility, zero observed attacks across 1,320 guarded episodes** of 6,600.
+- **Disposable confined branches** (APPA): untrusted content is inspected in a child branch that absorbs taint locally and exits through a shape-bounded channel, rather than poisoning the parent context. This is a better answer than quarantine-by-tier for the case where a plan genuinely must read Tier-3 material.
+- **Lattice-based information-flow verification** (ACE [R11]): concrete plans are verified against a lattice policy and rejected when they violate flow constraints. **Maknae already has the lattice** — the ceiling operand's level order plus the DCS library's compartments and releasability. §6.6's taint gap has a mechanism that is half-built here already.
+- **Interface-preserving recursive compilation and minimal-subgraph repair** (ATG [R5]): decompose recursively while preserving each parent node's input/output interface, keeping a coarse-to-fine graph *sequence*; on failure, freeze validated regions and repair only the smallest affected subgraph. It also runs a **pre-execution "thought experiment"** — consistency, missing-step, tool-appropriateness, dependency and constraint checks — which is a more complete phase-one list than §4.3's. Evaluated on 7B–8B backbones.
+- **Template / realized graph / trace** [R7]: the survey's three-way distinction, which disentangles this document's own vocabulary — a reusable design, the per-run graph, and the execution record are three artifacts. It also notes the representation axis that matters is **validatability**, not token count: DSL/JSON/YAML *"varies in how easily it can be validated"*, against graph IRs with *"typed operators or constrained schemas."* That answers §18's S-expression question on the right axis.
+
+### 12.9 Measured gains from adjacent systems
+
+Reported by their authors, not independently verified: **Routine** improved multi-step tool-calling accuracy **41% → 96%** in enterprise settings via structured planning scripts; **TDP** cut token consumption **up to 82%** using DAG sub-goals with scoped contexts; **DynTaskMAS** reduced execution time **21–33%**; **WorFBench** found a **15% gap between sequence-planning and graph-planning capability even in GPT-4** — models are measurably worse at producing graphs than sequences.
+
+### 12.10 The ablation protocol this document lacks
+
+SGH [R1] §8 specifies a seven-group design that isolates each contribution — and **G0 is "a state-of-the-art prompt-augmented Agent Loop (e.g., Claude Code, OpenAI Codex agent mode)"**, included because *"without it, improvements attributed to graph structure might merely reflect the benefit of providing the system with richer task information."*
+
+| group | scheduler | structure | recovery |
+|---|---|---|---|
+| G0 SOTA Loop | single-ready-unit | planner prompt + reflection | inline replan |
+| G1 Naive Loop | single | none | context continuation |
+| G2 Planner Loop | single | none | context + replan |
+| G3 Structured Loop | single | scaffold | scaffold recovery |
+| G4 GH-Core | **multi** | static DAG | retry only |
+| G5 GH+Patch | multi | static DAG | retry + patch |
+| G6 GH+Replan | multi | static DAG | full ladder |
+
+Gains decompose as `G_plan`, `G_scaffold`, `G_graph`, `G_patch`, `G_replan`. **This is the experiment §17 says is missing, already specified, with our own harness named as the baseline to beat.** Their stated biases are ours too: task-selection bias inflating `G_graph` if the task set over-represents parallelisable work, and LLM non-determinism requiring repeated runs.
+
+### 12.11 Where a static DAG is the wrong tool
+
+SGH [R1] §9.5 names three task classes the design does not serve: exploratory tasks where sub-tasks are unknown until intermediate results are seen; **dynamic goal evolution — *"investigate the outage and fix whatever is broken"***; and creative generation where revision structure depends on content. **The middle one is a real Maknae workload**, and the honest answer is that it belongs to an agent loop with inline replanning, not to a validated plan graph.
 
 ## 13. Where the labs are
 
@@ -525,6 +614,7 @@ Recorded before the adversarial read so the document is not mistaken for a retra
 - **A validated graph answers a threat per-request authorization structurally cannot.** ACP [R14] measures it: *"autonomous agents can produce harmful behavioral patterns from individually valid requests — a threat class that per-request policy evaluation cannot address, because stateless engines evaluate each request in isolation and cannot enforce properties that depend on execution history."* Under a 500-request workload where **every request is individually valid**, a stateless engine approves all 500. **A plan graph is the execution history, available before execution** — so sequence properties that no per-request PDP can see are checkable at phase one. This is an argument for the design that this document had not made, and it is a strong one.
 - **The category itself.** Anthropic's distinction — *workflows are LLMs orchestrated through predefined code paths; agents direct their own process* — is precisely what a validated plan graph is. We are not inventing a category, and the field is moving this way: a 2026 survey is titled *From Static Templates to Dynamic Runtime Graphs*.
 - **Plan-then-execute is a real security property, correctly bounded.** Separating planning from execution gives control-flow integrity against indirect prompt injection. Our caveat that it is insufficient alone is also the source's caveat, and Maknae already supplies the defence in depth it asks for at phase two.
+- **Code-based validation over model judgment, now quantified.** SGH's validation-gap theorem (§12.1) bounds whole-plan correctness by the *product* of per-node validation reliability. Maknae's validating nodes are `cargo test`, the clippy and mutants gates and `ci/gates/*.sh` — deterministic code, `p_v ≈ 1`. The alternative, an LLM judging each step, degrades geometrically and at 56 nodes degrades to nothing. This was house doctrine; it is now a theorem with a number attached.
 - **Progressive disclosure over loading everything.** Gorilla, ToolLLM and RAG-MCP converge on *retrieve the relevant tools rather than registering all of them*. The 1.8% shape layer is that pattern applied to plans.
 
 ### 14.2 Established by our own measurement
@@ -571,7 +661,7 @@ The control-flow-integrity argument — a validated plan resists indirect prompt
 
 ### 15.5 The parallelism speedup is measured on work unlike ours
 
-LLMCompiler's **3.7×** [R10] is on **I/O-bound** steps — web searches and API calls. A Maknae plan is Rust edits and `cargo test`, where the build serializes on the target-directory lock. Parallel branches would need separate worktrees or target directories, which is infrastructure nobody here has built. **§4.6's 89% file-disjointness is a real measurement; a speedup does not follow from it**, and this document should not be read as promising one.
+Settled by §12.4: LLMCompiler's 3.7× [R10] is on search and QA workloads. On dependency-constrained task graphs the measured parallel-to-sequential ratio is **0.88 at 10 nodes and 0.62–0.68 at 50** [R4] — **1.1× to 1.8×** — and only **30–40% of agent tasks have natural parallelism** at all [R1]. A Maknae plan additionally serializes on the cargo target-directory lock, so parallel branches need separate worktrees that nobody here has built. **§4.6's 89% file-disjointness measures potential; the achievable figure is materially lower and this document should not be read as promising a large speedup.**
 
 ### 15.6 A validated graph can be complied with and still be malicious — and this has 20 years of prior art
 
@@ -603,7 +693,13 @@ Two cautions from the same paper before adopting anything: they found and fixed 
 
 *(Provenance: a draft standard from a single author, but the most rigorously evidenced item in this corpus — TLA+ model-checked with 11 invariants and 4 temporal properties over 4.29 billion states, 73 signed conformance vectors, and its own negative results reported.)*
 
-### 15.9 A closed schema forbids the unanticipated case too
+### 15.9 We treated "graph" as a synonym for "controllable"; the survey says the opposite
+
+§12.6 is the finding this document was least prepared for. In SGH's 70-project survey, **graph/flow orchestration systems score *lowest* on controllability of any category** — high expressiveness, low controllability, low implementability — and failure-loop behaviour appeared in 3 of 4 of them against 0 of 7 state-machine systems.
+
+**The controllability does not come from the graph.** It comes from the restrictions layered on it: immutable plan versions, a deterministic dispatch policy, bounded recovery, contract validation. A graph without those is, empirically, the least controllable option available. Every argument in §5 and §6 that leans on "because it is a graph" should be read as leaning on the restrictions instead — and a reviewer will make that substitution whether or not this document does.
+
+### 15.10 A closed schema forbids the unanticipated case too
 
 *"The schema forbids the wrong thing rather than documenting it"* (§7.1) is the right instinct and has a cost. The Lake kept its vocabulary minimal by **census** — a human counted the cases. Under agent authoring (ruling 3) there is no census, and the seventh edge type nobody anticipated becomes an authoring failure rather than a schema request.
 
@@ -612,7 +708,7 @@ Two cautions from the same paper before adopting anything: they found and fixed 
 Listed so nothing here is mistaken for evidence.
 
 1. **This experiment does not meet the standard this repository applied to Jive.** The [Jive assessment](references/2026-09-25-jive-assessment.md) §1 refused to treat that project's numbers as evidence because they were one author's runs of his own tasks against his own agent. **Every number in §4 is one author's conversion of his own plans, by a parser he wrote, checked by checks he wrote, n=2, no repetition, no independent review.** The same verdict applies: usable for a design read, disqualified as evidence.
-2. **The profile and floor construction is less unsupported than it looked, and the reason is the strongest positioning argument available.** ControlValve [R12] generates its control-flow graphs **and its per-edge rules with an LLM**, and names that as its own weakness: *"because control-flow graphs and edge-specific rules in ControlValve are created by LLMs, they can be incorrect, too permissive, or too restrictive… if the LLM makes a mistake creating the graph or the rules, the defense can fail."* **Maknae's profile is operator-authored, boot-validated and custody-protected (§6.2); the floor is compiled in (§6.1).** The published state of the art's acknowledged weak link is precisely the thing this design does not delegate to a model. **And the shape has a precedent too**, which a fuller read found: [R6] §5.2 argues an ontology for these systems *"should be layered and modular — a core ontology can define concepts shared across systems, while specialized modules describe goals and values, agents and capabilities, observations and evidence, actions and states, and evaluation criteria… without requiring every system or domain to adopt a single monolithic model."* **That is the vocabulary-plus-floor with per-organisation profiles, stated as the field's next step.** What remains genuinely unsupported is not the shape but the *enforcement posture* — a boot-validated, custody-protected profile that can refuse startup — which no surveyed system attempts.
+2. **The profile and floor construction is less unsupported than it looked, and the reason is the strongest positioning argument available.** ControlValve [R12] generates its control-flow graphs **and its per-edge rules with an LLM**, and names that as its own weakness: *"because control-flow graphs and edge-specific rules in ControlValve are created by LLMs, they can be incorrect, too permissive, or too restrictive… if the LLM makes a mistake creating the graph or the rules, the defense can fail."* **Maknae's profile is operator-authored, boot-validated and custody-protected (§6.2); the floor is compiled in (§6.1).** The published state of the art's acknowledged weak link is precisely the thing this design does not delegate to a model. **And the shape has direct precedent in two places.** ControlValve [R12] provides for *"organization-specific rules… added, if needed"* alongside its generated edge rules — a per-deployment layer over a common mechanism, which is §6.2 under another name. And [R6] §5.2 argues an ontology for these systems *"should be layered and modular — a core ontology can define concepts shared across systems, while specialized modules describe goals and values, agents and capabilities, observations and evidence, actions and states, and evaluation criteria… without requiring every system or domain to adopt a single monolithic model."* **That is the vocabulary-plus-floor with per-organisation profiles, stated as the field's next step.** What remains genuinely unsupported is not the shape but the *enforcement posture* — a boot-validated, custody-protected profile that can refuse startup — which no surveyed system attempts.
 3. **Agent authorship of knowledge edges is explicitly unevaluated** — the Lake synthesis's own open question 2 notes the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is a decision, not a finding.
 4. **Validity is not correctness, and only validity is checkable — now settled by reading the paper.** BatchDAG's 98.8% means **structural and schema validity**: 255 of 258 plans *"produced valid, executable DAGs"*, and the three failures *"contained schema errors (referencing non-existent columns)."* Nothing about answering the question correctly. Three further details matter and none is in the abstract:
    - **The denominator is conditioned.** 42 of 300 calls failed on API errors and were excluded. End-to-end the rate is 255/300 = **85%**.
@@ -635,6 +731,10 @@ Listed so nothing here is mistaken for evidence.
 This is the standardised schema deferred when this work began. It is not a refinement of the graph; it is the layer the graph rests on.
 
 ### And the evaluation this document would need
+
+**The protocol exists and is specified (§12.10).** SGH's seven-group design isolates `G_plan`, `G_scaffold`, `G_graph`, `G_patch` and `G_replan`, and names Claude Code as the G0 baseline precisely so that structural gains are not confused with the gain from richer prompting. Running G0 / G3 / G4 alone — a prompt-augmented loop, a structured single-ready-unit loop, and a multi-ready-unit graph over the same task set — would answer whether the structure does any work. **Nothing in §4 is that experiment.**
+
+
 
 [R6] §5.1 also states why the measurements in §4 cannot carry the claim, more precisely than §16 item 1 does:
 
@@ -679,18 +779,18 @@ What it asks for instead — **intervention studies, structural ablations, and e
 | **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | **full** | §6.4, §6.5, §6.6, §15.3 |
 | **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **full** | §11, §14.1, §16 item 4 |
 | **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | **full** | §6.6, §14.1, §15.4, §15.7 |
-| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **full text held; skimmed** | §4.6, §14.1 |
-| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **full text held; skimmed** | §14.1 |
+| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | **full** | §4.6, §14.1 |
+| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | **full** | §14.1 |
 | **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | **key sections** | §13 |
-| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | **full text held; skimmed** | §13, §14.1 |
-| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | **full text held; skimmed** | §13 |
+| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | **full** | §13, §14.1 |
+| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | **full** | §13 |
 | **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **full** | §9.1, §13, §14.1 |
-| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | **full text held; skimmed** | §4.6, §15.5 |
+| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | **full** | §4.6, §15.5 |
 
-| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | abstract + mechanism | §6.6, §14.1 |
-| **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | arXiv non-excl. | **key sections in full** | §14.1, §15.4, §15.6, §16 item 2 |
-| **R13** | Kravchenko, Liventsev, Konstantinov, Iskhakov, Kukuy (Archestra AI). *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). Dual-phase reference monitor; monotone taint over-blocks or strands. | arXiv non-excl. | abstract + mechanism | §6.6 |
-| **R14** | Marcelo Fernandez (TraslaIA). *Agent Control Protocol v1.30: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829), draft standard, Apr 2026. History-aware admission; TLA+ model-checked over 4.29e9 states; reports its own v2.0 vulnerability and an evasion against its own risk formula. | arXiv non-excl. | abstract + mechanism | §14.1, §15.8 |
+| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | **full** | §6.6, §14.1 |
+| **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | **full** | §14.1, §15.4, §15.6, §16 item 2 |
+| **R13** | Kravchenko, Liventsev, Konstantinov, Iskhakov, Kukuy (Archestra AI). *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). Dual-phase reference monitor; monotone taint over-blocks or strands. | **full** | §6.6 |
+| **R14** | Marcelo Fernandez (TraslaIA). *Agent Control Protocol v1.30: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829), draft standard, Apr 2026. History-aware admission; TLA+ model-checked over 4.29e9 states; reports its own v2.0 vulnerability and an evasion against its own risk formula. | **full** | §14.1, §15.8 |
 
 ### Held in the Knowledge Lake
 
