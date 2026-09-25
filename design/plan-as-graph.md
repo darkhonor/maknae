@@ -275,7 +275,7 @@ The split is forced rather than merely tidy: [core principle 1](../AGENTS.md) ho
 | kernel activity | the kernel alone | **trusted** (TCB) | host lifetime | loss of system integrity |
 | governance / profile | operator or organisation, at boot | **trusted** config | boot to boot | wrong enforcement posture, silently |
 | user plan | the agent | **untrusted** — authored by the untrusted runtime | ephemeral; retention user-declared | a bad plan, caught by validation |
-| lake knowledge | ingested documents; **edges operator-authored**, never agent-written | **untrusted data**, trusted edges | long-lived, curated | wrong knowledge informs a decision |
+| lake knowledge | agent-authored and ingested from **external reference sources** (STIGs, NIST, vendor docs) — never from user work product | **untrusted data**; edges quarantined at birth | long-lived, shared | wrong knowledge informs a decision |
 
 The kernel's graph reaching host state and policy-granted restricted areas is consistent with the existing posture, **including the part the maintainer flagged in passing**: the kernel does not bypass policy to do it. [Core principle 2](../AGENTS.md) — *no role or privilege, not even the kernel, bypasses clearance* — applies to the kernel's own graph as it does to everything else.
 
@@ -331,10 +331,10 @@ The maintainer hedged here (*"likely driven by the profiles specifically — or 
 
 Four graphs that never touch would need no thought. Every risk is at a boundary, and the general rule is the standard one: **information may cross up the trust gradient only through validation; authority only ever flows down.**
 
-- **lake → plan.** Knowledge informs planning; legitimate, because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — that would let ingested content change what counts as a valid plan, which is untrusted data setting policy.
+- **lake → plan.** Knowledge informs planning, under measured access; legitimate, because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — that would let ingested content change what counts as a valid plan, which is untrusted data setting policy.
 - **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
 - **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
-- **plan → lake.** An executed plan that produced knowledge **proposes**; it does not ingest. The Lake's model keeps edge authoring on a single operator-gated surface, and "the platform generated it" is not a reason to bypass that — it is the reason not to.
+- **plan → lake.** **Nothing.** *(Corrected 2026-09-25 with the ruling-1 scoping: this said an executed plan "proposes" knowledge to the Lake. It does not propose either — a user's graph is a sink for shared knowledge, never a source of it. What the agent may ingest into the Lake comes from external reference sources, not from user work product.)*
 
 ### One conflict to resolve: the plan graph has two retention authorities
 
@@ -360,13 +360,24 @@ They are not independent. **Agents author ⇒ authorship is delegated ⇒ per-ed
 4. **The Lake's `writer == checker` byte-equality gate does not survive unchanged.** It holds because the authored set is human-curated and static between commits. With a growing agent-authored set the invariant becomes *a recompile of the current authored set is deterministic*, not *matches a committed golden* — still a real gate, a different one.
 5. **An agent-authored edge is a derived object and takes the high-water mark of its inputs.** The KLC's rule for derived objects already covers this if an edge is treated as one, which it should be.
 
-### The control ruling 1 actually needs: Jarvis learns in front of more than one person
+### Scope of ruling 1, and the flow rules that follow
 
-The Jarvis framing is *learn it and bring it back for use* — which means agent-authored knowledge is **shared**, not per-user. That crosses a boundary this document drew earlier: an ephemeral per-user plan graph produces knowledge that lands in a long-lived shared graph. **User A's task teaches the system something user B later reads.**
+***Corrected 2026-09-25 (maintainer): this section claimed Jarvis learning creates a cross-user inference channel. It does not, because the architecture forbids the flow that would create one.*** The draft read ruling 1 as platform-wide and concluded that one user's task teaches the system something another user reads. **The Jarvis reference is to the Lake only** — the shared long-term memory for reference material: NIST control sets, STIGs, vendor documentation. Per-user graphs stay per-user, and the platform cannot infer between users across their individual graphs.
 
-That is an inference channel, and it is the classic derivative-classification problem rather than a new one: an agent that learns a relationship while working on privileged material can carry that relationship into shared knowledge without any human in the loop, **even when both endpoint documents are individually unclassified.** The aggregation case from finding 3 above is the same hazard with a shorter fuse, because the aggregator is automated and continuous.
+**The flows, stated as rules:**
 
-The mechanism to apply is the one already named, not a new invention — the high-water mark of consequence 5, taken over the *task context* that produced the edge and not merely over its two endpoints. **An edge learned during privileged work inherits that work's mark.** Retention interacts here too: an edge outliving the ephemeral plan graph that produced it is the intended behaviour under Jarvis, which makes the mark the only thing still carrying the context after the plan is gone.
+- **external reference sources → Lake.** This is the Jarvis loop, and it is where agent authoring and ingest are permitted. The corpus is reference material, not user work product.
+- **Lake → per-user graph.** *Measured* access: shared knowledge informs a user's plan graph, mediated by the kernel.
+- **per-user graph → shared.** **Never.** A user's graph is a sink for shared knowledge, not a source of it.
+- **kernel graph → everything.** It constrains all of the above, and **no user sees it or can manipulate it.**
+
+The five consequences of ruling 1 above are unaffected — they concern agent authorship into the Lake, which stands. Three things this scoping changes or sharpens:
+
+1. **Consequence 5 resolves rather than looming.** An agent-inferred edge between two public documents can still take a mark above the Lake's own level, because a relationship can be classified where its endpoints are not. Under these flow rules the answer is not a new mechanism: **an inferred edge whose mark exceeds the Lake's level does not enter the Lake — it stays in the user's graph.** The Lake holds only what flows at its own level, which is the ceiling operand applied to knowledge rather than to a request.
+2. **"Measured access" is load-bearing and is the kernel graph's job.** A shared corpus read by subjects at different clearances is a filtered read, not an open one. That is existing machinery pointed at retrieval.
+3. **Per-user isolation is a property that must be enforced, not assumed.** "The platform cannot infer between users" is true by construction only if something constructs it. The channels that would break it are ordinary engineering ones rather than exotic: a shared embedding or retrieval index over both users' graphs, a shared cache keyed loosely, or model context carrying residue across turns. **This is what the kernel graph is for**, and it is worth stating as a positive requirement rather than as the absence of an edge.
+
+**The one channel that survives, narrowed and named honestly:** the Jarvis loop's *gap detection* fires during a user's task, so the decision to fetch a particular STIG is shaped by that user's work. The ingested content is public; the **fetch pattern** is not necessarily. That is a traffic-analysis channel, not a content channel — far narrower than what this section previously claimed, and worth recording rather than either inflating or dismissing.
 
 ## What this implies for post-Cooky work
 
