@@ -513,6 +513,9 @@ LLMCompiler [R10] Table 1, by benchmark — all search/QA:
 | Movie Rec. | **8-way embarrassingly parallel** | **3.74×** | 2.82× |
 | ParallelQA | dependency-bearing | 2.15× | 2.27× |
 | Game of 24 | replanning | 2.89× | 2.09× |
+| WebShop | exploration | *see below* | — |
+
+**The WebShop number needs correcting.** §12.4 carried "101.7×" without its baseline. That figure is against **LATS**, a brute-force tree search exploring 30 trajectories at 1,066s. Against **ReAct**, LLMCompiler is **slower** — 10.48s against 5.98s on gpt-3.5, 26.73s against 19.90s on gpt-4 — *"mainly due to the Planner overhead."* What it buys on WebShop is **accuracy**: success rate 19.8 → 48.2 (gpt-3.5) and 35.2 → 55.6 (gpt-4), because *"the ReAct agent tends to commit to a decision with imperfect information"* while the parallel plan visits all ten candidates. **Parallelism bought breadth of exploration, not speed**, and on the one benchmark where the planner overhead is not amortised it is a net latency loss.
 
 The headline 3.74× is the 8-way independent case. On **dependency-constrained task graphs** [R4] Table 4 the parallel-to-sequential ratio is 0.88 at 10 nodes and 0.62–0.68 at 50 — **1.1× to 1.8×** — and SGH [R1] estimates only **30–40% of agent tasks have natural parallelism** at all.
 
