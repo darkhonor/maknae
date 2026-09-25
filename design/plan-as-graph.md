@@ -279,11 +279,31 @@ The split is forced rather than merely tidy: [core principle 1](../AGENTS.md) ho
 
 The kernel's graph reaching host state and policy-granted restricted areas is consistent with the existing posture, **including the part the maintainer flagged in passing**: the kernel does not bypass policy to do it. [Core principle 2](../AGENTS.md) — *no role or privilege, not even the kernel, bypasses clearance* — applies to the kernel's own graph as it does to everything else.
 
-### The knowledge graph — read from the Lake's shipped model, not from the KLC
+### The knowledge graph — the KLC and the Lake's shipped model, compared
 
-***Corrected 2026-09-25 (maintainer): the [KLC](knowledge-lifecycle-contract.md) is not current; use the Knowledge Lake's graph models.*** An earlier draft of this section rested its claims on KLC §3/§8/§9.3. It is replaced by what the Lake actually ships. **Provenance, never authority** — the Lake is a separate project and its decisions do not bind this repository, per the [ADR README doctrine](adr/README.md); what follows is precedent worth copying, and the in-repo rule it has to satisfy is [core principle 2](../AGENTS.md)'s *inform-but-not-authorize*, which stands on its own.
+***Scoped 2026-09-25 (maintainer): the [KLC](knowledge-lifecycle-contract.md) is not current on this; read it against the Knowledge Lake's shipped graph models rather than in place of them.*** An earlier draft of this section rested its claims on the KLC alone, and a first correction replaced it with the Lake's model alone. **Both were wrong in the same way** — the two documents answer different questions and the contrast between them is the finding. **Provenance, never authority** — the Lake is a separate project and its decisions do not bind this repository, per the [ADR README doctrine](adr/README.md); the in-repo rule either model must satisfy is [core principle 2](../AGENTS.md)'s *inform-but-not-authorize*, which stands on its own.
 
-The Lake's authored edge surface (`references/lake/edges.yaml`, schema `edges.schema.json` v1, compiler `lib/lake/_edge_graph.py`) is a working answer to most of what this document has been circling, and it is worth reading before anything is designed here:
+**The KLC governs objects. The Lake's shipped model governs relationships.** That is why the KLC reads stale here rather than wrong: it was written before there was an edge model, so it has no answer to *who may assert a relationship* — and the Lake has no answer to *what happens when the corpus is classified*.
+
+| dimension | KLC (in-repo, object layer) | Lake graph model (shipped, relationship layer) |
+|---|---|---|
+| unit of governance | the **object** — tier, label, provenance, hash, per document | the **edge**, a first-class authored artifact with its own schema |
+| vocabulary | authority tiers, domains, bands, natures — an *authority* vocabulary | six relationship types — a *relational* vocabulary |
+| who may write | the agent **may** ingest: gap detection → fetch → quarantine at tier 3 | the agent writes **nothing**; one operator-authored surface |
+| provenance | stamped per object at ingest, with hash | **none per edge** — the tracked file and its git history are the provenance |
+| enforcement point | policy hooks at retrieval and output | schema validation and compiler rejection at build time |
+| integrity construction | the kernel is the integrity root for label state (§6.1) | `writer == checker`: the committed artifact must byte-equal a fresh compile |
+| classification | MLS, ceilings, no-read-up / no-write-down, high-water marks | **absent** — an unclassified corpus |
+
+**Three things fall out of the contrast, and they are the reason not to adopt either wholesale.**
+
+1. **The two documents disagree about agent authorship, and Maknae has to choose.** The KLC's learning loop *permits* agent-initiated ingest under quarantine; the Lake's edge model permits **no** agent authoring at all. Those are different answers to the same question, and the difference is not a detail — it decides whether per-edge provenance is required.
+2. **Provenance is needed exactly where authorship is delegated.** This resolves a claim this document made two sections ago — that provenance belongs on the edge. It does, *if* an untrusted party may author one. The Lake needs no per-edge field because it removes the antecedent: edges never arrive from outside. **The stronger mitigation is not to let the untrusted party author edges**, and per-edge provenance is the fallback for when that is impossible.
+3. **Neither model is sufficient for Maknae on its own.** The Lake's relational layer is the better-engineered artifact and has nothing to say about classification; the KLC has the classification machinery and nothing to say about edges. A knowledge graph in a system with a classification ceiling needs **labels on nodes and on edges** — because a relationship between two unclassified documents can itself be classified, which is the aggregation problem, and neither document addresses it.
+
+### What the Lake's model gets right, and is worth copying verbatim
+
+The authored edge surface (`references/lake/edges.yaml`, schema `edges.schema.json` v1, compiler `lib/lake/_edge_graph.py`) is a working answer to most of what this document has been circling, and it is worth reading before anything is designed here:
 
 - **A closed edge vocabulary of six, and no more:** `supersedes`, `implements`, `governs` (directional), `companion`, `relates_to` (symmetric), `delegates_to`. `additionalProperties: false` and a `const` `schema_version` throughout — the schema is fail-closed, not advisory. A seventh type (`contained_by`) was **YAGNI-deferred by census**, not by taste: one case in the corpus did not earn a vocabulary entry.
 - **Targets are opaque UUIDs only, and the pattern enforces it.** The schema's `uuid` regex *structurally rejects* a filename-valued target. This is the sharpest transferable idea in the model: **the schema forbids the wrong thing rather than documenting that it is wrong.**
@@ -295,7 +315,7 @@ The Lake's authored edge surface (`references/lake/edges.yaml`, schema `edges.sc
 
 **And the disciplined exception to "a graph has no field for prose":** `delegates_to` **requires** a `scope_note` of at least 8 characters. Exactly one edge type, the one whose relationship is meaningless without saying what was delegated, carries a mandatory note. That is the shape a plan graph should copy — not "no prose ever", but *prose only where the schema makes it non-optional because the edge is unreadable without it.*
 
-**A correction to this document's own claim of one section ago.** It asserted that provenance belongs on the edge, because an edge is an assertion neither endpoint's provenance covers. The Lake's model carries **no** provenance field on an edge — and its answer is better for its threat model: **there is a single authored surface, git-tracked and human-authored, and the agent does not write edges at all.** Every edge's provenance is the commit that added it. The per-edge provenance field is needed only where an untrusted party may author edges, so the stronger mitigation is the one the Lake took: **do not let the untrusted party author edges.** For Maknae that reads directly — an agent may *propose* a knowledge edge; the authored surface stays operator-gated.
+For Maknae, finding 2 above reads directly: an agent may *propose* a knowledge edge; the authored surface stays operator-gated, and per-edge provenance is only required if that gate is ever opened.
 
 **Where the maintainer's own example exceeds the current model, honestly:** *"this STIG rule can be implemented by this vendor product in their security document paragraph here"* is an `implements` edge, but the shipped model keys edges to **document ids**, not to a paragraph within one. Sub-document anchors are a real extension, not a configuration — and they are where an id scheme gets hard, because a paragraph anchor must survive the document being reissued.
 
