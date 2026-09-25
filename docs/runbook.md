@@ -510,6 +510,7 @@ Prove Maknae works as an agent on a **packaged** Linux install. An operator enro
 - **The Vault CA** as a PEM file on the host.
 - **The RPM, built on the target OS** (`packaging/rpm/README.md`), so its SELinux module is compiled against that host's policy.
 - **`jq` and `semanage`**: `sudo dnf install -y jq policycoreutils-python-utils`.
+- **#365 landed.** Until it does, the shipped SELinux policy refuses every write on an enforcing host (`denied { ioctl }` for `maknaed_t` on `user_home_t` `dir`), and the trail records `fs.write` `deny`, reason `mutation descriptor missing`.
 - **A provider API key**, which you will put into Vault in step 6. It never goes in a file on this host.
 
 ### 1. Install
@@ -596,7 +597,7 @@ sudo restorecon -Rv /etc/maknae
 From a machine and token allowed to write the path, not from this host:
 
 ```bash
-read -rsp 'API key: ' KEY; echo; printf %s "$KEY" | vault kv put maknae-kv/maknae/providers/openai api-key=-; unset KEY
+read -rsp 'API key: ' KEY && echo && [ -n "$KEY" ] && printf %s "$KEY" | vault kv put maknae-kv/maknae/providers/openai api-key=-; unset KEY
 ```
 
 `printf %s` keeps a trailing newline out of the stored value. A newline would make every provider call fail, because it is not allowed in the `Authorization` header.
@@ -631,9 +632,9 @@ printf 'Maknae is a security kernel for AI agents.\n' > ~/projects/maknae-242/in
 rm -f ~/projects/maknae-242/output.txt
 ```
 
-**Do not create `output.txt`.** The kernel decides the write and records its intent; the CLI then creates the file under your own permissions and reports the outcome. The kernel never writes to your files.
+**Do not create `output.txt`.** The kernel decides the write and records its intent; the CLI creates the file under your own permissions and reports the outcome. The kernel does not read or write your files (ADR-0009, #365).
 
-Replacing a file that already exists still executes in the daemon today. That is being removed (#365), and SELinux refuses it on an enforcing host, so this chapter writes a new file.
+Before any re-run of step 10, repeat `rm -f ~/projects/maknae-242/output.txt`. A second write to the same file takes the replace lane (`mutation.operation:"WriteExisting"`).
 
 ### 9. Start
 
@@ -654,7 +655,7 @@ maknae ping                                  # expect: pong
 ### 10. Hold the conversation
 
 ```bash
-START=$(date -u +%Y-%m-%dT%H:%M:%S); LSTART=$(date '+%x %T')
+START=$(date -u +%Y-%m-%dT%H:%M:%S)
 maknae agent "Read $HOME/projects/maknae-242/input.txt, write a one-sentence summary of it to $HOME/projects/maknae-242/output.txt, then tell me what you wrote."
 cat ~/projects/maknae-242/output.txt
 ```
@@ -684,9 +685,10 @@ What to find:
 | `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
 | `fs.read` | `object` = the canonical path, `result:"permit"` |
-| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"` |
+| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"`, `origin:"KernelObserved"`, `status:"IntentOnly"` (the intent is the kernel's own record) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created file in `effects` |
-| `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or `ReportedOsRefused`/`ReportedPartial`), `intent_seq` pointing at the intent |
+| `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
+| `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing` before #365) |
 
 There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
 
@@ -728,10 +730,11 @@ sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "REA
 ### 14. SELinux
 
 ```bash
-sudo ausearch -m AVC,USER_AVC,FANOTIFY -ts $LSTART    # unquoted: date and time are two arguments
+sudo grep -h 'type=AVC' /var/log/audit/audit.log* | grep -E 'maknaed_t|maknae_egress_t'
+sudo grep -h 'type=FANOTIFY' /var/log/audit/audit.log* | grep -i maknae    # fapolicyd denials
 ```
 
-`LSTART` was recorded at step 10, so the window starts with the conversation. `FANOTIFY` records are fapolicyd denials.
+Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured missing AVC records that the log holds. The log rotates quickly, so run this soon after step 10.
 
 **Expected:** no denials. A denial is a finding: quote it. This chapter is the first run of the delegated read descriptor under an enforcing policy.
 
