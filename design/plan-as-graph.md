@@ -460,7 +460,7 @@ SGH [R1] Theorem 6.3. Let `p_v` be the probability that node *v*'s contract vali
 
 **Correctness is the *product* of per-node validation reliability, so it decays geometrically with plan length.** A 56-node plan at `p_v` = 0.95 bounds at **5.7%**; at 0.99, **57%**. The paper distinguishes two regimes: **syntactic validation** (field existence, types, format) performed by deterministic code, where `p_v ≈ 1`; and **semantic validation** ("is the fix correct?"), where test suites are good and *"LLM-based validation depends on model capability and task difficulty."*
 
-**This is the quantified case for Maknae's posture.** Validation nodes here are `cargo test`, `cargo clippy`, `cargo mutants`, `ci/gates/*.sh` — code, with `p_v` near 1. A design in which a model judges whether each step succeeded degrades multiplicatively with plan length, and at our plan sizes it degrades to nothing. **Use code-based validation or keep plans short; there is no third option.**
+**This is the quantified case for code-based validation.** For Maknae developing Maknae the validating nodes are `cargo test`, `cargo clippy`, `cargo mutants` and `ci/gates/*.sh` — code, with `p_v` near 1. **For a user's plan there is no cargo, and §12.12 works out what the platform can evaluate instead.** A design in which a model judges whether each step succeeded degrades multiplicatively with plan length, and at our plan sizes it degrades to nothing. **Use code-based validation or keep plans short; there is no third option.**
 
 SGH's own mitigations are worth taking: require code-based validation on high-side-effect nodes, provide a `waiting_human` node state for critical steps, and rely on downstream contract failures to catch upstream semantic errors at the next dependency boundary.
 
@@ -580,6 +580,49 @@ Gains decompose as `G_plan`, `G_scaffold`, `G_graph`, `G_patch`, `G_replan`. **T
 ### 12.11 Where a static DAG is the wrong tool
 
 SGH [R1] §9.5 names three task classes the design does not serve: exploratory tasks where sub-tasks are unknown until intermediate results are seen; **dynamic goal evolution — *"investigate the outage and fix whatever is broken"***; and creative generation where revision structure depends on content. **The middle one is a real Maknae workload**, and the honest answer is that it belongs to an agent loop with inline replanning, not to a validated plan graph.
+
+## 12.12 What the platform actually evaluates — and the correctness bound as a gate
+
+§12.1's conclusion was stated too narrowly: *"Maknae's validating nodes are `cargo test`, clippy, mutants and `ci/gates`."* **That is Maknae developing Maknae.** A user's plan — remediate a STIG finding, configure a device, produce a compliance report — has no cargo and no repository test suite. The platform must run deterministic checks against an agent-authored graph during an **evaluation phase** between planning and execution, and those checks cannot assume a domain.
+
+Three tiers, and only the first is domain-independent.
+
+### Tier 1 — graph-level checks, deterministic and domain-free
+
+These are graph algorithms, not judgments, so `p ≈ 1` by construction and they apply to any plan in any domain:
+
+| check | what it rejects |
+|---|---|
+| acyclicity, reachability | cycles; orphan nodes unreachable from any root |
+| join consistency | an `all_of`/`any_of` whose predecessor set is malformed |
+| conflict analysis (§4.7) | unordered nodes with write∩write or write∩read overlap |
+| side-effect class vs dispatch (§6.5) | high-side-effect nodes eligible for speculative parallel dispatch |
+| profile conformance (§6.2) | a required node kind absent; a required adjacency missing |
+| scope containment | a node touching files no task in the plan declared |
+| egress allowlist (§8) | a fetch node whose source is not on the operator-signed list |
+| schema and type validation | a node whose declared inputs cannot be produced by its predecessors |
+
+ATG's [R5] pre-execution *"thought experiment"* adds four more of the same character — consistency, missing-step detection, tool-appropriateness, dependency validation — and is the closest published list to what this tier should contain.
+
+**This tier is the bulk of the tooling and it is buildable today.** It needs no model, no domain corpus, and no per-user configuration beyond the profile.
+
+### Tier 2 — node output contracts, deterministic where the domain supplies one
+
+SGH's contract validation [R1] guards the `running → executed` transition: a node enters `executed` only if its realised output satisfies its contract `κ_v`. **The contract is authored at planning time, before the node runs** — which is what makes it a check rather than a post-hoc rationalisation.
+
+A contract is deterministic when it is structural: an exit status, schema conformance, a file existing with an expected mode and owner, an idempotent re-read returning expected state, a value present in a response. **The domain supplies these, not the platform** — and for the maintainer's domain a great many already ship as published artifacts. A STIG rule carries its own check content, and where SCAP/OVAL definitions exist that check is machine-evaluable without an LLM in the loop. *(Not all of them: a substantial fraction of STIG rules are manual-review only, and those nodes fall to Tier 3.)*
+
+**The general rule this yields: a `verify` node's contract must name a check the platform can evaluate, and the plan declares which.** Where a domain publishes machine-checkable verification content, the plan graph should cite it rather than restate it.
+
+### Tier 3 — nodes with no deterministic contract, and the gate that falls out of the theorem
+
+Where no structural contract exists, validation is a judgment and `p_v < 1`. §12.1's theorem then bites: the plan's correctness bound is `∏ p_v` over every node, so a handful of judgment-validated nodes in a long plan drives the bound toward zero.
+
+**This yields a phase-one check that nothing in the surveyed literature performs: reject the plan because its validation bound is too weak.** If every node declares its contract *class* — `deterministic` (exit status, schema, state re-read), `test-suite`, `published-check` (SCAP/OVAL and similar), `human` (the `waiting_human` state), or `model-judgment` — the evaluator can compute the plan's bound from declared classes alone, before anything executes, and the **profile sets the floor**. A plan that cannot reach the floor is refused with the specific nodes named, and the author's options are to strengthen a contract, split the plan, or route a node to human review.
+
+This makes the validation gap **an authored property of the graph rather than an emergent property of execution**, which is the same move the rest of this design makes everywhere else: state the obligation in the artifact, check it before it runs.
+
+**Two honest limits.** The per-node reliabilities are estimates, not measurements — a declared class is a claim about a check's character, and calibrating `p` per class needs data this project does not have. And the theorem assumes independent validation errors, which correlated failures (one bad model, one wrong assumption threaded through several nodes) violate in the unfavourable direction.
 
 ## 13. Where the labs are
 
