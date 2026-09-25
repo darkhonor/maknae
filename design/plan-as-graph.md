@@ -581,7 +581,7 @@ Gains decompose as `G_plan`, `G_scaffold`, `G_graph`, `G_patch`, `G_replan`. **T
 
 SGH [R1] §9.5 names three task classes the design does not serve: exploratory tasks where sub-tasks are unknown until intermediate results are seen; **dynamic goal evolution — *"investigate the outage and fix whatever is broken"***; and creative generation where revision structure depends on content. **The middle one is a real Maknae workload**, and the honest answer is that it belongs to an agent loop with inline replanning, not to a validated plan graph.
 
-## 12.12 What the platform actually evaluates — and the correctness bound as a gate
+### 12.12 What the platform actually evaluates — and the correctness bound as a gate
 
 §12.1's conclusion was stated too narrowly: *"Maknae's validating nodes are `cargo test`, clippy, mutants and `ci/gates`."* **That is Maknae developing Maknae.** A user's plan — remediate a STIG finding, configure a device, produce a compliance report — has no cargo and no repository test suite. The platform must run deterministic checks against an agent-authored graph during an **evaluation phase** between planning and execution, and those checks cannot assume a domain.
 
