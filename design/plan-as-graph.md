@@ -446,37 +446,65 @@ Asked directly, because it decides how much of this is ours to invent.
 
 **The takeaway is not comfortable: the field is converging on graph-structured execution, the labs are selling it as tooling rather than arguing for it, and the one lab that has argued anything cautions against the framework we are designing.** The governance layer — profiles, floors, validation as authorization — is genuinely ours, which means it also has the least external support.
 
-## 14. Adversarial read: what we are proud of that may be a pitfall
+## 14. What holds up
 
-### 14.1 Fail-closed validation, on a checker measured wrong 60% of the time
+Recorded before the adversarial read so the document is not mistaken for a retraction. Three tiers, by what supports each.
+
+### 14.1 Independently confirmed by outside work
+
+- **Typed, first-class edges beat inferred relationships.** The best-supported claim in this document and the foundation of both graph families. F5's structural finding — *"version transitions are not explicit relationships that can be extracted from text"* — is independent of its contested magnitudes, and F4 puts a number on the failure it prevents: similarity-only retrieval reaches 58–64% on version-sensitive questions. Our `verifies` and `commit-with` edges are the same argument applied to activities.
+- **Stable opaque identifiers, not surface forms.** Not merely correct — correct *where the state of the art is not*. GraphRAG, HippoRAG, HippoRAG 2 and LightRAG all key on LLM-extracted surface forms and all treat name-based merging as unsolved (F9). The Lake imposed opaque ids anyway and has a concrete near-miss proving the point.
+- **Separating the evaluator from the generator.** **Two independent derivations converge here, which is the strongest support available short of a benchmark.** This document reached it from security — the agent runtime is untrusted, so it cannot attest to itself. Anthropic reached it from quality — agents confidently praise their own output, and *making the generator more self-critical did not work* where a separate skeptical evaluator did. Anthropic also names **evaluator-optimizer** as one of five composable patterns.
+- **Parallelism from declared dependencies.** Plan-over-Graph, LLMCompiler and BatchDAG all do exactly this; the maintainer identified it independently while reading a draft. §15.5 disputes the *magnitude* transferring to our workload — it does not dispute the structure, which is field-standard.
+- **The category itself.** Anthropic's distinction — *workflows are LLMs orchestrated through predefined code paths; agents direct their own process* — is precisely what a validated plan graph is. We are not inventing a category, and the field is moving this way: a 2026 survey is titled *From Static Templates to Dynamic Runtime Graphs*.
+- **Plan-then-execute is a real security property, correctly bounded.** Separating planning from execution gives control-flow integrity against indirect prompt injection. Our caveat that it is insufficient alone is also the source's caveat, and Maknae already supplies the defence in depth it asks for at phase two.
+- **Progressive disclosure over loading everything.** Gorilla, ToolLLM and RAG-MCP converge on *retrieve the relevant tools rather than registering all of them*. The 1.8% shape layer is that pattern applied to plans.
+
+### 14.2 Established by our own measurement
+
+Weak provenance (§16.1) — but these are real results, and **the experiment earned its keep by refuting rather than confirming.** A measurement that only agreed with its author would deserve less trust, not more.
+
+- **The shape layer is 1.8% of the markdown**, and shape-plus-heaviest-node is 12%. Progressive disclosure at that ratio makes whole-plan structural checks affordable on every plan.
+- **Compression is not the win** — it refuted the obvious first claim, which was mine.
+- **Inferred typing is not worth building on** — 23–33% unclassified and three false positives in five warnings. This is the result that produced the document's central design decision.
+- **The straight line was an artifact of the format**, not of the work: 89% of ceiling's task pairs touch disjoint files while the conversion produced a strict chain.
+- **Two of five warnings were true structural facts** about real plans — gaps a prose reviewer had not caught.
+
+### 14.3 Correct because it reuses settled doctrine rather than inventing
+
+The security reasoning in this document is largely *not new*, and that is the point in its favour: deny-by-default, **policy over profile**, inform-but-not-authorize, the TCB as the terminus of the trust regress, the `config.d/` custody rule making a subject unable to choose its own profile, and ADR-0022's compiled-in/boot-selected split. **No new security model was invented for graphs.** Where this document does invent — the profile and floor construction (§16.2) — is exactly where it has the least support, and the two facts are related.
+
+## 15. Adversarial read: what we are proud of that may be a pitfall
+
+### 15.1 Fail-closed validation, on a checker measured wrong 60% of the time
 
 Fail-closed is a core principle and it is right. But **the only structural checks ever run in this project produced three false positives out of five warnings** (§4.4). Fail-closed multiplied by an unreliable checker converts a checker bug into a work stoppage — and the failure is silent in the flattering direction, because a false positive looks exactly like discipline. In CI that is tolerable. For an interactive agent it is not. **Nothing in this document proposes how the checker itself earns trust**, and the negative-control gate's own logic applies: a validator that has never been observed wrongly rejecting a good plan proves nothing about its false-positive rate.
 
-### 14.2 The structural guarantee is only as strong as the mediation — and it differs by consumer
+### 15.2 The structural guarantee is only as strong as the mediation — and it differs by consumer
 
 *"You cannot reach the next node without traversing this one"* holds **only if the graph is the only execution path.** In Maknae it nearly is: every request transits the reference monitor. **In a Claude Code skill it is not at all** — the agent has a shell and can do the work outside the graph, then walk the nodes.
 
 This document has been written as though one idea serves both consumers. It does not. **The same design is load-bearing in the kernel and decorative in the harness**, and §11 should be read with that discount applied. A skill can make a plan *checkable*; it cannot make an obligation *enforced*.
 
-### 14.3 Retry back-edges in the plan may be the anti-pattern, not the feature
+### 15.3 Retry back-edges in the plan may be the anti-pattern, not the feature
 
 §6.3 put retry inside the graph, and the maintainer's failure path — *return to the prior activity node* — assumes re-running a node re-runs the same thing. **[SGH](https://arxiv.org/abs/2604.11378) names "unbounded recovery loops" as one of three structural defects of the agent-loop paradigm, and separates planning, execution and recovery into three layers with a strict escalation protocol precisely because LLM nodes are non-deterministic and non-idempotent.** Re-running a write node that half-succeeded is not a retry; it is a second, different edit.
 
 That paper is a position paper with no empirical results, so it is not authority. But it is a considered argument against a choice this document made without considering it.
 
-### 14.4 Plan-then-execute's security value evaporates at the re-plan, and we never said who may author one
+### 15.4 Plan-then-execute's security value evaporates at the re-plan, and we never said who may author one
 
 The control-flow-integrity argument — a validated plan resists indirect prompt injection because the actions are fixed in advance — holds while the plan is fixed. **Every failure path designed here involves retry or escalation, and none of them says who authors the revision.** If the untrusted runtime may re-plan, the injection surface reopens exactly when the system is already degraded. [*Architecting Resilient LLM Agents*](https://arxiv.org/pdf/2509.08646) states plainly that plan-then-execute alone is insufficient and requires defence in depth; Maknae has that at phase two, but **the re-plan authorship question is ours and is unanswered.**
 
-### 14.5 The parallelism speedup is measured on work unlike ours
+### 15.5 The parallelism speedup is measured on work unlike ours
 
 LLMCompiler's often-cited ~3.6× is on **I/O-bound** steps — web searches and API calls. A Maknae plan is Rust edits and `cargo test`, where the build serializes on the target-directory lock. Parallel branches would need separate worktrees or target directories, which is infrastructure nobody here has built. **§4.6's 89% file-disjointness is a real measurement; a speedup does not follow from it**, and this document should not be read as promising one.
 
-### 14.6 A closed schema forbids the unanticipated case too
+### 15.6 A closed schema forbids the unanticipated case too
 
 *"The schema forbids the wrong thing rather than documenting it"* (§7.1) is the right instinct and has a cost. The Lake kept its vocabulary minimal by **census** — a human counted the cases. Under agent authoring (ruling 3) there is no census, and the seventh edge type nobody anticipated becomes an authoring failure rather than a schema request.
 
-## 15. Where we have little grounded fact
+## 16. Where we have little grounded fact
 
 Listed so nothing here is mistaken for evidence.
 
@@ -485,10 +513,10 @@ Listed so nothing here is mistaken for evidence.
 3. **Agent authorship of knowledge edges is explicitly unevaluated** — the Lake synthesis's own open question 2 notes the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is a decision, not a finding.
 4. **Validity is not correctness, and only validity is checkable.** BatchDAG's 98.8% valid-DAG rate over 300 planning calls does not distinguish structural validity from semantic correctness in the abstract, and neither does phase-one validation here. **A structurally perfect plan that does the wrong thing passes every check in this document.**
 5. **The typed-edge magnitudes are contested.** F5's 10%-versus-60% is self-reported on a 100-question author-built benchmark. The structural claim survives; the size of the effect does not.
-6. **Comprehension rot is unmeasured** (§12), as is whether progressive disclosure actually reduces execution-time context (§16).
+6. **Comprehension rot is unmeasured** (§12), as is whether progressive disclosure actually reduces execution-time context (§17).
 7. **No storage-backend evidence** for a structured graph layer, air-gapped or otherwise.
 
-## 16. Open questions
+## 17. Open questions
 
 - Does the payload split (instruction / deliverable / expected output) hold on a plan with large expected-output blocks, or does it just move the p90?
 - Is an S-expression shape layer worth it over JSON once a schema exists? It won on tokens here; a schema-validated form may not need the margin.
