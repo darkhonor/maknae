@@ -136,6 +136,32 @@ The strongest evidence that the profile is the right artifact is that one alread
 
 This also explains a property of those skills worth naming: they are long, repetitive and heavily capitalised because **prose has no enforcement and compensates with volume**. A profile needs neither. The reduction is not a side benefit — a rule that is checked does not need to shout.
 
+## Where a profile lives, and how the witness stops being a harness
+
+*(Added 2026-09-25 from the maintainer's design: profiles configured instance-wide, and a witness that is structural rather than evidentiary.)*
+
+### Profiles are configuration, not code
+
+**The directory is `config.d/`, not `conf.d/`** — `docs/configuration.md` §"Who may write the block". Nothing scans a `conf.d`.
+
+The reason the existing surface is the right one is the custody rule already attached to it: a `config.d/` member must be **root-owned and not group/other-writable, and so must the directory**, or boot refuses with `SectionNotRootOwned`. A profile file inherits that property, and it is exactly the property a profile needs — **the subject a plan executes as cannot choose the profile it is judged against.** A home user sets their standard as root; an enterprise ships one in the image. Per-role assignment is then an ordinary `maknae-authz-basic` binding rather than a new mechanism.
+
+**The split follows [ADR-0022](adr/ADR-0022-classification-system-selection.md)'s precedent exactly: the schema is compiled in, the profile is boot-selected** — as the level order ships in the kernel while the declared system is chosen at boot. That keeps [ADR-0002](adr/ADR-0002-kernel-is-rust.md)'s "no runtime-patchable policy path" intact: a boot-read profile is configuration in the sense `authz.yaml` already is, not a patchable policy surface.
+
+### The witness is an edge, not a receipt
+
+The maintainer's shape, and it is better than the evidentiary one above: a graph is correct when a verifying activity node sits **directly downstream** of the activity it verifies. The guarantee stops being *"produce proof you did it"* and becomes *"you cannot reach the next node without traversing this one."* That removes the negative-test harness rather than formalising it — and the harness is only tolerated today because agents have been caught reporting actions they did not take.
+
+**The condition that makes it sound: the verify node must be executed by the runtime, not reported by the agent.** The edge proves the node was *traversed*; it cannot prove the result was *honest*. If the agent runs the check and announces the outcome, the arrow changes nothing and this is the checkbox with better syntax — the same failure, restated. If the runtime executes the node and its exit status drives the traversal, the agent is not party to the decision and cannot misreport it. **This is the point at which the graph-call primitive from the [Jive assessment](references/2026-09-25-jive-assessment.md) §2 stops being a token optimisation and becomes load-bearing:** the runtime walking the DAG without returning to the model is what makes a structural witness mean anything.
+
+### Three constraints the shape needs to be expressible
+
+1. **The verifying relation must be its own edge kind.** If any edge satisfies "the verify is connected to the activity," then an ordinary dependency — `write → commit` — satisfies it trivially. A `verifies` edge names its subject and is distinct from sequencing.
+2. **"On failure, return to the prior activity" is a cycle, and the acyclicity check rejects it.** As run in this experiment, the cycle check would fail every correctly-formed plan under this design. Retry must be a distinct edge kind excluded from the acyclicity pass, or rule one contradicts rule two.
+3. **A back-edge needs a bound and a terminal.** Unbounded retry is a loop: a maximum attempt count on the retry edge and an escalate-to-human terminal node, the same shape the egress budget's retry decisions took in #295.
+
+**On "a single edge":** read as *adjacency* rather than cardinality. Adjacency is the useful constraint — it forbids `set-permissions → commit → check-permissions`, where the verification is real but arrives after the irreversible step. Cardinality should remain *at least one*, because a single `cargo test` legitimately verifies several writes.
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
@@ -157,6 +183,7 @@ The harder half is the witness. A skill that only *emits* a conformant graph has
 - What is the minimum activity-class vocabulary? Seven were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`). The 23–33% fall-through was a parsing gap and is answered by authoring at birth; what is **not** answered is whether seven classes are enough to express a real plan without a `misc` escape hatch — and a `misc` node is an unclassified node wearing a badge.
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
-- What is the minimum honest witness? A captured exit code is cheap and forgeable by the same agent that writes the graph; the negative-control gate solves this for CI by proving the check can fail, and the analogue for a plan node is not yet obvious.
+- If the runtime executes verify nodes, what executes the runtime's own correctness? A structural witness moves the trust from the agent to the walker; the walker is then the thing that must be trusted, which is a smaller surface but not a zero one.
+- Does a `verifies` edge need to assert *what* was verified, or only *that* verification ran? Naming the subject makes the check stronger and the authoring burden higher.
 
 *Artifacts from this experiment were throwaway and are not committed. The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository.*
