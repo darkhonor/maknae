@@ -236,7 +236,7 @@ The inversion: **a classifier may propose a bin; it may never relax one.** A bin
 **Two properties are needed together, and either alone fails:**
 
 1. **Adjacency makes the activity unskippable.** The graph does not permit reaching the next node without the validating one.
-2. **The platform executes the validating node, not the agent.** Adjacency alone proves *traversal*, never *honesty* — if the agent runs the check and announces the outcome, the arrow changes nothing and this is the markdown checkbox with an edge drawn on it. When the platform executes it and the exit status drives traversal, the agent is not party to the decision. On failure the traversal returns to the prior activity node; it passes or it does not.
+2. **The platform executes the validating node, not the agent.** Adjacency alone proves *traversal*, never *honesty* — if the agent runs the check and announces the outcome, the arrow changes nothing and this is the markdown checkbox with an edge drawn on it. When the platform executes it and the exit status drives traversal, the agent is not party to the decision. **Failure does not travel back along an edge** — see §6.5.
 
 **This is where the graph-call primitive from the [Jive assessment](references/2026-09-25-jive-assessment.md) stops being a token optimisation and becomes load-bearing** — a runtime that walks the graph without returning to the model is what makes property 2 true.
 
@@ -244,15 +244,50 @@ Property 2 has independent support from a direction unrelated to security — se
 
 **The trust regress terminates at the TCB, as it already does.** At some point the platform resolves to OS primitives that have been permitted; risk surface cannot be removed entirely. This is [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md)'s boundary, not a new one. What matters is that validation executes on the trusted side of a line this project already draws: [core principle 1](../AGENTS.md) holds the agent runtime untrusted by design, so **an agent-executed validation asks the untrusted side to attest to itself.**
 
-**Three constraints for expressibility:**
+**One constraint for expressibility:** the verifying relation is **its own edge kind**. If any edge satisfies "the validation is connected to the activity", an ordinary `write → commit` dependency satisfies it trivially. A `verifies` edge names its subject.
 
-1. **The verifying relation is its own edge kind.** If any edge satisfies "the validation is connected to the activity", an ordinary `write → commit` dependency satisfies it trivially. A `verifies` edge names its subject.
-2. **"On failure, return to the prior activity" is a cycle.** An acyclicity check would reject every correctly-formed plan. Retry is a distinct edge kind excluded from that pass, or rule one contradicts rule two.
-3. **A back-edge needs a bound and a terminal** — a maximum attempt count and an escalate-to-human node, the shape #295's retry decisions took. Unattended work (§5.2) is where this stops being pedantic.
+*(Two further constraints appeared in an earlier draft — that retry needs a distinct edge kind excluded from the acyclicity pass, and that the back-edge needs a bound and a terminal. Both are superseded by §6.5: **there is no back-edge.**)*
 
 **"A single edge" reads as adjacency, not cardinality.** Adjacency forbids `set-permissions → commit → check-permissions`, where the validation is real but arrives after the irreversible step. Cardinality remains *at least one*: one `cargo test` legitimately verifies several writes.
 
-### 6.4 The two phases
+### 6.5 Recovery is per-node state, not a graph edge
+
+Reading [SGH](https://arxiv.org/abs/2604.11378) in full replaced this document's retry design with a better one. **The failure path is not an edge.** Each node carries a recovery state, `pristine → retried → patched`, and a **three-level escalation ladder**:
+
+| level | action | precondition |
+|---|---|---|
+| 1 | **local retry** | node is `pristine` |
+| 2 | **local patch** — re-run with adjusted configuration | node is at least `retried` |
+| 3 | **request replan** — a new plan *version* | **every** failed node is at least `patched` |
+
+**Skipping levels is prohibited, and the prohibition is mechanical rather than normative.** The recovery layer exposes exactly three entry points and enforces the order as an API precondition — `attempt_patch` is rejected unless the node is `retried`, `request_replan` is rejected unless all failed nodes are `patched`. An implementation that respects the API boundary cannot violate the invariant; one that mutates node state directly is outside the guarantees, *"analogous to unsafe blocks in type-safe languages."*
+
+**Three things this fixes here.**
+
+- **The DAG stays a DAG.** No retry edge kind, no exclusion from the acyclicity pass, no rule-one-contradicts-rule-two. A cleaner design that removes machinery rather than adding it.
+- **The fan-in ambiguity dissolves rather than being solved.** §4.7 asked which of five predecessors a failing join returns to. The answer is *none*: an `all_of` join becomes ready only when every predecessor reaches `executed`, and a failed predecessor climbs its **own** ladder locally. Recovery is local to the node; the join simply waits.
+- **Level 2 is the rung this document had missed entirely.** It had retry and escalate-to-human. Without *patch*, every non-transient failure jumps to replan — which is precisely the "premature replanning" the survey reports alongside infinite retry as the two observed failure modes.
+
+**And the control §15.4 needed.** The diagnoser that classifies a failure operates on a **diagnostic context, not the execution context** — *"diagnostic reasoning does not leak into the execution path, a property that is critical for auditability."* That is context separation between deciding-what-went-wrong and doing-the-work, and it maps directly onto Maknae's trust split. Re-planning stops being an open door: it is Level 3, gated on an exhausted ladder, producing a new plan version rather than mutating a running graph.
+
+A diagnosis is recorded as `(observed failure, root-cause hypothesis, recommended action, confidence)` — the confidence term connecting to §6.2's bin floor.
+
+### 6.6 Side-effect classification — the property this design lacked entirely
+
+SGH's fourth principle, and it is the most useful thing read this session: **classify every node by side-effect profile, and let the scheduler respect the classification.** *"A read-only API call can be freely retried; a database write cannot."*
+
+This document treated all nodes as equally retryable and equally parallelisable. They are not, and the consequences are two:
+
+1. **Retry budgets differ by side-effect class.** Re-running a `read` is free. Re-running a half-completed `write` is a second, different edit — which is exactly §15.3's non-idempotency problem, and side-effect classification is the mechanism that contains it rather than merely naming it.
+2. **High-side-effect nodes may not be speculatively dispatched in parallel** — a constraint **orthogonal to §4.7's file-conflict rule**. Two `commit` nodes with disjoint file scope still must not run concurrently. File conflict and side-effect class are two independent gates, and §4.7 only described the first.
+
+**The vocabulary is nearly free.** The activity classes already proposed — `read`, `write`, `test`, `verify`, `gate`, `commit` — map almost directly onto a side-effect profile, so this is a floor property (§6.1) rather than new machinery. It should be in the floor and not in an organisation's profile: irreversibility is not a discipline preference.
+
+### 6.7 State the expressiveness boundary
+
+SGH publishes what its design gives up — competitive parallelism, recursive sub-graph expansion, dynamic topology change, parent-chain rollback — and argues the boundary is appropriate rather than universal. **This document should do the same, and a reviewer will ask for it.** Notably it excludes speculative "first of" joins for the reason §4.7 raised independently: cancelling losers mid-execution requires compensation protocols for partial results. They declined the feature rather than solving it, which is a live option here too.
+
+### 6.8 The two phases
 
 **Phase one reads schema + profile** — is this graph well-formed, and does it satisfy its declared discipline. **Phase two runs at execution** — each node is authorized against policy at the moment it is reached, and the validating nodes the profile required are executed by the platform as the graph is walked.
 
@@ -387,6 +422,8 @@ The split is forced rather than tidy: principle 1 holds the agent runtime untrus
 
 The skill's job is **authoring plans into the schema against a declared profile**, not converting them afterwards: emit the shape layer as the plan is written, require an explicit activity-class set per step, require each task to declare its file scope, reject a step that parses to nothing rather than emitting an empty node, and run the structural checks as a self-review gate before the plan reaches the maintainer. The checks that earned their place are cycles, orphans, TDD ordering, and plan-scoped file references. Gate-before-commit belongs to the profile rather than the checker.
 
+A cheap partial answer to validity-versus-correctness, taken from BatchDAG: **probe before fan-out.** Execute one instance of a parallel group and check its result before dispatching the rest, so an incorrect plan costs one branch rather than five.
+
 **The harder half is execution.** A skill that only *emits* a conformant graph has moved the checkbox, not removed it. The validating nodes have to be run by the platform walking the graph, not by the agent reporting on itself — and that half is a Maknae concern, not a skill-authoring one.
 
 ## 12. What the research corpus supports, and what it does not
@@ -486,11 +523,13 @@ Fail-closed is a core principle and it is right. But **the only structural check
 
 This document has been written as though one idea serves both consumers. It does not. **The same design is load-bearing in the kernel and decorative in the harness**, and §11 should be read with that discount applied. A skill can make a plan *checkable*; it cannot make an obligation *enforced*.
 
-### 15.3 Retry back-edges in the plan may be the anti-pattern, not the feature
+### 15.3 Retry back-edges were the anti-pattern — confirmed, and replaced
 
-§6.3 put retry inside the graph, and the maintainer's failure path — *return to the prior activity node* — assumes re-running a node re-runs the same thing. **[SGH](https://arxiv.org/abs/2604.11378) names "unbounded recovery loops" as one of three structural defects of the agent-loop paradigm, and separates planning, execution and recovery into three layers with a strict escalation protocol precisely because LLM nodes are non-deterministic and non-idempotent.** Re-running a write node that half-succeeded is not a retry; it is a second, different edit.
+Read in full, [SGH](https://arxiv.org/abs/2604.11378) is stronger than the summary suggested. Its survey of **70 agent systems** found Agent Loop implementations *"commonly lacked any formal bounds on recovery attempts,"* producing two observed failure modes: **infinite retry** when the model insists on a failing approach, and **premature abandonment** when a transient error triggers an unnecessary replan. This document's design had the first hazard bounded and the second unguarded, because it had no Level 2.
 
-That paper is a position paper with no empirical results, so it is not authority. But it is a considered argument against a choice this document made without considering it.
+**Resolved, not merely flagged:** §6.5 adopts the per-node recovery ladder and §6.6 the side-effect classification. The back-edge is gone.
+
+**Its standing as evidence, unchanged:** a single-author position paper with **no empirical results** — it says so itself, offering *"a theoretical framework, a design analysis, and an experimental protocol—not a production implementation."* What it does have is a formal state machine with termination and soundness arguments and a 70-system survey, which is more than an opinion and less than a finding. **It is adopted here because its design is better reasoned than ours was, not because it is validated.**
 
 ### 15.4 Plan-then-execute's security value evaporates at the re-plan, and we never said who may author one
 
@@ -511,7 +550,12 @@ Listed so nothing here is mistaken for evidence.
 1. **This experiment does not meet the standard this repository applied to Jive.** The [Jive assessment](references/2026-09-25-jive-assessment.md) §1 refused to treat that project's numbers as evidence because they were one author's runs of his own tasks against his own agent. **Every number in §4 is one author's conversion of his own plans, by a parser he wrote, checked by checks he wrote, n=2, no repetition, no independent review.** The same verdict applies: usable for a design read, disqualified as evidence.
 2. **The profile and floor construction has no external support at all.** It is reasoned by analogy from the kernel's `Composition`. No published system governs plan graphs this way, successfully or otherwise.
 3. **Agent authorship of knowledge edges is explicitly unevaluated** — the Lake synthesis's own open question 2 notes the literature validates explicit edges over inferred ones but does not evaluate *who authors them*. Ruling 3 is a decision, not a finding.
-4. **Validity is not correctness, and only validity is checkable.** BatchDAG's 98.8% valid-DAG rate over 300 planning calls does not distinguish structural validity from semantic correctness in the abstract, and neither does phase-one validation here. **A structurally perfect plan that does the wrong thing passes every check in this document.**
+4. **Validity is not correctness, and only validity is checkable — now settled by reading the paper.** BatchDAG's 98.8% means **structural and schema validity**: 255 of 258 plans *"produced valid, executable DAGs"*, and the three failures *"contained schema errors (referencing non-existent columns)."* Nothing about answering the question correctly. Three further details matter and none is in the abstract:
+   - **The denominator is conditioned.** 42 of 300 calls failed on API errors and were excluded. End-to-end the rate is 255/300 = **85%**.
+   - **Validity degrades with structural complexity.** 100% on SQL-only and search-only categories; *"all three failures occurred on complex fan-out queries requiring multi-source joins."* Maknae's plans are the complex kind.
+   - **Their limitations section states this document's §16.4 verbatim:** *"if the planner generates an incorrect DAG, the system executes the full fan-out before the error becomes apparent."* It is a real operational problem, not a theoretical worry — and they propose the mitigation §11 should adopt: **a probe phase that validates on a single batch first.** Run one instance of a fan-out and check the result before dispatching the rest.
+
+   Provenance: single author, Brevian.ai, production self-report, n=12 queries, LLM-assisted drafting acknowledged. The architectural conclusion — *"for cross-entity analytical workloads, the LLM should plan, not execute"*, with four of six operation types requiring zero LLM calls — is independent support for §6.3's property 2.
 5. **The typed-edge magnitudes are contested.** F5's 10%-versus-60% is self-reported on a 100-question author-built benchmark. The structural claim survives; the size of the effect does not.
 6. **Comprehension rot is unmeasured** (§12), as is whether progressive disclosure actually reduces execution-time context (§17).
 7. **No storage-backend evidence** for a structured graph layer, air-gapped or otherwise.
