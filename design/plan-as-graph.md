@@ -176,6 +176,39 @@ That asymmetry means an enterprise-authored profile can only ever tighten. Which
 
 A profile that demands the impossible is then the organisation's own error, and it fails closed and loudly at validation rather than degrading quietly. That is the correct behaviour, not a gap.
 
+### The trust regress terminates at the TCB, as it already does
+
+*(Maintainer, 2026-09-25, answering "what verifies the runtime?": at some point the platform or the OS is the baseline we resolve to. If verification happens in the platform, it uses OS primitives that have been permitted. Risk surface cannot be removed completely.)*
+
+This is not a new boundary — it is [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md)'s, and the answer is that the regress was always going to terminate somewhere and the TCB is where. **What matters is that the verify node executes on the trusted side of a boundary this project already draws**: [core principle 1](../AGENTS.md) says the kernel/trust plane is the only trusted code and *the agent runtime is untrusted by design*. So "the runtime executes the verify node, not the agent" is not an extra control invented for plan graphs — it is the existing TCB boundary applied to one more decision. An agent-executed verification asks the untrusted side to attest to itself, which the architecture already refuses everywhere else.
+
+### Profiles validate at boot, against policy
+
+*(Maintainer: profiles validate at system start; a profile dictating an activity policy denies fails to load, and policy always takes priority over profile.)*
+
+This is the house pattern rather than a new mechanism — `SectionNotRootOwned`, `EgressBoundsRefusal::Undeclared` and the boot bounds gate already refuse at startup and name the file that failed. Two failure classes are worth separating, because the second is the one that earns the boot-time check:
+
+1. **A profile that does not parse.** Ordinary configuration refusal.
+2. **A profile that is well-formed but requires an activity policy denies.** A genuine conflict between two authored artifacts, detected at startup rather than at the moment a task runs. This is the valuable half: the operator learns at boot, not at 2am.
+
+**One recommendation against the maintainer's "maybe fails to start if it is the only profile": refuse boot on *any* invalid profile, not only the last one standing.** A partially-loaded profile set means the enforcement posture depends on which file happened to be malformed, and an operator who fixes one typo gets a different posture than the one they believe they have. Silent degradation of *enforcement* is the thing fail-closed exists to prevent, and the cost — a named refusal identifying the offending file, as the existing gates do — is the cost already paid everywhere else in this system. The counter-argument is real and should be recorded: in an organisation with many profiles, an all-or-nothing boot creates pressure to disable validation. That is a maintainer decision, not an agent's.
+
+### Profiles are typed by task, and the type must not come from the agent
+
+*(Maintainer: profiles come per organisation with a type driven by task — `company-TDD` for a coding task, `company-PP` for a slide deck.)*
+
+The selection step is where a hole opens. **If the agent declares its own task type, the agent selects the profile it is judged against** — which is the custody hole the `config.d/` ownership rule closed for the file, reopened at the point of use. It is also precisely what [core principle 2](../AGENTS.md) already forbids in another form: *access is decided by the reference monitor, not by prompt-level markers or content self-labeling.* **A task declaring its own type is self-labeling.**
+
+So the task-type → profile mapping is configuration, held on the same trusted side as the profiles themselves, and **an unmapped task type fails closed rather than falling back to the least restrictive profile.**
+
+### "Bins" — take Jev's approach, and invert its failure direction
+
+*(Maintainer: tasks given to the agent platform have bins that modify the schema or profile used — the useful part of models like Jev is the approach, not the implementation.)*
+
+The approach is sound: classify the incoming task, let the bin select the enforcement shape. The hazard is specific, and this repository already documented it — the [Jev assessment](references/2026-09-22-system-one-models-jev-assessment.md) found a hosted, closed, remotely-versioned probabilistic classifier whose calibration claim no outside party has tested. **A probabilistic classifier choosing which enforcement profile applies means a misclassification silently changes how much rigor is enforced**, which is self-labeling again with a model standing in for the agent.
+
+The inversion that keeps the useful part: **a classifier may propose a bin; it may never relax one.** Concretely — a bin resolves to a profile only when the mapping is configured and confidence clears a declared floor; otherwise the task takes the **most** restrictive profile available, not the loosest. **A classification failure must cost rigor, never remove it.** Under that rule a misclassified slide deck is merely annoying (it gets asked for tests), while a misclassified coding task cannot quietly escape the organisation's TDD profile — and the failure direction, not the accuracy, is what makes an untested classifier tolerable in the loop at all.
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
@@ -197,7 +230,7 @@ The harder half is the witness. A skill that only *emits* a conformant graph has
 - What is the minimum activity-class vocabulary? Seven were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`). The 23–33% fall-through was a parsing gap and is answered by authoring at birth; what is **not** answered is whether seven classes are enough to express a real plan without a `misc` escape hatch — and a `misc` node is an unclassified node wearing a badge.
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
-- If the runtime executes verify nodes, what executes the runtime's own correctness? A structural witness moves the trust from the agent to the walker; the walker is then the thing that must be trusted, which is a smaller surface but not a zero one.
+- Where does the bin's confidence floor come from, and who may set it? A floor the classifier's own vendor sets is not a floor.
 - Does a `verifies` edge need to assert *what* was verified, or only *that* verification ran? Naming the subject makes the check stronger and the authoring burden higher.
 
 *Artifacts from this experiment were throwaway and are not committed. The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository.*
