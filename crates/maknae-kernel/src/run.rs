@@ -2497,6 +2497,43 @@ where
         while handlers.try_join_next().is_some() {}
     };
 
+    // #265 A1 (AU-2): the stop, with its reason. Bounded like the drains below.
+    let (result, reason, posture) = match &outcome {
+        ServeOutcome::GracefulShutdown => {
+            ("permit", "shutdown: signal received".to_string(), "stopped")
+        }
+        ServeOutcome::SupervisorExited(e) => (
+            "deny",
+            format!("shutdown: credential supervisor exited: {e}"),
+            "unavailable",
+        ),
+    };
+    let stop = make_record(
+        "shutdown",
+        &wctx.host,
+        &wctx.socket,
+        nix::unistd::geteuid().as_raw(),
+        None,
+        None,
+        None,
+        session_ids.next_session(),
+        1,
+        "serve",
+        None,
+        result,
+        &reason,
+        posture,
+        &wctx.au3_1,
+    );
+    match tokio::time::timeout(AUDIT_DRAIN_SHUTDOWN_TIMEOUT, emit.emit(&stop)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("maknaed: AUDIT WRITE FAILED on the shutdown record: {e}"),
+        Err(_) => eprintln!(
+            "maknaed: the shutdown record did not append within {}s",
+            AUDIT_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
+        ),
+    }
+
     // #240: the credential supervisor is stopped HERE, before the drains and the
     // caller's `client.shutdown()` (see `SUPERVISOR_ABORT_REAP_TIMEOUT`). Not on
     // the path where it already exited — that handle has been polled to
@@ -2750,6 +2787,51 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
     RunError::AuditOffload(format!("{catalog}: {reason}"))
 }
 
+/// #265 C2: boot evidence that cannot be durably appended refuses boot.
+fn boot_evidence_refused(what: &str, e: maknae_audit_append::AuditError) -> RunError {
+    RunError::Other(format!(
+        "the boot {what} record was not durably appended: {e}"
+    ))
+}
+
+/// #265 A2: one boot `start` deny record for a post-sink startup failure no
+/// other refusal already recorded.
+#[allow(clippy::too_many_arguments)]
+async fn record_start_refusal<E: AuditEmit + Send + Sync>(
+    sink: &E,
+    host: &str,
+    socket: &str,
+    uid: u32,
+    session_id: u64,
+    seq: u64,
+    au3_1: &serde_json::Value,
+    result: &Result<ServeOutcome, RunError>,
+) {
+    let Err(RunError::Other(reason)) = result else {
+        return;
+    };
+    let rec = make_record(
+        "boot",
+        host,
+        socket,
+        uid,
+        None,
+        None,
+        None,
+        session_id,
+        seq,
+        "start",
+        None,
+        "deny",
+        reason,
+        "unauthorized",
+        au3_1,
+    );
+    if let Err(e) = sink.emit(&rec).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on the boot start refusal: {e}");
+    }
+}
+
 /// Read the root-owned boot posture marker (`<config_dir>/private/posture.yaml`,
 /// spec §4.6/§5.2) — the daemon can read it but never modify it. A MISSING file
 /// (never provisioned) or a MALFORMED one (bad YAML, wrong shape, a missing
@@ -2889,16 +2971,60 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     // `Seq::new()`s would both carry seq 1 and collide on (session_id, seq).
     // Every boot-time emitter below draws from this counter.
     let boot_seq = Seq::new();
+    let result = boot_after_sink(
+        config_dir,
+        boot,
+        transport,
+        egress_cfg,
+        &audit_cfg,
+        &sink,
+        &session_ids,
+        &host,
+        &socket,
+        euid,
+        &boot_seq,
+    )
+    .await;
+    record_start_refusal(
+        sink.as_ref(),
+        &host,
+        &socket,
+        euid,
+        boot_session_id(&session_ids),
+        boot_seq.next(),
+        &audit_cfg.au3_1,
+        &result,
+    )
+    .await;
+    result
+}
+
+/// Everything `run_inner` does once the audit sink is open, so that a startup
+/// failure here reaches [`record_start_refusal`] (#265 A2).
+#[allow(clippy::too_many_arguments)]
+async fn boot_after_sink(
+    config_dir: &Path,
+    boot: crate::BootConfig,
+    transport: maknae_config::TransportConfig,
+    egress_cfg: maknae_config::EgressConfig,
+    audit_cfg: &maknae_config::AuditConfig,
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    session_ids: &Arc<SessionIds>,
+    host: &str,
+    socket: &str,
+    euid: u32,
+    boot_seq: &Seq,
+) -> Result<ServeOutcome, RunError> {
     // #189: a configured `audit.siem` promises off-host offload that does not
     // exist until #223. Fail closed -- and audit the refusal, per the ordering
     // rule stated for the authz gate below.
-    if let Err(e) = crate::boot_gate::audit_offload_boot_gate(&audit_cfg) {
+    if let Err(e) = crate::boot_gate::audit_offload_boot_gate(audit_cfg) {
         return Err(refuse_audit_offload_boot(
             sink.as_ref(),
-            &host,
-            &socket,
+            host,
+            socket,
             euid,
-            boot_session_id(&session_ids),
+            boot_session_id(session_ids),
             boot_seq.next(),
             &audit_cfg.au3_1,
             e.to_string(),
@@ -2918,10 +3044,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         Err(e) => {
             return Err(refuse_authz_boot(
                 sink.as_ref(),
-                &host,
-                &socket,
+                host,
+                socket,
                 euid,
-                boot_session_id(&session_ids),
+                boot_session_id(session_ids),
                 boot_seq.next(),
                 &audit_cfg.au3_1,
                 e.to_string(),
@@ -2976,10 +3102,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         Err(e) => {
             return Err(refuse_authz_boot(
                 sink.as_ref(),
-                &host,
-                &socket,
+                host,
+                socket,
                 euid,
-                boot_session_id(&session_ids),
+                boot_session_id(session_ids),
                 boot_seq.next(),
                 &audit_cfg.au3_1,
                 e.to_string(),
@@ -3002,13 +3128,13 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let composition_name = maknae_security::guarded_backend_name(&authorizer);
     let composition_rec = make_record(
         "boot",
-        &host,
-        &socket,
+        host,
+        socket,
         euid,
         None,
         None,
         None,
-        boot_session_id(&session_ids),
+        boot_session_id(session_ids),
         boot_seq.next(),
         "authz",
         None,
@@ -3025,11 +3151,9 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         "authorized",
         &audit_cfg.au3_1,
     );
-    if let Err(e) = sink.emit(&composition_rec).await {
-        eprintln!(
-            "maknaed: AUDIT WRITE FAILED on boot composition record — boot proceeded without a durable record: {e}"
-        );
-    }
+    sink.emit(&composition_rec)
+        .await
+        .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
     let principal = Arc::new(principal);
 
@@ -3064,9 +3188,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
 
     // --- BOOT POSTURE RECORD (spec §5.2/§5.3): stated BEFORE mint, right after the
-    // plane client resolved which SecretID source it actually used. A durable-append
-    // failure here is logged but non-fatal (mirrors every other boot-record emit) —
-    // credential posture is an audit STATEMENT, not itself a gate.
+    // plane client resolved which SecretID source it actually used. An append
+    // failure refuses boot (#265 C2).
     //
     // `expected_target` is the deterministic sealed-credential path THIS boot's
     // config implies — `<config_dir>/private/maknaed-secret-id.{cred,sep}`, the
@@ -3096,13 +3219,13 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     );
     let posture_rec = make_record(
         "boot",
-        &host,
-        &socket,
+        host,
+        socket,
         euid,
         None,
         None,
         None,
-        boot_session_id(&session_ids),
+        boot_session_id(session_ids),
         boot_seq.next(),
         "posture",
         None,
@@ -3111,11 +3234,9 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
         posture.as_str(),
         &audit_cfg.au3_1,
     );
-    if let Err(e) = sink.emit(&posture_rec).await {
-        eprintln!(
-            "maknaed: AUDIT WRITE FAILED on boot posture record — boot proceeded without a durable record: {e}"
-        );
-    }
+    sink.emit(&posture_rec)
+        .await
+        .map_err(|e| boot_evidence_refused("posture", e))?;
     if posture != crate::posture::Posture::HrotSealed {
         eprintln!(
             "maknaed: {}",
@@ -3157,7 +3278,7 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
             boot.document(),
             &maknae_config::ResolvedSettings {
                 transport: &transport,
-                audit: &audit_cfg,
+                audit: audit_cfg,
                 vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
                 vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
                 egress: &egress_cfg,
@@ -3191,10 +3312,10 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let outcome = serve_after_mint(
         &client,
         &ca,
-        &sink,
+        sink,
         transport,
-        &audit_cfg,
-        Arc::clone(&session_ids),
+        audit_cfg,
+        Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
         Arc::clone(&principal),
@@ -3471,8 +3592,8 @@ mod tests {
 
     /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
     /// the shutdown chain at the deadline CEILING, term by term and in the
-    /// order `accept_loop` and `run_inner` execute them — the supervisor
-    /// abort-reap, the handler drain (deadline + its own bound) and the reap
+    /// order `accept_loop` and `run_inner` execute them — the stop record's
+    /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
     /// of what it aborts, the audit drain, the plane client's shutdown (a
     /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
     /// four rounds each found a term the expression had skipped while the
@@ -3488,7 +3609,8 @@ mod tests {
             read_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
             ..maknae_config::transport_from_section(None).unwrap()
         };
-        let chain = SUPERVISOR_ABORT_REAP_TIMEOUT
+        let chain = AUDIT_DRAIN_SHUTDOWN_TIMEOUT
+            + SUPERVISOR_ABORT_REAP_TIMEOUT
             + handler_drain_bound(
                 &ceiling,
                 Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
@@ -3727,6 +3849,102 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .block_on(run_inner(dir))
     }
 
+    struct TestEmit {
+        fail: bool,
+        recs: Mutex<Vec<AuditRecord>>,
+    }
+    impl TestEmit {
+        fn new(fail: bool) -> Self {
+            TestEmit {
+                fail,
+                recs: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl AuditEmit for TestEmit {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+            let r = if self.fail {
+                Err(maknae_audit_append::AuditError::WritePrimary(
+                    "injected".into(),
+                ))
+            } else {
+                self.recs.lock().unwrap().push(rec.clone());
+                Ok(())
+            };
+            async move { r }
+        }
+    }
+    fn evidence() -> AuditRecord {
+        make_record(
+            "boot",
+            "h",
+            "s",
+            0,
+            None,
+            None,
+            None,
+            1,
+            1,
+            "posture",
+            None,
+            "permit",
+            "r",
+            "p",
+            &serde_json::Value::Null,
+        )
+    }
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn boot_evidence_that_cannot_be_appended_refuses_boot() {
+        let refused = block_on(TestEmit::new(true).emit(&evidence()))
+            .map_err(|e| boot_evidence_refused("posture", e));
+        match refused {
+            Err(RunError::Other(m)) => {
+                assert!(m.contains("posture") && m.contains("injected"), "{m}")
+            }
+            other => panic!("expected Err(RunError::Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_post_sink_startup_failure_is_recorded_once_and_a_recorded_refusal_is_not() {
+        let rec = |result: Result<ServeOutcome, RunError>| {
+            let e = TestEmit::new(false);
+            block_on(record_start_refusal(
+                &e,
+                "h",
+                "s",
+                0,
+                7 << 32,
+                4,
+                &serde_json::Value::Null,
+                &result,
+            ));
+            e.recs.into_inner().unwrap()
+        };
+        let recs = rec(Err(RunError::Other("bind: address in use".into())));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            (
+                recs[0].event.as_str(),
+                recs[0].action.as_str(),
+                recs[0].outcome.result.as_str()
+            ),
+            ("boot", "start", "deny")
+        );
+        assert!(recs[0].outcome.reason.contains("bind: address in use"));
+        assert_eq!((recs[0].session_id, recs[0].seq), (7 << 32, 4));
+        assert!(rec(Err(RunError::Authz("a".into()))).is_empty());
+        assert!(rec(Err(RunError::AuditOffload("o".into()))).is_empty());
+        assert!(rec(Ok(ServeOutcome::GracefulShutdown)).is_empty());
+    }
+
     // (a) A missing `authz.yaml` refuses to start with the NEW distinct error
     // variant, having written a durable AU-3 refusal record — spec §5.4.
     #[test]
@@ -3887,6 +4105,22 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 comp_rec.seq, posture_rec.seq,
                 "boot records collided on seq"
             );
+            // #265 A2: the later failure is itself on the trail, last.
+            let start = recs.last().unwrap();
+            assert_eq!(
+                (
+                    start.event.as_str(),
+                    start.action.as_str(),
+                    start.outcome.result.as_str()
+                ),
+                ("boot", "start", "deny")
+            );
+            let Err(RunError::Other(reason)) = &result else {
+                unreachable!()
+            };
+            assert_eq!(&start.outcome.reason, reason);
+            assert_eq!(start.session_id, posture_rec.session_id);
+            assert!(start.seq > posture_rec.seq);
         } else {
             // Unprivileged (every CI lane, this dev host): the authz gate still
             // refuses — for `NotRootOwned` specifically (checked below via its

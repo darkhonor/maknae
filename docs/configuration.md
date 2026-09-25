@@ -549,12 +549,12 @@ egress:
   work — the handshake, the group lookup, the frame read and the response write (each at
   its `transport` timeout), the PDP decision and the verb's own blocking step, this
   deadline, the close, and a ten-second margin for the audit appends — so the outcome record is written, and the shipped units'
-  stop timeouts (`TimeoutStopSec=880`, launchd `ExitTimeOut`) cover that drain at BOTH
+  stop timeouts (`TimeoutStopSec=885`, launchd `ExitTimeOut`) cover that drain at BOTH
   ceilings (60 s transport timeouts, 600 s deadline) plus every other term of the
-  shutdown chain — the credential supervisor's abort and reap, the reap of aborted
+  shutdown chain — the stop record's append, the credential supervisor's abort and reap, the reap of aborted
   handlers, the audit drain, the plane client's bounded lock wait and token revoke, and the
   runtime teardown — and a kernel test holds the unit values to that chain, two-sided. At
-  the defaults the chain is 391 s; a stop with nothing in flight exits in milliseconds. One
+  the defaults the chain is 396 s; a stop with nothing in flight exits in milliseconds. One
   more bound at the ceiling: a prompt that fills `transport.frame_max_bytes` at its own
   1 MiB maximum re-wraps into an egress frame larger than the deputy's 1 MiB request cap
   and is refused before it is sent (`send failed` in the trail, nothing left the host).

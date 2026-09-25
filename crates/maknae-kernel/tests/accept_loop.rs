@@ -519,10 +519,21 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
         }
         other => panic!("expected ServeOutcome::SupervisorExited, got {other:?}"),
     }
+    let recs = emit.records();
+    assert_eq!(
+        recs.len(),
+        1,
+        "only the stop record — no connection was processed past the supervisor exit: {recs:?}"
+    );
+    assert_eq!(recs[0].event, "shutdown");
+    assert_eq!(recs[0].outcome.result, "deny");
     assert!(
-        emit.records().is_empty(),
-        "no connection should ever have been processed — the accept loop must not \
-         continue past the supervisor exit"
+        recs[0]
+            .outcome
+            .reason
+            .contains("credential supervisor exited"),
+        "{:?}",
+        recs[0].outcome
     );
 }
 
@@ -567,6 +578,15 @@ async fn shutdown_signal_yields_graceful_outcome() {
     assert!(
         matches!(outcome, ServeOutcome::GracefulShutdown),
         "expected ServeOutcome::GracefulShutdown, got {outcome:?}"
+    );
+    let recs = emit.records();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0].event, "shutdown");
+    assert_eq!(recs[0].outcome.result, "permit");
+    assert!(
+        recs[0].outcome.reason.contains("signal"),
+        "{:?}",
+        recs[0].outcome
     );
 }
 
