@@ -73,6 +73,7 @@ Eight structural checks ran against the shape layer. These are properties invisi
 | write-before-test across 56 steps | hold 9 tasks in your head at once | one query |
 | commit with no gate before it | as above | one query |
 | step touching a file outside its declared scope | grep and cross-reference by hand | set difference |
+| two unordered steps writing the same file | not expressible — markdown has no "unordered" | reachability + set intersection (§4.6) |
 
 All of it against **991 tokens** — which makes the checks affordable on *every* plan, a different claim from being possible at all.
 
@@ -98,6 +99,31 @@ And two findings survive the change of birth format:
 - **Conventions that lived in prose.** The gate-batching convention a human reader absorbs must become a declared field (`gates-deferred-to`) or its check reports a defect forever.
 
 **The general form: prose is lossy for machines and lossless for humans, and removing it converts an implicit obligation into an explicit schema field.** Schema completeness is then the only thing standing between a structural check and a confident wrong answer — the same finding as before, relocated from the parser to the vocabulary.
+
+### 4.6 Parallelism — the straight line is an artifact of the format
+
+A markdown plan is a numbered list, and a numbered list implies sequence whether or not the work requires it. **The conversion shows this starkly: every graph this experiment produced is a strict chain** — `t1 → t2 → … → t9`, each step depending on exactly the one printed above it — because document order was the only dependency information the source contained.
+
+Measured against what the plans actually declare:
+
+| plan | tasks with declared files | task pairs | **file-disjoint pairs** |
+|---|---:|---:|---:|
+| ceiling | 8 of 9 | 28 | **25 (89%)** |
+| strike | 4 of 6 | 6 | **6 (100%)** |
+
+**The linear structure came from the format, not from the work.** Tasks with no dependency between them can be dispatched concurrently to subagents; only where one task's outcome feeds another does ordering matter at all.
+
+**The honest bound:** file-disjointness is *necessary but not sufficient*. The ceiling plan has genuine ordering that no file overlap reveals — Task 5 wires a composition root that Task 1's normalizer feeds, an **interface** dependency with no shared file. So 89% is the candidate set after eliminating write conflicts, not a schedule; the real parallelism is lower and is only computable from declared interface edges. That is precisely what the authoring skills' `Interfaces: Consumes / Produces` block was trying to express in prose, and it becomes a typed edge.
+
+**Three consequences, and the second is the one that matters.**
+
+1. **Real parallelism requires declared edges, not inferred order.** Another argument for authoring over conversion: a retrofit cannot recover a dependency the source never stated, so it must assume the worst and serialize everything.
+2. **A missing edge is now a correctness bug, not a documentation gap.** Under sequential execution, an omitted dependency is invisible — document order silently supplies it. Under parallel dispatch, two subagents race on the same file. **Declared file scope stops being a convenience for checking and becomes load-bearing for safety**, and it yields a structural check that only exists because of parallelism: *two nodes with no ordering path between them must not declare overlapping write scope.* That belongs in the floor (§6.1), not in an organisation's profile.
+3. **The critical path becomes measurable.** With real edges the longest path through the graph is the minimum achievable wall-clock, and the difference between it and the node count is how much a plan's sequencing is costing. Prose gives no such number.
+
+**It also interacts with the execution model.** Each subagent is another instance of the untrusted runtime, so parallel branches are several untrusted runtimes against one kernel — which the PDP already handles, since it decides per request. What gets harder is everything with a shared budget or a total order: retry counts (§6.3 constraint 3) across concurrent branches, escalation when two branches fail independently, and audit ordering under [ADR-0019](adr/ADR-0019-audit-record-model.md) when events no longer arrive in plan order.
+
+*(The maintainer's related observation, recorded without re-litigating it: a lifecycle described as a straight line has the same problem as a plan described as one — the linearity may be in the description rather than in the thing.)*
 
 ---
 
@@ -344,6 +370,8 @@ The skill's job is **authoring plans into the schema against a declared profile*
 - Is an S-expression shape layer worth it over JSON once a schema exists? It won on tokens here; a schema-validated form may not need the margin.
 - What is the minimum activity-class vocabulary? Seven were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`). Authoring at birth answers the fall-through rate; it does not answer whether seven suffice without a `misc` escape hatch — and a `misc` node is an unclassified node wearing a badge.
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
+- How much of the 89% file-disjointness survives interface-dependency analysis? The measured figure is an upper bound on candidate parallelism, not a schedule, and the real number is unmeasured.
+- Under parallel dispatch, is the retry bound per-branch or per-graph? Per-branch multiplies the worst case by the branch count; per-graph makes one unlucky branch starve the others.
 - How many profiles are needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
 - Where does a bin's confidence floor come from, and who may set it? A floor the classifier's vendor sets is not a floor.
 - Does a long-lived scheduled graph hold node state **in** the artifact (no longer immutable) or **beside** it (the two can disagree)?
