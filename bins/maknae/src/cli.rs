@@ -172,6 +172,7 @@ impl From<Verb> for maknae_proto::Verb {
                 path,
                 content: maknae_proto::Bytes::new(zeroize::Zeroizing::new(Vec::new())),
                 mode: maknae_proto::WriteMode::Existing,
+                conversation: None,
             },
             Verb::Delete { path, recursive } => maknae_proto::Verb::FsDelete { path, recursive },
             Verb::Mkdir { path, parents } => maknae_proto::Verb::FsMkdir {
@@ -559,6 +560,7 @@ pub(crate) async fn send_verb(
 pub(crate) fn write_request(
     path: String,
     content: zeroize::Zeroizing<Vec<u8>>,
+    conversation: Option<String>,
     frame_max: usize,
 ) -> Result<maknae_proto::Verb, String> {
     // Judged BEFORE the encode, so an over-budget write is refused in the caller's
@@ -568,6 +570,7 @@ pub(crate) fn write_request(
         return Err("content exceeds the configured frame budget".to_string());
     }
     let request = maknae_proto::Verb::FsWrite {
+        conversation,
         path,
         content: maknae_proto::Bytes::new(content),
         mode: maknae_proto::WriteMode::Existing,
@@ -772,10 +775,26 @@ mod tests {
     /// caller. Over-budget content must be refused BEFORE the encode, with the
     /// stdin path's wording, not as an opaque codec failure.
     #[test]
+    fn write_request_carries_the_conversation_it_is_given() {
+        let v = write_request(
+            "/projects/a".into(),
+            zeroize::Zeroizing::new(b"x".to_vec()),
+            Some("conv-cli".into()),
+            4096,
+        )
+        .unwrap();
+        assert!(matches!(
+            v,
+            maknae_proto::Verb::FsWrite { conversation: Some(ref c), .. } if c == "conv-cli"
+        ));
+    }
+
+    #[test]
     fn write_request_refuses_content_over_the_frame_budget() {
         let e = write_request(
             "/projects/big".into(),
             zeroize::Zeroizing::new(vec![7u8; 64]),
+            None,
             16,
         )
         .expect_err("over-budget content must not encode");

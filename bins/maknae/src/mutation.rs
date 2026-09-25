@@ -741,6 +741,7 @@ mod tests {
             path,
             content: proto::Bytes::new(zeroize::Zeroizing::new(b"new bytes".to_vec())),
             mode: proto::WriteMode::Existing,
+            conversation: None,
         }
     }
     #[test]

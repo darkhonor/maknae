@@ -1461,6 +1461,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
             path: "/home/test/x".into(),
             content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
             mode: maknae_proto::WriteMode::Existing,
+            conversation: None,
         },
     ] {
         let emit = RecEmit::new();

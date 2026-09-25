@@ -175,3 +175,11 @@ Dated as-built amendment; rides the #275 PR. Four statements.
 **Measured, and stated plainly rather than as an edge case:** with a real identity the widest `session.prompt` records are 1027 bytes (`alice`/`user`), 1042 (`aackerman`/`admin`) and 1123 (a 32-byte user with `adversary`) against the 1015 cap. **On macOS those records mirror in degraded form always.** `log show` is therefore no longer a place to reconstruct a full content-plane record on that platform; the JSONL is that place, on both.
 
 **4. This changes no control posture.** AU-3 and AU-3(1) are satisfied by the primary append-only JSONL sink, which has **no size cap** and is identical on both platforms; decision 3 already states the system-log mirror is best-effort and that its absence can never mask or convert a primary-sink outcome. A mirror that summarizes and points is what "best-effort" already promised — the marker is an availability signal, **not a second AU-3 surface**, and it deliberately does not attempt the six elements.
+
+## Amendment (2026-09-25, #265) — the conversation identifier on `fs.write` records
+
+**The record gains an optional top-level `conversation`**, set only on `fs.write` records, and omitted when absent. `FsWrite` carries the loop's conversation identifier with the same status it has on `session.prompt`: client-supplied, informational, never a verdict input, and held to `conversation_id_is_acceptable`. An unacceptable identifier is refused `BadRequest` at the operand pre-gate before the PDP, and never reaches the trail. Every record built from the write's base record carries it: the refusal, the intent and the completion.
+
+**Why it is here:** AU-3 asks what produced the event. A write the loop made on a model's proposal joins by `conversation` to the `session.prompt` egress records, which name the provider (`object`). The provider's registry entry names the model, so the join gives the full attribution without copying it into every record. The identifier is a client claim, and the record treats it as one. The subject and the verdict stay the kernel's own.
+
+**The JSONL is the full record on both platforms.** The macOS and journald mirror caps do not constrain record content. The constraint is what AU-3/AU-3(1) require, and nothing more.

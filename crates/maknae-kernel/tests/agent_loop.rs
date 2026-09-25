@@ -203,7 +203,7 @@ impl Plane for FixturePlane {
             _ => ReadOutcome::Unavailable,
         }
     }
-    async fn write(&mut self, path: &str, content: &[u8]) -> WriteOutcome {
+    async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
         // Replacement lane: the kernel executes through a delegated writable fd.
         let fd = std::fs::OpenOptions::new()
             .write(true)
@@ -211,6 +211,7 @@ impl Plane for FixturePlane {
             .ok()
             .map(std::os::fd::OwnedFd::from);
         let verb = Verb::FsWrite {
+            conversation: Some(conversation.into()),
             path: path.into(),
             content: maknae_proto::Bytes::new(Zeroizing::new(content.to_vec())),
             mode: maknae_proto::WriteMode::Existing,
@@ -320,6 +321,11 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         .iter()
         .filter(|r| r.action == "session.prompt")
         .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
+    let writes: Vec<_> = recs.iter().filter(|r| r.action == "fs.write").collect();
+    assert_eq!(writes.len(), 2, "intent + completion: {writes:?}");
+    assert!(writes
+        .iter()
+        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
     // The drained count, and it detects UNDER-consumption only:
     // `Scripted::send` answers an empty queue with
     // `EgressFailure::Transport("script exhausted")` rather than panicking, so
@@ -457,6 +463,7 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         .find(|r| r.action == "fs.write")
         .expect("an fs.write record");
     assert_eq!(w.outcome.result, "deny");
+    assert_eq!(w.conversation.as_deref(), Some("agent-wd-conv"));
     assert_eq!(
         egress.remaining(),
         0,

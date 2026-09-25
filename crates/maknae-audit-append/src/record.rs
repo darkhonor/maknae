@@ -250,6 +250,10 @@ pub struct AuditRecord {
     /// other record and on a prompt refused before any send was considered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<EgressAudit>,
+    /// The loop's conversation identifier on `fs.write` records (#265) —
+    /// client-supplied, informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -345,6 +349,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             egress: None,
+            conversation: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -428,6 +433,18 @@ mod tests {
         let mut sent = e.clone();
         sent.status = EgressStatus::Sent;
         assert!(!sent.is_intent());
+    }
+
+    #[test]
+    fn conversation_is_absent_when_none_and_a_top_level_key_when_set() {
+        let s = canonical_json(&sample()).unwrap();
+        assert!(!s.contains("conversation"), "{s}");
+        let mut rec = sample();
+        rec.conversation = Some("conv-265".into());
+        let s = canonical_json(&rec).unwrap();
+        assert!(s.contains("\"conversation\":\"conv-265\""), "{s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.conversation.as_deref(), Some("conv-265"));
     }
 
     #[test]
@@ -568,6 +585,7 @@ mod tests {
                 object_requested: None,
                 mutation: None,
                 egress: None,
+                conversation: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

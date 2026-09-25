@@ -1185,6 +1185,7 @@ mod tests {
                 path: "/x".into(),
                 content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
                 mode: maknae_proto::WriteMode::Existing,
+                conversation: None,
             },
             Verb::FsDelete {
                 path: "/x".into(),

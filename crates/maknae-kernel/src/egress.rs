@@ -954,6 +954,7 @@ mod tests {
                 conversation: "c".into(),
                 reply_length: None,
             }),
+            conversation: None,
         }
     }
 
