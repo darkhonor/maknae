@@ -492,7 +492,7 @@ Recorded before the adversarial read so the document is not mistaken for a retra
 - **Typed, first-class edges beat inferred relationships.** The best-supported claim in this document and the foundation of both graph families. F5's structural finding — *"version transitions are not explicit relationships that can be extracted from text"* — is independent of its contested magnitudes, and F4 puts a number on the failure it prevents: similarity-only retrieval reaches 58–64% on version-sensitive questions. Our `verifies` and `commit-with` edges are the same argument applied to activities.
 - **Stable opaque identifiers, not surface forms.** Not merely correct — correct *where the state of the art is not*. GraphRAG, HippoRAG, HippoRAG 2 and LightRAG all key on LLM-extracted surface forms and all treat name-based merging as unsolved (F9). The Lake imposed opaque ids anyway and has a concrete near-miss proving the point.
 - **Separating the evaluator from the generator.** **Two independent derivations converge here, which is the strongest support available short of a benchmark.** This document reached it from security — the agent runtime is untrusted, so it cannot attest to itself. Anthropic reached it from quality — agents confidently praise their own output, and *making the generator more self-critical did not work* where a separate skeptical evaluator did. Anthropic also names **evaluator-optimizer** as one of five composable patterns.
-- **Parallelism from declared dependencies.** Plan-over-Graph, LLMCompiler and BatchDAG all do exactly this; the maintainer identified it independently while reading a draft. §15.5 disputes the *magnitude* transferring to our workload — it does not dispute the structure, which is field-standard.
+- **Parallelism from declared dependencies.** Plan-over-Graph [R4], LLMCompiler [R10] and BatchDAG [R2] all do exactly this; the maintainer identified it independently while reading a draft. §15.5 disputes the *magnitude* transferring to our workload — it does not dispute the structure, which is field-standard.
 - **The category itself.** Anthropic's distinction — *workflows are LLMs orchestrated through predefined code paths; agents direct their own process* — is precisely what a validated plan graph is. We are not inventing a category, and the field is moving this way: a 2026 survey is titled *From Static Templates to Dynamic Runtime Graphs*.
 - **Plan-then-execute is a real security property, correctly bounded.** Separating planning from execution gives control-flow integrity against indirect prompt injection. Our caveat that it is insufficient alone is also the source's caveat, and Maknae already supplies the defence in depth it asks for at phase two.
 - **Progressive disclosure over loading everything.** Gorilla, ToolLLM and RAG-MCP converge on *retrieve the relevant tools rather than registering all of them*. The 1.8% shape layer is that pattern applied to plans.
@@ -537,7 +537,7 @@ The control-flow-integrity argument — a validated plan resists indirect prompt
 
 ### 15.5 The parallelism speedup is measured on work unlike ours
 
-LLMCompiler's often-cited ~3.6× is on **I/O-bound** steps — web searches and API calls. A Maknae plan is Rust edits and `cargo test`, where the build serializes on the target-directory lock. Parallel branches would need separate worktrees or target directories, which is infrastructure nobody here has built. **§4.6's 89% file-disjointness is a real measurement; a speedup does not follow from it**, and this document should not be read as promising one.
+LLMCompiler's **3.7×** [R10] is on **I/O-bound** steps — web searches and API calls. A Maknae plan is Rust edits and `cargo test`, where the build serializes on the target-directory lock. Parallel branches would need separate worktrees or target directories, which is infrastructure nobody here has built. **§4.6's 89% file-disjointness is a real measurement; a speedup does not follow from it**, and this document should not be read as promising one.
 
 ### 15.6 A closed schema forbids the unanticipated case too
 
@@ -579,3 +579,62 @@ Listed so nothing here is mistaken for evidence.
 - §5.3's retention conflict.
 
 *The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository. The conversion artifacts were throwaway and are not committed.*
+
+---
+
+## 18. References
+
+**Why this section exists:** every claim above that rests on outside work is cited here with its holding location, licence and **reading state**. The next reader — human or agent — should not repeat a search that has already been done, and should be able to see at a glance which sources were actually read.
+
+**Nothing here is authority.** Per the [ADR README doctrine](adr/README.md), external work is provenance. Sources marked *abstract only* have not been read beyond their abstract and must not be cited as though they had been.
+
+### Held for this document
+
+`~/claude-memory/maknae/references/_raw/` — study copies, SHA-256 anchored, index at `2026-09-25-graph-driven-activity-sources.md`.
+
+| # | source | licence | read | cited in |
+|---|---|---|---|---|
+| **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | **full** | §6.5, §6.6, §6.7, §15.3 |
+| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **full** | §11, §14.1, §16.4 |
+| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | summary | §14.1, §15.4 |
+| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | abstract only | §4.6, §14.1 |
+| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | abstract only | §14.1 |
+| **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | abstract only | §13 |
+| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | abstract only | §13, §14.1 |
+| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | abstract only | §13 |
+| **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **full** | §9.1, §13, §14.1 |
+| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | abstract only | §4.6, §15.5 |
+
+### Held in the Knowledge Lake
+
+Full text at `knowledgebase/research/`, with the findings synthesis at `knowledgebase/design/research-retrieval-architecture.md` (F1–F13). Read via that synthesis, not line-by-line, except where noted.
+
+| # | source | cited in |
+|---|---|---|
+| **L1** | Huwiler, Stockinger, Fürst (ZHAW). *VersionRAG.* [arXiv:2510.08109](https://arxiv.org/abs/2510.08109). **F5/F4** — typed first-class edges required; 58–64% ceiling for similarity-only on version-sensitive questions. *Magnitudes self-reported on a 100-question author-built benchmark.* | §12, §14.1 |
+| **L2** | Xiang et al. *When to use Graphs in RAG (GraphRAG-Bench).* [arXiv:2506.05690](https://arxiv.org/abs/2506.05690), ICLR 2026. **F3** — when graph retrieval underperforms. | §12 |
+| **L3** | Han, Ma, Wang, Aggarwal, Tang, et al. *RAG vs. GraphRAG.* [arXiv:2502.11371](https://arxiv.org/abs/2502.11371). **F1–F2** — hybrid routing beats either alone. | §12 |
+| **L4** | Edge et al. (Microsoft). *From Local to Global: A Graph RAG Approach.* [arXiv:2404.16130](https://arxiv.org/abs/2404.16130). **F9** — surface-form keying. | §12 |
+| **L5** | Jiménez Gutiérrez et al. (OSU NLP). *HippoRAG* [arXiv:2405.14831]; *HippoRAG 2* [arXiv:2502.14802]. **F9**. | §12 |
+| **L6** | Guo et al. (HKUDS). *LightRAG.* [arXiv:2410.05779](https://arxiv.org/abs/2410.05779). **F9**. | §12 |
+| **L7** | Guo, Wu, Yiu. *ComplianceNLP.* [arXiv:2604.23585](https://arxiv.org/abs/2604.23585). **F10** — graph re-ranking the largest single quality lift in the closest domain analog. | §12 |
+| **L8** | HuaShu (花叔). *Loop Engineering: The Complete Guide* (Orange Book, June 2026). Industry guide. Generator-and-evaluator; the four costs. **Read directly for this document.** | §12, §14.1 |
+| **L9** | Liu, Ye, Gao, et al. (NVIDIA/NTU/MIT). *SoL-Pi.* [arXiv:2609.20519](https://arxiv.org/abs/2609.20519). Harness overfitting caution. Held in `claude-memory`, referenced-not-ingested by the lake. | §12 |
+| **L10** | Patil et al. *Gorilla* [arXiv:2305.15334]; Qin et al. *ToolLLM* [arXiv:2307.16789]; *RAG-MCP* [arXiv:2505.03275] *(preprint, pedigree unverified)*. Retrieve tools rather than register all. | §12 |
+
+### In-repository
+
+| source | cited in |
+|---|---|
+| [`AGENTS.md`](../AGENTS.md) — core principles 1 and 2; the standing rulings | throughout |
+| [ADR-0002](adr/ADR-0002-kernel-is-rust.md) static Rust TCB · [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md) modular authorization · [ADR-0005](adr/ADR-0005-enforcement-locus-tcb-boundary.md) TCB boundary · [ADR-0008](adr/ADR-0008-authorization-composition-contract.md) composition · [ADR-0019](adr/ADR-0019-audit-record-model.md) audit records · [ADR-0022](adr/ADR-0022-classification-policy-as-data.md) policy as data · [ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) runtime loop | §5–§6, §15 |
+| [`design/diagrams/generated-operational-concept.svg`](diagrams/generated-operational-concept.svg) — the OV-1 and the governed learning loop | §8 |
+| [`references/2026-09-25-jive-assessment.md`](references/2026-09-25-jive-assessment.md) — the graph-call primitive; the provenance standard this document is held to | §Origin, §6.3, §16.1 |
+| [`references/2026-09-22-system-one-models-jev-assessment.md`](references/2026-09-22-system-one-models-jev-assessment.md) — untested classifier calibration | §6.2 |
+| [`design/knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) — object-layer governance; **not current on edges** | §7 |
+| [`design/self-development.md`](self-development.md) — PRs are human-gated | §12 |
+| Knowledge Lake `references/lake/edges.yaml`, `schemas/edges.schema.json` v1, `lib/lake/_edge_graph.py`, `references/lake/vendors.yaml` | §7.1, §8 |
+
+### Searched and deliberately not pursued
+
+Recorded so the search is not repeated: **OpenAI** (AgentKit, Agent Builder, the Symphony orchestration spec) and **Google** (Antigravity orchestration surface) ship graph-shaped agent tooling but publish no position on plan governance — product, not argument (§13). **LangGraph** is the de facto framework implementation and was not evaluated here. **Classical workflow engines** (Airflow, Luigi, Prefect) are surveyed in R1 §2.8 rather than read directly.
