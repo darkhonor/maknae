@@ -104,6 +104,38 @@ graph     49 tokens  (delete t3s1 :file "crates/maknae-kernel/tests/subject_iden
 
 The general form: **prose is lossy for machines but lossless for humans, and removing it converts an implicit obligation into an explicit schema field.** The schema's completeness is now the only thing standing between a structural check and a confident wrong answer — which is the same finding as before, relocated from the parser to the vocabulary.
 
+## Schema, profile, witness — three artifacts, not one
+
+*(Added 2026-09-25 from the maintainer's framing: the model defines not only a schema but **required elements** — nodes and edges that must be present for a graph to be declared correct.)*
+
+Collapsing these into one "graph format" is how the thing becomes unbuildable. They have different authority and different change rates.
+
+**The schema is the vocabulary.** What node kinds and edge kinds exist and what fields each carries. It changes rarely, and breaking it invalidates every stored graph.
+
+**The profile is the required-elements set** — what a graph must contain to be correct. `tdd` requires a `verify-red` node between every test node and the implementation it constrains, a gate before every commit (or a declared deferral), and a witness on every verify. `straight` requires far less and is a legitimate choice for someone not yet working that way. `docs-only` requires neither tests nor gates but does require a citation on every claim-bearing node. **One vocabulary, several policies over it, deny-by-default: a graph with no declared profile does not validate.** This is the same separation the kernel already makes between the seam's vocabulary and the policy evaluated across it, and it is worth making for the same reason — the policy is the part that legitimately varies.
+
+**The witness is what was actually observed.** A required node is not an observed node, and this is the distinction the whole idea stands on. A validator can prove a `verify-red` node *exists*; it cannot prove anyone ran it and saw red. Stop at the profile and the result is the markdown checkbox with better syntax — and the checkbox is precisely what fails today, because an agent ticks it. So a node carries the command, the expected result, and the captured actual, bound back to the node at execution time. This is [`ci/gates/negative-control.sh`](../ci/gates/) applied one level up: *a green run that was never observed failing proves nothing.*
+
+Mapped onto the two-phase authorization shape: **phase one reads schema + profile** (is this graph well-formed and does it satisfy its declared discipline), **phase two reads the witness** (did this node's activity actually occur, and is it permitted now).
+
+### The skills are already a profile, written in prose
+
+The strongest evidence that the profile is the right artifact is that one already exists — as English, in the authoring skills, with no enforcement:
+
+| skill prose | the graph element it is | 
+|---|---|
+| "Run it to make sure it fails" / "MANDATORY. Never skip." | a required `verify-red` node between test and implementation |
+| "Expected: FAIL with 'function not defined'" | that node's expected-witness field |
+| "**Files:** Create / Modify / Test" | declared file scope, with intent |
+| "**Interfaces:** Consumes / Produces" | typed edges between task nodes |
+| "No Placeholders — no TBD, no 'add error handling'" | a validator rule rejecting empty-deliverable nodes |
+| "Each step is one action (2–5 minutes)" | a node-granularity constraint |
+| "one at a time, test each" | an ordering constraint |
+
+**Every one of those is prose whose only function is to make an agent take an activity later — which means it is an activity node, or a rule about one.** In a graph it is present or the graph fails validation; it is not text an executor can skim.
+
+This also explains a property of those skills worth naming: they are long, repetitive and heavily capitalised because **prose has no enforcement and compensates with volume**. A profile needs neither. The reduction is not a side benefit — a rule that is checked does not need to shout.
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
@@ -114,7 +146,9 @@ The general form: **prose is lossy for machines but lossless for humans, and rem
 
 ## If this becomes a Claude Code skill
 
-The skill's job is **authoring plans into the schema**, not converting them afterwards. Concretely: emit the shape layer as the plan is written, require an explicit activity-class set per step, require each task to declare its file scope, reject a step that parses to nothing rather than emitting an empty node, and run the structural checks as a self-review gate before the plan reaches the maintainer. The checks that earned their place in this experiment are cycles, orphans, TDD ordering, and plan-scoped file references. Gate-before-commit should be configurable per plan, because the ceiling plan's batched-gate convention is legitimate and the check as written cannot see it.
+The skill's job is **authoring plans into the schema against a declared profile**, not converting them afterwards. Concretely: emit the shape layer as the plan is written, require an explicit activity-class set per step, require each task to declare its file scope, reject a step that parses to nothing rather than emitting an empty node, and run the structural checks as a self-review gate before the plan reaches the maintainer. The checks that earned their place in this experiment are cycles, orphans, TDD ordering, and plan-scoped file references. Gate-before-commit belongs to the profile rather than the checker, because the ceiling plan's batched-gate convention is legitimate and a hard-coded check cannot see it.
+
+The harder half is the witness. A skill that only *emits* a conformant graph has moved the checkbox, not removed it; the executor side has to bind observed output back to the node it claims to satisfy, and a node whose witness is absent is not a passed node.
 
 ## Open questions
 
@@ -122,5 +156,7 @@ The skill's job is **authoring plans into the schema**, not converting them afte
 - Is the shape layer worth an S-expression over JSON once a schema exists? S-expression won on tokens here; a schema-validated form may not need the margin.
 - What is the minimum activity-class vocabulary? Seven were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`). The 23–33% fall-through was a parsing gap and is answered by authoring at birth; what is **not** answered is whether seven classes are enough to express a real plan without a `misc` escape hatch — and a `misc` node is an unclassified node wearing a badge.
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
+- How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
+- What is the minimum honest witness? A captured exit code is cheap and forgeable by the same agent that writes the graph; the negative-control gate solves this for CI by proving the check can fail, and the analogue for a plan node is not yet obvious.
 
 *Artifacts from this experiment were throwaway and are not committed. The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository.*
