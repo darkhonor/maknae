@@ -146,7 +146,7 @@ This also explains a property of those skills worth naming: they are long, repet
 
 The reason the existing surface is the right one is the custody rule already attached to it: a `config.d/` member must be **root-owned and not group/other-writable, and so must the directory**, or boot refuses with `SectionNotRootOwned`. A profile file inherits that property, and it is exactly the property a profile needs — **the subject a plan executes as cannot choose the profile it is judged against.** A home user sets their standard as root; an enterprise ships one in the image. Per-role assignment is then an ordinary `maknae-authz-basic` binding rather than a new mechanism.
 
-**The split follows [ADR-0022](adr/ADR-0022-classification-system-selection.md)'s precedent exactly: the schema is compiled in, the profile is boot-selected** — as the level order ships in the kernel while the declared system is chosen at boot. That keeps [ADR-0002](adr/ADR-0002-kernel-is-rust.md)'s "no runtime-patchable policy path" intact: a boot-read profile is configuration in the sense `authz.yaml` already is, not a patchable policy surface.
+**The split follows [ADR-0022](adr/ADR-0022-classification-policy-as-data.md)'s precedent exactly: the schema is compiled in, the profile is boot-selected** — as the level order ships in the kernel while the declared system is chosen at boot. That keeps [ADR-0002](adr/ADR-0002-kernel-is-rust.md)'s "no runtime-patchable policy path" intact: a boot-read profile is configuration in the sense `authz.yaml` already is, not a patchable policy surface.
 
 ### The witness is an edge, not a receipt
 
@@ -161,6 +161,20 @@ The maintainer's shape, and it is better than the evidentiary one above: a graph
 3. **A back-edge needs a bound and a terminal.** Unbounded retry is a loop: a maximum attempt count on the retry edge and an escalate-to-human terminal node, the same shape the egress budget's retry decisions took in #295.
 
 **On "a single edge":** read as *adjacency* rather than cardinality. Adjacency is the useful constraint — it forbids `set-permissions → commit → check-permissions`, where the verification is real but arrives after the irreversible step. Cardinality should remain *at least one*, because a single `cargo test` legitimately verifies several writes.
+
+### We define the vocabulary; they define the profile
+
+*(Added 2026-09-25, maintainer: the profile is an artifact handed to an enterprise to author for itself.)*
+
+This is [ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)'s shape applied to plan governance — a stable vocabulary with the locally-variable part behind it — and the substitution axis is real, because development discipline genuinely differs between a home user and a regulated enterprise while the set of things a plan node can *be* does not.
+
+**The load-bearing constraint, in the maintainer's terms: a profile cannot authorize an activity that violates policy; it can only enforce local policy on development activities.** Stated in this repository's existing vocabulary, a profile is a **well-formedness contract, not an authorization input** — it is [core principle 2](../AGENTS.md)'s *inform-but-not-authorize* one layer up. A profile can make a plan **invalid**; it can never make a node **permitted**. A graph may satisfy its profile completely and still have every node denied at execution, because validity is decided over graph structure and authorization is decided by the PDP over the activity. **Validity is necessary and never sufficient**, and the two surfaces must not be allowed to collapse into one, or a locally-authored file becomes a path to a grant.
+
+That asymmetry means an enterprise-authored profile can only ever tighten. Which exposes the piece the design still needs:
+
+**The vocabulary must carry a floor — elements no profile may drop.** Otherwise "they define the profile" includes defining one that requires nothing, and the mechanism silently becomes optional. The precedent is directly in hand: ADR-0008 decision 1 makes the ceiling operand a **named, non-removable field** of the `Composition` rather than something a configuration chooses to include. The same construction applies here — a small set of graph elements present in every profile by construction, with everything above the floor left to the authoring organisation.
+
+A profile that demands the impossible is then the organisation's own error, and it fails closed and loudly at validation rather than degrading quietly. That is the correct behaviour, not a gap.
 
 ## What this implies for post-Cooky work
 
