@@ -275,17 +275,29 @@ The split is forced rather than merely tidy: [core principle 1](../AGENTS.md) ho
 | kernel activity | the kernel alone | **trusted** (TCB) | host lifetime | loss of system integrity |
 | governance / profile | operator or organisation, at boot | **trusted** config | boot to boot | wrong enforcement posture, silently |
 | user plan | the agent | **untrusted** — authored by the untrusted runtime | ephemeral; retention user-declared | a bad plan, caught by validation |
-| lake knowledge | ingested documents, plus agent inference | **untrusted data** | long-lived, curated | wrong knowledge informs a decision |
+| lake knowledge | ingested documents; **edges operator-authored**, never agent-written | **untrusted data**, trusted edges | long-lived, curated | wrong knowledge informs a decision |
 
 The kernel's graph reaching host state and policy-granted restricted areas is consistent with the existing posture, **including the part the maintainer flagged in passing**: the kernel does not bypass policy to do it. [Core principle 2](../AGENTS.md) — *no role or privilege, not even the kernel, bypasses clearance* — applies to the kernel's own graph as it does to everything else.
 
-### The knowledge graph is a PIP, and its edges are the exposed surface
+### The knowledge graph — read from the Lake's shipped model, not from the KLC
 
-The [KLC](knowledge-lifecycle-contract.md) §3 already settles the role: **the Lake is a PIP; the reference monitor is the PDP.** A knowledge graph over the Lake is therefore a *Policy Information Point* — it may inform a decision and may never make one, which is the same inform-but-not-authorize line the KLC draws for quarantined content (§8: usable to inform the current task's reasoning, not privileged actions).
+***Corrected 2026-09-25 (maintainer): the [KLC](knowledge-lifecycle-contract.md) is not current; use the Knowledge Lake's graph models.*** An earlier draft of this section rested its claims on KLC §3/§8/§9.3. It is replaced by what the Lake actually ships. **Provenance, never authority** — the Lake is a separate project and its decisions do not bind this repository, per the [ADR README doctrine](adr/README.md); what follows is precedent worth copying, and the in-repo rule it has to satisfy is [core principle 2](../AGENTS.md)'s *inform-but-not-authorize*, which stands on its own.
 
-That line will be under pressure, and it is worth saying why now rather than when it is proposed. An edge reading `stig-rule:RHEL-09-211010 --implemented-by--> vendor-doc:§4.2` is *precisely* the shape someone will later want to use to auto-approve a control. It must not be, however well-curated the Lake is.
+The Lake's authored edge surface (`references/lake/edges.yaml`, schema `edges.schema.json` v1, compiler `lib/lake/_edge_graph.py`) is a working answer to most of what this document has been circling, and it is worth reading before anything is designed here:
 
-**The design point the graph form adds beyond the KLC's existing object handling: an edge is itself an assertion, and it is not covered by either endpoint's provenance.** The KLC stamps provenance and hash on ingested objects. A relationship *between* two objects is a third claim — made either by a document (then it carries that document's provenance and authority tier) or inferred by the agent (then it is an **internal-origin object** and takes §9.3's gate, not a free pass because both endpoints are trusted). **Provenance belongs on the edge.** A graph is more dangerous than prose in exactly one way here: an edge renders as something the system established, where a sentence renders as something a document said.
+- **A closed edge vocabulary of six, and no more:** `supersedes`, `implements`, `governs` (directional), `companion`, `relates_to` (symmetric), `delegates_to`. `additionalProperties: false` and a `const` `schema_version` throughout — the schema is fail-closed, not advisory. A seventh type (`contained_by`) was **YAGNI-deferred by census**, not by taste: one case in the corpus did not earn a vocabulary entry.
+- **Targets are opaque UUIDs only, and the pattern enforces it.** The schema's `uuid` regex *structurally rejects* a filename-valued target. This is the sharpest transferable idea in the model: **the schema forbids the wrong thing rather than documenting that it is wrong.**
+- **One authored direction; the compiler materializes the typed inverse.** `DIRECTIONAL_INVERSES` derives the reverse edge, and symmetric edges are authored exactly once on a **deterministic canonical side** (lexicographically smaller id). An authored surface that cannot express the same fact two ways cannot drift between them.
+- **Derived artifacts are drift-gated by byte equality** — the vendor graph's contract states *the committed artifact must byte-equal a fresh compile (writer == checker)*. The same construction as this repository's content-keyed drift gates.
+- **Ids are deterministic, not random:** `uuid5(NAMESPACE_URL, "urn:lake:external:<slug>")`, so two independent builds agree on identity.
+- **External stub nodes** let an edge point at an authority the corpus does not hold, with `source_url` required — a reference that does not pretend to be a holding.
+- **The compiler rejects self-loops and duplicate authored edges** at build time.
+
+**And the disciplined exception to "a graph has no field for prose":** `delegates_to` **requires** a `scope_note` of at least 8 characters. Exactly one edge type, the one whose relationship is meaningless without saying what was delegated, carries a mandatory note. That is the shape a plan graph should copy — not "no prose ever", but *prose only where the schema makes it non-optional because the edge is unreadable without it.*
+
+**A correction to this document's own claim of one section ago.** It asserted that provenance belongs on the edge, because an edge is an assertion neither endpoint's provenance covers. The Lake's model carries **no** provenance field on an edge — and its answer is better for its threat model: **there is a single authored surface, git-tracked and human-authored, and the agent does not write edges at all.** Every edge's provenance is the commit that added it. The per-edge provenance field is needed only where an untrusted party may author edges, so the stronger mitigation is the one the Lake took: **do not let the untrusted party author edges.** For Maknae that reads directly — an agent may *propose* a knowledge edge; the authored surface stays operator-gated.
+
+**Where the maintainer's own example exceeds the current model, honestly:** *"this STIG rule can be implemented by this vendor product in their security document paragraph here"* is an `implements` edge, but the shipped model keys edges to **document ids**, not to a paragraph within one. Sub-document anchors are a real extension, not a configuration — and they are where an id scheme gets hard, because a paragraph anchor must survive the document being reissued.
 
 ### Shared substrate, separate vocabularies
 
@@ -302,7 +314,7 @@ Four graphs that never touch would need no thought. Every risk is at a boundary,
 - **lake → plan.** Knowledge informs planning; legitimate, because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — that would let ingested content change what counts as a valid plan, which is untrusted data setting policy.
 - **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
 - **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
-- **plan → lake.** An executed plan that produced knowledge is internal-origin ingest under KLC §9.3, not a shortcut into the Lake because the platform generated it.
+- **plan → lake.** An executed plan that produced knowledge **proposes**; it does not ingest. The Lake's model keeps edge authoring on a single operator-gated surface, and "the platform generated it" is not a reason to bypass that — it is the reason not to.
 
 ### One conflict to resolve: the plan graph has two retention authorities
 
