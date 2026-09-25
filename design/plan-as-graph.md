@@ -606,6 +606,74 @@ Author-reported, not independently verified: **Routine** raised multi-step tool-
 
 SGH [R1] §9.5: exploratory tasks; **dynamic goal evolution — *"investigate the outage and fix whatever is broken"***; creative generation. **The middle one is a real Maknae workload** and belongs to an agent loop with inline replanning, not to a validated plan graph.
 
+### 12.16 Findings from R2, R4 and R5 completed
+
+**Two independent measurements now support §1's objective, and neither is about tokens.**
+
+BatchDAG [R2] ran the same 12 queries through two variants differing *only* in the inter-step data format:
+
+| metric | structured rows | prose summaries |
+|---|---:|---:|
+| hallucinations per query | **10.9** | 14.9 (+27%) |
+| LLM calls per query | **25.4** | 39.5 (+56%) |
+| tokens per query | **69K** | 80K (+16%) |
+| overall quality | **2.42** | 2.08 |
+| win / tie / loss | **3 / 9 / 0** | — |
+
+*(p = 0.107, n = 12 — the authors state plainly it does not reach conventional significance.)* Their explanation is the mechanism §1 asserts: *"prose summaries lose the structured provenance chain — downstream steps cannot verify which claims are grounded in source data vs fabricated during summarization"*, and *"prose summaries lose information at each step, forcing downstream steps to re-derive data that structured rows would have preserved."* They call it **"the single most important architectural decision in BatchDAG."**
+
+ATG [R5] measures the same effect on actions rather than data, in ALFWorld where invalid actions are detectable:
+
+| method | trajectories containing hallucinated actions |
+|---|---:|
+| ReAct | 42.86% |
+| PoG (strongest structured baseline) | 28.57% |
+| **ATG** | **12.14%** |
+
+A **71.7% relative reduction over ReAct**, attributed to the same cause: *"linear textual trajectories can accumulate irrelevant context and induce hallucinated actions in later stages, while ATG localizes the context of each atomic node."* ATG also cuts execution steps 31.4 → 18.4 on ALFWorld, and **25.3% fewer than PoG**, which is graph-shaped too.
+
+**This is better evidence for §1 than the token measurements in §4.** The claim is not that graphs are smaller; it is that prose intermediates and accumulated context cause fabrication, and two independent teams measured that.
+
+#### The small-model picture, corrected again
+
+§12.3 read R4's 60.7% Qwen hallucination as fatal. R4's Table 3 shows both halves:
+
+| | Optimal Rate | Success Rate |
+|---|---:|---:|
+| Claude 3.5 Sonnet | 39.2 | **90.0** |
+| GPT-4o | 14.1 | 51.3 |
+| Llama-3.1-8B | 1.8 | 52.3 |
+| **Llama-3.1-8B, SFT + DPO** | **71.6** | 83.6 |
+| Qwen2.5-7B, SFT + DPO | 27.0 | 75.8 |
+
+And on real textual queries, **two separable effects**:
+
+| | Optimal | Success | time ratio |
+|---|---:|---:|---:|
+| Claude, plan directly | 14.5 | 89.5 | 1.904 |
+| **Claude, extract graph then plan** | **41.5** | 93.5 | 1.514 |
+| Llama, plan directly | 0.0 | 19.0 | 3.433 |
+| **Llama, extract + trained planner** | **72.5** | 83.0 | 1.540 |
+
+**Making the graph explicit before planning nearly triples a frontier model's optimal rate with no training at all** — 14.5 → 41.5. That is the shape/payload separation this document proposes, measured on someone else's benchmark. And a fine-tuned 8B model reaches 72.5, beating Claude, while Claude retains the best raw success rate.
+
+**So the honest local-model position is three-part:** an untrained small model should not author graphs; the extract-then-plan *structure* helps every model including frontier ones; and a model fine-tuned on the schema outperforms frontier models at optimal planning while still trailing on task success.
+
+R4 also isolates what drives collapse: **node count, not edge count** — correlation 0.8–1.0 for node count against under 0.5 for edges at 10 nodes — and untrained models *"show high cost ratios, indicating that there are many redundant subtasks"*, which is over-decomposition measured rather than asserted. Their synthetic task trees are capped at **depth 4**, on the grounds that shallow hierarchies better match reality.
+
+#### Mechanisms from R2 and R5 worth adopting
+
+- **Typed operations with declared LLM cost** [R2]. Six step types; **four require zero LLM calls** (sql, search, transform, compare); only fan-out and analyze invoke a model. *"For queries answerable by SQL + transform + analyze, the total LLM cost after planning is exactly one call."* The planner prompt carries explicit cost annotations — *"fan out is THE expensive one"* — so the planner optimises against a real cost model.
+- **A richer edge than `depends_on`** [R2]. Their `InputSpec` supports a direct field reference `{step: 1, key: "meeting_id"}` and a **merge join** across two prior steps. Our edges say *that* a node depends on another; theirs say *which field*, and *how joined*.
+- **Group by the unit of analysis, not by row** [R2]. Batching 5,824 transcript rows by row gave 1,165 LLM calls with each meeting analysed 5–50 times on fragments; batching by `meeting_id` gave 25 calls with complete context — **47×, $70 → $1.50** — and the authors call it the single largest improvement. It is also the answer to over-decomposition: granularity should follow the logical entity.
+- **Per-step storage keys** [R2]. *"Storing each step's result in its own storage key eliminates last-writer-wins race conditions when concurrent wave tasks update a shared object."* §4.7's conflict analysis covers files and not the plan's own state.
+- **Goal-based prompting beats both alternatives** [R2]. Exhaustive rules still produced unexpected structures; **few-shot examples caused the model to copy examples that did not fit, producing over-engineered 12-step plans** — a named cause for SGH's over-decomposition failure. Describing each operation's purpose, cost and data model won.
+- **Strip unknown fields rather than constrain the prompt** [R2]. *"The LLM can hallucinate arbitrary parameters; the system ignores what it does not understand."* This sits in productive tension with the Lake's `additionalProperties: false`: **a human-authored surface should reject an unknown field; a model-authored one should strip it.** That maps onto the floor-versus-plan split.
+- **Test the raw bytes** [R2]. Markdown-wrapped JSON caused parse failures and **silent fallback to a single-step plan** — the same silent-degradation class as §4.4's empty node. *"Always test the raw bytes an LLM returns, not what the prompt implies it should return."*
+- **Interface-preserving recursive compilation** [R5]. A parent node is replaced by a subgraph that consumes the same external inputs and produces a compatible output, so *"replacing v with G_v does not change how the rest of the graph interacts with that computation."* **Granularity becomes revisable rather than a one-shot choice**, and context narrows automatically with depth.
+- **Repair scope by lowest common historical ancestor** [R5]. Failed nodes are traced through the refinement history to *"the smallest ancestor node from which the failed region was derived"*, which *"marks the original planning scope where the failure was introduced."* Better than R6's execution-order recovery frontier: it repairs where the error was **introduced**, not where it **surfaced**. Ablation puts subgraph repair at **6.4–7.8 points** and the pre-execution check at **3.8–4.9**.
+- **Don't make the planner do what the node can do** [R2, principle 5]. *"Early plans over-derived metadata upstream. But the fan-out LLM receives full transcript content and can identify speakers, classify intent, and extract patterns directly. Pushing complexity into the fan-out prompt produces simpler, more robust plans."*
+
 ### 12.15 Findings from the completed reads
 
 Added as coverage moved from partial to complete on R6, R9 and R12. Three are corrections to this document; two are new attack surfaces.
@@ -899,10 +967,10 @@ What it asks for instead — **intervention studies, structural ablations, and e
 | # | source | licence | read | cited in |
 |---|---|---|---|---|
 | **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | 64% | §6.4, §6.5, §6.6, §15.3 |
-| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | 37% | §11, §14.1, §16 item 4 |
+| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **100%** | §11, §14.1, §16 item 4 |
 | **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | 63% | §6.6, §14.1, §15.4, §15.7 |
-| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | 29% | §4.6, §14.1 |
-| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | 24% | §14.1 |
+| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **100%** | §4.6, §14.1 |
+| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **100%** | §14.1 |
 | **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | body 100% / refs n/a | §13 |
 | **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | 17% | §13, §14.1 |
 | **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | 6% | §13 |
