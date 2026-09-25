@@ -402,6 +402,10 @@ pub enum Verb {
         path: String,
         content: crate::Bytes,
         mode: crate::WriteMode,
+        /// The loop's conversation identifier (#265), under the same rule as
+        /// `SessionPrompt`'s: recorded, never decided on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
     },
     /// Destroy file content. Irreversible, and the strongest argument for
     /// two-phase audit.
@@ -807,6 +811,7 @@ mod tests {
                 path: "/projects/frame-limit".into(),
                 content: crate::Bytes::new(zeroize::Zeroizing::new(vec![0, 255, 17])),
                 mode: crate::WriteMode::Existing,
+                conversation: None,
             },
         };
         let expected = encode_request(&request).unwrap();
@@ -817,6 +822,24 @@ mod tests {
         assert!(encode_request_zeroizing(&request, 0).is_err());
     }
     use super::*;
+
+    #[test]
+    fn a_writes_conversation_is_omitted_when_none_and_round_trips_when_set() {
+        let write = |conversation: Option<&str>| Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsWrite {
+                path: "/p".into(),
+                content: crate::Bytes::new(zeroize::Zeroizing::new(vec![1])),
+                mode: crate::WriteMode::Existing,
+                conversation: conversation.map(str::to_string),
+            },
+        };
+        let none = encode_request(&write(None)).unwrap();
+        assert!(!none.windows(12).any(|w| w == b"conversation"));
+        assert_eq!(decode_request(&none).unwrap(), write(None));
+        let some = encode_request(&write(Some("conv-265"))).unwrap();
+        assert_eq!(decode_request(&some).unwrap(), write(Some("conv-265")));
+    }
 
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
@@ -969,6 +992,7 @@ mod tests {
                     b"private-mutation-158".to_vec(),
                 )),
                 mode: crate::WriteMode::CreateExclusive,
+                conversation: None,
             },
             Verb::FsDelete {
                 path: "/home/u/projects/x".into(),

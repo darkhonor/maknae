@@ -146,6 +146,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             egress: None,
+            conversation: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: reason.into(),

@@ -173,7 +173,7 @@ pub async fn drive<P: Plane>(
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
                         },
                         Ok(ToolRequest::Write { path, content, .. }) => {
-                            match plane.write(&path, &content).await {
+                            match plane.write(transcript.conversation(), &path, &content).await {
                                 WriteOutcome::Applied => ToolOutcome::WriteApplied,
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
@@ -273,7 +273,7 @@ mod tests {
     struct Scripted {
         replies: VecDeque<Result<PromptReply, PlaneError>>,
         reads: Vec<String>,
-        writes: Vec<(String, Vec<u8>)>,
+        writes: Vec<(String, String, Vec<u8>)>,
         prompts: usize,
         read_outcome: ReadOutcome,
         write_outcome: WriteOutcome,
@@ -287,8 +287,8 @@ mod tests {
             self.reads.push(p.into());
             self.read_outcome.clone()
         }
-        async fn write(&mut self, p: &str, c: &[u8]) -> WriteOutcome {
-            self.writes.push((p.into(), c.to_vec()));
+        async fn write(&mut self, conv: &str, p: &str, c: &[u8]) -> WriteOutcome {
+            self.writes.push((conv.into(), p.into(), c.to_vec()));
             self.write_outcome.clone()
         }
     }
@@ -330,7 +330,10 @@ mod tests {
         assert!(out.stopped.is_none());
         assert_eq!(out.steps_used, 3);
         assert_eq!(p.reads, vec!["/w/a.txt"]);
-        assert_eq!(p.writes, vec![("/w/a.txt".to_string(), b"new".to_vec())]);
+        assert_eq!(
+            p.writes,
+            vec![("conv".to_string(), "/w/a.txt".to_string(), b"new".to_vec())]
+        );
         assert_eq!(t.turns().len(), 6, "user, asst, tool, asst, tool, asst");
         assert!(tool_text(&t.turns()[2]).starts_with("file body"));
         assert!(tool_text(&t.turns()[4]).starts_with("applied"));

@@ -14,6 +14,16 @@ async fn drive(
     records: Arc<Records>,
     delegate: bool,
 ) -> Option<maknae_proto::Response> {
+    drive_in(fx, bytes, records, delegate, None).await
+}
+
+async fn drive_in(
+    fx: &Fixture,
+    bytes: &[u8],
+    records: Arc<Records>,
+    delegate: bool,
+    conversation: Option<&str>,
+) -> Option<maknae_proto::Response> {
     let target = fx.root.join("unique-existing-write-sentinel");
     let fd = delegate.then(|| {
         std::fs::OpenOptions::new()
@@ -27,6 +37,7 @@ async fn drive(
             path: target.to_str().unwrap().into(),
             content: Bytes::new(bytes.to_vec().into()),
             mode: WriteMode::Existing,
+            conversation: conversation.map(str::to_string),
         },
         fd,
         records,
@@ -72,6 +83,75 @@ async fn durable_intent_precedes_existing_empty_truncation_and_completion() {
         maknae_audit_append::MutationOrigin::KernelObserved
     );
 }
+#[tokio::test]
+async fn a_loop_write_records_its_conversation_on_intent_and_completion() {
+    let fx = Fixture::new("conversation_success", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"old").unwrap();
+    let records = Records::new(0);
+    let response = drive_in(
+        &fx,
+        b"new",
+        records.clone(),
+        true,
+        Some("conv-265-sentinel"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        response.result,
+        RespResult::Ok(Payload::MutationComplete)
+    ));
+    let records = records.snapshot();
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0].conversation, None);
+    for r in &records[1..] {
+        assert_eq!(
+            r.conversation.as_deref(),
+            Some("conv-265-sentinel"),
+            "{r:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_loop_write_records_its_conversation() {
+    let fx = Fixture::new("conversation_refused", "Read");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"untouched").unwrap();
+    let records = Records::new(0);
+    let response = drive_in(&fx, b"bad", records.clone(), true, Some("conv-265-refused"))
+        .await
+        .unwrap();
+    assert!(matches!(response.result, RespResult::Err(_)));
+    let records = records.snapshot();
+    assert_eq!(records[1].outcome.result, "deny");
+    assert_eq!(records[1].conversation.as_deref(), Some("conv-265-refused"));
+}
+
+#[tokio::test]
+async fn an_unacceptable_conversation_id_refuses_the_write_before_the_pdp() {
+    let long = "x".repeat(33);
+    for bad in ["", "has space", "a/b", long.as_str()] {
+        let fx = Fixture::new("conversation_bad", "Write");
+        let target = fx.root.join("unique-existing-write-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let records = Records::new(0);
+        let response = drive_in(&fx, b"bad", records.clone(), true, Some(bad))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&response.result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::BadRequest),
+            "{bad:?}: {:?}",
+            response.result
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        let records = records.snapshot();
+        assert!(records.iter().all(|r| r.mutation.is_none()), "{bad:?}");
+        assert!(records.iter().all(|r| r.conversation.is_none()), "{bad:?}");
+    }
+}
+
 #[tokio::test]
 async fn failed_intent_preserves_existing_bytes_and_length() {
     let fx = Fixture::new("intent_fail", "Write");
@@ -150,6 +230,7 @@ async fn permitted_alias_write_audits_requested_and_verified_objects() {
             path: alias.to_str().unwrap().into(),
             content: Bytes::new(b"verified-alias-effect".to_vec().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         },
         Some(fd),
         records.clone(),
@@ -242,6 +323,7 @@ fn create_verb(fx: &Fixture) -> Verb {
             .into(),
         content: Bytes::new(b"content".to_vec().into()),
         mode: WriteMode::CreateExclusive,
+        conversation: None,
     }
 }
 async fn send_report(client: &mut tokio::io::DuplexStream, report: &maknae_proto::MutationReport) {
@@ -410,6 +492,7 @@ async fn cancelled_socket_waiter_does_not_cancel_existing_effect_completion_owne
             path: target.to_str().unwrap().into(),
             content: Bytes::new(b"surviving-worker-effect".to_vec().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         },
         Some(fd),
         records.clone(),
@@ -487,6 +570,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
             path: alias.to_str().unwrap().into(),
             content: Bytes::new(b"bad".to_vec().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         },
         Some(fd),
         records.clone(),
@@ -743,6 +827,7 @@ async fn renamed_existing_object_after_intent_reports_no_effect_without_rollback
             path: target.to_str().unwrap().into(),
             content: Bytes::new(Vec::new().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         },
         Some(fd),
         records.clone(),

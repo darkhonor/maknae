@@ -365,6 +365,7 @@ fn make_record(
         object_requested: None,
         mutation: None,
         egress: None,
+        conversation: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -659,52 +660,61 @@ pub async fn handle<S, E, P>(
         }
     }
 
-    // #172: the prompt's operand pre-gate, the same shape as the Read one — a
+    // #172, #265: the operand pre-gate, the same shape as the Read one — a
     // malformed conversation id or an inadmissible content kind is the
     // BadRequest class and never reaches the PDP. Result-returning emit, frame
     // gated on the append: `emit_request_deny` is for legs that serve nothing.
-    if let Verb::SessionPrompt {
-        conversation,
-        turns,
-    } = &request.verb
-    {
-        let shape = if !maknae_proto::conversation_id_is_acceptable(conversation) {
+    let pregate = match &request.verb {
+        Verb::SessionPrompt {
+            conversation,
+            turns,
+        } => if !maknae_proto::conversation_id_is_acceptable(conversation) {
             Err("conversation identifier not acceptable".to_string())
         } else {
             crate::egress::admitted_turns(turns)
-        };
-        if let Err(reason) = shape {
-            let appended = emit_request_outcome(
-                &emit,
-                &host,
-                &socket,
-                peer_uid,
-                &peer_uri,
-                peer_user.as_deref(),
-                None,
-                session_id,
-                seq.next(),
-                verb_to_action(&request.verb),
-                None,
-                None,
-                "deny",
-                &format!("prompt fails operand pre-gate: {reason}"),
-                "unauthorized",
-                &au3_1,
+        }
+        .err()
+        .map(|reason| ("prompt", reason)),
+        Verb::FsWrite {
+            conversation: Some(conversation),
+            ..
+        } if !maknae_proto::conversation_id_is_acceptable(conversation) => Some((
+            "write",
+            "conversation identifier not acceptable".to_string(),
+        )),
+        _ => None,
+    };
+    if let Some((noun, reason)) = pregate {
+        let appended = emit_request_outcome(
+            &emit,
+            &host,
+            &socket,
+            peer_uid,
+            &peer_uri,
+            peer_user.as_deref(),
+            None,
+            session_id,
+            seq.next(),
+            verb_to_action(&request.verb),
+            None,
+            None,
+            "deny",
+            &format!("{noun} fails operand pre-gate: {reason}"),
+            "unauthorized",
+            &au3_1,
+        )
+        .await;
+        if may_respond(appended) {
+            write_error_bounded(
+                &mut stream,
+                &cfg,
+                ProtoErrCode::BadRequest,
+                "invalid request",
             )
             .await;
-            if may_respond(appended) {
-                write_error_bounded(
-                    &mut stream,
-                    &cfg,
-                    ProtoErrCode::BadRequest,
-                    "invalid request",
-                )
-                .await;
-            }
-            close_bounded(&mut stream).await;
-            return;
         }
+        close_bounded(&mut stream).await;
+        return;
     }
 
     if matches!(
@@ -730,6 +740,9 @@ pub async fn handle<S, E, P>(
         );
         // #275: the peer identity, bounded and audit-only.
         record.subject.user = admitted_user(peer_user.as_deref());
+        if let Verb::FsWrite { conversation, .. } = &request.verb {
+            record.conversation.clone_from(conversation);
+        }
         crate::mutation::handle(
             &mut stream,
             &request.verb,

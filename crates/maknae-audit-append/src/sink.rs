@@ -311,6 +311,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             egress: None,
+            conversation: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),

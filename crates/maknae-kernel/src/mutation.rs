@@ -860,6 +860,7 @@ mod tests {
             path: target.to_str().unwrap().into(),
             content: Bytes::new(Vec::new().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         };
         let full = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1055,6 +1056,7 @@ mod tests {
             path: target.to_str().unwrap().into(),
             content: Bytes::new(Vec::new().into()),
             mode: WriteMode::Existing,
+            conversation: None,
         };
         assert!(prepare(
             write,

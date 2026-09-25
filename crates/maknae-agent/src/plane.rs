@@ -117,7 +117,12 @@ pub trait Plane {
         turns: &[Turn],
     ) -> impl Future<Output = Result<PromptReply, PlaneError>> + Send;
     fn read(&mut self, path: &str) -> impl Future<Output = ReadOutcome> + Send;
-    fn write(&mut self, path: &str, content: &[u8]) -> impl Future<Output = WriteOutcome> + Send;
+    fn write(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        content: &[u8],
+    ) -> impl Future<Output = WriteOutcome> + Send;
 }
 
 #[cfg(test)]

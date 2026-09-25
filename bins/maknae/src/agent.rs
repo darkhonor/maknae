@@ -219,12 +219,13 @@ impl Plane for RealPlane<'_> {
             .await,
         )
     }
-    async fn write(&mut self, path: &str, content: &[u8]) -> WriteOutcome {
+    async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
         // The frame-budget refusal is LOCAL and pre-send — nothing left
         // the process, nothing is on the trail, the file is untouched.
         let Ok(verb) = write_request(
             path.to_string(),
             zeroize::Zeroizing::new(content.to_vec()),
+            Some(conversation.to_string()),
             self.transport.frame_max_bytes,
         ) else {
             return WriteOutcome::NotSent;
