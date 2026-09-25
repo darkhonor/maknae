@@ -1,0 +1,22 @@
+[package]
+name = "maknae-deputy"
+publish.workspace = true
+description = "The egress deputy's decisions: admission, the credential cache, fulfilment."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-config = { path = "../maknae-config" }
+maknae-llm = { path = "../maknae-llm" }
+maknae-proto = { path = "../maknae-proto" }
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+maknae-vault = { path = "../maknae-vault" }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

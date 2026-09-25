@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 maknae-config = { path = "../../crates/maknae-config" }
-maknae-llm = { path = "../../crates/maknae-llm" }
+maknae-deputy = { path = "../../crates/maknae-deputy" }
 maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 # #240a D4-A, maintainer ruling 2026-09-12 (option b). Adopting an inherited

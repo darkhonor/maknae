@@ -109,12 +109,6 @@ pub fn decide<'a>(
     // and `Refusal` is the right taxonomy — `serve.rs` documents its `Fulfil`
     // lane as "the deputy was WILLING", which a pre-send refusal is not.
     //
-    // On coverage, stated accurately because an earlier version of this
-    // comment got it wrong: **`maknae-egress` is not in `mutants_crates` at
-    // all** (`coverage-tiers.toml`), so #297's blind spot covers this file too
-    // — this module's own header calling itself "mutation-visible" is
-    // aspirational. The new predicates were hand-mutated instead.
-    //
     // Both checks name a kernel bug: the PDP refuses non-text and text-less
     // prompts before a frame exists. They are defence in depth, and they are
     // the reason `Admitted` can be handed to `fulfil` without `fulfil` needing

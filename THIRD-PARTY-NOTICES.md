@@ -125,6 +125,7 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | maknae-authz-basic | 0.0.0 | Apache-2.0 |
 | maknae-classification-aus | 0.0.0 | Apache-2.0 |
 | maknae-config | 0.0.0 | Apache-2.0 |
+| maknae-deputy | 0.0.0 | Apache-2.0 |
 | maknae-egress | 0.0.0 | Apache-2.0 |
 | maknae-io | 0.0.0 | Apache-2.0 |
 | maknae-kernel | 0.0.0 | Apache-2.0 |

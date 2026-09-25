@@ -9,8 +9,8 @@
 //! request, so the credential check runs per request rather than once on a
 //! long-lived socket.
 
-use crate::handle::{decide, Refusal};
 use maknae_config::EgressBounds;
+use maknae_deputy::handle::{decide, Refusal};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -89,7 +89,9 @@ pub fn serve_one<F>(
     fulfil: F,
 ) -> Result<(), ServeError>
 where
-    F: FnOnce(&crate::handle::Admitted<'_>) -> Result<maknae_proto::EgressFrameReply, ServeError>,
+    F: FnOnce(
+        &maknae_deputy::handle::Admitted<'_>,
+    ) -> Result<maknae_proto::EgressFrameReply, ServeError>,
 {
     // BEFORE the first read. A peer we have not authenticated does not get to
     // hand us bytes to parse.
@@ -130,7 +132,7 @@ mod tests {
     /// the TRANSPORT alone. The provider path has its own tests in `call.rs`
     /// and `maknae-llm`'s hermetic stub suite.
     fn canned(
-        _a: &crate::handle::Admitted<'_>,
+        _a: &maknae_deputy::handle::Admitted<'_>,
     ) -> Result<maknae_proto::EgressFrameReply, ServeError> {
         Ok(maknae_proto::EgressFrameReply {
             reply: maknae_proto::PromptReply {
@@ -432,12 +434,12 @@ mod tests {
     /// path twice and counts reads, which is the assertion that was missing.
     #[test]
     fn two_served_connections_sharing_a_destination_read_the_key_once() {
-        use std::sync::Mutex;
+        use std::sync::{Arc, Mutex};
 
         struct Counting {
-            reads: Mutex<usize>,
+            reads: Arc<Mutex<usize>>,
         }
-        impl crate::keys::KeySource for Counting {
+        impl maknae_deputy::keys::KeySource for Counting {
             async fn read(
                 &self,
                 _m: &str,
@@ -470,17 +472,18 @@ mod tests {
             .build()
             .unwrap();
         // ONE cache, outside the loop — exactly as main.rs holds it.
-        let mut keys = crate::keys::KeyCache::new(Counting {
-            reads: Mutex::new(0),
+        let reads = Arc::new(Mutex::new(0));
+        let mut keys = maknae_deputy::keys::KeyCache::new(Counting {
+            reads: Arc::clone(&reads),
         });
         let b = bounds();
         let mut served = 0;
         for conn in l.incoming() {
             let _ = serve_one(conn.unwrap(), me, &b, |admitted| {
-                rt.block_on(crate::call::fulfil(
+                rt.block_on(maknae_deputy::call::fulfil(
                     admitted,
                     &mut keys,
-                    crate::call::CallBounds::default(),
+                    maknae_deputy::call::CallBounds::default(),
                     &b.kv_mount,
                 ))
                 .map_err(|e| ServeError::Fulfil(e.to_string()))
@@ -492,7 +495,7 @@ mod tests {
         }
         h.join().unwrap();
         assert_eq!(
-            *keys.source().reads.lock().unwrap(),
+            *reads.lock().unwrap(),
             1,
             "two connections to the SAME destination must read the credential once; \
              a cache the serving path rebuilds per request is not a cache"

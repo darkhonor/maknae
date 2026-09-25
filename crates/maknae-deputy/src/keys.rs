@@ -60,15 +60,6 @@ impl<S: KeySource> KeyCache<S> {
     /// naming the same secret and field share a key, and the path is what the
     /// deputy's grant is expressed over. The error carries the path — never
     /// the value.
-    /// The source, for tests that need to observe how often it was asked.
-    /// `cfg(test)` rather than `#[allow(dead_code)]`: it exists only to let a
-    /// test count reads, and production has no business reaching past the cache
-    /// to the thing behind it.
-    #[cfg(test)]
-    pub fn source(&self) -> &S {
-        &self.source
-    }
-
     pub async fn get(
         &mut self,
         mount: &str,

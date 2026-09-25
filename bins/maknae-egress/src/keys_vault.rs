@@ -1,11 +1,11 @@
-//! The Vault-backed [`KeySource`](crate::keys::KeySource) — the I/O half.
+//! The Vault-backed [`KeySource`](maknae_deputy::keys::KeySource) — the I/O half.
 //!
 //! Split from `keys.rs` for the reason this tree splits `kv_io`/`kv` and
 //! `secret_io`/`secret_source`: the CACHE is a decision worth mutation-testing
 //! and this is a network read no unit test should stand in for. This project
 //! has no Vault stub and deliberately uses none.
 
-use crate::keys::KeySource;
+use maknae_deputy::keys::KeySource;
 use zeroize::Zeroizing;
 
 /// Reads through `maknae-vault`'s deputy client, which owns the login, the KV
@@ -40,7 +40,7 @@ impl KeySource for VaultKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::KeyCache;
+    use maknae_deputy::keys::KeyCache;
 
     /// A throwaway self-signed CA, generated once with
     /// `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-384 -nodes
