@@ -1039,7 +1039,7 @@ This is the standardised schema deferred when this work began. It is not a refin
 
 ### And the evaluation this document would need
 
-**The protocol exists and is specified (§12.10).** SGH's seven-group design isolates `G_plan`, `G_scaffold`, `G_graph`, `G_patch` and `G_replan`, and names Claude Code as the G0 baseline precisely so that structural gains are not confused with the gain from richer prompting. Running G0 / G3 / G4 alone — a prompt-augmented loop, a structured single-ready-unit loop, and a multi-ready-unit graph over the same task set — would answer whether the structure does any work. **Nothing in §4 is that experiment.**
+**The protocol exists and is specified, in SGH [R1] §10.** Its seven-group design isolates `G_plan`, `G_scaffold`, `G_graph`, `G_patch` and `G_replan`, and names Claude Code as the G0 baseline precisely so that structural gains are not confused with the gain from richer prompting. Running G0 / G3 / G4 alone — a prompt-augmented loop, a structured single-ready-unit loop, and a multi-ready-unit graph over the same task set — would answer whether the structure does any work. **Nothing in §4 is that experiment.**
 
 
 
