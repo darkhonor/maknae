@@ -29,6 +29,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0023 | The runtime loop is the ACP Agent, the kernel the Client — Rust MVP loop as `maknae agent`, model egress brokered per turn | **Proposed (2026-09-07)** — Cooky's implementation issues cite it while Proposed, as with 0010; ratification at or after #242 |
 | 0024 | Tenancy model — Maknae is multi-tenant (several humans, several agent personas, one kernel); every subject is uid-derived and an agent holds no identity of its own; the reserved `agent` token is struck | Accepted (operator-ratified 2026-09-10) |
 | 0025 | FIPS 140-3 validation is a design goal, not a constraint — the `aws-lc-rs <1.18` pin is struck and Maknae builds on the AWS-LC-FIPS 4.x module while it is under CMVP review; the certificate is not tracked | Accepted (maintainer-ruled 2026-09-19) |
+| 0026 | The memory-hygiene boundary — a Maknae-owned buffer of secret-class bytes (content, prompt and reply text, the provider key; Vault authentication material is out of scope) must zeroize from allocation and never grow (the pre-existing sites that do not are listed); third-party codec and transport intermediates (ciborium growth, reqwest/serde_json/hyper/rustls both directions, vaultrs, the bearer header) are a named residual, listed in the ADR | Accepted (maintainer-ruled 2026-09-22, Option A; written 2026-09-25) |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 

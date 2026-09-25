@@ -10,7 +10,9 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
 /// File content on the wire. CBOR byte-string major type (asserted by test),
-/// zeroize-on-drop, redacting `Debug`.
+/// zeroize-on-drop, redacting `Debug`. Decode intermediates are not wiped —
+/// ciborium's growth copies and error-path buffer, and the scratch
+/// `from_reader` supplies (ADR-0026).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bytes(pub Zeroizing<Vec<u8>>);
 

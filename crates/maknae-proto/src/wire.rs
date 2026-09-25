@@ -38,6 +38,8 @@ pub fn conversation_id_is_acceptable(id: &str) -> bool {
 /// Prompt text: secret-adjacent like file content (`Bytes`), so it zeroizes
 /// on drop and `Debug` redacts; unlike `Bytes` it is a CBOR TEXT string,
 /// because ACP's `text` is a string and a peer must not have to re-encode.
+/// Decode intermediates are not wiped — ciborium's growth copies and
+/// error-path buffer, and the scratch `from_reader` supplies (ADR-0026).
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretText(pub zeroize::Zeroizing<String>);
 
