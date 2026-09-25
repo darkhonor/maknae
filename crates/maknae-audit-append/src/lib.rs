@@ -24,7 +24,7 @@ pub use error::AuditError;
 pub use record::{
     canonical_json, AuditRecord, EgressAudit, EgressStatus, Integrity, MutationAudit,
     MutationEffectKind, MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase,
-    MutationStatus, Outcome, Source, Subject, Where,
+    MutationStatus, Outcome, Source, Subject, Where, NO_PEER_UID,
 };
 pub use session::{Seq, SessionIds};
 pub use sink::{AuditEmit, AuditSink};

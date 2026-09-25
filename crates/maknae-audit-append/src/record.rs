@@ -8,6 +8,9 @@
 use crate::error::AuditError;
 use serde::{Deserialize, Serialize};
 
+/// `Source.uid` for a record with no identifiable peer: POSIX's `(uid_t)-1`.
+pub const NO_PEER_UID: u32 = u32::MAX;
+
 /// AU-3d: the connecting peer — kernel-verified uid/gid/pid + plane identity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Source {

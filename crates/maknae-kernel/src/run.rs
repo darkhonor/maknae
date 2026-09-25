@@ -1755,16 +1755,26 @@ pub async fn handle<S, E, P>(
                     };
                     // Zeroizing, pre-sized encode (spec D5): no realloc, no
                     // un-zeroized partial copies; buffer zeroizes after write.
-                    if let Ok(bytes) = encode_response_zeroizing(
-                        &response,
-                        content_len + crate::handler::FRAME_ENVELOPE_MARGIN as usize,
-                    ) {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(cfg.read_timeout_ms),
-                            write_frame(&mut stream, &bytes),
-                        )
-                        .await;
-                    }
+                    deliver_read(
+                        &mut stream,
+                        &cfg,
+                        encode_response_zeroizing(
+                            &response,
+                            content_len + crate::handler::FRAME_ENVELOPE_MARGIN as usize,
+                        ),
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        peer_user.as_deref(),
+                        decided_role,
+                        session_id,
+                        &seq,
+                        verb_to_action(&request.verb),
+                        &au3_1,
+                    )
+                    .await;
                 }
                 Err(refusal) => {
                     let (result, reason, posture, code, msg) = read_refusal_disposition(&refusal);
@@ -1951,6 +1961,45 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
             "response encoding failed",
         )
         .await;
+    }
+}
+
+/// The read path's delivery of an encoded response; an encode failure after
+/// the permit record gets the same correction every other verb gets (#265 B1).
+#[allow(clippy::too_many_arguments)]
+async fn deliver_read<S, E: AuditEmit + Send + Sync, B: AsRef<[u8]>>(
+    stream: &mut S,
+    cfg: &TransportConfig,
+    encoded: Result<B, maknae_proto::ProtoCodecError>,
+    emit: &Arc<E>,
+    host: &str,
+    socket: &str,
+    peer_uid: u32,
+    peer_uri: &str,
+    peer_user: Option<&str>,
+    role: Option<&'static str>,
+    session_id: u64,
+    seq: &Seq,
+    action: &str,
+    au3_1: &serde_json::Value,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    match encoded {
+        Ok(bytes) => {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(cfg.read_timeout_ms),
+                write_frame(stream, bytes.as_ref()),
+            )
+            .await;
+        }
+        Err(_) => {
+            refuse_unencodable_bounded(
+                stream, cfg, emit, host, socket, peer_uid, peer_uri, peer_user, role, session_id,
+                seq, action, au3_1,
+            )
+            .await
+        }
     }
 }
 
@@ -2152,11 +2201,11 @@ pub trait PlaneAccept {
     type Raw: Send + 'static;
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
-    /// Prompt half: take the next raw socket + its peer-creds. Only a raw-accept syscall
-    /// error surfaces (`io::Error`); the loop logs-and-continues on it (never `?`).
+    /// Prompt half: take the next raw socket + its peer-creds. The loop continues on
+    /// either error (never `?`).
     fn accept_raw(
         &self,
-    ) -> impl Future<Output = Result<(Self::Raw, PeerCreds), std::io::Error>> + Send;
+    ) -> impl Future<Output = Result<(Self::Raw, PeerCreds), maknae_vault::RawAcceptError>> + Send;
 
     /// Bounded half: run the mTLS handshake within `handshake_timeout` and report the
     /// authenticated peer, or an `AcceptRejection` carrying the passed-through creds. Run
@@ -2175,7 +2224,7 @@ impl PlaneAccept for PlaneListener {
 
     // `async fn` (not a manual `-> impl Future`): its anonymous future satisfies the trait's
     // `+ Send` bound because the only awaits are `Send`.
-    async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
+    async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), maknae_vault::RawAcceptError> {
         PlaneListener::accept_raw(self).await
     }
 
@@ -2196,6 +2245,19 @@ impl PlaneAccept for PlaneListener {
             peer_uid,
             delegated,
         })
+    }
+}
+
+/// Hand a connection-refusal record to the bounded background drain; a full
+/// queue counts it for the drain's aggregate record (#265 A6).
+fn offload_refusal(
+    tx: &mpsc::Sender<AuditRecord>,
+    rec: AuditRecord,
+    dropped: &std::sync::atomic::AtomicU64,
+) {
+    if let Err(err) = tx.try_send(rec) {
+        dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("maknaed: connection-refusal audit offload dropped a record: {err}");
     }
 }
 
@@ -2266,17 +2328,58 @@ where
     let (atcap_audit_tx, mut atcap_audit_rx) =
         mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
     let atcap_audit_emit = Arc::clone(&emit);
+    // #265 A6: records the full queue refused are counted here and written by the
+    // drain as one aggregate record.
+    let atcap_audit_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (drain_dropped, drain_ids, drain_wctx) = (
+        Arc::clone(&atcap_audit_dropped),
+        Arc::clone(&session_ids),
+        wctx.clone(),
+    );
     let mut atcap_audit_task = tokio::spawn(async move {
+        let append = |rec: AuditRecord| {
+            let emit = Arc::clone(&atcap_audit_emit);
+            async move {
+                if let Err(e) = emit.emit(&rec).await {
+                    eprintln!(
+                        "maknaed: AUDIT WRITE FAILED on a connection refusal (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                        rec.source.uid
+                    );
+                }
+            }
+        };
+        let flush_dropped = || {
+            let n = drain_dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
+            (n > 0).then(|| {
+                make_record(
+                    "connection",
+                    &drain_wctx.host,
+                    &drain_wctx.socket,
+                    maknae_audit_append::NO_PEER_UID,
+                    None,
+                    None,
+                    None,
+                    drain_ids.next_session(),
+                    1,
+                    "connect",
+                    None,
+                    "deny",
+                    &format!("audit queue full: {n} connection-refusal records dropped"),
+                    "unauthorized",
+                    &drain_wctx.au3_1,
+                )
+            })
+        };
         while let Some(rec) = atcap_audit_rx.recv().await {
-            if let Err(e) = atcap_audit_emit.emit(&rec).await {
-                eprintln!(
-                    "maknaed: AUDIT WRITE FAILED on at-capacity denial (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
-                    rec.source.uid
-                );
+            append(rec).await;
+            if let Some(summary) = flush_dropped() {
+                append(summary).await;
             }
         }
+        if let Some(summary) = flush_dropped() {
+            append(summary).await;
+        }
     });
-    let mut atcap_audit_dropped: u64 = 0;
 
     tokio::pin!(shutdown);
     tokio::pin!(supervisor);
@@ -2304,7 +2407,15 @@ where
                     // A raw-accept syscall error (no peer, or peer-cred capture failed): log
                     // and continue. NEVER `?` — a transient accept error must not kill the
                     // daemon. This is the ONLY thing the loop handles inline.
-                    Err(e) => {
+                    Err(maknae_vault::RawAcceptError::PeerCreds(detail)) => {
+                        let rec = make_record(
+                            "connection", &wctx.host, &wctx.socket, maknae_audit_append::NO_PEER_UID,
+                            None, None, None, session_ids.next_session(), 1, "connect", None, "deny",
+                            &format!("peer credentials not captured: {detail}"), "unauthorized", &wctx.au3_1,
+                        );
+                        offload_refusal(&atcap_audit_tx, rec, &atcap_audit_dropped);
+                    }
+                    Err(maknae_vault::RawAcceptError::Accept(e)) => {
                         eprintln!("maknaed: raw accept failed (continuing): {e}");
                     }
                     Ok((raw, peer_creds)) => {
@@ -2326,14 +2437,7 @@ where
                                     peer_creds.gid, peer_creds.pid, None, session_id, 1,
                                     "connect", None, "deny", "at capacity", "unauthorized", &wctx.au3_1,
                                 );
-                                if let Err(err) = atcap_audit_tx.try_send(rec) {
-                                    atcap_audit_dropped = atcap_audit_dropped.saturating_add(1);
-                                    eprintln!(
-                                        "maknaed: at-capacity audit offload {} for peer_uid={} — connection still refused, record dropped (total dropped: {atcap_audit_dropped}): {err}",
-                                        match err { mpsc::error::TrySendError::Full(_) => "queue full", mpsc::error::TrySendError::Closed(_) => "channel closed" },
-                                        peer_creds.uid
-                                    );
-                                }
+                                offload_refusal(&atcap_audit_tx, rec, &atcap_audit_dropped);
                             }
                             Ok(permit) => {
                                 let acceptor = Arc::clone(&acceptor);
@@ -2592,9 +2696,10 @@ where
             AUDIT_DRAIN_SHUTDOWN_TIMEOUT.as_secs()
         );
     }
-    if atcap_audit_dropped > 0 {
+    let unrecorded = atcap_audit_dropped.load(std::sync::atomic::Ordering::Relaxed);
+    if unrecorded > 0 {
         eprintln!(
-            "maknaed: at-capacity audit offload dropped {atcap_audit_dropped} record(s) over the daemon's life (audit queue saturation)"
+            "maknaed: {unrecorded} dropped connection-refusal record(s) were not counted on the trail before exit"
         );
     }
 
@@ -4412,6 +4517,61 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             crate::posture::Posture::Unverified,
             "a marker with the right mechanism but the wrong target must not \
              determine HrotSealed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod read_delivery_tests {
+    use super::*;
+
+    struct Recorded(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for Recorded {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+            self.0.lock().unwrap().push(rec.clone());
+            async { Ok(()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unencodable_read_is_corrected_on_the_trail_and_the_wire() {
+        let (mut ours, mut theirs) = tokio::io::duplex(4096);
+        let emit = Arc::new(Recorded(std::sync::Mutex::new(Vec::new())));
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let seq = Seq::new();
+        let _permit_record = seq.next();
+        deliver_read(
+            &mut ours,
+            &cfg,
+            Err::<Vec<u8>, _>(maknae_proto::ProtoCodecError::Encode("injected".into())),
+            &emit,
+            "h",
+            "s",
+            1000,
+            "maknae://d/plane/cli",
+            None,
+            Some("user"),
+            7,
+            &seq,
+            "fs.read",
+            &serde_json::Value::Null,
+        )
+        .await;
+        drop(ours);
+        let recs = emit.0.lock().unwrap().clone();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].seq, 2);
+        assert_eq!(recs[0].outcome.posture, "unavailable");
+        assert!(recs[0].outcome.reason.contains("could not be encoded"));
+        let body = maknae_proto::read_frame(&mut theirs, 65536).await.unwrap();
+        let resp = maknae_proto::decode_response(&body).unwrap();
+        assert!(
+            matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Internal),
+            "{:?}",
+            resp.result
         );
     }
 }

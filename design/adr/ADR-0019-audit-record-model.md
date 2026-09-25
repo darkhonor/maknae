@@ -191,3 +191,15 @@ Dated as-built amendment; rides the #275 PR. Four statements.
 **A startup failure after the sink opens is recorded.** Every post-sink failure that is not already a recorded refusal (`authz`, `audit.offload`) appends one `event: boot`, `action: start`, `deny` record carrying the failure's reason. It is in the boot session, after the records before it. This covers the egress bounds, the egress backend, the plane client and CA, mint, and the post-mint group, bind and signal steps.
 
 **Boot evidence is a gate, not a statement.** A composition or posture record that cannot be durably appended refuses boot. Before this amendment the daemon logged the failure and served without the record of its own policy composition, which contradicted this ADR's fail-closed rule.
+
+## Amendment (2026-09-25, #265) — connection refusals are counted, reads are corrected, and two residuals are named
+
+**A peer whose credentials cannot be captured is a recorded connection deny.** The raw accept now separates the `accept()` syscall error from a peer-credential capture failure (`RawAcceptError`). The second appends `event: connection`, `action: connect`, `deny`, reason `peer credentials not captured: …`. It has no subject, and `source.uid` is `NO_PEER_UID` (`u32::MAX`, POSIX's `(uid_t)-1`), because the schema's uid is not optional. A syscall error has no peer, no subject and no decision, so it is operational logging (#354), not audit.
+
+**No connection refusal leaves the trail uncounted.** At-capacity and peer-credential denies go through the bounded background offload. A record the full queue refuses is counted. The drain task appends one aggregate record (`audit queue full: N connection-refusal records dropped`, `NO_PEER_UID`) after the next record it appends, and again when it finishes at shutdown. The aggregate is written inside the existing audit-drain bound, so the shutdown chain gains no stage. Individual records under a flood are exactly what an attacker would use to grow the log, so this is a count, not a replay.
+
+**A read whose response cannot be encoded after its permit record is corrected**, with the same `delivery failed` record and `Internal` frame every other verb already gets.
+
+**Residual: a startup failure before the sink opens** (the FIPS assert, config load, the sink open itself) has nowhere to be recorded. It reaches stderr and the service manager's log, and goes to the operational tiers (#354).
+
+**Residual: an append that fails after its side effect** (a write's completion, a prompt's outcome, the namespace lane's progress, report or ack) cannot be repaired by another record, because the sink has just failed. The durable intent record already states *authorized, outcome unknown*, which is this ADR's two-phase design. The response to the audit failure itself (AU-5: alert, halt or continue) is an open decision. Today it is `eprintln!` and the request's frame is withheld.
