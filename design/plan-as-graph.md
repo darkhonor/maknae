@@ -264,6 +264,52 @@ Today's `SKILL.md` conflates them, and that conflation explains a property of th
 
 The split is forced rather than merely tidy: [core principle 1](../AGENTS.md) holds that the agent runtime is untrusted by design, so **an obligation enforced by the agent is not enforced.** The answer to "LLM or platform?" follows from the posture already adopted — **the platform enforces obligations; the model consumes knowledge.**
 
+## There is not one graph — there are four, and they differ by writer
+
+*(Maintainer, 2026-09-25, naming the set: a kernel-maintained activity graph; ephemeral per-user plan graphs; graphs that govern agent behaviour; and the long-term knowledge graph over the Knowledge Lake.)*
+
+**The useful axis is not purpose but who may write and what a false entry costs.** On that axis the four split two and two, and the two untrusted ones are untrusted for different reasons — which matters, because the mitigations are different.
+
+| graph | writer | trust | lifetime | a false entry causes |
+|---|---|---|---|---|
+| kernel activity | the kernel alone | **trusted** (TCB) | host lifetime | loss of system integrity |
+| governance / profile | operator or organisation, at boot | **trusted** config | boot to boot | wrong enforcement posture, silently |
+| user plan | the agent | **untrusted** — authored by the untrusted runtime | ephemeral; retention user-declared | a bad plan, caught by validation |
+| lake knowledge | ingested documents, plus agent inference | **untrusted data** | long-lived, curated | wrong knowledge informs a decision |
+
+The kernel's graph reaching host state and policy-granted restricted areas is consistent with the existing posture, **including the part the maintainer flagged in passing**: the kernel does not bypass policy to do it. [Core principle 2](../AGENTS.md) — *no role or privilege, not even the kernel, bypasses clearance* — applies to the kernel's own graph as it does to everything else.
+
+### The knowledge graph is a PIP, and its edges are the exposed surface
+
+The [KLC](knowledge-lifecycle-contract.md) §3 already settles the role: **the Lake is a PIP; the reference monitor is the PDP.** A knowledge graph over the Lake is therefore a *Policy Information Point* — it may inform a decision and may never make one, which is the same inform-but-not-authorize line the KLC draws for quarantined content (§8: usable to inform the current task's reasoning, not privileged actions).
+
+That line will be under pressure, and it is worth saying why now rather than when it is proposed. An edge reading `stig-rule:RHEL-09-211010 --implemented-by--> vendor-doc:§4.2` is *precisely* the shape someone will later want to use to auto-approve a control. It must not be, however well-curated the Lake is.
+
+**The design point the graph form adds beyond the KLC's existing object handling: an edge is itself an assertion, and it is not covered by either endpoint's provenance.** The KLC stamps provenance and hash on ingested objects. A relationship *between* two objects is a third claim — made either by a document (then it carries that document's provenance and authority tier) or inferred by the agent (then it is an **internal-origin object** and takes §9.3's gate, not a free pass because both endpoints are trusted). **Provenance belongs on the edge.** A graph is more dangerous than prose in exactly one way here: an edge renders as something the system established, where a sentence renders as something a document said.
+
+### Shared substrate, separate vocabularies
+
+`(write t1s3) --verifies--> (test t1s4)` and `(stig-rule) --implemented-by--> (vendor-paragraph)` have nothing in common at the vocabulary level, and forcing one vocabulary across them would produce a vocabulary that fits neither. **What they can share is the substrate**: node identity, typed edges, provenance fields, versioning, and the serialization. That distinction keeps "we define the vocabulary, they define the profile" from becoming ambiguous about *which* vocabulary — there is one substrate and several vocabularies over it, and a profile constrains exactly one of them.
+
+### The governance graph is schema-level, not a fourth instance
+
+The maintainer hedged here (*"likely driven by the profiles specifically — or something else entirely"*), and the hedge is warranted. A profile is a **predicate over graphs**, not a graph of activities: *"a node of kind `write` must have an adjacent node of kind `verify`"* is a subgraph pattern matched against a plan graph. It can legitimately be expressed as a graph — of required patterns — but it is the schema-level artifact, not an instance alongside the other three. **Three instance graphs and one pattern artifact** is the cleaner count.
+
+### The crossings are the design; the graphs are the easy part
+
+Four graphs that never touch would need no thought. Every risk is at a boundary, and the general rule is the standard one: **information may cross up the trust gradient only through validation; authority only ever flows down.**
+
+- **lake → plan.** Knowledge informs planning; legitimate, because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — that would let ingested content change what counts as a valid plan, which is untrusted data setting policy.
+- **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
+- **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
+- **plan → lake.** An executed plan that produced knowledge is internal-origin ingest under KLC §9.3, not a shortcut into the Lake because the platform generated it.
+
+### One conflict to resolve: the plan graph has two retention authorities
+
+The maintainer's model has plan graphs ephemeral, in a per-user store, with **user-declared retention**. The previous section recorded that node state transitions over a validated graph are an audit trail by construction ([ADR-0019](adr/ADR-0019-audit-record-model.md)). **Both cannot govern the same artifact.** A user who declares zero retention would otherwise delete the audit record of what the agent did on their behalf.
+
+Two resolutions, and this is a maintainer call: either the execution record is a separate kernel-retained object that references the plan, or the plan is retained under the audit policy and only its *payload* is subject to user retention. The second is cheaper; the first is cleaner about what an audit record is.
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
