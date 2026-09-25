@@ -158,14 +158,14 @@ files = [
   "crates/maknae-config/src/egress_cfg.rs",
   # #240a: the deputy's decision — bounds containment and shape admission, and
   # the absence of any path by which it could chain to another call.
-  "bins/maknae-egress/src/handle.rs",
+  "crates/maknae-deputy/src/handle.rs",
   # #240b: fulfilment is gated on `Admitted`, which has no public constructor —
   # a provider call cannot be made on a frame whose bounds were never checked.
-  "bins/maknae-egress/src/call.rs",
+  "crates/maknae-deputy/src/call.rs",
   # #240b: the credential is read on FIRST USE per destination and cached. "At
   # boot" is single-provider thinking and fails with two. A failed read is not
   # cached, so a transient Vault failure cannot poison a destination.
-  "bins/maknae-egress/src/keys.rs",
+  "crates/maknae-deputy/src/keys.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -266,7 +266,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -444,6 +444,10 @@ why = "scaffold stub — re-tier at body landing (T1 candidate: privileged capab
 [[t3]]
 path = "crates/maknae-subject-ctx/src/lib.rs"
 why = "scaffold stub — re-tier at body landing"
+
+[[t3]]
+path = "crates/maknae-deputy/src/lib.rs"
+why = "module declarations only; the decisions are handle/keys/call (T1)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"

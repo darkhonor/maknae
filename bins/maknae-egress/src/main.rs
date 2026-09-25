@@ -20,12 +20,11 @@
 //! Thin by design (T3, the `bins/maknaed` precedent): the decision is in
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
-mod call;
-mod handle;
-mod keys;
 mod keys_vault;
 mod listen;
 mod serve;
+
+use maknae_deputy::{call, keys};
 
 use std::path::PathBuf;
 

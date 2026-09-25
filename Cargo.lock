@@ -1099,12 +1099,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-deputy"
+version = "0.0.0"
+dependencies = [
+ "maknae-config",
+ "maknae-llm",
+ "maknae-proto",
+ "maknae-vault",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "maknae-egress"
 version = "0.0.0"
 dependencies = [
  "listenfd",
  "maknae-config",
- "maknae-llm",
+ "maknae-deputy",
  "maknae-proto",
  "maknae-vault",
  "nix",

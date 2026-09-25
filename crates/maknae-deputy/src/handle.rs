@@ -64,6 +64,18 @@ pub enum Refusal {
 /// returned `Ok`. `call::fulfil` takes one, so a provider call cannot be made
 /// on a frame whose bounds were never checked — the property is in the type
 /// rather than in a comment someone has to keep reading.
+///
+/// ```compile_fail,E0451
+/// fn forge(req: &maknae_proto::EgressFrameRequest) -> maknae_deputy::handle::Admitted<'_> {
+///     maknae_deputy::handle::Admitted { req }
+/// }
+/// ```
+///
+/// ```
+/// fn read<'a>(a: &maknae_deputy::handle::Admitted<'a>) -> &'a maknae_proto::EgressFrameRequest {
+///     a.request()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Admitted<'a> {
     req: &'a EgressFrameRequest,
@@ -108,12 +120,6 @@ pub fn decide<'a>(
     // is PURE and directly testable (no socket, no credential, no provider),
     // and `Refusal` is the right taxonomy — `serve.rs` documents its `Fulfil`
     // lane as "the deputy was WILLING", which a pre-send refusal is not.
-    //
-    // On coverage, stated accurately because an earlier version of this
-    // comment got it wrong: **`maknae-egress` is not in `mutants_crates` at
-    // all** (`coverage-tiers.toml`), so #297's blind spot covers this file too
-    // — this module's own header calling itself "mutation-visible" is
-    // aspirational. The new predicates were hand-mutated instead.
     //
     // Both checks name a kernel bug: the PDP refuses non-text and text-less
     // prompts before a frame exists. They are defence in depth, and they are
@@ -190,6 +196,15 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    /// The `compile_fail` doctest on `Admitted` constructs it as `Admitted { req }`;
+    /// this keeps that literal valid inside the crate, so privacy is what fails it.
+    #[test]
+    fn admitted_holds_the_frame_in_req() {
+        let f = req("maknae/providers/openai");
+        let a = Admitted { req: &f };
+        assert!(std::ptr::eq(a.request(), &f));
     }
 
     #[test]
