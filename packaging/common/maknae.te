@@ -225,10 +225,10 @@ allow init_t maknae_private_t:dir { search getattr };
 allow init_t maknae_secret_t:file { read open getattr };
 
 # Audit dir: APPEND, not write (MAC-enforced append-only). NO `create`/`add_name`
-# (the package pre-creates the file; the daemon only appends). `lock` — the sink
+# (the package pre-creates the file). `lock` — the sink
 # is single-writer and may flock.
 allow maknaed_t maknae_audit_t:dir { open read search getattr };
-allow maknaed_t maknae_audit_t:file { append open getattr lock };
+allow maknaed_t maknae_audit_t:file { read append open getattr lock };
 
 # UDS bind + chgrp in /run/maknae.
 # el10's systemd 257 labels the RuntimeDirectory=maknae dir `maknae_runtime_t`
