@@ -510,7 +510,6 @@ Prove Maknae works as an agent on a **packaged** Linux install. An operator enro
 - **The Vault CA** as a PEM file on the host.
 - **The RPM, built on the target OS** (`packaging/rpm/README.md`), so its SELinux module is compiled against that host's policy.
 - **`jq` and `semanage`**: `sudo dnf install -y jq policycoreutils-python-utils`.
-- **#364 fixed.** Until the shipped policy grants `maknaed_t` write on a delegated home descriptor, SELinux denies the write in step 10. The rest of the chapter still runs, and the denial is the recorded result.
 - **A provider API key**, which you will put into Vault in step 6. It never goes in a file on this host.
 
 ### 1. Install
@@ -597,7 +596,7 @@ sudo restorecon -Rv /etc/maknae
 From a machine and token allowed to write the path, not from this host:
 
 ```bash
-read -rs KEY && printf %s "$KEY" | vault kv put maknae-kv/maknae/providers/openai api-key=- && unset KEY
+read -rsp 'API key: ' KEY; echo; printf %s "$KEY" | vault kv put maknae-kv/maknae/providers/openai api-key=-; unset KEY
 ```
 
 `printf %s` keeps a trailing newline out of the stored value. A newline would make every provider call fail, because it is not allowed in the `Authorization` header.
@@ -629,10 +628,12 @@ The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so
 ```bash
 mkdir -p ~/projects/maknae-242
 printf 'Maknae is a security kernel for AI agents.\n' > ~/projects/maknae-242/input.txt
-: > ~/projects/maknae-242/output.txt
+rm -f ~/projects/maknae-242/output.txt
 ```
 
-**Create `output.txt` before the run.** The daemon executes a write only on an object that already exists (`crates/maknae-kernel/src/mutation.rs`). A new file is created on the client-reported lane instead, and its record says so. This chapter asks for the kernel-observed lane.
+**Do not create `output.txt`.** The kernel decides the write and records its intent; the CLI then creates the file under your own permissions and reports the outcome. The kernel never writes to your files.
+
+Replacing a file that already exists still executes in the daemon today. That is being removed (#365), and SELinux refuses it on an enforcing host, so this chapter writes a new file.
 
 ### 9. Start
 
@@ -667,6 +668,7 @@ cat ~/projects/maknae-242/output.txt
 The trail is `/var/log/maknae/audit.jsonl`. Its directory is `0700 _maknae`, so reading it needs `sudo`.
 
 ```bash
+: "${START:?run step 10 in this shell}"
 sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
 sudo jq -c 'select(.event=="boot" and .action=="authz") | {ts, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 1
 ```
@@ -679,14 +681,14 @@ What to find:
 |---|---|
 | Boot composition evidence | `event:"boot"`, `action:"authz"`, reason `authorization composition: …; system: …; ceiling: …`. Written at every boot, before serving |
 | `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation` |
-| `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`, `BackendUnavailable`) |
+| `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
+| `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
 | `fs.read` | `object` = the canonical path, `result:"permit"` |
-| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteExisting"` |
-| `fs.write` completion | `mutation.phase:"Completion"`, `origin:"KernelObserved"`, `status:"Applied"`, `intent_seq` pointing at the intent. A `Reported*` status means the client-reported lane |
+| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"` |
+| `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created file in `effects` |
+| `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or `ReportedOsRefused`/`ReportedPartial`), `intent_seq` pointing at the intent |
 
-Before #364 is fixed, the write rows will not match the table: the policy refuses the delegated descriptor. Quote whatever the trail records for the write.
-
-There is **one `session.prompt` pair per model turn**, so a read-then-write conversation has several.
+There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
 
 **Correlation:**
 - `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
@@ -719,8 +721,8 @@ sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "REA
 
 - **Expected owners and modes:** `/etc/maknae` `root:_maknae 750`, with an ACL entry for `_maknae-egress` only; `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; the sealed `.cred` `root:root 400`; the RoleID `root:_maknae-egress 640`.
 - **Expected reads:** every `test -r` says `not readable`, for the operator and for `_maknae`.
-  - For the two `/etc/maknae` files, the operator's result rests on the directory: the operator cannot traverse `/etc/maknae` (`root:_maknae 750`), so the file modes are what `stat` shows.
-  - The runtime credential exists only while the deputy runs. Run the loop once, and confirm `runtime credential present` before reading its `test -r` line.
+  - The operator's `not readable` proves only that `/etc/maknae` (`root:_maknae 750`) cannot be traversed. Judge the file modes from the `stat` output. The same holds for `_maknae` and `egress/` (`root:_maknae-egress 750`).
+  - The runtime credential exists only once the deputy has started. Run `maknae agent` once, and confirm `runtime credential present` before reading its `test -r` line.
 - **What this check does not cover:** the operator's own `maknae-enroll` token can mint a `maknae-egress` SecretID in Vault. That lies outside the file-custody claim; state it alongside the result.
 
 ### 14. SELinux
@@ -731,11 +733,12 @@ sudo ausearch -m AVC,USER_AVC,FANOTIFY -ts $LSTART    # unquoted: date and time 
 
 `LSTART` was recorded at step 10, so the window starts with the conversation. `FANOTIFY` records are fapolicyd denials.
 
-**Expected:** no denials once #364 is fixed. Before that, expect `denied { write }` for `maknaed_t` on `user_home_t` at step 10. Any other denial is a finding: quote it. This chapter is the first run of both delegated descriptors, read and write, under an enforcing policy.
+**Expected:** no denials. A denial is a finding: quote it. This chapter is the first run of the delegated read descriptor under an enforcing policy.
 
 ### What it proves
 
-- **A packaged Maknae acts as an agent against a real provider:** one conversation, one read, one write (once #364 is fixed), and every leg decided by `maknaed` and audited before its delivery or effect.
+- **A packaged Maknae acts as an agent against a real provider:** one conversation, one read, one write, and every leg decided by `maknaed` and audited before its delivery or effect.
+- **The write is performed by the client under your own permissions**; the kernel only decides it and records it.
 - **The provider key lives only in Vault** and is read only by the deputy, under its own AppRole and policy.
 - **The trail shows each decision and its outcome in order**, with the boot composition record ahead of them.
 
