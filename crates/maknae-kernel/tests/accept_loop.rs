@@ -56,6 +56,7 @@ enum Scripted {
     /// `accept_raw` succeeds, but `finish_handshake` sleeps this long before yielding an OK
     /// connection — simulating a peer that stalls the TLS handshake.
     Stall(Duration, DuplexStream, String, u32),
+    RawFail(maknae_vault::RawAcceptError),
 }
 
 /// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
@@ -91,7 +92,7 @@ impl PlaneAccept for FakeAccept {
     // Pop INSIDE the future so a `select!` that loses to shutdown (dropping this future
     // unpolled) does not silently consume a scripted item. The std MutexGuard is released
     // before the only await, so the future stays `Send` (satisfying the trait bound).
-    async fn accept_raw(&self) -> Result<(FakeRaw, PeerCreds), std::io::Error> {
+    async fn accept_raw(&self) -> Result<(FakeRaw, PeerCreds), maknae_vault::RawAcceptError> {
         let item = self.queue.lock().unwrap().pop_front();
         if item.is_some() {
             self.popped
@@ -108,6 +109,7 @@ impl PlaneAccept for FakeAccept {
             Some(Scripted::Stall(d, stream, uri, uid)) => {
                 Ok((FakeRaw::Stall(d, stream, uri, uid), creds(uid)))
             }
+            Some(Scripted::RawFail(e)) => Err(e),
             None => {
                 std::future::pending::<()>().await;
                 unreachable!()
@@ -468,6 +470,100 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
 
     loop_task.abort();
     let _ = emit.records(); // touch the sink so the type is exercised
+}
+
+/// #265 A4: a peer whose credentials cannot be captured is a recorded connection
+/// deny with no peer identity; an `accept()` syscall error is not (A5, #354).
+#[tokio::test]
+async fn a_peer_credential_failure_is_a_recorded_deny_and_an_accept_error_is_not() {
+    let recs = drive(
+        vec![
+            Scripted::RawFail(maknae_vault::RawAcceptError::PeerCreds("EPERM".into())),
+            Scripted::RawFail(maknae_vault::RawAcceptError::Accept(std::io::Error::other(
+                "EMFILE",
+            ))),
+        ],
+        cfg_with(64, 150),
+    )
+    .await;
+    let recs: Vec<_> = recs.iter().filter(|r| r.event != "shutdown").collect();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    let r = recs[0];
+    assert_eq!(
+        (
+            r.event.as_str(),
+            r.action.as_str(),
+            r.outcome.result.as_str()
+        ),
+        ("connection", "connect", "deny")
+    );
+    assert!(r.outcome.reason.contains("EPERM"), "{:?}", r.outcome);
+    assert_eq!(r.source.uid, maknae_audit_append::NO_PEER_UID);
+    assert_eq!((r.source.gid, r.source.pid), (None, None));
+    assert_eq!(r.subject.user, None);
+}
+
+/// #265 A6: every at-capacity refusal is on the trail — individually, or counted
+/// in an aggregate record when the offload queue was full.
+#[tokio::test]
+async fn every_at_capacity_refusal_is_recorded_or_counted() {
+    const REFUSED: usize = 500;
+    let (_c1, server1) = tokio::io::duplex(1024);
+    let mut script = vec![Scripted::Ok(
+        server1,
+        "maknae://d/plane/cli".to_string(),
+        9000,
+    )];
+    for i in 0..REFUSED {
+        script.push(ok_conn("maknae://d/plane/cli", 10_000 + i as u32));
+    }
+    let emit = SlowEmit::new(Duration::from_millis(10));
+    let acceptor = FakeAccept::new(script);
+    let popped = acceptor.pop_counter();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let emit_for_loop = emit.clone();
+    let loop_task = tokio::spawn(async move {
+        maknae_kernel::accept_loop(
+            acceptor,
+            emit_for_loop,
+            Arc::new(SessionIds::with_nonce(1)),
+            cfg_with(1, 150),
+            wctx(),
+            async move {
+                let _ = rx.await;
+            },
+            pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(fixture_principal()),
+            std::sync::Arc::new(Default::default()),
+            std::sync::Arc::new("test-backend".to_string()),
+            std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::unavailable_egress(),
+        )
+        .await;
+    });
+    while popped.load(std::sync::atomic::Ordering::Relaxed) < REFUSED + 1 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let _ = tx.send(());
+    loop_task.await.unwrap();
+
+    let recs = emit.records();
+    let individual = recs
+        .iter()
+        .filter(|r| r.outcome.reason == "at capacity")
+        .count();
+    let counted: usize = recs
+        .iter()
+        .filter_map(|r| r.outcome.reason.strip_prefix("audit queue full: "))
+        .map(|rest| rest.split(' ').next().unwrap().parse::<usize>().unwrap())
+        .sum();
+    assert!(
+        counted > 0,
+        "the queue never filled; the test proves nothing"
+    );
+    assert_eq!(individual + counted, REFUSED);
 }
 
 /// P1 (codex round-5): when the credential supervisor's `JoinHandle` resolves (token

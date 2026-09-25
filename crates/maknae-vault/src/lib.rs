@@ -70,7 +70,8 @@ pub use secret_source::{
 };
 #[cfg(unix)]
 pub use stream::{
-    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawPlaneConn, RejectReason,
+    AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
+    RawPlaneConn, RejectReason,
 };
 pub use verify::{verify_plane_uri_san, VerifyError};
 

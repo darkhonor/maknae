@@ -262,10 +262,9 @@ impl PlaneListener {
     /// `SO_PEERCRED`/`LOCAL_PEERCRED` capture — both fast syscalls — and return the raw
     /// stream with its peer-creds. NO TLS handshake happens here, so this cannot be stalled
     /// by a slow peer: the daemon's accept loop stays free to accept the next connection
-    /// while the (bounded) handshake runs elsewhere, under the concurrency semaphore. Only a
-    /// raw-accept syscall error (or a peer-cred capture failure) surfaces here, as an
-    /// `io::Error` the loop logs-and-continues (never `?`).
-    pub async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
+    /// while the (bounded) handshake runs elsewhere, under the concurrency semaphore. Never
+    /// `?` in the loop: see [`RawAcceptError`].
+    pub async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), RawAcceptError> {
         accept_raw_on(&self.listener).await
     }
 
@@ -298,16 +297,33 @@ impl PlaneListener {
 /// The prompt raw-accept, factored out of the `PlaneListener` method so tests can drive it
 /// against a bare `UnixListener` (peer-creds need a real socket; `PlaneListener` itself
 /// additionally requires a live `PlaneClient` cert-sink attachment not needed here). A
-/// peer-cred capture failure fails closed to an `io::Error` — a peer we cannot identify
-/// cannot be policed, and the caller drops the socket.
+/// peer we cannot identify cannot be policed: the socket is dropped.
 pub(crate) async fn accept_raw_on(
     listener: &tokio::net::UnixListener,
-) -> Result<(RawPlaneConn, PeerCreds), std::io::Error> {
-    let (raw, _addr) = listener.accept().await?;
+) -> Result<(RawPlaneConn, PeerCreds), RawAcceptError> {
+    let (raw, _addr) = listener.accept().await.map_err(RawAcceptError::Accept)?;
     // Capture peer-creds BEFORE the handshake — so they're available to report even on a
     // handshake/SAN failure (the whole point of `AcceptRejection`).
-    let peer_creds = peercred::capture(&raw).map_err(std::io::Error::other)?;
+    let peer_creds =
+        peercred::capture(&raw).map_err(|e| RawAcceptError::PeerCreds(e.to_string()))?;
     Ok((RawPlaneConn(raw), peer_creds))
+}
+
+/// Why a raw accept produced no connection: the syscall itself, or a peer
+/// whose credentials could not be captured (#265 A4 — the second is audited).
+#[derive(Debug)]
+pub enum RawAcceptError {
+    Accept(std::io::Error),
+    PeerCreds(String),
+}
+
+impl std::fmt::Display for RawAcceptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RawAcceptError::Accept(e) => write!(f, "accept: {e}"),
+            RawAcceptError::PeerCreds(e) => write!(f, "peer credentials: {e}"),
+        }
+    }
 }
 
 /// The bounded handshake half, factored out for the same testability reason as
