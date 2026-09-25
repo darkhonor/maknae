@@ -56,7 +56,7 @@ profile maknaed /usr/bin/maknaed {
   # audit.jsonl is deleted under confinement, maknaed fails closed until an
   # operator restores the file.
   /var/log/maknae/                       r,
-  /var/log/maknae/audit.jsonl            ak,
+  /var/log/maknae/audit.jsonl            rak,
   /var/log/maknae/**                     a,
 
   # Runtime UDS — the daemon binds its control socket in /run/maknae and needs
