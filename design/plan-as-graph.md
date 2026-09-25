@@ -6,6 +6,8 @@
 
 **Origin.** The [Jive assessment](references/2026-09-25-jive-assessment.md) §2 identified the graph-call primitive as the one transferable idea in that project: separate *deciding the shape of the work* from *doing the work*, so the model is consulted when the shape must change rather than when the next step must be looked up. This document records an experiment on the half of that idea Maknae can use without adopting any of Jive's execution posture — **representing an approved plan as a graph** — and the constraints the experiment found.
 
+***Corrected 2026-09-25 (maintainer): the experiment measured the wrong artifact.*** It converted plans that were **born as prose**, so every constraint below that blames *inference* is really a constraint on *retrofitting*. The maintainer's correction is that a plan generated as a graph from birth has no prose to infer from — it states activities to take, not decisions to explain. §"What born-as-graph actually changes" re-measures against that, and it removes two of the three false positives outright while leaving the size finding intact and creating a new obligation the prose was silently carrying.
+
 ## The idea in one paragraph
 
 An implementation plan is already a graph: tasks depend on tasks, steps depend on steps, steps touch files. Markdown flattens that graph into a linear document that must be re-read whole to answer any question about it. Splitting the representation in two — a **shape layer** carrying only node ids, activity classes and edges, and a **payload layer** carrying each node's full prose and code, addressed by id — lets a reader load the shape for a few hundred tokens and pull only the payloads it needs. Two properties follow: progressive disclosure during execution, and mechanical queryability of the plan as a whole.
@@ -60,10 +62,52 @@ Of the warnings the checks did raise, verification against the source plans foun
 
 Two converter defects were also found and fixed mid-experiment, both of which had produced confident wrong output first: a missing key made "task with no commit" fire on 9 of 9 tasks, and single-label classification made `"Green + gates"` — a step that runs both `cargo test` and `fmt`/`clippy`/`mutants` — count as `test` only, which manufactured the gate warnings. **Activity class is a set, never a label.**
 
+## What born-as-graph actually changes
+
+The maintainer's framing: if plans are generated as graphs from birth, the prose never exists, and the plan carries activities rather than arguments. Measured against the same two plans, by payload field:
+
+| plan | prose (`text`) | code / deliverable | structure + names + files | prose share |
+|---|---:|---:|---:|---:|
+| ceiling (code-heavy) | 5,805 | 44,635 | 3,207 | **11%** |
+| strike (docs/ADR) | 2,005 | 0 | 1,388 | **59%** |
+
+**This does not rescue the size finding, and that is the first thing to say.** On the code-heavy plan the prose is 11% of the payload; **83% is code blocks**, which a born-as-graph plan still has to carry byte for byte. Deleting every word of justification leaves the two-layer total at roughly parity with the markdown, not below it. On the docs plan prose is 59%, but most of that prose *is the deliverable* — ADR text to be written — and is therefore code by another name. **The disclosure win (1.8% shape) stands; the compression claim stays dead either way.**
+
+**What it does remove is the typing failure, which was the binding constraint.** Both of these were inference artifacts and cannot occur in a declared-at-birth node:
+
+- **23–33% unclassified.** There is nothing to classify: the node *is* its activity class.
+- **The noun-as-verb false positive.** Strike `t3s1` was misread as a commit because its prose said *"retire them in the same commit as their subject."* Written as a graph node, that sentence is not prose at all — it is an **edge**: `:commit-with t3c1`. The ambiguity is not reduced, it is structurally absent.
+
+Hand-converting that one node is instructive about where the gain is and is not:
+
+```
+markdown  68 tokens  - [ ] **Step 1:** Delete the whole-`Verb` `SUBJECT_NAME` regression
+                       test and `every_verb_for_test`. **Retire them in the same commit
+                       as their subject** — a guard that outlives its reason becomes a
+                       puzzle for the next reader, and #276's body says so explicitly.
+
+graph     49 tokens  (delete t3s1 :file "crates/maknae-kernel/tests/subject_identity.rs"
+                      :items (test:SUBJECT_NAME fn:every_verb_for_test)
+                      :commit-with t3c1 :cite #276)
+```
+
+**72% of the tokens for 100% of the machine-checkable content.** The saving is modest because identifiers dominate. The actual change is that `:commit-with` is a fact a query can trust and *"in the same commit as"* was a fact a query got wrong.
+
+**This is the maintainer's own cardinal rule applied one level up.** The standing ruling on comments is that the default is no comment and the reasoning lives in the ADR, the issue or the commit message. A plan node obeys the same rule: it states the activity and cites `#276`; the argument for retiring the guard lives in `#276`, where it already did.
+
+### The obligation this creates
+
+**Every judgement the prose was silently carrying has to become a declared field, or the check that needed it becomes unanswerable.** This is the one place born-as-graph makes the problem harder, and it is visible in the two findings it does *not* fix:
+
+- **The gate-before-commit warnings** (ceiling `t2s3`, `t8s10`) were true structural facts whose *disposition* depended on a convention — that this plan batches its gates into Task 9. That convention lived in prose a human reader absorbed. In a graph it must be declared (`:gates-deferred-to t9`) or the check reports a defect that is not one, forever.
+- **The `t9` file-scope false positive** is untouched. It was the check confusing task-local scope with plan-global scope, and a file named in *expected gate output* with a file *touched*. No amount of birth-format fixes a rule that asks the wrong question. Scope and file-intent (`:touches` vs `:expects-in-output`) are declared fields too.
+
+The general form: **prose is lossy for machines but lossless for humans, and removing it converts an implicit obligation into an explicit schema field.** The schema's completeness is now the only thing standing between a structural check and a confident wrong answer — which is the same finding as before, relocated from the parser to the vocabulary.
+
 ## What this implies for post-Cooky work
 
-1. **Activity class must be declared at authoring time, not inferred at conversion time.** This is the whole finding. Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. A plan that wants to be assessed structurally must be *written* with its node types, which means the schema comes before the tooling, not after it.
-2. **The schema is the artifact, not the converter.** A retrofitting parser over existing markdown is a measurement instrument and should be thrown away — this one was. What survives is the node contract: id, activity class *set*, dependencies, declared file scope, and a payload split into instruction / code / expected-output.
+1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
+2. **The schema is the artifact, not the converter.** A retrofitting parser over existing markdown is a measurement instrument and should be thrown away — this one was. What survives is the node contract, and the correction above extends it: id, activity class, dependencies, **declared file scope with intent** (`touches` vs `expects-in-output`), **declared plan-level conventions** (where gates run), an issue citation in place of justification, and a payload split into instruction / deliverable / expected-output.
 3. **Scope rules belong to the plan, not the task.** The `t9` false positive is the general case: a plan has task-local scope and plan-global scope, and a check that knows only one of them is wrong at every boundary.
 4. **Do not claim size reduction.** State disclosure cost (what a reader loads) and keep it separate from storage cost (what the plan weighs). They move in opposite directions on code-heavy plans.
 5. **The two consumers have different requirements and must not be conflated.** A plan graph for *our development process* is a Claude Code authoring concern. A task graph inside Maknae's runtime loop is a kernel-authorization concern under ADR-0023, where the planner is untrusted by design and a node's activity class would be an input to a PDP decision rather than a convenience for a reader. Evidence gathered for the first does not transfer to the second, and this experiment gathered none for the second.
@@ -76,7 +120,7 @@ The skill's job is **authoring plans into the schema**, not converting them afte
 
 - Does the payload split (instruction / code / expected output) hold up on a plan with large expected-output blocks, or does it just move the p90?
 - Is the shape layer worth an S-expression over JSON once a schema exists? S-expression won on tokens here; a schema-validated form may not need the margin.
-- What is the minimum activity-class vocabulary? Seven classes were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`) and 23–33% of steps still fell through — is that a vocabulary gap or a parsing gap?
+- What is the minimum activity-class vocabulary? Seven were used ad hoc (`read`, `write`, `test`, `verify`, `gate`, `commit`, `decide`). The 23–33% fall-through was a parsing gap and is answered by authoring at birth; what is **not** answered is whether seven classes are enough to express a real plan without a `misc` escape hatch — and a `misc` node is an unclassified node wearing a badge.
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 
 *Artifacts from this experiment were throwaway and are not committed. The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository.*
