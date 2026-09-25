@@ -30,13 +30,17 @@ That ratio is the contribution. It is independent of Jev, independent of TypeScr
 - **Streaming commit of graph entries.** Each fully-closed root entry commits while the tool arguments are still streaming, with dependency-ordered commit and whole-graph validation at the end. Execution starts before the planner has finished speaking.
 - **A reusable, in-repo comparison harness.** `taskground/` defines eleven tasks with fresh workspaces and runs Jive, Codex and Claude Code through the same definitions. Shipping the harness rather than only the numbers is better practice than most projects that publish benchmarks — see §4 for why it still does not make the numbers evidence.
 - **Honest framing of its own limits.** The README says plainly that it is "fighting the model's training," that other agents are better at some tasks, and "I'm not sure if this is it." That is more calibrated than the "Agent 2.0" banner suggests.
-- **30 test files / 5,667 lines against ~98k lines of source, in week one.** Including offline fixture-only tests that need no API keys.
+- **32 test files / 7,041 lines under `tests/`, in week one.** Including offline fixture-only tests that need no API keys. *(Corrected 2026-09-25: an earlier draft said 30 / 5,667, from a `tests/*.test.ts` glob that missed two `.tsx` files.)*
 
 ## 4. Flaws in the approach — AVOID
 
-**The benchmark numbers are not evidence.** `taskground/task_runs/` is **empty** — the published table is not reproducible from the repository. There is no repetition count, no variance, no median, no n. Single runs of LLM-driven agents on tasks authored by the same person who authored the agent, with wall-clock as the headline metric. The harness is genuinely reusable; the numbers in the README are an anecdote with a table around it.
+**The benchmark numbers are not evidence.** `taskground/task_runs/` holds nothing but a `.gitkeep` — the published table is not reproducible from the repository. There is no repetition count, no variance, no median, no n. Single runs of LLM-driven agents on tasks authored by the same person who authored the agent, with wall-clock as the headline metric. The harness is genuinely reusable; the numbers in the README are an anecdote with a table around it.
 
-**The trust model is "none," and it is not stated as a decision.** `src/core/process.ts:25` is `spawn("bash", ["-c", script], { env: { ...process.env, ... } })` — the planner's text becomes a shell command with the operator's full environment inherited. There is no approval prompt, no allowlist, no sandbox, no confirmation path anywhere in the tree. The single occurrence of the word "sandbox" in the repository is `docs/USAGE.md:236` stating that extractors are **not** sandboxed.
+**The trust model is "none" on Jive's own execution path, and it is not stated as a decision.** `src/core/process.ts:25` is `spawn("bash", ["-c", script], { env: { ...process.env, ... } })` — the planner's text becomes a shell command with the operator's full environment inherited. Across `src/` and `docs/` there is no approval prompt, no allowlist, no sandbox and no confirmation path, and the only occurrence of "sandbox" in either is `docs/USAGE.md:236` stating that extractors are **not** sandboxed.
+
+*(Corrected 2026-09-25 after review: an earlier draft said "no sandbox anywhere in the tree" and "the single occurrence in the repository." Both overstated the search, which covered `src/` and `docs/` only. The repository does contain sandboxing — see immediately below — and the claim is now scoped to what was actually measured.)*
+
+**And the harness sandboxes the competitor but not the subject.** `taskground/app/agents.ts:13` launches Codex with `--sandbox workspace-write -c sandbox_workspace_write.network_access=true`. So the benchmark runs the comparison agent inside a workspace-scoped sandbox with network access declared, and runs Jive with none — while reporting wall-clock as the headline metric. Not a like-for-like comparison, and it makes the speed numbers in §4's first paragraph weaker still.
 
 **Extractors are the sharp edge.** By design (`DESIGN.md`): extractors "may run commands and access the network," and "adding an extractor should be easy enough for the agent itself to write one during a task and then use it." So the agent authors new unsandboxed code at runtime, from model output, and executes it. In Maknae's vocabulary this is content authorizing its own execution — the exact inversion of inform-but-not-authorize.
 
@@ -94,5 +98,5 @@ This is the one idea worth a design discussion; it is also the one where getting
 
 ## 8. Sources
 
-- `merijjeyn/jive` @ `c88105f`, read 2026-09-25: `README.md`, `DESIGN.md`, `docs/GRAPH_CONTRACT.md`, `docs/USAGE.md`, `docs/CONTEXT.md`, `src/core/process.ts`, `src/jev/client.ts`, `taskground/`, `tests/`.
+- `merijjeyn/jive` @ `c88105f`, read 2026-09-25: `README.md`, `DESIGN.md`, `docs/GRAPH_CONTRACT.md`, `docs/USAGE.md`, `docs/CONTEXT.md`, `src/core/process.ts`, `src/jev/client.ts`, `taskground/app/agents.ts`, `taskground/`, `tests/`.
 - `design/references/2026-09-22-system-one-models-jev-assessment.md` — the Jev provenance finding this assessment rests on.
