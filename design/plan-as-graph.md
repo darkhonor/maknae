@@ -342,6 +342,32 @@ The maintainer's model has plan graphs ephemeral, in a per-user store, with **us
 
 Two resolutions, and this is a maintainer call: either the execution record is a separate kernel-retained object that references the plan, or the plan is retained under the audit policy and only its *payload* is subject to user retention. The second is cheaper; the first is cleaner about what an audit record is.
 
+## Maintainer rulings on the knowledge graph (2026-09-25)
+
+**1. Agents may author and ingest.** The stated model is Jarvis: *learn what you do not know and bring it back for use by others.* This settles the disagreement the comparison surfaced — Maknae takes the KLC's posture, not the Lake's operator-gated one.
+
+**2. Provenance is needed exactly where authorship is delegated.** Concurred.
+
+**3. The graph takes from neither model whole.** Concurred, with the maintainer's reason recorded because it is the useful part: *"I built both over time, I've learned and changed opinions as I've experienced both — life sucks at absolutes."* The Lake's relational engineering and the KLC's classification machinery were each right for what they were built against; the composite is what Maknae needs, and neither source is authority for it.
+
+### What rulings 1 and 2 require when composed
+
+They are not independent. **Agents author ⇒ authorship is delegated ⇒ per-edge provenance is mandatory in Maknae's model.** The Lake's answer — *the git history is the provenance* — stops working the moment the author is not a human making a reviewed commit. Five consequences follow, and they are the cost of ruling 1 rather than arguments against it:
+
+1. **Every edge carries who asserted it, from what source, at what authority basis, and when.** The Lake needs no such field; Maknae does, and it is not optional.
+2. **An agent-authored edge is born quarantined.** The KLC already has this shape for objects — tier 3, usable to inform the current task's reasoning, never to authorize a privileged action. Applied at edge granularity it is the same *inform-but-not-authorize* line, and it means a freshly-learned relationship can shape retrieval on the turn it is learned without ever deciding anything.
+3. **Edges need promotion and demotion, as objects already do.** A path from agent-asserted to operator-confirmed, and a path back when the source is superseded. An edge whose endpoint was superseded is a stale assertion, and nothing currently retires it.
+4. **The Lake's `writer == checker` byte-equality gate does not survive unchanged.** It holds because the authored set is human-curated and static between commits. With a growing agent-authored set the invariant becomes *a recompile of the current authored set is deterministic*, not *matches a committed golden* — still a real gate, a different one.
+5. **An agent-authored edge is a derived object and takes the high-water mark of its inputs.** The KLC's rule for derived objects already covers this if an edge is treated as one, which it should be.
+
+### The control ruling 1 actually needs: Jarvis learns in front of more than one person
+
+The Jarvis framing is *learn it and bring it back for use* — which means agent-authored knowledge is **shared**, not per-user. That crosses a boundary this document drew earlier: an ephemeral per-user plan graph produces knowledge that lands in a long-lived shared graph. **User A's task teaches the system something user B later reads.**
+
+That is an inference channel, and it is the classic derivative-classification problem rather than a new one: an agent that learns a relationship while working on privileged material can carry that relationship into shared knowledge without any human in the loop, **even when both endpoint documents are individually unclassified.** The aggregation case from finding 3 above is the same hazard with a shorter fuse, because the aggregator is automated and continuous.
+
+The mechanism to apply is the one already named, not a new invention — the high-water mark of consequence 5, taken over the *task context* that produced the edge and not merely over its two endpoints. **An edge learned during privileged work inherits that work's mark.** Retention interacts here too: an edge outliving the ephemeral plan graph that produced it is the intended behaviour under Jarvis, which makes the mark the only thing still carrying the context after the plan is gone.
+
 ## What this implies for post-Cooky work
 
 1. **Plans are authored as graphs, not converted into them.** *(Rewritten 2026-09-25 after the maintainer's correction; this read "activity class must be declared at authoring time, not inferred at conversion time," which named the symptom and left conversion on the table as a fallback. It is not a fallback.)* Inferred typing was 67–77% complete and produced three false positives out of five warnings; a structural authorization pass built on that is an authorization pass that lies. The fix is not a better parser — it is that the prose the parser was reading should never have been written. A plan node states the activity, the files, the edges, and cites the issue where the argument lives.
@@ -364,6 +390,7 @@ The harder half is the witness. A skill that only *emits* a conformant graph has
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
 - Where does the bin's confidence floor come from, and who may set it? A floor the classifier's own vendor sets is not a floor.
+- Under ruling 1, what confirms an agent-authored edge for promotion — an operator, a second agent, or corroboration by a second source? Each answers a different threat.
 - A long-lived scheduled graph accumulates node state. Is that state in the graph or beside it? In it, and the artifact is no longer immutable; beside it, and the two can disagree.
 - If obligations move out of `SKILL.md` into a profile, what stops a skill from re-stating them in prose anyway? A rule with two homes drifts, which is the failure this repository already records for comments and issue bodies.
 - Does a `verifies` edge need to assert *what* was verified, or only *that* verification ran? Naming the subject makes the check stronger and the authoring burden higher.
