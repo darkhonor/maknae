@@ -171,7 +171,7 @@ The kernel's graph reaches host state and policy-granted restricted areas — an
 
 **Information crosses up the trust gradient only through validation; authority only ever flows down.**
 
-- **lake → plan.** Knowledge informs planning under measured access; legitimate, because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — that would let ingested content decide what counts as a valid plan, which is untrusted data setting policy.
+- **lake → plan.** Knowledge informs planning under measured access — this is the intended and load-bearing path, and §6.7 sets which tiers may shape a plan's *structure* versus only its *content*. It is legitimate because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — informing what a plan says is not the same as deciding what counts as a valid plan, and only the second would be untrusted data setting policy.
 - **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
 - **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
 - **plan → shared knowledge.** **No content; demand crosses.** A task hitting a knowledge gap becomes a *request*, and what enters the Lake is an external document from an authorized source — never the user's work product. See §8.
@@ -285,7 +285,21 @@ This document treated all nodes as equally retryable and equally parallelisable.
 
 ### 6.7 Two rules taken from the security literature
 
-**The planner must not be exposed to untrusted content.** This is ACE's core mechanism [R11] — the abstract plan is built from **trusted information only** — and ControlValve [R12] notes the same property protects its own planning stage: *"the planning stage is not exposed to untrusted content, so there is less of a risk of prompt injection."* For Maknae this is a phase-one rule with teeth: a plan graph authored while the planner is reading tool output, retrieved documents or Lake content is authored in a tainted context, and §5.1's *lake → plan* crossing must therefore feed **execution**, not **planning**.
+**The planner reads trusted information — and the Lake is the trusted-information store, not a threat to planning.**
+
+ACE's rule [R11] is that the abstract plan is built from **trusted information only**, and ControlValve [R12] observes the same property protects its planning stage: *"the planning stage is not exposed to untrusted content, so there is less of a risk of prompt injection."* **The boundary those papers draw is attacker-controllability, not externality.** Their threat is a malicious third-party app description, or tool output arriving mid-execution and rewriting control flow — content an adversary can author. A curated, tier-labelled, provenance-stamped corpus fetched from an operator-signed allowlist (§8) is the *opposite* of that: it is the trusted information ACE says planning should be built from.
+
+**This matters operationally, not just definitionally.** Planning against the Lake — applicable requirements, vendor guidance, example source, the controls that apply — is what has produced more secure and more compliant plans in this project over months of use. A rule that cut planning off from it would make plans worse in exactly the dimension the platform exists to serve, in exchange for mitigating a threat the Lake's own governance already addresses.
+
+**The rule that does transfer, and the tier model already implements it:**
+
+| planning input | disposition |
+|---|---|
+| Tier 0 doctrine, Tier 1 authoritative, curated vendor corpus | **trusted** — read freely; this is the intended planning substrate |
+| Tier 3 quarantine, freshly fetched material | may inform *reasoning*; **must not shape the graph's structure** |
+| tool output, MCP/app descriptions, retrieved web content arriving during execution | **untrusted at planning time** — this is ACE's actual threat |
+
+**And the two-layer split (§3) gives a cleaner boundary than either source has.** The *shape* layer — which activities, in what order, with what dependencies — is control flow, and control flow is derived from trusted tiers only. The *payload* layer may draw on lower-tier material, with its mark travelling (§7). An attacker who poisons a Tier-3 document can then influence what a step's content says; they cannot add a node, remove a gate, or reorder a commit. That is the property ACE is protecting, achieved without blinding the planner.
 
 **Structural validation does not protect the data flowing between nodes.** [R3] §2.2 states it plainly: an attacker who controls a source can inject a payload that rides the plan's own data flow — the agent *"would correctly follow its plan"* while carrying malicious content into a later step. **This document has node authorization and no data-plane taint model at all.** ACE's answer is to verify concrete plans against **user-specified secure information-flow constraints**; APPA [R13] pursues recoverable information-flow control for the same problem. Named here as a gap rather than solved.
 
