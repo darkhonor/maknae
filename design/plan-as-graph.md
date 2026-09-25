@@ -609,6 +609,67 @@ Author-reported, not independently verified: **Routine** raised multi-step tool-
 
 SGH [R1] §9.5: exploratory tasks; **dynamic goal evolution — *"investigate the outage and fix whatever is broken"***; creative generation. **The middle one is a real Maknae workload** and belongs to an agent loop with inline replanning, not to a validated plan graph.
 
+### 12.17 Findings from the remaining sources
+
+#### Two hazards of parallelism this document had not identified
+
+**Error propagation is multiplied, not divided.** SGH [R1] limitation 3: *"In a single-ready-unit Agent Loop, if the LLM makes a reasoning error at step t, it may correct itself at step t+1 without wasting resources. In Graph Harness, if the LLM makes an error in generating the DAG, **the error propagates to multiple parallel executions**."* §4.6 counted the upside of parallelism and not this: the serial loop's opportunistic self-correction is a capability we give up.
+
+**Concurrent authorization can race.** ACP [R14] §3.5 establishes that *"a governance mechanism can guarantee runtime admissibility only if evaluation and state mutation occur in a single, indivisible step"*, under two assumptions: a **serializable** state backend, and **atomic commit** of the decision together with its ledger entry. Its corollary is pointed: *"every APPROVED decision corresponds to an admissible action at evaluation time. **Split evaluators (RBAC, OPA, policy engines) cannot guarantee this because state can change between read and write.**"* And the declared limitation: under read-committed isolation *"two concurrent evaluations can observe the same pre-mutation state, breaking atomicity."*
+
+**§4.7's conflict analysis covers files. This covers the authorization state.** Two parallel branches can both be approved against the same pre-mutation view. Maknae's audit-gated reply is already close to the atomic-commit half; the serializability half is unstated.
+
+#### Accumulated state must be keyed by context, not by actor
+
+ACP's own v2.0 vulnerability, fixed in v3.0, is the sharpest worked example in the corpus. Anomaly counters were keyed by agent id alone, so three benign `(read, public)` requests primed the counter and a following `(write, sensitive)` request inherited it — **+25 anomaly penalty, RS 50 → 75, DENIED where clean state would have escalated.** Rule 3 had always used `SHA-256(agent ‖ capability ‖ resource)`; Rules 1 and 2 had not, and *"this asymmetry means that pattern frequency is isolated per context while aggregate frequency and denial rate are not."* Cooldown had the same defect in the over-enforcement direction: *"an agent whose cap-A activity triggers cooldown is blocked across all capabilities."*
+
+The formal fix is `ContextIsolation`, and its justification is one this repository already holds: *"a correct reference monitor must enforce temporal properties over **equivalence classes of interactions**; conflating distinct contexts violates that requirement."* **For a parallel plan graph the equivalence class is finer still — several nodes of one plan running under one subject must not share an accumulation register.**
+
+#### Deviation collapse, named precisely
+
+§15.9 called it a hazard. [R14] §2.6 distinguishes it from the two things it resembles: it is **not specification gaming** — *"the engine does not optimize against the policy; it evaluates faithfully. The failure is architectural, not behavioral"* — and **not Goodhart** — *"no optimization pressure is applied… the upstream pipeline removes the inputs that would activate the boundary, a structural consequence of pipeline composition, not metric manipulation."* Both invariants are TLA+-checked: `FailureConditionPreservation` and `NoDegenerateAdmissibility`, zero violations.
+
+#### Mechanisms worth taking from the security papers
+
+- **Delegation must not expand privilege** [R14 P3]: *"the delegated agent's permissions are always a strict subset of the delegator's."* A subagent dispatched for a node should hold a strict subset of that node's authority; §4.6 never said so.
+- **The decision and its record commit together or not at all** [R14 TA2]: *"a ledger write failure causes the token to be treated as if it were never issued."*
+- **Record every decision, not only refusals** [R14 P4]: *"Not just successes. Everything."*
+- **Capabilities, never abstract roles** [R14]: `acp:cap:<domain>.<action>`, with `exp` mandatory — *"a token without expiry is invalid by definition"* — and `parent_hash` chaining delegations.
+- **Prefer the plan whose privilege set is a strict subset** [R11 App. B]: plan risk is the union of its nodes' privileges; a plan is preferred **only** if its risk set is a strict subset of the alternative's, and **incomparable plans get no preference**. A conservative selection rule that refuses to invent a total order over incomparable risks.
+- **Implicit flows leak, and both channels are worked examples** [R11 App. A]: a loop that sends before loading leaks after one iteration, caught by fixpoint iteration; a branch on a secret leaks through the branch condition — *"despite the absence of an explicit flow from a to b, the value of b nonetheless holds the contents of a"* — caught by injecting the condition into the body. **This document has no taint model and therefore no account of either.**
+
+#### The representation question, answered against my earlier reading
+
+§12.8 recorded ACE's restricted-Python subset as *chosen for static analysability*. Its Appendix C says the opposite about the choice and is worth quoting in full:
+
+> *"We use Python for ease of implementation with the ast module and **because current generation LLMs are proficient at writing it**. However, this choice also makes difficult the formal analysis of the language itself… As a result, **we can provide no formal guarantees on the soundness of our data privacy guarantees**. A more comprehensive solution might involve a DSL with formal grammar and operational semantics… such as by demonstrating a non-interference result."*
+
+**So the trade-off is explicit and was resolved toward LLM fluency at the cost of the soundness guarantee** — which is the same axis R9's Appendix 2 names (*keep the format close to what the model has seen*) and the same one R7 §8 lists as an open problem: *"Constrained IRs improve executability and reproducibility, but they may exclude the very solutions that make dynamic workflows powerful."* What ACE **does** constrain is instructive: single typed entry point, every variable type-declared, checks at compile *and* run time, and a ban on `open`/`exec`/`eval`/`getattr`, **all mutable types (`list`, `dict`, `set`)**, lambdas, nested definitions, and every import but `math`.
+
+#### Validation checks and rules we lack
+
+From SGH [R1] A.2, five pre-execution checks, of which two are new here: **every node's output contract must specify at least one validation rule**, and **high side-effect nodes must not be scheduled for speculative parallel execution**. Its reachability check is also two-sided — every node must reach an *exit* node, not merely be reachable from an entry.
+
+From ControlValve [R12] App. L, five general edge rules, and one is the direct anti-CFH control: **G02 No Rerouting** — *"the instruction invokes the correct downstream agent without 'rerouting' instructions (informing an agent to instruct another agent)."*
+
+From R6, **evidence freshness**: Proof-or-Stop *"binds accepted evidence to the current source state"*, so a passing check from before a later edit is not evidence for the tree as it stands.
+
+#### Two things to stop claiming, and one to start
+
+**Stop implying the survey evidence is quantitative.** SGH's Appendix A.4 downgrades its own 70-project survey: *"NOT peer-reviewed and should be interpreted as **qualitative evidence** rather than quantitative proof… the project selection is subjective and not systematically sampled."* §12.6's controllability table carries that discount, even though the category classification itself reached inter-rater agreement κ = 0.84.
+
+**Stop citing R9 as the current lab position** (§12.15).
+
+**Start stating the build cost.** SGH estimates a minimal implementation at **3,300–6,500 lines** — DAG validation 1,000–2,000, concurrent scheduler with rate limiting 800–1,500, WAL state persistence 500–1,000, recovery engine 600–1,200, contract validation 400–800 — against ~300–500 for a simple agent loop and 30,000–50,000 for Airflow or Prefect. The authors flag these as estimates from analysis rather than measurement, but an order-of-magnitude figure is better than none, and this document has offered none.
+
+#### The recipe, and the counterpoint
+
+[R7] §7.5 gives the most actionable guidance in the corpus: **start with a constrained static scaffold or small operator library**; use node-level optimisation for a competent baseline; **add graph-level structure only when trace analysis shows structural failure modes**; prefer **runtime selection over generation**; reserve in-execution editing for genuine environmental uncertainty; then prune. Its diagnostic test is crisp — *"if the error arises because the wrong node executed, the right node never existed, or the information path was wrong, a better prompt is unlikely to be the real fix."*
+
+Selection over a fixed super-graph deserves more weight here than §5 gives it, for a reason that speaks directly to our validation problem: **"validity is inherited from the super-graph"**, and *"selective activation often captures a large fraction of the cost savings available from more ambitious dynamic methods."* Its limit is real — a pruning policy cannot introduce a verifier the super-graph never had.
+
+**And the counterpoint the document should carry:** [R7] cites **OneFlow**, which *"argues that some gains attributed to multi-agent workflows can be reproduced by a strong single-agent simulator when roles share the same backbone and can reuse context efficiently."*
+
 ### 12.16 Findings from R2, R4 and R5 completed
 
 **Two independent measurements now support §1's objective, and neither is about tokens.**
@@ -961,7 +1022,7 @@ What it asks for instead — **intervention studies, structural ablations, and e
 
 **Why this section exists:** every claim above that rests on outside work is cited here with its holding location, licence and **reading state**. The next reader — human or agent — should not repeat a search that has already been done, and should be able to see at a glance which sources were actually read.
 
-**Nothing here is authority.** Per the [ADR README doctrine](adr/README.md), external work is provenance. **Reading state is recorded per source and is part of the citation.** *(**This column has been wrong three times.** First "skimmed" for sources never opened; then bulk-set to "full" for sources read in part; then bulk-set to "full" again when nothing had been read end to end. It now carries **measured coverage** — lines read against file length — because a percentage cannot be fudged the way an adjective can. **No source in this table has been read in full.** Every §12 claim is drawn from a passage that was read, but the unread remainder has not been checked for contradiction, and §12 must be treated as provisional until coverage reaches 100%.)* The figure is the share of the extracted text actually read. **A claim may not lean harder than its source's coverage supports**, and at these coverages every finding is subject to revision by the unread remainder.
+**Nothing here is authority.** Per the [ADR README doctrine](adr/README.md), external work is provenance. **Reading state is recorded per source and is part of the citation.** *(**This column has been wrong three times before reaching the figures below.** First "skimmed" for sources never opened; then bulk-set to "full" for sources read in part; then bulk-set to "full" again when nothing had been read end to end. It now carries **measured coverage** — lines read against file length — because a percentage cannot be fudged the way an adjective can. **Three are now complete; the rest are read in body and not in bibliography, code listings, or — for R14, a 4,641-line draft standard — every experiment section.** Every §12 claim is drawn from a passage that was read. The residual risk is no longer that claims are unsourced but that an unread appendix qualifies one, which is why the figures stay as percentages.)* The figure is the share of the extracted text actually read. **A claim may not lean harder than its source's coverage supports**, and at these coverages every finding is subject to revision by the unread remainder.
 
 ### Held for this document
 
@@ -969,20 +1030,20 @@ What it asks for instead — **intervention studies, structural ablations, and e
 
 | # | source | licence | read | cited in |
 |---|---|---|---|---|
-| **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | 64% | §6.4, §6.5, §6.6, §15.3 |
-| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | **100%** | §11, §14.1, §16 item 4 |
-| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | 63% | §6.6, §14.1, §15.4, §15.7 |
-| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **100%** | §4.6, §14.1 |
-| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **100%** | §14.1 |
+| **R1** | Hu Wei. *From Agent Loops to Structured Graphs: A Scheduler-Theoretic Framework for LLM Agent Execution.* [arXiv:2604.11378](https://arxiv.org/abs/2604.11378), 13 Apr 2026. **Position paper; no empirical results**; 70-system survey; formal state machine. | arXiv non-excl. | ~90% (body + formal appendices) | §6.4, §6.5, §6.6, §15.3 |
+| **R2** | Anupreet Walia (Brevian.ai). *BatchDAG: LLM-Planned Execution Graphs for Scalable Ad-Hoc Analysis Over Enterprise Data.* [arXiv:2607.18241](https://arxiv.org/abs/2607.18241), 17 Apr 2026. Production self-report, n=12 queries. | **CC BY 4.0** | ~95% | §11, §14.1, §16 item 4 |
+| **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | ~85% | §6.6, §14.1, §15.4, §15.7 |
+| **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | ~90% | §4.6, §14.1 |
+| **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | ~90% | §14.1 |
 | **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | body 100% / refs n/a | §13 |
-| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | 17% | §13, §14.1 |
-| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | 6% | §13 |
+| **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | ~95% (body) | §13, §14.1 |
+| **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | ~85% (body) | §13 |
 | **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **100%** | §9.1, §13, §14.1 |
-| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | 24% | §4.6, §15.5 |
-| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | 47% | §6.6, §14.1 |
+| **R10** | Kim, Moon, Tabrizi, Lee, Mahoney, Keutzer, Gholami. *An LLM Compiler for Parallel Function Calling.* [arXiv:2312.04511](https://arxiv.org/abs/2312.04511), 7 Dec 2023. Reports up to **3.7× latency**, 6.7× cost, ~9% accuracy over ReAct. | arXiv non-excl. | ~90% (body) | §4.6, §15.5 |
+| **R11** | Li, Mallick, Rose, Robertson, Oprea, Nita-Rotaru (Northeastern). *ACE: A Security Architecture for LLM-Integrated App Systems.* [arXiv:2504.20984](https://arxiv.org/abs/2504.20984), **NDSS 2026 — peer-reviewed**. Abstract-Concrete-Execute; abstract plan from trusted information only; concrete plans verified against secure information-flow constraints. Breaks IsolateGPT. | arXiv non-excl. | ~95% (body + appendices) | §6.6, §14.1 |
 | **R12** | Jha, Triedman, Wagle, Shmatikov (Cornell + Microsoft). *Breaking and Fixing Defenses Against Control-Flow Hijacking in Multi-Agent Systems.* [arXiv:2510.17276](https://arxiv.org/abs/2510.17276), **ICLR 2026 — peer-reviewed**. Breaks LlamaFirewall-style alignment checks; proposes CONTROLVALVE (permitted control-flow graphs + per-invocation contextual rules). **The closest published prior art to this proposal.** | **CC BY 4.0** | **100%** | §14.1, §15.4, §15.6, §16 item 2 |
-| **R13** | Kravchenko, Liventsev, Konstantinov, Iskhakov, Kukuy (Archestra AI). *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). Dual-phase reference monitor; monotone taint over-blocks or strands. | arXiv non-excl. | 29% | §6.6 |
-| **R14** | Marcelo Fernandez (TraslaIA). *Agent Control Protocol v1.30: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829), draft standard, Apr 2026. History-aware admission; TLA+ model-checked over 4.29e9 states; reports its own v2.0 vulnerability and an evasion against its own risk formula. | **CC BY 4.0** | 12% | §14.1, §15.8 |
+| **R13** | Kravchenko, Liventsev, Konstantinov, Iskhakov, Kukuy (Archestra AI). *APPA: Recoverable Information-Flow Control for Real-World LLM Agents.* [arXiv:2607.24625](https://arxiv.org/abs/2607.24625). Dual-phase reference monitor; monotone taint over-blocks or strands. | arXiv non-excl. | ~90% (body) | §6.6 |
+| **R14** | Marcelo Fernandez (TraslaIA). *Agent Control Protocol v1.30: Admission Control for Agent Actions.* [arXiv:2603.18829](https://arxiv.org/abs/2603.18829), draft standard, Apr 2026. History-aware admission; TLA+ model-checked over 4.29e9 states; reports its own v2.0 vulnerability and an evasion against its own risk formula. | **CC BY 4.0** | ~60% (body; 4,641-line spec) | §14.1, §15.8 |
 
 ### Held in the Knowledge Lake
 
