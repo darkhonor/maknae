@@ -495,9 +495,7 @@ mod tests {
 
     /// #264, at the level where the mapping actually lives. `wire.rs`'s
     /// equivalent test supplies its OWN `role: "user"`, so it exercises
-    /// `with_preamble` and says nothing about this file's mapping -- and this
-    /// file is inside #297's mutation blind spot, so nothing else would catch
-    /// a change to it either.
+    /// `with_preamble` and says nothing about this file's mapping.
     ///
     /// The client's content here IS a serialized system message. It must reach
     /// the provider as USER content, and the only `"role":"system"` in the
