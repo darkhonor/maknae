@@ -70,6 +70,12 @@ pub enum Refusal {
 ///     maknae_deputy::handle::Admitted { req }
 /// }
 /// ```
+///
+/// ```
+/// fn read<'a>(a: &maknae_deputy::handle::Admitted<'a>) -> &'a maknae_proto::EgressFrameRequest {
+///     a.request()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Admitted<'a> {
     req: &'a EgressFrameRequest,
@@ -190,6 +196,15 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    /// The `compile_fail` doctest on `Admitted` constructs it as `Admitted { req }`;
+    /// this keeps that literal valid inside the crate, so privacy is what fails it.
+    #[test]
+    fn admitted_holds_the_frame_in_req() {
+        let f = req("maknae/providers/openai");
+        let a = Admitted { req: &f };
+        assert!(std::ptr::eq(a.request(), &f));
     }
 
     #[test]
