@@ -668,7 +668,7 @@ What it asks for instead — **intervention studies, structural ablations, and e
 
 **Why this section exists:** every claim above that rests on outside work is cited here with its holding location, licence and **reading state**. The next reader — human or agent — should not repeat a search that has already been done, and should be able to see at a glance which sources were actually read.
 
-**Nothing here is authority.** Per the [ADR README doctrine](adr/README.md), external work is provenance. Sources marked *abstract only* have not been read beyond their abstract and must not be cited as though they had been.
+**Nothing here is authority.** Per the [ADR README doctrine](adr/README.md), external work is provenance. **Reading state is recorded per source and is part of the citation.** *full* = read end to end; *key sections* / *key sections in full* = the sections bearing on this document, read in full; *abstract + mechanism* = abstract plus the mechanism section; *full text held; skimmed* = held locally and skimmed, not studied. A claim may not lean harder than its source's reading state supports.
 
 ### Held for this document
 
@@ -681,7 +681,7 @@ What it asks for instead — **intervention studies, structural ablations, and e
 | **R3** | Del Rosario, Krawiecka, Schroeder de Witt. *Architecting Resilient LLM Agents: A Guide to Secure Plan-then-Execute Implementations.* [arXiv:2509.08646](https://arxiv.org/abs/2509.08646). | arXiv non-excl. | **full** | §6.6, §14.1, §15.4, §15.7 |
 | **R4** | Zhang, Ma, Cao, Zhang, Zhao. *Plan-over-Graph: Towards Parallelable LLM Agent Schedule.* [arXiv:2502.14563](https://arxiv.org/abs/2502.14563), 20 Feb 2025. | arXiv non-excl. | **full text held; skimmed** | §4.6, §14.1 |
 | **R5** | Zhang, Chen, Huang, Cui, Ji, Wang. *Atomic Task Graph: A Unified Framework for Agentic Planning and Execution.* [arXiv:2607.01942](https://arxiv.org/abs/2607.01942). | arXiv non-excl. | **full text held; skimmed** | §14.1 |
-| **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | abstract only | §13 |
+| **R6** | Feng, Xiang, Yang, Ma, Chen, Zhang, Huang, et al. *Graph Engineering in the Era of LLM Agents: From Individual Intelligence to System Intelligence.* [arXiv:2608.21156](https://arxiv.org/abs/2608.21156). | **CC BY 4.0** | **key sections** | §13 |
 | **R7** | Yue, Bhandari, Ko, Patel, Lin, Zhou, et al. *From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents.* [arXiv:2603.22386](https://arxiv.org/abs/2603.22386). | arXiv non-excl. | **full text held; skimmed** | §13, §14.1 |
 | **R8** | Bei, Zhang, Wang, Chen, Zhou, Chen, Li, et al. *Graphs Meet AI Agents: Taxonomy, Progress, and Future Opportunities.* [arXiv:2506.18019](https://arxiv.org/abs/2506.18019). | arXiv non-excl. | **full text held; skimmed** | §13 |
 | **R9** | Anthropic. *[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)* (engineering blog). Five composable patterns; the workflows-versus-agents distinction. | © Anthropic | **full** | §9.1, §13, §14.1 |
