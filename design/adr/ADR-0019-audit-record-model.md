@@ -183,3 +183,11 @@ Dated as-built amendment; rides the #275 PR. Four statements.
 **Why it is here:** AU-3 asks what produced the event. A write the loop made on a model's proposal joins by `conversation` to the `session.prompt` egress records, which name the provider (`object`). The provider's registry entry names the model, so the join gives the full attribution without copying it into every record. The identifier is a client claim, and the record treats it as one. The subject and the verdict stay the kernel's own.
 
 **The JSONL is the full record on both platforms.** The macOS and journald mirror caps do not constrain record content. The constraint is what AU-3/AU-3(1) require, and nothing more.
+
+## Amendment (2026-09-25, #265) — the stop record, post-sink boot failures, and boot evidence is a gate
+
+**The trail records the stop (AU-2).** When the serve loop ends, the daemon appends one `event: shutdown`, `action: serve` record before the drains. A signal is `permit`, reason `shutdown: signal received`, posture `stopped`. A credential-supervisor exit is `deny`, with the supervisor's reason, posture `unavailable`. The append is bounded by the audit-drain timeout. The record takes a fresh `session_id` from the boot's allocator with `seq` 1, so it shares the boot nonce with every other record of this boot.
+
+**A startup failure after the sink opens is recorded.** Every post-sink failure that is not already a recorded refusal (`authz`, `audit.offload`) appends one `event: boot`, `action: start`, `deny` record carrying the failure's reason. It is in the boot session, after the records before it. This covers the egress bounds, the egress backend, the plane client and CA, mint, and the post-mint group, bind and signal steps.
+
+**Boot evidence is a gate, not a statement.** A composition or posture record that cannot be durably appended refuses boot. Before this amendment the daemon logged the failure and served without the record of its own policy composition, which contradicted this ADR's fail-closed rule.
