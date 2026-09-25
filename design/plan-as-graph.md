@@ -368,7 +368,7 @@ They are not independent. **Agents author ⇒ authorship is delegated ⇒ per-ed
 
 - **external reference sources → Lake.** This is the Jarvis loop, and it is where agent authoring and ingest are permitted. The corpus is reference material, not user work product.
 - **Lake → per-user graph.** *Measured* access: shared knowledge informs a user's plan graph, mediated by the kernel.
-- **per-user graph → shared.** **Never.** A user's graph is a sink for shared knowledge, not a source of it.
+- **per-user graph → shared.** **No content, but demand crosses** — *(corrected 2026-09-25: this read simply "never", which is wrong and deletes the governed learning loop.)* A task hitting a knowledge gap becomes a **request**, and what subsequently enters the Lake is an external document fetched from an authorized source, never the user's work product. See §"The governed learning loop" below; the distinction that keeps it safe is that the user graph supplies the *demand*, never the *content*.
 - **kernel graph → everything.** It constrains all of the above, and **no user sees it or can manipulate it.**
 
 The five consequences of ruling 1 above are unaffected — they concern agent authorship into the Lake, which stands. Three things this scoping changes or sharpens:
@@ -377,7 +377,38 @@ The five consequences of ruling 1 above are unaffected — they concern agent au
 2. **"Measured access" is load-bearing and is the kernel graph's job.** A shared corpus read by subjects at different clearances is a filtered read, not an open one. That is existing machinery pointed at retrieval.
 3. **Per-user isolation is a property that must be enforced, not assumed.** "The platform cannot infer between users" is true by construction only if something constructs it. The channels that would break it are ordinary engineering ones rather than exotic: a shared embedding or retrieval index over both users' graphs, a shared cache keyed loosely, or model context carrying residue across turns. **This is what the kernel graph is for**, and it is worth stating as a positive requirement rather than as the absence of an edge.
 
-**The one channel that survives, narrowed and named honestly:** the Jarvis loop's *gap detection* fires during a user's task, so the decision to fetch a particular STIG is shaped by that user's work. The ingested content is public; the **fetch pattern** is not necessarily. That is a traffic-analysis channel, not a content channel — far narrower than what this section previously claimed, and worth recording rather than either inflating or dismissing.
+### The governed learning loop, from [`generated-operational-concept.svg`](diagrams/generated-operational-concept.svg)
+
+*(Maintainer, 2026-09-25, pointing at steps 2 and 3. This is the use case the "never" above deleted.)*
+
+The OV-1 states the loop in six steps, and **step 2 is the control this document had missed**:
+
+| | step | plane | what it establishes |
+|---|---|---|---|
+| 1 | tasked work | runtime, **untrusted** | the agent hits a knowledge gap while doing real work |
+| 2 | **request, never act** | **trust plane** | *"The runtime cannot perform a lifecycle transition. It may only ASK for one."* |
+| 3 | **fetch — authorized sources only** | **trust plane** | *"The egress allowlist is the operator's signed authority map. A source not on it is denied."* |
+| 4 | quarantine | Tier 3 | all new knowledge — ingested, generated or demoted; may inform work, may not authorize a privileged action |
+| 5 | promote, one tier per gate | trust plane | 3 → 2 → 1 on corroboration or operator sign-off; **automation can never raise a ceiling, and there is no path from Quarantine to Doctrine** |
+| 6 | authoritative | Tier 1 | applied to the next task |
+
+**Step 2 is why the demand crossing is safe, and it is the same boundary this document has been relying on everywhere else.** The untrusted runtime does not fetch. It asks. The trust plane decides and acts. So a user's task can legitimately drive ingestion into a shared corpus without the user's graph ever being a content source — the runtime contributes a *request*, and the trust plane contributes the *action*.
+
+**Step 3 answers the traffic-analysis channel this section previously flagged, and better than by mitigating it.** The egress is performed in the trust plane against a signed allowlist, so the fetch is decided, constrained and auditable at the point where it happens. The channel is real — a gap detected during a user's task shapes which document gets fetched — but it runs through the one place in the system designed to observe and bound it, rather than out of an untrusted runtime.
+
+**A pre-authorized source list does three jobs, not one**, and the Lake's [`references/lake/vendors.yaml`](https://github.com/mpe-es/knowledgebase/blob/main/references/lake/vendors.yaml) is the worked example — per-vendor authorized URLs, `adobe` → `adobe.com`, `apache` → `apache.org`/`httpd.apache.org`/`tomcat.apache.org`:
+
+1. **Security** — an internet search can be steered to attacker-controlled content; an allowlist keyed to the vendor's own domain cannot.
+2. **Legal exposure** — the maintainer's point, and it is not a footnote: a search can land an automated fetcher on a trap or illegal site. An allowlist is the only form of this control that works without a human looking at each result.
+3. **Authority basis** — the source determines how far the content may be promoted. This is the axis a search result simply does not have; "found on the web" has no tier.
+
+**This closes an open question this document raised earlier** — *what confirms an agent-authored edge for promotion?* The OV-1's answer is **corroboration or operator sign-off, one tier per gate, automation never raising a ceiling, and no path at all from Quarantine to Doctrine (Tier 0).**
+
+**And the honesty the diagram itself carries, which belongs here too:** it marks the trust plane as BUILT and the entire knowledge lifecycle — Lake, skill registry, tier state machine, promotion pipeline — as NOT YET. *"The kernel that makes the loop safe is substantially real. The loop is not."* Everything in this section constrains what gets built; none of it describes what runs.
+
+### Implication for the plan graph, which is what this document is about
+
+The allowlist is a **profile rule with a natural home**: a plan node that fetches must name its source, and **a fetch node whose source is not on the allowlist is an invalid graph** — rejected at validation, before execution, rather than denied at egress. That is phase-one authorization doing exactly the work it was proposed for, and it composes with the runtime check rather than replacing it: the graph is refused if it *plans* to fetch from an unauthorized source, and the fetch is refused again at the seam if it somehow reaches it.
 
 ## What this implies for post-Cooky work
 
@@ -401,7 +432,6 @@ The harder half is the witness. A skill that only *emits* a conformant graph has
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How many profiles are actually needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
 - Where does the bin's confidence floor come from, and who may set it? A floor the classifier's own vendor sets is not a floor.
-- Under ruling 1, what confirms an agent-authored edge for promotion — an operator, a second agent, or corroboration by a second source? Each answers a different threat.
 - A long-lived scheduled graph accumulates node state. Is that state in the graph or beside it? In it, and the artifact is no longer immutable; beside it, and the two can disagree.
 - If obligations move out of `SKILL.md` into a profile, what stops a skill from re-stating them in prose anyway? A rule with two homes drifts, which is the failure this repository already records for comments and issue bodies.
 - Does a `verifies` edge need to assert *what* was verified, or only *that* verification ran? Naming the subject makes the check stronger and the authoring burden higher.
