@@ -73,7 +73,7 @@ Eight structural checks ran against the shape layer. These are properties invisi
 | write-before-test across 56 steps | hold 9 tasks in your head at once | one query |
 | commit with no gate before it | as above | one query |
 | step touching a file outside its declared scope | grep and cross-reference by hand | set difference |
-| two unordered steps writing the same file | not expressible — markdown has no "unordered" | reachability + set intersection (§4.6) |
+| two unordered steps conflicting on a file | not expressible — markdown has no "unordered" | reachability + scope intersection (§4.7) |
 
 All of it against **991 tokens** — which makes the checks affordable on *every* plan, a different claim from being possible at all.
 
@@ -122,6 +122,29 @@ Measured against what the plans actually declare:
 3. **The critical path becomes measurable.** With real edges the longest path through the graph is the minimum achievable wall-clock, and the difference between it and the node count is how much a plan's sequencing is costing. Prose gives no such number.
 
 **It also interacts with the execution model.** Each subagent is another instance of the untrusted runtime, so parallel branches are several untrusted runtimes against one kernel — which the PDP already handles, since it decides per request. What gets harder is everything with a shared budget or a total order: retry counts (§6.3 constraint 3) across concurrent branches, escalation when two branches fail independently, and audit ordering under [ADR-0019](adr/ADR-0019-audit-record-model.md) when events no longer arrive in plan order.
+
+### 4.7 The validator rule, stated precisely
+
+The positive case is the point: **five files needing edits are five activities that can run simultaneously on different agents, converging where testing across them matters.** Fan out from the task root, fan in at the validating node. That is the canonical parallel unit, and a profile can require its shape rather than leaving it to an author's discretion.
+
+**"Editing the same file" is only one of three hazards, and the rule needs the operation, not just the path.** Classic dependency analysis applies unchanged — for two nodes with no ordering path between them:
+
+| overlap | hazard | verdict |
+|---|---|---|
+| write ∩ write | lost update | **must be ordered** |
+| write ∩ read | the reader sees one state or the other | **must be ordered** |
+| read ∩ read | none | **free** |
+
+The `op` on a declared file (`create` / `modify` / `read`) is what makes this decidable, which is a second reason that field is not decoration.
+
+**File granularity is correct, and deliberately so.** Two agents editing different functions in one file is safe in principle and unsafe in practice: the edit mechanism is line-based read-modify-write, so concurrent writes lose updates regardless of how disjoint the intent was. A later refinement to symbol granularity would introduce exactly the race this check exists to prevent.
+
+**The join node's scope is derived, not authored.** A validating node that fans in must read the union of the write scopes reaching it — otherwise the test does not test what changed. The validator computes that union; an author declaring something narrower is an error rather than a preference.
+
+**Two things the fan-in breaks, and the first has no obvious answer.**
+
+1. **"On failure, return to the prior activity" is ambiguous at a join.** With one predecessor the retry target is unambiguous; with five it is not. Returning to all five re-runs work that succeeded; returning to none loses the failure's cause. The likely answer is that a validating node's failure names *which* predecessors it implicates, which means the pass condition has to be finer than a single exit status — and that is a real cost of parallelism, not a detail.
+2. **Partial completion is a state the graph must be able to hold.** If one branch of five fails permanently, four have already written. The structure already prevents the worst outcome — `commit` is downstream of the join and the join is downstream of every branch, so an unreachable join makes the commit unreachable — but the working tree is left mid-change, and whether that is cleaned up or left for inspection is a decision the profile should carry rather than an executor's habit.
 
 *(The maintainer's related observation, recorded without re-litigating it: a lifecycle described as a straight line has the same problem as a plan described as one — the linearity may be in the description rather than in the thing.)*
 
@@ -372,6 +395,7 @@ The skill's job is **authoring plans into the schema against a declared profile*
 - Does a structurally-assessed plan actually reduce execution-time context, or does the executor load most payloads anyway? Unmeasured.
 - How much of the 89% file-disjointness survives interface-dependency analysis? The measured figure is an upper bound on candidate parallelism, not a schedule, and the real number is unmeasured.
 - Under parallel dispatch, is the retry bound per-branch or per-graph? Per-branch multiplies the worst case by the branch count; per-graph makes one unlucky branch starve the others.
+- At a fan-in, how does a failing validating node name which predecessors it implicates? A single exit status cannot, and without it the retry target is ambiguous (§4.7).
 - How many profiles are needed, and who authors one? A profile per team is governance; a profile per plan is a loophole.
 - Where does a bin's confidence floor come from, and who may set it? A floor the classifier's vendor sets is not a floor.
 - Does a long-lived scheduled graph hold node state **in** the artifact (no longer immutable) or **beside** it (the two can disagree)?
