@@ -3592,8 +3592,8 @@ mod tests {
 
     /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
     /// the shutdown chain at the deadline CEILING, term by term and in the
-    /// order `accept_loop` and `run_inner` execute them — the supervisor
-    /// abort-reap, the handler drain (deadline + its own bound) and the reap
+    /// order `accept_loop` and `run_inner` execute them — the stop record's
+    /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
     /// of what it aborts, the audit drain, the plane client's shutdown (a
     /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
     /// four rounds each found a term the expression had skipped while the
@@ -3609,7 +3609,8 @@ mod tests {
             read_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
             ..maknae_config::transport_from_section(None).unwrap()
         };
-        let chain = SUPERVISOR_ABORT_REAP_TIMEOUT
+        let chain = AUDIT_DRAIN_SHUTDOWN_TIMEOUT
+            + SUPERVISOR_ABORT_REAP_TIMEOUT
             + handler_drain_bound(
                 &ceiling,
                 Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
