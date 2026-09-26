@@ -6,8 +6,8 @@
 //!
 //! Four limits of this file, so its coverage is not read wider than it is.
 //! First, the write lane driven here is the REPLACEMENT lane and only that:
-//! `FixturePlane::write` sends `WriteMode::Existing`, so the kernel executes
-//! through a delegated writable fd and answers `MutationComplete`. The CREATE
+//! `FixturePlane::write` sends `WriteMode::Existing`, and replaces the file
+//! itself after a `MutationAttempt` grant. The CREATE
 //! lane — `WriteMode::CreateExclusive`, a `MutationAttempt` grant,
 //! `mutation::execute` — is never driven against the brain from here (#241);
 //! its coverage lives where the lane lives, in `bins/maknae`'s `mutation`
@@ -204,23 +204,94 @@ impl Plane for FixturePlane {
         }
     }
     async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
-        // Replacement lane: the kernel executes through a delegated writable fd.
-        let fd = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .ok()
-            .map(std::os::fd::OwnedFd::from);
+        use maknae_proto::{
+            EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
+        };
+        use std::os::fd::AsFd;
+        let held = maknae_io::open_path_for_delegation(std::path::Path::new(path)).ok();
         let verb = Verb::FsWrite {
             conversation: Some(conversation.into()),
             path: path.into(),
             content: maknae_proto::Bytes::new(Zeroizing::new(content.to_vec())),
             mode: maknae_proto::WriteMode::Existing,
         };
-        match self.verb(verb, fd).await.result {
-            RespResult::Ok(Payload::MutationComplete) => WriteOutcome::Applied,
-            _ => WriteOutcome::Unknown,
+        let (mut client, task, body) = self.fx.start_egress(
+            verb,
+            held.as_ref().map(|fd| fd.try_clone().unwrap()),
+            Arc::clone(&self.records),
+            maknae_config::transport_from_section(None).unwrap(),
+            Some("openai"),
+            self.egress.clone(),
+        );
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        let response = maknae_proto::read_frame(&mut client, 65536)
+            .await
+            .ok()
+            .and_then(|b| maknae_proto::decode_response(&b).ok());
+        let applied = match (response.map(|r| r.result), held.as_ref()) {
+            (Some(RespResult::Ok(Payload::MutationAttempt(grant))), Some(held)) => match &grant
+                .scope
+            {
+                MutationScope::Exact {
+                    path,
+                    effect: ReportedEffect::ReplacedFile,
+                } => {
+                    maknae_io::replace_held_file(held.as_fd(), std::path::Path::new(path), content)
+                        .is_ok()
+                        && acked(
+                            &mut client,
+                            MutationReport::Batch {
+                                id: grant.id,
+                                first_index: 0,
+                                effects: vec![EffectEntry {
+                                    path: path.clone(),
+                                    effect: ReportedEffect::ReplacedFile,
+                                }],
+                            },
+                            1,
+                        )
+                        .await
+                        && acked(
+                            &mut client,
+                            MutationReport::Finished {
+                                id: grant.id,
+                                next_index: 1,
+                                outcome: ReportedFinish::Success,
+                                stopped_at: None,
+                            },
+                            1,
+                        )
+                        .await
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        drop(client);
+        task.await.unwrap();
+        if applied {
+            WriteOutcome::Applied
+        } else {
+            WriteOutcome::Unknown
         }
     }
+}
+
+async fn acked(
+    client: &mut tokio::io::DuplexStream,
+    report: maknae_proto::MutationReport,
+    next_index: u32,
+) -> bool {
+    let Ok(body) = maknae_proto::encode_mutation_report(&report) else {
+        return false;
+    };
+    if maknae_proto::write_frame(client, &body).await.is_err() {
+        return false;
+    }
+    matches!(
+        maknae_proto::read_frame(client, 65536).await.ok().and_then(|b| maknae_proto::decode_mutation_ack(&b).ok()),
+        Some(ack) if ack.next_index == next_index
+    )
 }
 
 // The roles: + destinations: tail that makes session.prompt decidable for the
@@ -322,7 +393,21 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         .filter(|r| r.action == "session.prompt")
         .all(|r| r.egress.as_ref().map(|e| e.conversation.as_str()) == Some("agent-e2e-conv")));
     let writes: Vec<_> = recs.iter().filter(|r| r.action == "fs.write").collect();
-    assert_eq!(writes.len(), 2, "intent + completion: {writes:?}");
+    assert_eq!(
+        writes.len(),
+        3,
+        "intent + progress + completion: {writes:?}"
+    );
+    assert_eq!(writes[0].mutation.as_ref().unwrap().content_length, Some(3));
+    let last = writes.last().unwrap().mutation.as_ref().unwrap();
+    assert_eq!(
+        last.origin,
+        maknae_audit_append::MutationOrigin::ClientReported
+    );
+    assert_eq!(
+        last.status,
+        maknae_audit_append::MutationStatus::ReportedSuccess
+    );
     assert!(writes
         .iter()
         .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));

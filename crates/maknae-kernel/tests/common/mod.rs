@@ -318,7 +318,7 @@ impl Fixture {
         )
     }
     /// The full starter (#172): a registered provider name and an egress
-    /// backend. `fd` is INCLUDED: the mutation suite delegates a real writable
+    /// backend. `fd` is INCLUDED: the mutation suite delegates a real no-access
     /// descriptor through here.
     pub fn start_egress(
         &self,
