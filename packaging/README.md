@@ -174,7 +174,7 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
   will decide which tool is permitted when the tool-exec increment lands (#84);
   today it governs the read path (#77). Per-binary MAC separation is a future
   tool-exec increment.
-- **#77 home-read relaxation is syntax-validated, not yet serve-time-validated** — four MAC/isolation artifacts changed (`maknaed.service` ProtectHome, `maknae.te` home vectors, the AppArmor profile + local include, the enroll ACL). The .te builds clean under el9 refpolicy and the profile parses clean on trixie; the enforce-clean home-read/home-write-refused acceptance is the operator's pre-merge checklist item.
+- **Home access (#365)** — the daemon holds `getattr` and receipt-only `ioctl` over home content (`maknae.te`), no AppArmor home rule, and no ACL; `ProtectHome=read-only`. Serve-time enforce-clean on Rocky 10 (SELinux enforcing, a `0700` home, each kept permission shown load-bearing). On Debian 13 a probe confined by the shipped profile showed AppArmor does not mediate these operations; a full AppArmor serve is the Debian bullet below.
 - **RHEL 9 operator enroll** — deferred to #73 (see above).
 - **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
   both AppArmor profiles load, but the daemon has not been run under the AppArmor
