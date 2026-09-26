@@ -122,6 +122,7 @@ pub fn prepare(
             *wire_components = components.clone();
             result
         }
+        proto::Verb::Read { path, .. } => maknae_io::open_path_for_delegation(Path::new(path)),
         _ => return None,
     };
     let (fd, error) = match opened {
@@ -211,18 +212,20 @@ fn grant_parent(prepared: &PreparedMutation, grant: &MutationGrant) -> Result<Pa
     Ok(parent)
 }
 
-fn grant_replacement(
-    prepared: &PreparedMutation,
-    grant: &MutationGrant,
-) -> Result<PathBuf, String> {
+fn grant_object(prepared: &PreparedMutation, grant: &MutationGrant) -> Result<PathBuf, String> {
     if prepared.fd.is_none() {
-        return Err("replacement grant without prepared object evidence".into());
+        return Err("object grant without prepared object evidence".into());
     }
+    let expected = match prepared.request {
+        proto::Verb::Read { .. } => ReportedEffect::ReadFile,
+        _ => ReportedEffect::ReplacedFile,
+    };
     match &grant.scope {
-        MutationScope::Exact {
-            path,
-            effect: ReportedEffect::ReplacedFile,
-        } if Path::new(path).is_absolute() => Ok(PathBuf::from(path)),
+        MutationScope::Exact { path, effect }
+            if *effect == expected && Path::new(path).is_absolute() =>
+        {
+            Ok(PathBuf::from(path))
+        }
         _ => Err("mutation grant does not match prepared operation".into()),
     }
 }
@@ -238,6 +241,10 @@ struct WalkFrame {
     depth: usize,
 }
 enum Work {
+    Read {
+        held: OwnedFd,
+        path: PathBuf,
+    },
     Replace {
         held: OwnedFd,
         path: PathBuf,
@@ -269,6 +276,7 @@ struct Worker {
     frame_cap: usize,
     next_index: u32,
     seen: HashSet<String>,
+    content: Option<maknae_io::Zeroizing<Vec<u8>>>,
 }
 struct Step {
     effect: Option<EffectEntry>,
@@ -287,6 +295,8 @@ fn io_finish(error: &IoError) -> ReportedFinish {
         IoError::NonUtf8Component { .. } => ReportedFinish::UnsupportedName,
         IoError::MutationPathChanged { .. } => ReportedFinish::PathChanged,
         IoError::DeadlineElapsed { .. } => ReportedFinish::LimitReached,
+        IoError::TargetTooLarge { .. } => ReportedFinish::LimitReached,
+        IoError::SizeChanged { .. } => ReportedFinish::PathChanged,
         _ => ReportedFinish::OsRefused,
     }
 }
@@ -348,7 +358,7 @@ impl Worker {
         let entry = EffectEntry {
             path: path.into(),
             effect,
-            length: None,
+            length: (effect == ReportedEffect::ReadFile).then_some(u64::MAX),
         };
         if !fits(
             &batch(self.grant.id, self.next_index, entry),
@@ -380,6 +390,31 @@ impl Worker {
         let work = std::mem::replace(&mut self.work, Work::Done);
         match work {
             Work::Done => Step::stop(ReportedFinish::Success, None),
+            Work::Read { held, path } => {
+                let path = match self.reserve(&path, ReportedEffect::ReadFile, 1) {
+                    Ok(p) => p,
+                    Err(s) => return s,
+                };
+                match maknae_io::read_held_file(
+                    held.as_fd(),
+                    Path::new(&path),
+                    self.grant.limits.max_bytes,
+                ) {
+                    Ok(bytes) => {
+                        let length = Some(bytes.len() as u64);
+                        self.content = Some(bytes);
+                        Step {
+                            effect: Some(EffectEntry {
+                                path,
+                                effect: ReportedEffect::ReadFile,
+                                length,
+                            }),
+                            finish: Some((ReportedFinish::Success, None)),
+                        }
+                    }
+                    Err(e) => error_step(e, ReportedEffect::ReadFile, path),
+                }
+            }
             Work::Replace { held, path, bytes } => {
                 let path = match self.reserve(&path, ReportedEffect::ReplacedFile, 1) {
                     Ok(p) => p,
@@ -634,11 +669,36 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     cfg: &TransportConfig,
     request_started: Instant,
 ) -> Result<bool, String> {
+    run_attempt(prepared, grant, stream, cfg, request_started)
+        .await
+        .map(|(success, _)| success)
+}
+pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    prepared: PreparedMutation,
+    grant: MutationGrant,
+    stream: &mut S,
+    cfg: &TransportConfig,
+    request_started: Instant,
+) -> Result<Option<maknae_io::Zeroizing<Vec<u8>>>, String> {
+    run_attempt(prepared, grant, stream, cfg, request_started)
+        .await
+        .map(|(_, content)| content)
+}
+type Attempted = (bool, Option<maknae_io::Zeroizing<Vec<u8>>>);
+async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    prepared: PreparedMutation,
+    grant: MutationGrant,
+    stream: &mut S,
+    cfg: &TransportConfig,
+    request_started: Instant,
+) -> Result<Attempted, String> {
+    let reading = matches!(prepared.request, proto::Verb::Read { .. });
     let granted = match &prepared.request {
         proto::Verb::FsWrite {
             mode: WriteMode::Existing,
             ..
-        } => Granted::Object(grant_replacement(&prepared, &grant)?),
+        }
+        | proto::Verb::Read { .. } => Granted::Object(grant_object(&prepared, &grant)?),
         _ => Granted::Parent(grant_parent(&prepared, &grant)?),
     };
     if grant.limits.max_effects == 0
@@ -672,6 +732,10 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .ok_or("mutation grant without prepared evidence")?;
         let work = match granted {
             Granted::Object(path) => match prepared.request {
+                proto::Verb::Read { .. } => Work::Read {
+                    held: evidence,
+                    path,
+                },
                 proto::Verb::FsWrite { .. } => Work::Replace {
                     held: evidence,
                     path,
@@ -729,6 +793,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
             frame_cap: cap,
             next_index: 0,
             seen: HashSet::new(),
+            content: None,
         })
     });
     let mut worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
@@ -766,13 +831,15 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 next.next_index,
             )
             .await?;
-            if outcome != ReportedFinish::Success {
+            if outcome != ReportedFinish::Success && reading {
+                eprintln!("read not performed: {outcome:?}");
+            } else if outcome != ReportedFinish::Success {
                 eprintln!(
                     "mutation stopped: {outcome:?}; {} effect(s) reported",
                     next.next_index
                 );
             }
-            return Ok(outcome == ReportedFinish::Success);
+            return Ok((outcome == ReportedFinish::Success, next.content.take()));
         }
         worker = next;
     }
@@ -877,9 +944,17 @@ mod tests {
         cfg: TransportConfig,
         request_started: Instant,
     ) -> (Result<bool, String>, Vec<MutationReport>) {
-        let (mut client, mut server) = tokio::io::duplex(65536);
-        let cap = cfg.frame_max_bytes;
-        let receiver = tokio::spawn(async move {
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledge_all(server, cfg.frame_max_bytes);
+        let result = execute(prepared, grant, &mut client, &cfg, request_started).await;
+        drop(client);
+        (result, receiver.await.unwrap())
+    }
+    fn acknowledge_all(
+        mut server: tokio::io::DuplexStream,
+        cap: usize,
+    ) -> tokio::task::JoinHandle<Vec<MutationReport>> {
+        tokio::spawn(async move {
             let mut reports = vec![];
             while let Ok(bytes) = proto::read_frame(&mut server, cap).await {
                 let report = proto::decode_mutation_report(&bytes).unwrap();
@@ -903,10 +978,139 @@ mod tests {
                 }
             }
             reports
+        })
+    }
+    fn read(path: String) -> Option<PreparedMutation> {
+        prepare(proto::Verb::Read { path }, None)
+    }
+    fn read_grant(path: &str, max_bytes: u64) -> MutationGrant {
+        let mut g = grant(MutationScope::Exact {
+            path: path.into(),
+            effect: ReportedEffect::ReadFile,
         });
-        let result = execute(prepared, grant, &mut client, &cfg, request_started).await;
+        g.limits.max_bytes = max_bytes;
+        g
+    }
+    async fn acknowledged_read(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cfg: TransportConfig,
+    ) -> (Result<Option<Vec<u8>>, String>, Vec<MutationReport>) {
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledge_all(server, cfg.frame_max_bytes);
+        let result = execute_read(prepared, grant, &mut client, &cfg, Instant::now()).await;
         drop(client);
-        (result, receiver.await.unwrap())
+        (
+            result.map(|content| content.map(|c| c.to_vec())),
+            receiver.await.unwrap(),
+        )
+    }
+    #[tokio::test]
+    async fn read_reports_its_length_then_success_and_returns_the_bytes() {
+        let d = Fixture::new();
+        let path = d.path("read-sentinel");
+        std::fs::write(&path, b"read sentinel bytes").unwrap();
+        let g = read_grant(&path, 65024);
+        let id = g.id;
+        let (result, reports) =
+            acknowledged_read(read(path.clone()).unwrap(), g, TransportConfig::default()).await;
+        assert_eq!(result, Ok(Some(b"read sentinel bytes".to_vec())));
+        assert_eq!(
+            reports,
+            vec![
+                MutationReport::Batch {
+                    id,
+                    first_index: 0,
+                    effects: vec![EffectEntry {
+                        path: path.clone(),
+                        effect: ReportedEffect::ReadFile,
+                        length: Some(19),
+                    }],
+                },
+                MutationReport::Finished {
+                    id,
+                    next_index: 1,
+                    outcome: ReportedFinish::Success,
+                    stopped_at: None,
+                },
+            ]
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"read sentinel bytes");
+    }
+    #[tokio::test]
+    async fn a_read_over_the_grant_limit_reports_limit_reached_and_returns_nothing() {
+        let d = Fixture::new();
+        let path = d.path("read-limit-sentinel");
+        std::fs::write(&path, b"read sentinel bytes").unwrap();
+        let g = read_grant(&path, 18);
+        let id = g.id;
+        let (result, reports) =
+            acknowledged_read(read(path.clone()).unwrap(), g, TransportConfig::default()).await;
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            reports,
+            vec![MutationReport::Finished {
+                id,
+                next_index: 0,
+                outcome: ReportedFinish::LimitReached,
+                stopped_at: Some(path),
+            }]
+        );
+    }
+    #[tokio::test]
+    async fn a_renamed_read_target_reports_path_changed_and_returns_nothing() {
+        let d = Fixture::new();
+        let path = d.path("read-rename-sentinel");
+        std::fs::write(&path, b"moved read bytes").unwrap();
+        let prepared = read(path.clone()).unwrap();
+        std::fs::rename(&path, d.path("read-moved-sentinel")).unwrap();
+        let (result, reports) = acknowledged_read(
+            prepared,
+            read_grant(&path, 65024),
+            TransportConfig::default(),
+        )
+        .await;
+        assert_eq!(result, Ok(None));
+        assert!(matches!(
+            &reports[..],
+            [MutationReport::Finished {
+                next_index: 0,
+                outcome: ReportedFinish::PathChanged,
+                ..
+            }]
+        ));
+    }
+    #[tokio::test]
+    async fn an_unacknowledged_success_releases_no_content() {
+        let d = Fixture::new();
+        let path = d.path("read-unacknowledged-sentinel");
+        std::fs::write(&path, b"withheld bytes").unwrap();
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let receiver = tokio::spawn(async move {
+            let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+            let report = proto::decode_mutation_report(&bytes).unwrap();
+            let MutationReport::Batch { id, .. } = report else {
+                panic!("expected the read batch first: {report:?}")
+            };
+            proto::write_frame(
+                &mut server,
+                &proto::encode_mutation_ack(&proto::MutationAck { id, next_index: 1 }).unwrap(),
+            )
+            .await
+            .unwrap();
+            let _finished = proto::read_frame(&mut server, 65536).await;
+        });
+        let result = execute_read(
+            read(path.clone()).unwrap(),
+            read_grant(&path, 65024),
+            &mut client,
+            &TransportConfig::default(),
+            Instant::now(),
+        )
+        .await;
+        drop(client);
+        receiver.await.unwrap();
+        assert!(result.is_err(), "content released without an ack");
     }
     #[test]
     fn preparation_keeps_evidence_and_never_reinterprets_other_open_errors() {
@@ -1429,7 +1633,7 @@ mod tests {
         ));
     }
     #[test]
-    fn replacement_grant_must_be_an_absolute_exact_replaced_file() {
+    fn object_grant_must_match_the_prepared_verb() {
         let d = Fixture::new();
         let path = d.path("replacement-grant-sentinel");
         std::fs::write(&path, b"kept").unwrap();
@@ -1445,16 +1649,21 @@ mod tests {
                 effect: ReportedEffect::ReplacedFile,
             },
         ] {
-            assert!(grant_replacement(&prepared, &grant(scope)).is_err());
+            assert!(grant_object(&prepared, &grant(scope)).is_err());
         }
         let valid = grant(MutationScope::Exact {
             path: path.clone(),
             effect: ReportedEffect::ReplacedFile,
         });
         let beneath_file = prepare_write(d.path("replacement-grant-sentinel/child")).unwrap();
-        assert!(grant_replacement(&beneath_file, &valid).is_err());
+        assert!(grant_object(&beneath_file, &valid).is_err());
+        assert_eq!(grant_object(&prepared, &valid), Ok(PathBuf::from(&path)));
+        let read_prepared = read(path.clone()).unwrap();
+        assert!(grant_object(&read_prepared, &valid).is_err());
+        let read_valid = read_grant(&path, 65024);
+        assert!(grant_object(&prepared, &read_valid).is_err());
         assert_eq!(
-            grant_replacement(&prepared, &valid),
+            grant_object(&read_prepared, &read_valid),
             Ok(PathBuf::from(&path))
         );
         assert_eq!(std::fs::read(path).unwrap(), b"kept");
@@ -1472,6 +1681,18 @@ mod tests {
         assert_eq!(prepared.preparation_error(), None);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"no access bytes");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_read_preparation_needs_no_access_to_the_object() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let path = d.path("read-no-access-sentinel");
+        std::fs::write(&path, b"no access read bytes").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let prepared = read(path.clone()).unwrap();
+        assert!(prepared.descriptor().unwrap().is_some());
+        assert_eq!(prepared.preparation_error(), None);
     }
     #[test]
     fn malformed_preparation_and_mkdir_depth_are_refused_without_entries() {
@@ -1836,6 +2057,7 @@ mod tests {
             frame_cap: 65536,
             next_index: 0,
             seen: HashSet::new(),
+            content: None,
         }
     }
     #[test]

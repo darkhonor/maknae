@@ -31,9 +31,6 @@ pub enum Dispatch {
     NoBehaviour,
     Pong,
     WhoamiRequested,
-    /// The peer asked to read a file; the path is the VERB's own datum
-    /// (client-supplied, canonical-pre-gated by the PEP), not a peer fact.
-    ReadRequested(String),
     /// Requires the dedicated descriptor/preparation and durable intent path.
     MutationRequested,
     /// The peer asked for the effective configuration (#162 Phase 2). Carries
@@ -55,8 +52,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     match verb {
         Verb::Ping => Dispatch::Pong,
         Verb::Whoami => Dispatch::WhoamiRequested,
-        Verb::Read { path } => Dispatch::ReadRequested(path.clone()),
-        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
+        Verb::Read { .. } | Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
             Dispatch::MutationRequested
         }
         // Every enumerated-but-unbuilt term. NO wildcard: a new variant is a
@@ -243,30 +239,20 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
 /// frame budget to 0 are fail-closed by design, not a bug.
 pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 
-/// Build the seam Request from the verb + kernel-verified peer uid. Subject
-/// carries `uid` only (i64 carriage of the u32 — lossless). A reserved `name`
-/// token used to sit beside it for runtime-originated requests; ADR-0024 struck
-/// it (#276), so the uid is the whole subject. `Read` carries the client-supplied
-/// path as the resource `path` attribute; resource/context otherwise empty.
-/// The kernel-reported path of a descriptor the subject delegated, once verified.
-///
-/// Its presence IS the OS's answer (ADR-0009 decision 1): the subject's own `open(2)`
-/// already ran the kernel's whole permission check — DAC bits, ACLs, supplementary
-/// groups, SELinux/AppArmor. Absence means no descriptor arrived, or one arrived and
-/// failed verification; either way the OS was not established and decision 2 makes
-/// that a `Deny`.
-pub type VerifiedObject<'a> = Option<&'a str>;
-
 /// The bound on `subject.user`, re-exported for the identity suite.
 pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
     crate::run::admitted_user_pub(user)
 }
 
+/// Build the seam Request from the verb + kernel-verified peer uid. Subject
+/// carries `uid` only (i64 carriage of the u32 — lossless). A reserved `name`
+/// token used to sit beside it for runtime-originated requests; ADR-0024 struck
+/// it (#276), so the uid is the whole subject. `Read` carries the client-supplied
+/// path as the resource `path` attribute; resource/context otherwise empty.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,
     lane: maknae_security::Lane,
-    object: VerifiedObject<'_>,
     // The provider registered at boot (#243), by name, or none. Supplied by
     // the accept loop's captured boot state, never read off the wire.
     provider_name: Option<&str>,
@@ -275,25 +261,8 @@ pub fn build_authz_request(
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
     let mut resource = Attributes::new();
-    if let Verb::Read { path } = verb {
-        match object {
-            // GROUND TRUTH. The deny list evaluates the path the object actually has,
-            // so `~/innocent -> ~/.ssh/id_rsa` is decided on `.ssh/id_rsa`, not on the
-            // alias the client chose to send (ADR-0009 decision 6).
-            Some(real) => {
-                resource.insert("path", AttrValue::Str(real.to_string()));
-                resource.insert(
-                    maknae_security::RESOURCE_OS_ACCESSIBLE,
-                    AttrValue::Bool(true),
-                );
-            }
-            // No verified descriptor: stamp what was ASKED so the trail is honest,
-            // and stamp NO answer -- on the local lane that is unknown, and unknown
-            // denies. Never a fallback to a daemon-side open.
-            None => {
-                resource.insert("path", AttrValue::Str(path.clone()));
-            }
-        }
+    if let Verb::Read { path, .. } = verb {
+        resource.insert("path", AttrValue::Str(path.clone()));
     }
     // #172: the egress destination is the kernel's registered provider, stamped
     // here so the PDP decides on `provider:<name>` and the client never names
@@ -372,66 +341,31 @@ pub fn lexical_pregate(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Why the read PEP refused to hand back content (spec D5). The CONTENT case
-/// is not here — this enum exists so the outcome→(record, wire) mapping is a
-/// pure T1 table, not branching buried in orchestration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadRefusal {
-    /// Target exceeds the frame budget: a PERMIT whose delivery is refused —
-    /// never truncated (spec D5).
-    TooLarge,
-    /// The anchor itself could not open (missing ACL, unmounted home, bad
-    /// mode) — the read subsystem is unavailable; ping/whoami unaffected.
-    Unavailable(String),
-    /// The target refused a named requirement (symlink, hardlink, not a
-    /// regular file, OS DAC) — reason is audit-only, wire stays generic.
-    Refused(String),
-    /// The bounded read elapsed (wedged filesystem) — fail closed.
-    TimedOut,
-    /// The blocking task did not complete — fail closed.
-    JoinFailed,
-}
-
 /// CBOR + response-envelope headroom subtracted from the daemon's own frame
 /// budget before a read is sized (spec D5). Degenerate-but-legal configs
 /// (frame_max_bytes as low as 1) make the budget 0 and every non-empty read
-/// refuses TooLarge — fail-closed by design, not a bug. T1-pinned here; the
-/// binding in run.rs is thin orchestration.
+/// is refused — fail-closed by design, not a bug. T1-pinned here; the
+/// binding in mutation.rs is thin orchestration.
 pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
 
-/// The read budget for one response frame.
+/// The content bound for one read grant (and the reply frame's envelope margin).
 pub fn read_budget(frame_max_bytes: usize) -> u64 {
     (frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN)
 }
 
-/// The named requirements for a SUBJECT-DELEGATED read (ADR-0009).
+/// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009).
 ///
-/// Three proofs, all required (decision 3): the descriptor proves the subject has OS
-/// access — its existence IS the OS's answer — `confined_beneath` proves the object
-/// lies under the enrolled home, and `root_required` proves the home itself is not a
-/// place where aliases can be planted (decision 7; the anchor REQUIREMENT survives
-/// even though the anchor OPEN does not). No one of them substitutes for another: the
-/// descriptor says nothing about *where*, and confinement says nothing about *who*.
-///
-/// This replaced `read_plan`, which resolved a client-supplied name under an opened
-/// anchor. That shape is gone, deliberately: resolving a name needs traversal
-/// permission on the subject's home, which a STIG `0700` home does not grant (#194).
+/// Three proofs, all required (decision 3): the descriptor proves where the object
+/// is — the kernel-reported path — `confined_beneath` proves the object lies under
+/// the enrolled home, and `root_required` proves the home itself is not a place where
+/// aliases can be planted (decision 7). The descriptor confers no access; the OS
+/// answers at the subject's own re-open.
 ///
 /// `owner`/`mode_mask` on the TARGET stay `None` deliberately and are NOT a gap:
 /// evaluating them daemon-side is the mode-algebra reimplementation that ACLs,
 /// supplementary groups, SELinux and AppArmor make non-equivalent to the kernel's own
 /// answer. `nlink_exactly_one` is load-bearing three ways (decision 5).
-///
-/// **`budget` is `None` at DECISION time and `Some` at READ time, and that split is
-/// load-bearing.** An oversize object is "a PERMIT whose delivery is refused — never
-/// truncated" (#77 spec D5): applying the frame budget before the decision would turn
-/// an authorized read of a large file into an *authorization* failure, losing the
-/// distinction between "you may not" and "it will not fit".
-pub fn delegated_plan(
-    home: &std::path::Path,
-    owner_uid: u32,
-    budget: Option<u64>,
-) -> maknae_io::DelegatedRequired {
+pub fn delegated_plan(home: &std::path::Path, owner_uid: u32) -> maknae_io::DelegatedRequired {
     maknae_io::DelegatedRequired {
         confined_beneath: home.to_path_buf(),
         root_required: maknae_io::AnchorRequired {
@@ -443,68 +377,8 @@ pub fn delegated_plan(
             mode_mask: None,
             nlink_exactly_one: true,
             regular_file: true,
-            max_bytes: budget,
+            max_bytes: None,
         },
-    }
-}
-
-/// The read PEP's error mapping (T1): io refusal → typed [`ReadRefusal`].
-pub fn map_read_error(e: maknae_io::IoError) -> ReadRefusal {
-    match e {
-        maknae_io::IoError::TargetTooLarge { .. } => ReadRefusal::TooLarge,
-        other => ReadRefusal::Refused(other.to_string()),
-    }
-}
-
-/// The audit/wire disposition of one refusal: (outcome.result,
-/// outcome.reason, outcome.posture, wire code, wire message). Reasons are
-/// audit-only; every wire message here is a fixed generic string.
-pub fn read_refusal_disposition(
-    r: &ReadRefusal,
-) -> (
-    &'static str,
-    String,
-    &'static str,
-    maknae_proto::ProtoErrCode,
-    &'static str,
-) {
-    use maknae_proto::ProtoErrCode as C;
-    match r {
-        ReadRefusal::TooLarge => (
-            "permit",
-            "delivery refused: oversize".into(),
-            "refused-oversize",
-            C::TooLarge,
-            "resource too large",
-        ),
-        ReadRefusal::Unavailable(e) => (
-            "deny",
-            format!("read subsystem unavailable: {e}"),
-            "unavailable",
-            C::Internal,
-            "read unavailable",
-        ),
-        ReadRefusal::Refused(e) => (
-            "deny",
-            e.clone(),
-            "unauthorized",
-            C::Unauthorized,
-            "not authorized",
-        ),
-        ReadRefusal::TimedOut => (
-            "deny",
-            "read timed out".into(),
-            "unavailable",
-            C::Internal,
-            "read unavailable",
-        ),
-        ReadRefusal::JoinFailed => (
-            "deny",
-            "read failed (join)".into(),
-            "unavailable",
-            C::Internal,
-            "read unavailable",
-        ),
     }
 }
 
@@ -536,13 +410,13 @@ mod tests {
             conversation: "c".into(),
             turns: vec![],
         };
-        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, None, Some("openai"));
+        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some("openai"));
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
         );
         assert!(
-            build_authz_request(&v, 1002, maknae_security::Lane::Local, None, None)
+            build_authz_request(&v, 1002, maknae_security::Lane::Local, None)
                 .resource
                 .0
                 .get("destination")
@@ -552,7 +426,6 @@ mod tests {
             &Verb::Ping,
             1002,
             maknae_security::Lane::Local,
-            None,
             Some("openai")
         )
         .resource
@@ -770,12 +643,12 @@ mod tests {
     }
 
     #[test]
-    fn read_dispatches_read_requested_with_its_path() {
+    fn a_read_dispatches_to_the_attempt_lane() {
         assert_eq!(
             dispatch_verb(&Verb::Read {
                 path: "/home/op/a".into()
             }),
-            Dispatch::ReadRequested("/home/op/a".into())
+            Dispatch::MutationRequested
         );
         assert_ne!(
             dispatch_verb(&Verb::Read { path: "/x".into() }),
@@ -810,18 +683,12 @@ mod tests {
 
     #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None, None);
+        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
         );
-        let r = build_authz_request(
-            &Verb::Whoami,
-            u32::MAX,
-            maknae_security::Lane::Local,
-            None,
-            None,
-        );
+        let r = build_authz_request(&Verb::Whoami, u32::MAX, maknae_security::Lane::Local, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(i64::from(u32::MAX)))
@@ -830,7 +697,7 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None, None);
+        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None);
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
         // Context is no longer empty: every request carries its lane (ADR-0009 D8).
@@ -849,7 +716,6 @@ mod tests {
             501,
             maknae_security::Lane::Local,
             None,
-            None,
         );
         assert_eq!(r.action.0, "fs.read");
         assert_eq!(
@@ -862,18 +728,17 @@ mod tests {
     /// most important one in the design: **the lane comes from the ACCEPTING LISTENER
     /// and from nothing else.**
     ///
-    /// It is what separates *"absent means `Deny`"* (local — the OS could have been
-    /// asked and was not) from *"absent means not applicable"* (remote — there is no
-    /// uid on this host to ask about). So anything that lets a local request present
-    /// as remote escapes OS DAC entirely, and the client controls the verb.
+    /// A filesystem attempt is decided only on `local`: a remote peer has no uid on
+    /// this host to perform it. So the lane must never follow anything the client
+    /// controls, and the client controls the verb.
     #[test]
     fn the_lane_comes_from_the_listener_and_client_content_cannot_change_it() {
         use maknae_security::{AttrValue, Lane, CONTEXT_DAC_LANE};
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None, None);
+        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None);
+        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -890,7 +755,6 @@ mod tests {
             },
             501,
             Lane::Local,
-            None,
             None,
         );
         assert_eq!(
@@ -978,89 +842,7 @@ mod tests {
             "~ is client-side only, never wire"
         );
     }
-    // ---- read_refusal_disposition (T1: the outcome table) ----
-
-    #[test]
-    fn oversize_is_a_permit_with_refused_delivery_and_too_large_on_the_wire() {
-        let (result, reason, posture, code, msg) = read_refusal_disposition(&ReadRefusal::TooLarge);
-        assert_eq!(result, "permit");
-        assert!(reason.contains("oversize"));
-        assert_eq!(posture, "refused-oversize");
-        assert_eq!(code, maknae_proto::ProtoErrCode::TooLarge);
-        assert_eq!(msg, "resource too large");
-    }
-
-    /// `ReadRefusal::OutsideRoot` was RETIRED by ADR-0009 and its test with it.
-    /// Confinement is now one of the two proofs the DECISION requires, so an object
-    /// outside the enrolled home never establishes OS access and the PDP denies —
-    /// there is no longer a "permitted, then refused at delivery" outcome to render.
-    /// The e2e coverage moved to `a_permit_outside_the_anchored_root_is_refused_
-    /// distinctly`, which now asserts the composed Deny.
-    ///
-    /// `TooLarge` remains the one refusal that renders as a PERMIT whose delivery
-    /// failed, and it keeps its own test above.
-    #[test]
-    fn only_oversize_still_renders_a_permit_whose_delivery_was_refused() {
-        for r in [
-            ReadRefusal::Refused("x".into()),
-            ReadRefusal::Unavailable("y".into()),
-            ReadRefusal::TimedOut,
-            ReadRefusal::JoinFailed,
-        ] {
-            assert_eq!(
-                read_refusal_disposition(&r).0,
-                "deny",
-                "every refusal but oversize is a denial: {r:?}"
-            );
-        }
-        assert_eq!(read_refusal_disposition(&ReadRefusal::TooLarge).0, "permit");
-    }
-
-    #[test]
-    fn target_refusals_deny_with_generic_wire_and_audit_only_reason() {
-        let (result, reason, posture, code, msg) =
-            read_refusal_disposition(&ReadRefusal::Refused("hard-linked (nlink=2): /x".into()));
-        assert_eq!(result, "deny");
-        assert!(
-            reason.contains("nlink=2"),
-            "reason is the io rendering, audit-only"
-        );
-        assert_eq!(posture, "unauthorized");
-        assert_eq!(code, maknae_proto::ProtoErrCode::Unauthorized);
-        assert_eq!(msg, "not authorized");
-        assert!(!msg.contains("nlink"), "wire stays generic");
-    }
-
-    #[test]
-    fn unavailable_timeout_and_join_all_deny_unavailable() {
-        for r in [
-            ReadRefusal::Unavailable("acl missing".into()),
-            ReadRefusal::TimedOut,
-            ReadRefusal::JoinFailed,
-        ] {
-            let (result, _, posture, code, msg) = read_refusal_disposition(&r);
-            assert_eq!(result, "deny", "{r:?}");
-            assert_eq!(posture, "unavailable", "{r:?}");
-            assert_eq!(code, maknae_proto::ProtoErrCode::Internal, "{r:?}");
-            assert_eq!(msg, "read unavailable", "{r:?}");
-        }
-    }
-
-    #[test]
-    fn dispositions_are_pairwise_distinct_where_it_matters() {
-        // Arm-swap killers. The oversize-vs-outside-root pair is gone with
-        // `OutsideRoot` (ADR-0009); oversize vs refused still differ in posture,
-        // and refused vs unavailable differ in code+message.
-        assert_ne!(
-            read_refusal_disposition(&ReadRefusal::TooLarge).2,
-            read_refusal_disposition(&ReadRefusal::Refused("x".into())).2
-        );
-        assert_ne!(
-            read_refusal_disposition(&ReadRefusal::Refused("x".into())).3,
-            read_refusal_disposition(&ReadRefusal::Unavailable("y".into())).3
-        );
-    }
-    // ---- delegated_plan / map_read_error / read_budget (T1: the decision
+    // ---- delegated_plan / read_budget (T1: the decision
     //      logic — the alias boundary, the named requirements, the bound) ----
 
     #[test]
@@ -1075,8 +857,8 @@ mod tests {
     }
 
     #[test]
-    fn delegated_plan_names_all_three_proofs_and_splits_the_budget() {
-        let req = delegated_plan(std::path::Path::new("/home/op"), 501, Some(1000));
+    fn delegated_plan_names_all_three_proofs() {
+        let req = delegated_plan(std::path::Path::new("/home/op"), 501);
         assert_eq!(
             req.confined_beneath,
             std::path::Path::new("/home/op"),
@@ -1097,42 +879,11 @@ mod tests {
             "load-bearing three ways (ADR-0009 D5)"
         );
         assert!(req.target.regular_file, "no fifo/device");
-        assert_eq!(
-            req.target.max_bytes,
-            Some(1000),
-            "the budget is the named bound"
-        );
-        // NOT a gap: the descriptor IS the OS's answer, and recomputing the mode
-        // algebra here is what the operator forbade (ADR-0009 D1).
+        assert_eq!(req.target.max_bytes, None);
+        // NOT a gap: the OS answers at the subject's re-open, and recomputing the
+        // mode algebra here is what the operator forbade (ADR-0009 D1).
         assert_eq!(req.target.owner, None);
         assert_eq!(req.target.mode_mask, None);
-
-        // Oversize is a PERMIT whose delivery is refused, never a denial — so the
-        // budget is absent at decision time and present at read time.
-        assert_eq!(
-            delegated_plan(std::path::Path::new("/home/op"), 501, None)
-                .target
-                .max_bytes,
-            None
-        );
-    }
-
-    #[test]
-    fn map_read_error_types_oversize_and_everything_else() {
-        let too_large = maknae_io::IoError::TargetTooLarge {
-            path: "/x".into(),
-            limit: 10,
-            actual: 20,
-        };
-        assert_eq!(map_read_error(too_large), ReadRefusal::TooLarge);
-        let other = maknae_io::IoError::MultiplyLinked {
-            path: "/x".into(),
-            nlink: 2,
-        };
-        match map_read_error(other) {
-            ReadRefusal::Refused(m) => assert!(m.contains("hard-linked"), "{m}"),
-            r => panic!("expected Refused, got {r:?}"),
-        }
     }
 
     /// Every term in the vocabulary, for the exhaustiveness properties below.
@@ -1315,7 +1066,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None, None);
+            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),

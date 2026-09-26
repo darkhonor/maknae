@@ -65,52 +65,15 @@ pub fn mint_conversation_id() -> String {
 
 /// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
 /// refusal of an ARMED request is `Refused` — the one outcome the model may
-/// not appeal. Any other code (a `BadRequest` for `/a/../b` is a client-shape
-/// fault, not a decision), any protocol surprise, and any transport error is
-/// `Unavailable`. The wire carries no reason (ADR-0019); it does carry the
-/// code.
-///
-/// What `Refused` does NOT mean, stated here because the mapping invites the
-/// opposite reading: an armed `Unauthorized` is not proof that the PDP weighed
-/// this object's content. The kernel's `map_read_error` sends EVERY
-/// `maknae_io::IoError` except `TargetTooLarge` into `ReadRefusal::Refused`,
-/// and `read_refusal_disposition` answers that with `Unauthorized` and the
-/// wire message `not authorized`. So a model that names a directory, or a path
-/// whose fstat or object-kind check (`regular_file`, `nlink_exactly_one`)
-/// fails, gets a successful subject-side open, an ARMED request, and
-/// `Not authorized` — the one outcome the compiled prompt forbids it to
-/// diagnose or retry. This mapper cannot tell those apart from a real deny:
-/// the wire carries no reason (ADR-0019). Whether such faults should ride
-/// `Internal` / `read unavailable` instead is a kernel-disposition question,
-/// which is wire semantics and the maintainer's; it is recorded as
-/// residual 1 in issue #344, and it is not a change this mapper can make.
-///
-/// Corrected 2026-09-22 (#241): an UNARMED refusal is `Unavailable`, not
-/// `Refused`. When the subject's own `open_for_delegation` fails — a typo'd
-/// path, ENOENT, EACCES — `send_verb` sends the request anyway, unarmed, so
-/// the deny lands in the audit trail (ADR-0009 decision 2), and the kernel
-/// refuses it for want of a descriptor. That arrives as the same generic
-/// `Unauthorized` as a real deny, but it is not a PDP verdict on the object's
-/// content: it is the subject's own OS-DAC or a path that does not exist.
-/// Rendering it as "Not authorized" told the model a decision had been made,
-/// and the compiled prompt forbids the model to diagnose or retry that.
-///
-/// *(Scoped 2026-09-22, #344: the record above says the kernel "refuses it for
-/// want of a descriptor". That is what happens when the path is lexically
-/// canonical and so reaches the descriptor check. A path that ALSO fails
-/// `lexical_pregate` — an empty, `.` or `..` segment, or a trailing `/` — is
-/// answered `BadRequest` first, because `maknae-kernel`'s `run.rs` runs that
-/// gate before descriptor evaluation; this mapper then sends it to
-/// `Unavailable` through the `BadRequest` arm rather than the unarmed one. The
-/// record's point is unchanged either way: neither outcome is a PDP verdict on
-/// the object's content.)*
+/// not appeal. An armed `Unauthorized` is the kernel's refusal before any
+/// grant; the wire carries no reason (ADR-0019). An unarmed refusal, any other
+/// code (a `BadRequest` for `/a/../b` is a client-shape fault), any protocol
+/// surprise and any transport error is `Unavailable`. So is a grant that ends
+/// without an acknowledged `Success` (OS refusal, limit, changed object, lost
+/// ack): a fact about the attempt, not a verdict.
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
-        // The buffer is MOVED, never copied: `b.0` is already a `Zeroizing`,
-        // and `maknae_proto::Bytes::new` forbids copying content out of one
-        // into a plain `Vec`. `ReadOutcome::Content` carries the same type, so
-        // the secrecy survives the hop into the brain.
-        Ok(SentOutcome::Payload(Payload::ReadContent(b))) => ReadOutcome::Content(b.0),
+        Ok(SentOutcome::ReadDone { content: Some(b) }) => ReadOutcome::Content(b.0),
         Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
         Ok(SentOutcome::Refused {
             code: maknae_proto::ProtoErrCode::Unauthorized,
@@ -201,18 +164,15 @@ impl Plane for RealPlane<'_> {
         {
             return Err(PlaneError::FrameTooLarge);
         }
-        prompt_outcome(send_verb(verb, None, None, self.transport, self.client, self.ca).await)
+        prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
     }
     async fn read(&mut self, path: &str) -> ReadOutcome {
-        // The object is passed so the read is ARMED exactly as `maknae read`
-        // is (ADR-0009).
         read_outcome(
             send_verb(
                 Verb::Read {
                     path: path.to_string(),
                 },
                 None,
-                Some(path),
                 self.transport,
                 self.client,
                 self.ca,
@@ -231,17 +191,7 @@ impl Plane for RealPlane<'_> {
         ) else {
             return WriteOutcome::NotSent;
         };
-        write_outcome(
-            send_verb(
-                verb,
-                Some(content),
-                None,
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await,
-        )
+        write_outcome(send_verb(verb, Some(content), self.transport, self.client, self.ca).await)
     }
 }
 
@@ -471,8 +421,18 @@ mod tests {
         use maknae_proto::{Payload, ProtoErrCode};
         let content = maknae_proto::Bytes::new(zeroize::Zeroizing::new(b"x".to_vec()));
         assert_eq!(
-            read_outcome(Ok(SentOutcome::Payload(Payload::ReadContent(content)))),
+            read_outcome(Ok(SentOutcome::ReadDone {
+                content: Some(content)
+            })),
             ReadOutcome::Content(zeroize::Zeroizing::new(b"x".to_vec()))
+        );
+        assert_eq!(
+            read_outcome(Ok(SentOutcome::ReadDone { content: None })),
+            ReadOutcome::Unavailable
+        );
+        assert_eq!(
+            read_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
+            ReadOutcome::Unavailable
         );
         assert_eq!(
             read_outcome(Ok(SentOutcome::Refused {
@@ -491,7 +451,7 @@ mod tests {
             ReadOutcome::Unavailable
         );
         // #241: an UNARMED refusal is not a PDP verdict on the content. The
-        // subject's own `open_for_delegation` failed (ENOENT, EACCES), the
+        // subject's own `open_path_for_delegation` failed (ENOENT), the
         // request went out without a descriptor, and the kernel denied it for
         // want of one (ADR-0009 d2) — which arrives as the same generic
         // `Unauthorized`. Telling the model "Not authorized" for a typo'd path

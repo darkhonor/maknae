@@ -1,8 +1,8 @@
 //! maknae-kernel — PRIVILEGED trust-plane logic library (the PDP call site, six KLC
 //! hooks, egress enforcement, config boot). Thin main in bins/maknaed. MUST NOT be
 //! reachable from bins/maknae (spec §3 P1). As of #77 the per-request PDP is WIRED
-//! (boot_gate constructs it; handle() decides every request through the seam and
-//! enforces the read PEP); KLC hooks/egress remain gated on ADR-0005/0007/0008.
+//! (boot_gate constructs it; handle() decides every request through the seam; reads
+//! and writes are subject-side attempts); KLC hooks/egress remain gated on ADR-0005/0007/0008.
 mod authz;
 mod blocking_guard;
 mod boot;

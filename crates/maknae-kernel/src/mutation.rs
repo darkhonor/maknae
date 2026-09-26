@@ -105,11 +105,9 @@ fn prepare(
         _ => None,
     };
     if let Some((refused, kind, effect)) = object {
-        let verified = maknae_io::verify_delegated(
-            fd.as_fd(),
-            delegated_plan(&principal.home, principal.uid, None),
-        )
-        .map_err(|e| format!("{refused}: {e}"))?;
+        let verified =
+            maknae_io::verify_delegated(fd.as_fd(), delegated_plan(&principal.home, principal.uid))
+                .map_err(|e| format!("{refused}: {e}"))?;
         maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path)
             .map_err(|e| format!("{refused}: {e}"))?;
         let path = verified
@@ -132,7 +130,7 @@ fn prepare(
         fd,
         MutationRequired {
             confined_beneath: principal.home.clone(),
-            root_required: delegated_plan(&principal.home, principal.uid, None).root_required,
+            root_required: delegated_plan(&principal.home, principal.uid).root_required,
         },
     )
     .map_err(|e| format!("namespace location evidence refused: {e}"))?;
@@ -247,7 +245,7 @@ fn authorize<P: Authorizer>(
 ) -> Result<Option<&'static str>, AuthorizeErr> {
     let mut decided_role: Option<&'static str> = None;
     for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, Lane::Local, None, None);
+        let mut request = build_authz_request(verb, uid, Lane::Local, None);
         request
             .resource
             .0
@@ -498,7 +496,17 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         max_effects: maknae_proto::MAX_MUTATION_EFFECTS,
         max_depth: maknae_proto::MAX_MUTATION_DEPTH,
         deadline_ms: cfg.read_timeout_ms,
-        max_bytes: 0,
+        max_bytes: if matches!(
+            scope,
+            MutationScope::Exact {
+                effect: ReportedEffect::ReadFile,
+                ..
+            }
+        ) {
+            crate::handler::read_budget(cfg.frame_max_bytes)
+        } else {
+            0
+        },
     };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
     let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();

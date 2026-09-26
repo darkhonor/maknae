@@ -257,55 +257,6 @@ fn canonical_violation(path: &str) -> Option<&'static str> {
     None
 }
 
-/// What OS discretionary access control says about a request naming an object.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum OsDacGate {
-    /// The OS permits this subject this object. The policy decision proceeds.
-    Satisfied,
-    /// Refuse, with an audit-only reason distinguishing WHY from a policy denial.
-    Deny(&'static str),
-    /// OS DAC is not the applicable control on this lane. The operand contributes
-    /// nothing on this ground and the rest of the policy carries the decision.
-    NotApplicable,
-    /// Present but wrong-typed — failed-to-evaluate, never a fall-through to absent.
-    Indeterminate,
-}
-
-/// The OS-DAC gate over a request that names an object (ADR-0009 decision 8).
-///
-/// **Code-defined and unconfigurable.** No `authz.yaml` key enables, disables, or
-/// overrides it — the same class as `Role::Adversary`'s deny-all. Operator ruling:
-/// *"DAC permissions aren't something I should have to write a policy configuration
-/// for. Those are managed by the OS."*
-///
-/// The LANE is read first and it is load-bearing: it is the only thing separating
-/// *absent means unknown, so deny* (local — the OS could have been asked) from
-/// *absent means not applicable, so abstain* (remote — there is no uid, process, or
-/// descriptor on this host to ask about). Collapse the two and either every remote
-/// read denies the day the gateway lands, or every local read fails open.
-pub(crate) fn os_dac_gate(req: &SecRequest) -> OsDacGate {
-    let lane = match req.context.0.get(maknae_security::CONTEXT_DAC_LANE) {
-        Some(AttrValue::Str(s)) => s.as_str(),
-        // Absent, or present-but-wrong-typed. Either way the two meanings of a
-        // missing answer cannot be told apart, so neither may be assumed.
-        _ => return OsDacGate::Deny("dac lane absent"),
-    };
-    if lane == maknae_security::Lane::Remote.as_str() {
-        return OsDacGate::NotApplicable;
-    }
-    if lane != maknae_security::Lane::Local.as_str() {
-        return OsDacGate::Deny("dac lane unrecognised");
-    }
-    match req.resource.0.get(maknae_security::RESOURCE_OS_ACCESSIBLE) {
-        Some(AttrValue::Bool(true)) => OsDacGate::Satisfied,
-        Some(AttrValue::Bool(false)) => OsDacGate::Deny("os dac refuses this subject this object"),
-        Some(_) => OsDacGate::Indeterminate,
-        // ADR-0008 decision 4: no operand may fail open. On this lane the OS could
-        // have been asked, so silence is unknown — and unknown is never a permit.
-        None => OsDacGate::Deny("os accessibility unknown"),
-    }
-}
-
 /// The one spelling of the absence note, shared by every arm that abstains
 /// on a role's reach (#172): three tests depend on the class arm and the
 /// prompt arm agreeing byte for byte, so the agreement is one function.
@@ -422,22 +373,16 @@ pub(crate) fn decide_loaded_with_role(
     let class = class_of(&req.action.0);
     let verdict = match role {
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
-        // not filesystem privilege. Users and admins use the SAME subject OS
-        // proof and universal path policy. Key the implemented term exactly;
-        // adding a path to an unbuilt fs verb must never grant it Read access.
-        Role::Admin | Role::User if req.action.0 == "fs.read" => match os_dac_gate(req) {
-            OsDacGate::Satisfied | OsDacGate::NotApplicable => {
-                decide_fs(lp, req, role.key(), FsScope::Read)
-            }
-            OsDacGate::Deny(why) => Verdict::Deny {
-                reason: format!("os dac: {why}"),
-            },
-            OsDacGate::Indeterminate => Verdict::Indeterminate,
-        },
+        // not filesystem privilege. Users and admins share the universal path
+        // policy. Key the implemented terms exactly; adding a path to an unbuilt
+        // fs verb must never grant it access.
         Role::Admin | Role::User
-            if matches!(req.action.0.as_str(), "fs.write" | "fs.delete" | "fs.mkdir") =>
+            if matches!(
+                req.action.0.as_str(),
+                "fs.read" | "fs.write" | "fs.delete" | "fs.mkdir"
+            ) =>
         {
-            match mutation_scope(req) {
+            match attempt_scope(req) {
                 Ok(scope) => decide_fs(lp, req, role.key(), scope),
                 Err(verdict) => verdict,
             }
@@ -548,7 +493,7 @@ enum FsScope {
     WriteSubtree,
 }
 
-fn mutation_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
+fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
     use maknae_security::{
         FsOperation, CONTEXT_DAC_LANE, CONTEXT_FS_OPERATION, RESOURCE_OS_ACCESSIBLE,
     };
@@ -556,27 +501,28 @@ fn mutation_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
         reason: reason.into(),
     };
     if req.context.0.str(CONTEXT_DAC_LANE) != Some("local") {
-        return Err(refuse("filesystem mutation requires a local subject"));
+        return Err(refuse("filesystem attempt requires a local subject"));
     }
     let operation = req
         .context
         .0
         .str(CONTEXT_FS_OPERATION)
         .and_then(FsOperation::parse)
-        .ok_or_else(|| refuse("filesystem mutation preparation absent or invalid"))?;
+        .ok_or_else(|| refuse("filesystem attempt preparation absent or invalid"))?;
     let scope = match (req.action.0.as_str(), operation) {
+        ("fs.read", FsOperation::Read) => FsScope::Read,
         ("fs.write", FsOperation::WriteExisting | FsOperation::WriteCreate)
         | ("fs.delete", FsOperation::DeleteEntry)
         | ("fs.mkdir", FsOperation::Mkdir) => FsScope::Write,
         ("fs.delete", FsOperation::DeleteTree) => FsScope::WriteSubtree,
         _ => {
             return Err(refuse(
-                "filesystem mutation preparation does not match action",
+                "filesystem attempt preparation does not match action",
             ))
         }
     };
     if req.resource.0.get(RESOURCE_OS_ACCESSIBLE).is_some() {
-        return Err(refuse("mutation attempt cannot carry an OS preapproval"));
+        return Err(refuse("filesystem attempt cannot carry an OS preapproval"));
     }
     Ok(scope)
 }
@@ -676,20 +622,18 @@ mod tests {
         if let Some(p) = path {
             r.insert(RESOURCE_PATH, AttrValue::Str(p.into()));
         }
-        // These vectors exercise the GRAMMAR, the globs and the role gates -- not OS
-        // DAC -- so give them a satisfied gate and each keeps testing the one thing it
-        // names. Unconditional, not path-keyed: the missing-path vector asserts an
-        // Indeterminate from the GRAMMAR, and it can only reach the grammar if the
-        // gate ahead of it is satisfied. `read_req` drives the gate itself.
-        r.insert(
-            maknae_security::RESOURCE_OS_ACCESSIBLE,
-            AttrValue::Bool(true),
-        );
         let mut c = Attributes::new();
         c.insert(
             maknae_security::CONTEXT_DAC_LANE,
             AttrValue::Str(maknae_security::Lane::Local.as_str().into()),
         );
+        // Grammar vectors decide a prepared local read.
+        if action == "fs.read" {
+            c.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str("read".into()),
+            );
+        }
         SecRequest {
             subject: Subject(s),
             resource: Resource(r),
@@ -828,7 +772,7 @@ mod tests {
         assert_eq!(
             decide_loaded(&lp, &principal(), &req),
             Verdict::Deny {
-                reason: "mutation attempt cannot carry an OS preapproval".into()
+                reason: "filesystem attempt cannot carry an OS preapproval".into()
             }
         );
         let mut plain = read_req(Some("local"), None);
@@ -873,11 +817,9 @@ mod tests {
         }
     }
 
-    /// Build a read request with an explicit lane and OS-DAC answer.
+    /// A read request with an explicit lane and optional OS attribute; no preparation.
     fn read_req(lane: Option<&str>, accessible: Option<AttrValue>) -> SecRequest {
         let mut r = request(Some(501), "fs.read", Some("/home/operator/x"));
-        // request() stamps a satisfied gate for the grammar vectors; these tests own
-        // the gate's inputs outright, so start from a clean slate.
         r.resource.0 = {
             let mut fresh = Attributes::new();
             fresh.insert(RESOURCE_PATH, AttrValue::Str("/home/operator/x".into()));
@@ -897,75 +839,77 @@ mod tests {
     }
 
     #[test]
-    fn local_with_os_access_satisfies_the_gate() {
+    fn a_read_is_decided_only_as_a_local_prepared_attempt_without_os_preapproval() {
+        let lp = lp_with(None, &[]);
+        let decide = |lane: Option<&str>, op: Option<&str>, accessible: Option<AttrValue>| {
+            let mut req = read_req(lane, accessible);
+            if let Some(op) = op {
+                req.context.0.insert(
+                    maknae_security::CONTEXT_FS_OPERATION,
+                    AttrValue::Str(op.into()),
+                );
+            }
+            decide_loaded(&lp, &principal(), &req)
+        };
         assert!(matches!(
-            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Bool(true)))),
-            OsDacGate::Satisfied
+            decide(Some("local"), Some("read"), None),
+            Verdict::Permit { .. }
         ));
-    }
-
-    /// The defect #186 was filed for: the OS refuses this subject this object, and
-    /// the daemon must refuse too or it is a path around the OS.
-    #[test]
-    fn local_without_os_access_denies() {
-        assert!(matches!(
-            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Bool(false)))),
-            OsDacGate::Deny(_)
-        ));
-    }
-
-    /// ADR-0008 decision 4 applied: an operand that permits an object whose OS
-    /// accessibility it never evaluated is deciding on input it did not evaluate.
-    /// On the LOCAL lane the OS could have been asked, so silence is UNKNOWN.
-    #[test]
-    fn local_with_no_answer_denies_because_unknown_is_never_permit() {
-        assert!(matches!(
-            os_dac_gate(&read_req(Some("local"), None)),
-            OsDacGate::Deny(_)
-        ));
-    }
-
-    /// NOT the same as unknown, and the distinction is the whole point of the lane:
-    /// a remote subject has no uid, process, or descriptor on this host (ADR-0006
-    /// D5/D7), so there is nothing to ask. The operand abstains and the rest of the
-    /// policy carries the decision. Collapse this into Deny and the remote lane can
-    /// never read anything the day the gateway lands.
-    #[test]
-    fn remote_is_not_applicable_because_there_is_no_uid_to_ask_about() {
-        assert!(matches!(
-            os_dac_gate(&read_req(Some("remote"), None)),
-            OsDacGate::NotApplicable
-        ));
-    }
-
-    /// The lane is the ONLY thing separating "absent means Deny" from "absent means
-    /// abstain", so an absent or unrecognised lane cannot be treated as either.
-    #[test]
-    fn an_absent_or_unrecognised_lane_denies() {
-        assert!(matches!(
-            os_dac_gate(&read_req(None, None)),
-            OsDacGate::Deny(_)
-        ));
-        assert!(matches!(
-            os_dac_gate(&read_req(Some("locaI"), Some(AttrValue::Bool(true)))),
-            OsDacGate::Deny(_)
-        ));
-    }
-
-    /// The crate's matcher invariant, applied here too: a PRESENT but wrong-typed
-    /// value is failed-to-evaluate, never a fall-through to "absent".
-    #[test]
-    fn a_wrong_typed_answer_is_indeterminate_never_a_fall_through() {
-        assert!(matches!(
-            os_dac_gate(&read_req(
+        for (lane, op, accessible, reason) in [
+            (
+                Some("remote"),
+                Some("read"),
+                None,
+                "filesystem attempt requires a local subject",
+            ),
+            (
+                None,
+                Some("read"),
+                None,
+                "filesystem attempt requires a local subject",
+            ),
+            (
                 Some("local"),
-                Some(AttrValue::Str("true".into()))
-            )),
-            OsDacGate::Indeterminate
-        ));
+                None,
+                None,
+                "filesystem attempt preparation absent or invalid",
+            ),
+            (
+                Some("local"),
+                Some("write-existing"),
+                None,
+                "filesystem attempt preparation does not match action",
+            ),
+            (
+                Some("local"),
+                Some("read"),
+                Some(AttrValue::Bool(true)),
+                "filesystem attempt cannot carry an OS preapproval",
+            ),
+            (
+                Some("local"),
+                Some("read"),
+                Some(AttrValue::Bool(false)),
+                "filesystem attempt cannot carry an OS preapproval",
+            ),
+        ] {
+            assert_eq!(
+                decide(lane, op, accessible),
+                Verdict::Deny {
+                    reason: reason.into()
+                },
+                "{lane:?} {op:?}"
+            );
+        }
+        let mut write = read_req(Some("local"), None);
+        write.action.0 = "fs.write".into();
+        write.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str("read".into()),
+        );
         assert!(matches!(
-            os_dac_gate(&read_req(Some("local"), Some(AttrValue::Int(1)))),
-            OsDacGate::Indeterminate
+            decide_loaded(&lp, &principal(), &write),
+            Verdict::Deny { .. }
         ));
     }
 
@@ -1037,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn user_and_admin_share_filesystem_permissions_and_os_refusals() {
+    fn user_and_admin_share_filesystem_permissions_and_refuse_os_preapproval() {
         let lp = lp_with(
             Some(&[("admin", &["alex"]), ("user", &["usery"])]),
             &[("alex", OPERATOR_UID), ("usery", 701)],
@@ -1070,7 +1014,7 @@ mod tests {
             assert_eq!(
                 decide_loaded(&lp, &principal(), &req),
                 Verdict::Deny {
-                    reason: "os dac: os dac refuses this subject this object".into(),
+                    reason: "filesystem attempt cannot carry an OS preapproval".into(),
                 }
             );
         }
