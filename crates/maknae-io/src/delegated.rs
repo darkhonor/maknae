@@ -162,8 +162,8 @@ pub struct Received {
 /// `regular_file` requirement refuses the object exactly as before — the judgement
 /// stays on the trusted side. It applies no requirement of its own, changes nothing
 /// the daemon checks (those are `fstat`-based), and has no effect on a regular file's
-/// reads. `open_writable_for_delegation` has carried the same flag, for the same
-/// reason, since it was written (`syscall::open_writable_delegation`).
+/// reads. `open_path_for_delegation`'s macOS lane carries the same flag for the same
+/// reason (`syscall::macos_path_delegation_flags`).
 ///
 /// The flag comes from `nix::fcntl::OFlag`, the same typed family every other open in
 /// this crate composes from, by way of `OpenOptionsExt::custom_flags` — a single flag,
@@ -185,10 +185,8 @@ pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     ))
 }
 
-/// Subject-side, nontruncating writable open for existing-file delegation.
-/// Failure must still lead to an audited request without evidence.
-pub fn open_writable_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
-    crate::syscall::open_writable_delegation(path).map_err(Into::into)
+pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_path_delegation(path).map_err(Into::into)
 }
 
 /// Subject-side directory open. Proves no permission to mutate its children.
@@ -315,6 +313,16 @@ pub fn read_delegated(
     let verified = verify_delegated(fd.as_fd(), req)?;
     let bytes = crate::anchor::read_checked_fd(fd, &verified.path, &target)?;
     Ok((verified.path, bytes))
+}
+
+pub fn refuse_write_access(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
+    if crate::syscall::confers_no_write(&fd)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
+    {
+        Ok(())
+    } else {
+        Err(IoError::AccessBearingDescriptor { path: path.into() })
+    }
 }
 
 /// Verify a subject-delegated descriptor. Does not consume the fd: the caller
@@ -926,6 +934,45 @@ mod tests {
         assert_eq!(&*bytes, content);
     }
 
+    #[test]
+    fn open_path_for_delegation_does_not_block_on_a_writerless_fifo() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipe = root.path().join("waiting");
+        nix::unistd::mkfifo(
+            &pipe,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = pipe.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_path_for_delegation(&probe).map(|_| ()));
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn a_no_access_descriptor_is_enough_to_verify_location_and_kind() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = confinement_root(root.path());
+        let p = home.join("held");
+        std::fs::write(&p, b"x").expect("write");
+        let fd = open_path_for_delegation(&p).expect("no-access open");
+        let verified = verify_delegated(
+            fd.as_fd(),
+            DelegatedRequired {
+                confined_beneath: home,
+                root_required: maknae_io_root_req(),
+                target: TargetRequired {
+                    max_bytes: None,
+                    ..target()
+                },
+            },
+        )
+        .expect("location and kind verify through a no-access descriptor");
+        assert_eq!(verified.path, p);
+    }
+
     /// When the OS refuses the SUBJECT, there is nothing to delegate — and the caller
     /// must still send its request so the refusal is DECIDED and audited rather than
     /// failing silently client-side (ADR-0009 decision 2). This asserts the error is
@@ -1130,5 +1177,35 @@ mod tests {
             ),
             other => panic!("an fd outside the confinement root must be refused: {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_a_no_write_descriptor_is_accepted_as_replacement_evidence() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let p = d.path().join("held");
+        std::fs::write(&p, b"safe").expect("write");
+        let held = open_path_for_delegation(&p).expect("no-access open");
+        assert_eq!(refuse_write_access(held.as_fd(), &p), Ok(()));
+        for (read, write) in [(false, true), (true, true)] {
+            let fd: OwnedFd = std::fs::OpenOptions::new()
+                .read(read)
+                .write(write)
+                .open(&p)
+                .expect("writable open")
+                .into();
+            assert_eq!(
+                refuse_write_access(fd.as_fd(), &p),
+                Err(IoError::AccessBearingDescriptor { path: p.clone() })
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let readable: OwnedFd = std::fs::File::open(&p).expect("readable open").into();
+            assert_eq!(
+                refuse_write_access(readable.as_fd(), &p),
+                Err(IoError::AccessBearingDescriptor { path: p.clone() })
+            );
+        }
+        assert_eq!(std::fs::read(&p).expect("read"), b"safe");
     }
 }

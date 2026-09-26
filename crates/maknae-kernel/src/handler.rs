@@ -1183,7 +1183,7 @@ mod tests {
             },
             Verb::FsWrite {
                 path: "/x".into(),
-                content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
+                content_length: 0,
                 mode: maknae_proto::WriteMode::Existing,
                 conversation: None,
             },

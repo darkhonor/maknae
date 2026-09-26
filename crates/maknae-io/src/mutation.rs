@@ -39,14 +39,6 @@ pub struct MutationDirectory {
     deadline: Option<Instant>,
 }
 
-/// A non-append writable regular descriptor, never opened with truncation here.
-#[derive(Debug)]
-pub struct WritableObject {
-    fd: OwnedFd,
-    path: PathBuf,
-    required: DelegatedRequired,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectState {
     NoEffect,
@@ -176,37 +168,6 @@ pub fn verify_mutation_directory(
     })
 }
 
-fn verify_write(fd: &OwnedFd, required: &DelegatedRequired) -> Result<PathBuf, IoError> {
-    check_root(&required.confined_beneath)?;
-    // The public target requirements may tighten but never waive these invariants.
-    let mut target = required.target.clone();
-    target.regular_file = true;
-    target.nlink_exactly_one = true;
-    let verified = crate::verify_delegated(
-        fd.as_fd(),
-        DelegatedRequired {
-            confined_beneath: required.confined_beneath.clone(),
-            root_required: required.root_required.clone(),
-            target,
-        },
-    )?;
-    checked_path(&verified.path)?;
-    if !syscall::is_nonappend_writable(fd).map_err(at(&verified.path))? {
-        return Err(IoError::NotWritableDescriptor {
-            path: verified.path,
-        });
-    }
-    Ok(verified.path)
-}
-
-pub fn verify_writable_object(
-    fd: OwnedFd,
-    required: DelegatedRequired,
-) -> Result<WritableObject, IoError> {
-    let path = verify_write(&fd, &required)?;
-    Ok(WritableObject { fd, path, required })
-}
-
 fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
     if actual != expected {
         return Err(IoError::MutationPathChanged {
@@ -214,24 +175,6 @@ fn same_path(actual: &Path, expected: &Path) -> Result<(), IoError> {
         });
     }
     Ok(())
-}
-
-/// Replace through the exact checked descriptor. pwrite leaves a shared cursor
-/// untouched; no daemon-owned temp/rename changes the inode, owner or mode.
-/// Another holder can still change O_APPEND after a check or write concurrently.
-pub fn replace_existing(object: WritableObject, bytes: &[u8]) -> Result<(), MutationFailure> {
-    let check = || {
-        let path = verify_write(&object.fd, &object.required)?;
-        same_path(&path, &object.path)
-    };
-    replace_bytes(
-        &object.fd,
-        &object.path,
-        bytes,
-        check,
-        syscall::write_at,
-        syscall::fsync_fd,
-    )
 }
 
 fn replace_bytes(
@@ -270,6 +213,55 @@ fn replace_bytes(
     let length = bytes.len() as i64;
     syscall::truncate_fd(fd, length).map_err(|e| failure(path, state, io_error(e, path)))?;
     sync(fd).map_err(|e| failure(path, EffectState::DurabilityUnknown, io_error(e, path)))
+}
+
+const REPLACEABLE: TargetRequired = TargetRequired {
+    nlink_exactly_one: true,
+    ..TargetRequired::OS_DAC_REGULAR
+};
+
+fn same_object(a: &nix::sys::stat::FileStat, b: &nix::sys::stat::FileStat) -> bool {
+    a.st_dev == b.st_dev && a.st_ino == b.st_ino
+}
+
+pub fn replace_held_file(
+    held: BorrowedFd<'_>,
+    expected: &Path,
+    bytes: &[u8],
+) -> Result<(), MutationFailure> {
+    checked_path(expected).map_err(no_effect(expected))?;
+    let pinned = syscall::fstat(&held)
+        .map_err(at(expected))
+        .map_err(no_effect(expected))?;
+    crate::checks::check_target(&pinned, expected, &REPLACEABLE).map_err(no_effect(expected))?;
+    let fd = syscall::reopen_writable(&held, expected).map_err(|e| {
+        let source = if e == nix::errno::Errno::ENOENT {
+            IoError::MutationPathChanged {
+                path: expected.to_path_buf(),
+            }
+        } else {
+            io_error(e, expected)
+        };
+        failure(expected, EffectState::NoEffect, source)
+    })?;
+    let check = || {
+        let st = syscall::fstat(&fd).map_err(at(expected))?;
+        crate::checks::check_target(&st, expected, &REPLACEABLE)?;
+        if !same_object(&st, &pinned) {
+            return Err(IoError::MutationPathChanged {
+                path: expected.to_path_buf(),
+            });
+        }
+        same_path(&syscall::fd_path(&fd).map_err(at(expected))?, expected)
+    };
+    replace_bytes(
+        &fd,
+        expected,
+        bytes,
+        check,
+        syscall::write_at,
+        syscall::fsync_fd,
+    )
 }
 
 impl MutationDirectory {
@@ -425,17 +417,6 @@ impl AsFd for MutationDirectory {
         self.fd.as_fd()
     }
 }
-impl WritableObject {
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-impl AsFd for WritableObject {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 impl DirectoryCursor {
     pub fn next_entry(&mut self) -> Result<Option<Entry>, IoError> {
         self.directory.reverify(self.directory.path())?;
@@ -473,6 +454,128 @@ mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom};
     use std::os::unix::fs::{symlink, PermissionsExt};
+    fn held(p: &Path) -> OwnedFd {
+        crate::open_path_for_delegation(p).unwrap()
+    }
+    #[test]
+    fn held_replacement_truncates_through_a_fresh_writable_open_and_keeps_identity() {
+        crate::testutil::isolated(
+            "mutation::tests::held_replacement_truncates_through_a_fresh_writable_open_and_keeps_identity",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let p = root(&d).join("held-replace-sentinel");
+                std::fs::write(&p, b"original long bytes").unwrap();
+                let mut shared = OpenOptions::new().write(true).open(&p).unwrap();
+                shared.seek(SeekFrom::Start(9)).unwrap();
+                let before = syscall::stat_path(&p).unwrap();
+                let fd = held(&p);
+                replace_held_file(fd.as_fd(), &p, b"new").unwrap();
+                assert_eq!(std::fs::read(&p).unwrap(), b"new");
+                assert_eq!(shared.stream_position().unwrap(), 9);
+                assert!(same_object(&before, &syscall::stat_path(&p).unwrap()));
+                replace_held_file(fd.as_fd(), &p, b"").unwrap();
+                assert!(std::fs::read(&p).unwrap().is_empty());
+            },
+        );
+    }
+    #[test]
+    fn held_replacement_refuses_directories_links_and_moved_objects_without_effect() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = root(&d);
+        let e = replace_held_file(held(&dir).as_fd(), &dir, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(matches!(e.source, IoError::NotRegularFile { .. }), "{e:?}");
+        let p = dir.join("linked-sentinel");
+        std::fs::write(&p, b"untouched").unwrap();
+        std::fs::hard_link(&p, dir.join("second-name")).unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        assert!(matches!(e.source, IoError::MultiplyLinked { .. }), "{e:?}");
+        std::fs::remove_file(dir.join("second-name")).unwrap();
+        let fd = held(&p);
+        std::fs::rename(&p, dir.join("moved")).unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(
+            matches!(e.source, IoError::MutationPathChanged { .. }),
+            "{e:?}"
+        );
+        std::fs::write(&p, b"newcomer").unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert_eq!(std::fs::read(&p).unwrap(), b"newcomer");
+        assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
+    }
+    #[test]
+    fn identity_is_device_and_inode_together() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (root(&d).join("a"), root(&d).join("b"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let sa = syscall::stat_path(&a).unwrap();
+        assert!(same_object(
+            &sa,
+            &syscall::fstat(&File::open(&a).unwrap()).unwrap()
+        ));
+        assert!(!same_object(&sa, &syscall::stat_path(&b).unwrap()));
+        let mut elsewhere = sa;
+        elsewhere.st_dev = sa.st_dev.wrapping_add(1);
+        assert!(!same_object(&sa, &elsewhere));
+    }
+    #[test]
+    fn held_replacement_is_refused_by_the_subjects_own_permissions() {
+        if nix::unistd::geteuid().is_root() {
+            crate::testutil::skip_or_fail(
+                "held_replacement_is_refused_by_the_subjects_own_permissions",
+                "running as root, which writes a 0444 file and voids the premise",
+            );
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("read-only-sentinel");
+        std::fs::write(&p, b"untouched").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(
+            matches!(
+                e.source,
+                IoError::Io {
+                    kind: crate::IoKind::PermissionDenied,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), b"untouched");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reopen_reaches_the_held_inode_without_walking_its_path() {
+        if nix::unistd::geteuid().is_root() {
+            crate::testutil::skip_or_fail(
+                "linux_reopen_reaches_the_held_inode_without_walking_its_path",
+                "running as root, which traverses a 0600 directory and voids the premise",
+            );
+            return;
+        }
+        crate::testutil::isolated(
+            "mutation::tests::linux_reopen_reaches_the_held_inode_without_walking_its_path",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let dir = root(&d).join("sub");
+                std::fs::create_dir(&dir).unwrap();
+                let p = dir.join("held-sentinel");
+                std::fs::write(&p, b"old").unwrap();
+                let fd = held(&p);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let result = replace_held_file(fd.as_fd(), &p, b"new");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                result.unwrap();
+                assert_eq!(std::fs::read(&p).unwrap(), b"new");
+            },
+        );
+    }
+
     fn root(d: &tempfile::TempDir) -> PathBuf {
         d.path().canonicalize().unwrap()
     }
@@ -503,14 +606,6 @@ mod tests {
         assert_eq!(
             syscall::fstat(&dir).unwrap().st_ino,
             syscall::fstat(&dir.fd).unwrap().st_ino
-        );
-        let p = root(&d).join("fd-sentinel");
-        std::fs::write(&p, b"unchanged").unwrap();
-        let object = verify_writable_object(writable(&p), req(&d)).unwrap();
-        assert_eq!(object.path(), p);
-        assert_eq!(
-            syscall::fstat(&object).unwrap().st_ino,
-            syscall::fstat(&object.fd).unwrap().st_ino
         );
         let missing = root(&d).join("missing-root");
         assert!(matches!(
@@ -552,7 +647,6 @@ mod tests {
             );
             assert!(!empty.join("detached-sentinel").exists());
         }
-        assert_eq!(std::fs::read(p).unwrap(), b"unchanged");
     }
 
     #[test]
@@ -807,44 +901,6 @@ mod tests {
             }
         )
         .is_err());
-    }
-    #[test]
-    fn writable_proof_and_nontruncating_offset_independent_replacement() {
-        // A mutated nonadvancing write loop must be killed and reaped, not hang the suite.
-        crate::testutil::isolated(
-            "mutation::tests::writable_proof_and_nontruncating_offset_independent_replacement",
-            || {
-                let d = tempfile::tempdir().unwrap();
-                let p = d.path().join("offset-sentinel");
-                std::fs::write(&p, b"original long bytes").unwrap();
-                let mut shared = OpenOptions::new().write(true).open(&p).unwrap();
-                shared.seek(SeekFrom::Start(9)).unwrap();
-                let object =
-                    verify_writable_object(shared.try_clone().unwrap().into(), req(&d)).unwrap();
-                assert_eq!(std::fs::read(&p).unwrap(), b"original long bytes");
-                replace_existing(object, b"new").unwrap();
-                assert_eq!(std::fs::read(&p).unwrap(), b"new");
-                assert_eq!(shared.stream_position().unwrap(), 9);
-                replace_existing(verify_writable_object(writable(&p), req(&d)).unwrap(), b"")
-                    .unwrap();
-                assert!(std::fs::read(&p).unwrap().is_empty());
-            },
-        );
-    }
-    #[test]
-    fn readonly_append_and_hardlinked_writable_descriptors_are_refused() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("writable-sentinel");
-        std::fs::write(&p, b"untouched").unwrap();
-        assert!(verify_writable_object(File::open(&p).unwrap().into(), req(&d)).is_err());
-        assert!(verify_writable_object(
-            OpenOptions::new().append(true).open(&p).unwrap().into(),
-            req(&d)
-        )
-        .is_err());
-        std::fs::hard_link(&p, d.path().join("alias")).unwrap();
-        assert!(verify_writable_object(writable(&p), req(&d)).is_err());
-        assert_eq!(std::fs::read(&p).unwrap(), b"untouched");
     }
     #[test]
     fn exclusive_collision_preserves_intervening_sentinel() {
@@ -1135,25 +1191,14 @@ mod tests {
     }
 
     #[test]
-    fn confinement_root_must_be_a_directory_even_for_writable_evidence() {
-        let d = tempfile::tempdir().unwrap();
-        let p = root(&d).join("root-file-sentinel");
-        std::fs::write(&p, b"safe").unwrap();
-        let mut required = req(&d);
-        required.confined_beneath = p.clone();
-        assert!(verify_writable_object(writable(&p), required).is_err());
-        assert_eq!(std::fs::read(p).unwrap(), b"safe");
-    }
-
-    #[test]
     fn preparation_open_is_nontruncating_and_never_creates() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("prepare-sentinel");
         std::fs::write(&p, b"original").unwrap();
-        let fd = crate::open_writable_for_delegation(&p).unwrap();
-        verify_writable_object(fd, req(&d)).unwrap();
+        let fd = crate::open_path_for_delegation(&p).unwrap();
+        crate::verify_delegated(fd.as_fd(), req(&d)).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"original");
-        assert!(crate::open_writable_for_delegation(&d.path().join("absent")).is_err());
+        assert!(crate::open_path_for_delegation(&d.path().join("absent")).is_err());
         assert!(!d.path().join("absent").exists());
         let fd = crate::open_directory_for_delegation(d.path()).unwrap();
         assert!(verify_mutation_directory(
@@ -1165,32 +1210,6 @@ mod tests {
         )
         .is_ok());
         assert!(crate::open_directory_for_delegation(&p).is_err());
-    }
-
-    #[test]
-    fn writable_reverification_refuses_renames_and_late_append_without_effect() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("recheck-sentinel");
-        std::fs::write(&p, b"unchanged").unwrap();
-        let object = verify_writable_object(writable(&p), req(&d)).unwrap();
-        std::fs::rename(&p, d.path().join("moved")).unwrap();
-        assert_eq!(
-            replace_existing(object, b"bad").unwrap_err().state,
-            EffectState::NoEffect
-        );
-        assert_eq!(std::fs::read(d.path().join("moved")).unwrap(), b"unchanged");
-        let shared = writable(&d.path().join("moved"));
-        let object = verify_writable_object(shared.try_clone().unwrap(), req(&d)).unwrap();
-        nix::fcntl::fcntl(
-            &shared,
-            nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_APPEND),
-        )
-        .unwrap();
-        assert_eq!(
-            replace_existing(object, b"bad").unwrap_err().state,
-            EffectState::NoEffect
-        );
-        assert_eq!(std::fs::read(d.path().join("moved")).unwrap(), b"unchanged");
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Mutation preparation and the durable-intent gate. Namespace facts remain
-//! client reported. Only an existing writable object executes in the daemon.
+//! Mutation preparation and the durable-intent gate. Every effect is a subject-side
+//! attempt; its progress and completion are client reported.
 use crate::{
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate},
     MutationExchange,
@@ -9,13 +9,14 @@ use maknae_audit_append::{
     MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Seq,
 };
 use maknae_config::{Principal, TransportConfig};
-use maknae_io::{MutationDirectory, MutationRequired, WritableObject};
+use maknae_io::{MutationDirectory, MutationRequired};
 use maknae_proto::{
-    Bytes, MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
+    MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
     ProtoErrCode, ProtoError, ReportedEffect, ReportedFinish, RespResult, Response, Verb,
     WriteMode, PROTOCOL_VERSION,
 };
 use maknae_security::{AttrValue, Authorizer, Decision, FsOperation, Lane};
+use std::os::fd::AsFd;
 use std::{
     os::fd::OwnedFd,
     path::Path,
@@ -24,29 +25,23 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::Semaphore,
 };
 
-/// No orphan reclamation: the permit follows the actual blocking worker and its
-/// completion owner, even when the socket's waiter has gone away.
+/// No orphan reclamation: the permit follows the actual blocking worker.
 static CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const MAX_WORKERS: usize = 16;
 fn capacity() -> Arc<Semaphore> {
     Arc::clone(CAPACITY.get_or_init(|| Arc::new(Semaphore::new(MAX_WORKERS))))
 }
 
-enum Operation {
-    Existing {
-        object: WritableObject,
-        bytes: Bytes,
-    },
-    Namespace {
-        _directory: MutationDirectory,
-        scope: MutationScope,
-    },
+enum Evidence {
+    Object { _fd: OwnedFd },
+    Directory { _directory: MutationDirectory },
 }
 struct PreparedMutation {
-    operation: Operation,
+    _evidence: Evidence,
+    scope: MutationScope,
     paths: Vec<String>,
     kind: FsOperation,
 }
@@ -88,26 +83,28 @@ fn prepare(
     }
     let fd = fd.ok_or("mutation descriptor missing")?;
     if let Verb::FsWrite {
-        content,
         mode: WriteMode::Existing,
         ..
     } = verb
     {
-        let object = maknae_io::verify_writable_object(
-            fd,
+        let verified = maknae_io::verify_delegated(
+            fd.as_fd(),
             delegated_plan(&principal.home, principal.uid, None),
         )
-        .map_err(|e| format!("writable evidence refused: {e}"))?;
-        let path = object
-            .path()
+        .map_err(|e| format!("replacement evidence refused: {e}"))?;
+        maknae_io::refuse_write_access(fd.as_fd(), &verified.path)
+            .map_err(|e| format!("replacement evidence refused: {e}"))?;
+        let path = verified
+            .path
             .to_str()
             .ok_or("non-UTF-8 object path")?
             .to_owned();
         checked(&path)?;
         return Ok(PreparedMutation {
-            operation: Operation::Existing {
-                object,
-                bytes: content,
+            _evidence: Evidence::Object { _fd: fd },
+            scope: MutationScope::Exact {
+                path: path.clone(),
+                effect: ReportedEffect::ReplacedFile,
             },
             paths: vec![path],
             kind: FsOperation::WriteExisting,
@@ -207,10 +204,10 @@ fn prepare(
         _ => return Err("invalid mutation operation".into()),
     };
     Ok(PreparedMutation {
-        operation: Operation::Namespace {
+        _evidence: Evidence::Directory {
             _directory: directory,
-            scope,
         },
+        scope,
         paths,
         kind,
     })
@@ -241,12 +238,6 @@ fn authorize<P: Authorizer>(
             maknae_security::CONTEXT_FS_OPERATION,
             AttrValue::Str(prepared.kind.as_str().into()),
         );
-        if matches!(prepared.operation, Operation::Existing { .. }) {
-            request.resource.0.insert(
-                maknae_security::RESOURCE_OS_ACCESSIBLE,
-                AttrValue::Bool(true),
-            );
-        }
         // `combine(vec![..])` preserved: it is what produces the
         // "indeterminate operand blocks (fail-closed)" trail string.
         let (v, role) = maknae_security::guarded_decide_reporting_role(authorizer, &request);
@@ -454,110 +445,25 @@ where
         refuse(stream, cfg, &*emit, record, reason).await;
         return true;
     }
-    match prepared.operation {
-        Operation::Existing { object, bytes } => {
-            let completion_seq = seq.next();
-            // The detached owner retains the permit, result and completion obligation.
-            // Dropping the socket waiter cannot orphan the effect's audit owner.
-            let worker = tokio::spawn(async move {
-                let intent = commit_intent(
-                    &*emit,
-                    record,
-                    Some(bytes.0.len() as u64),
-                    prepared.kind,
-                    prepared.paths,
-                )
-                .await?;
-                existing_worker(object, bytes, intent, completion_seq, permit, emit).await
-            });
-            if let Ok(Ok(Ok(applied))) =
-                tokio::time::timeout(Duration::from_millis(cfg.read_timeout_ms), worker).await
-            {
-                if applied {
-                    send(
-                        stream,
-                        cfg,
-                        Response {
-                            protocol_version: PROTOCOL_VERSION,
-                            result: RespResult::Ok(Payload::MutationComplete),
-                        },
-                    )
-                    .await;
-                } else {
-                    send(
-                        stream,
-                        cfg,
-                        Response {
-                            protocol_version: PROTOCOL_VERSION,
-                            result: RespResult::Err(ProtoError {
-                                code: ProtoErrCode::Unauthorized,
-                                message: "not authorized".into(),
-                            }),
-                        },
-                    )
-                    .await;
-                }
-            }
-        }
-        Operation::Namespace { _directory, scope } => {
-            let length = if let Verb::FsWrite { content, .. } = verb {
-                Some(content.0.len() as u64)
-            } else {
-                None
-            };
-            if let Ok(Ok(intent)) = tokio::time::timeout(
-                Duration::from_millis(cfg.read_timeout_ms),
-                commit_intent(&*emit, record, length, prepared.kind, prepared.paths),
-            )
-            .await
-            {
-                namespace(stream, cfg, &*emit, intent, scope, seq).await;
-            }
-            drop(_directory);
-            drop(permit);
-        }
+    let length = if let Verb::FsWrite { content_length, .. } = verb {
+        Some(*content_length)
+    } else {
+        None
+    };
+    if let Ok(Ok(intent)) = tokio::time::timeout(
+        Duration::from_millis(cfg.read_timeout_ms),
+        commit_intent(&*emit, record, length, prepared.kind, prepared.paths),
+    )
+    .await
+    {
+        attempt(stream, cfg, &*emit, intent, prepared.scope, seq).await;
     }
+    drop(prepared._evidence);
+    drop(permit);
     true
 }
-async fn existing_worker<E: AuditEmit + Send + Sync + 'static>(
-    object: WritableObject,
-    bytes: Bytes,
-    intent: DurableIntent,
-    completion_seq: u64,
-    permit: OwnedSemaphorePermit,
-    emit: Arc<E>,
-) -> Result<bool, ()> {
-    let result =
-        tokio::task::spawn_blocking(move || maknae_io::replace_existing(object, &bytes.0)).await;
-    let (status, succeeded) = match result {
-        Ok(effect) => observed_result(effect),
-        Err(_) => (MutationStatus::Incomplete, false),
-    };
-    let record = completion(&intent, completion_seq, status);
-    let result = emit.emit(&record).await.map_err(|_| ());
-    drop(permit);
-    result?;
-    Ok(succeeded)
-}
 
-/// Effect state cannot manufacture operation success: a failed operation may
-/// already have applied its effect and must still receive no success response.
-fn observed_result(result: Result<(), maknae_io::MutationFailure>) -> (MutationStatus, bool) {
-    match result {
-        Ok(()) => (MutationStatus::Applied, true),
-        Err(failure) => (
-            match failure.state {
-                maknae_io::EffectState::NoEffect => MutationStatus::NoEffect,
-                maknae_io::EffectState::Applied => MutationStatus::Applied,
-                maknae_io::EffectState::Partial => MutationStatus::Partial,
-                maknae_io::EffectState::DurabilityUnknown => MutationStatus::DurabilityUnknown,
-            },
-            false,
-        ),
-    }
-}
-
-async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
+async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
     emit: &E,
@@ -574,25 +480,37 @@ async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         max_depth: maknae_proto::MAX_MUTATION_DEPTH,
         deadline_ms: cfg.read_timeout_ms,
     };
-    let Ok(mut exchange) = MutationExchange::begin(id, scope.clone(), limits) else {
-        return;
-    };
-    let grant = MutationGrant { id, scope, limits };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
-    let Ok(bytes) = maknae_proto::encode_response(&Response {
+    let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();
+    let bytes = maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Ok(Payload::MutationAttempt(grant)),
-    }) else {
-        return;
-    };
-    if bytes.len() > cfg.frame_max_bytes
-        || !matches!(
+        result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
+            id,
+            scope,
+            limits,
+        })),
+    })
+    .ok()
+    .filter(|bytes| bytes.len() <= cfg.frame_max_bytes);
+    let delivered = match (exchange, bytes) {
+        (Some(exchange), Some(bytes)) => matches!(
             tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
             Ok(Ok(()))
         )
-    {
+        .then_some(exchange),
+        _ => None,
+    };
+    let Some(mut exchange) = delivered else {
+        incomplete(
+            cfg,
+            emit,
+            &intent,
+            seq,
+            "attempt grant not delivered; no effect authorized",
+        )
+        .await;
         return;
-    }
+    };
     loop {
         let result = tokio::time::timeout_at(
             deadline,
@@ -678,12 +596,22 @@ async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             tokio::time::timeout_at(deadline, emit.emit(&record)).await,
             Ok(Ok(()))
         ) {
+            incomplete(
+                cfg,
+                emit,
+                &intent,
+                seq,
+                "mutation report not recorded; effects unknown",
+            )
+            .await;
             return;
         }
         let Ok(ack) = exchange.acknowledge(pending) else {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         };
         let Ok(bytes) = maknae_proto::encode_mutation_ack(&ack) else {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         };
         // The grant already fit this immutable frame budget. Even an ack with
@@ -693,6 +621,7 @@ async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
             Ok(Ok(()))
         ) {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         }
         if terminal {
@@ -700,6 +629,8 @@ async fn namespace<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         }
     }
 }
+const ACK_UNDELIVERED: &str = "mutation acknowledgment not delivered; effects unknown";
+
 async fn incomplete<E: AuditEmit>(
     cfg: &TransportConfig,
     emit: &E,
@@ -858,7 +789,7 @@ mod tests {
         std::fs::write(&target, b"untouched").unwrap();
         let verb = Verb::FsWrite {
             path: target.to_str().unwrap().into(),
-            content: Bytes::new(Vec::new().into()),
+            content_length: 0,
             mode: WriteMode::Existing,
             conversation: None,
         };
@@ -896,13 +827,7 @@ mod tests {
             .reason
             .contains("budget"));
         drop(full);
-        fds.push(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&target)
-                .unwrap()
-                .into(),
-        );
+        fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
         let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let delayed = Arc::new(Delayed {
             pdp: fixture_pdp(&fx),
@@ -953,27 +878,6 @@ mod tests {
             b"untouched",
             "a late permit cannot resurrect a timed-out request"
         );
-    }
-    #[test]
-    fn observed_failure_state_never_becomes_success_or_rollback() {
-        assert_eq!(observed_result(Ok(())), (MutationStatus::Applied, true));
-        for (state, expected) in [
-            (maknae_io::EffectState::NoEffect, MutationStatus::NoEffect),
-            (maknae_io::EffectState::Applied, MutationStatus::Applied),
-            (maknae_io::EffectState::Partial, MutationStatus::Partial),
-            (
-                maknae_io::EffectState::DurabilityUnknown,
-                MutationStatus::DurabilityUnknown,
-            ),
-        ] {
-            let at = std::path::PathBuf::from("/real-operation-result");
-            let error = maknae_io::MutationFailure {
-                state,
-                source: maknae_io::IoError::MutationPathChanged { path: at.clone() },
-                at,
-            };
-            assert_eq!(observed_result(Err(error)), (expected, false));
-        }
     }
     #[test]
     fn canonical_paths_and_normal_components_reject_ambiguous_names_and_boundaries() {
@@ -1052,19 +956,26 @@ mod tests {
             Lane::Local
         )
         .is_err());
-        let write = Verb::FsWrite {
+        let write = || Verb::FsWrite {
             path: target.to_str().unwrap().into(),
-            content: Bytes::new(Vec::new().into()),
+            content_length: 0,
             mode: WriteMode::Existing,
             conversation: None,
         };
-        assert!(prepare(
-            write,
-            Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal,
-            Lane::Local
-        )
-        .is_err());
+        let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
+        let prepared = prepare(write(), held(), &fx.principal, Lane::Local).unwrap();
+        assert_eq!(prepared.kind, FsOperation::WriteExisting);
+        assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
+        assert_eq!(
+            prepared.scope,
+            MutationScope::Exact {
+                path: target.to_str().unwrap().into(),
+                effect: ReportedEffect::ReplacedFile
+            }
+        );
+        assert!(prepare(write(), Some(fx.fd()), &fx.principal, Lane::Local).is_err());
+        std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
+        assert!(prepare(write(), held(), &fx.principal, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
 }

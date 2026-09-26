@@ -186,6 +186,13 @@ allow maknaed_t home_root_t:dir { open read getattr search };
 allow maknaed_t user_home_dir_t:dir { open read getattr search };
 allow maknaed_t user_home_t:dir { open read getattr search };
 allow maknaed_t user_home_t:file { read open getattr };
+# #365: receipt of the subject's no-access (O_PATH) descriptors is checked as ioctl; the xperm rules allow only command 0x0000, which no filesystem implements.
+allow maknaed_t user_home_t:dir ioctl;
+allow maknaed_t user_home_t:file ioctl;
+allow maknaed_t user_home_dir_t:dir ioctl;
+allowxperm maknaed_t user_home_t:dir ioctl 0x0000;
+allowxperm maknaed_t user_home_t:file ioctl 0x0000;
+allowxperm maknaed_t user_home_dir_t:dir ioctl 0x0000;
 # The anchor's own path may traverse a symlinked home component (spec D5:
 # open_anchor_resolved deliberately follows the anchor's ancestors by path) —
 # read-only lnk_file vectors so a symlinked /home/<user> does not AVC-deny.

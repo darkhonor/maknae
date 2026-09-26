@@ -396,11 +396,11 @@ pub enum Verb {
     /// Maknae returns bytes; ACP v1's counterpart is text-only — a divergence the
     /// mapping carries.
     Read { path: String },
-    /// Create or replace file content. Maknae writes bytes; ACP v1's counterpart
-    /// is text-only — the same divergence `fs.read` carries.
+    /// Create or replace a file. The subject writes the bytes under its own credentials;
+    /// the request carries only their length, a client claim recorded on the intent (#365).
     FsWrite {
         path: String,
-        content: crate::Bytes,
+        content_length: u64,
         mode: crate::WriteMode,
         /// The loop's conversation identifier (#265), under the same rule as
         /// `SessionPrompt`'s: recorded, never decided on.
@@ -528,9 +528,6 @@ pub enum Payload {
     SubjectList(Vec<RoleBindingView>),
     /// Durable policy authorization for a subject-side attempt, never OS approval.
     MutationAttempt(crate::MutationGrant),
-    /// An existing-file replacement completed under daemon observation and its
-    /// completion record was durably appended. Namespace reports use MutationAck.
-    MutationComplete,
     /// The provider's reply to a permitted `session.prompt` (#172): released to
     /// the requesting loop only on the PDP's Permit and after the outcome record
     /// landed. Text only in Cooky; `Unavailable` never produces one.
@@ -807,11 +804,11 @@ mod tests {
     fn request_secret_encoding_enforces_actual_frame_limit() {
         let request = Request {
             protocol_version: PROTOCOL_VERSION,
-            verb: Verb::FsWrite {
-                path: "/projects/frame-limit".into(),
-                content: crate::Bytes::new(zeroize::Zeroizing::new(vec![0, 255, 17])),
-                mode: crate::WriteMode::Existing,
-                conversation: None,
+            verb: Verb::SessionPrompt {
+                conversation: "frame-limit".into(),
+                turns: vec![Turn::User {
+                    content: vec![text("frame-limit-sentinel")],
+                }],
             },
         };
         let expected = encode_request(&request).unwrap();
@@ -824,12 +821,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_write_request_carries_its_length_and_never_its_content() {
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::FsWrite {
+                path: "/p".into(),
+                content_length: 365,
+                mode: crate::WriteMode::Existing,
+                conversation: None,
+            },
+        };
+        let encoded = encode_request(&request).unwrap();
+        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+        let rendered = format!("{value:?}");
+        assert!(rendered.contains("\"content_length\""), "{rendered}");
+        assert!(!rendered.contains("\"content\""), "{rendered}");
+        assert_eq!(decode_request(&encoded).unwrap(), request);
+    }
+
+    #[test]
     fn a_writes_conversation_is_omitted_when_none_and_round_trips_when_set() {
         let write = |conversation: Option<&str>| Request {
             protocol_version: PROTOCOL_VERSION,
             verb: Verb::FsWrite {
                 path: "/p".into(),
-                content: crate::Bytes::new(zeroize::Zeroizing::new(vec![1])),
+                content_length: 1,
                 mode: crate::WriteMode::Existing,
                 conversation: conversation.map(str::to_string),
             },
@@ -988,9 +1004,7 @@ mod tests {
         let verbs = [
             Verb::FsWrite {
                 path: "/home/u/projects/x".into(),
-                content: crate::Bytes::new(zeroize::Zeroizing::new(
-                    b"private-mutation-158".to_vec(),
-                )),
+                content_length: 20,
                 mode: crate::WriteMode::CreateExclusive,
                 conversation: None,
             },
@@ -1050,16 +1064,14 @@ mod tests {
                 deadline_ms: 5000,
             },
         });
-        for payload in [grant, Payload::MutationComplete] {
-            let response = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(payload),
-            };
-            assert_eq!(
-                decode_response(&encode_response(&response).unwrap()).unwrap(),
-                response
-            );
-        }
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(grant),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
     }
 
     #[test]

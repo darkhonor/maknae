@@ -202,6 +202,7 @@ pub struct MutationAudit {
     pub phase: MutationPhase,
     pub origin: MutationOrigin,
     pub status: MutationStatus,
+    /// The length the request declared: a client claim; the kernel never sees the bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

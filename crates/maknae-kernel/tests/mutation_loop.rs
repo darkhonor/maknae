@@ -1,8 +1,8 @@
-//! Real composed PDP and real writable descriptors across the mutation audit gate.
+//! Real composed PDP and real no-access descriptors across the mutation audit gate.
 mod common;
 use common::{Fixture, Records};
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
-use maknae_proto::{Bytes, Payload, RespResult, Verb, WriteMode};
+use maknae_proto::{Payload, RespResult, Verb, WriteMode};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -25,85 +25,134 @@ async fn drive_in(
     conversation: Option<&str>,
 ) -> Option<maknae_proto::Response> {
     let target = fx.root.join("unique-existing-write-sentinel");
-    let fd = delegate.then(|| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&target)
-            .unwrap()
-            .into()
-    });
-    let (mut client, task, body) = fx.start(
-        Verb::FsWrite {
-            path: target.to_str().unwrap().into(),
-            content: Bytes::new(bytes.to_vec().into()),
-            mode: WriteMode::Existing,
-            conversation: conversation.map(str::to_string),
-        },
-        fd,
-        records,
-    );
+    let fd = delegate.then(|| maknae_io::open_path_for_delegation(&target).unwrap());
+    let (mut client, task, body) = fx.start(write_verb(&target, bytes, conversation), fd, records);
     maknae_proto::write_frame(&mut client, &body).await.unwrap();
-    let response = tokio::time::timeout(
-        Duration::from_secs(3),
-        maknae_proto::read_frame(&mut client, 65536),
-    )
-    .await
-    .ok()?
-    .ok()
-    .and_then(|body| maknae_proto::decode_response(&body).ok());
+    let response = next_response(&mut client).await;
+    drop(client);
     task.await.unwrap();
     response
 }
-#[tokio::test]
-async fn durable_intent_precedes_existing_empty_truncation_and_completion() {
-    let fx = Fixture::new("existing_success", "Write");
-    let target = fx.root.join("unique-existing-write-sentinel");
-    std::fs::write(&target, b"original-long-sentinel").unwrap();
-    let records = Records::new(0);
-    let response = drive(&fx, b"", records.clone(), true).await.unwrap();
-    assert!(
-        matches!(response.result, RespResult::Ok(Payload::MutationComplete)),
-        "{:?}",
-        records.snapshot()
+fn write_verb(target: &std::path::Path, bytes: &[u8], conversation: Option<&str>) -> Verb {
+    Verb::FsWrite {
+        path: target.to_str().unwrap().into(),
+        content_length: bytes.len() as u64,
+        mode: WriteMode::Existing,
+        conversation: conversation.map(str::to_string),
+    }
+}
+async fn replace_as_subject(
+    client: &mut tokio::io::DuplexStream,
+    grant: &maknae_proto::MutationGrant,
+    held: &std::os::fd::OwnedFd,
+    bytes: &[u8],
+) {
+    use maknae_proto::{
+        EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
+    };
+    let MutationScope::Exact {
+        path,
+        effect: ReportedEffect::ReplacedFile,
+    } = &grant.scope
+    else {
+        panic!(
+            "replacement must be granted as Exact ReplacedFile: {:?}",
+            grant.scope
+        )
+    };
+    maknae_io::replace_held_file(
+        std::os::fd::AsFd::as_fd(held),
+        std::path::Path::new(path),
+        bytes,
+    )
+    .unwrap();
+    send_report(
+        client,
+        &MutationReport::Batch {
+            id: grant.id,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: path.clone(),
+                effect: ReportedEffect::ReplacedFile,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(ack(client).await.unwrap().next_index, 1);
+    send_report(
+        client,
+        &MutationReport::Finished {
+            id: grant.id,
+            next_index: 1,
+            outcome: ReportedFinish::Success,
+            stopped_at: None,
+        },
+    )
+    .await;
+    assert_eq!(ack(client).await.unwrap().next_index, 1);
+}
+async fn replace_start(
+    fx: &Fixture,
+    target: &std::path::Path,
+    bytes: &[u8],
+    records: Arc<impl AuditEmit + Send + Sync + 'static>,
+    conversation: Option<&str>,
+) -> (
+    tokio::io::DuplexStream,
+    tokio::task::JoinHandle<()>,
+    std::os::fd::OwnedFd,
+) {
+    let held = maknae_io::open_path_for_delegation(target).unwrap();
+    let (mut client, task, body) = fx.start(
+        write_verb(target, bytes, conversation),
+        Some(held.try_clone().unwrap()),
+        records,
     );
-    assert_eq!(std::fs::read(target).unwrap(), b"");
-    let records = records.snapshot();
-    assert_eq!(records[1].object_requested, None);
-    assert_eq!(records[2].object_requested, None);
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    (client, task, held)
+}
+fn assert_undelivered_grant_is_incomplete(records: &[AuditRecord]) {
+    assert_eq!(records.len(), 3, "an undelivered grant closes its intent");
+    let intent = records[1].mutation.as_ref().unwrap();
+    assert_eq!(intent.phase, maknae_audit_append::MutationPhase::Intent);
+    let closed = records[2].mutation.as_ref().unwrap();
+    assert_eq!(closed.phase, maknae_audit_append::MutationPhase::Completion);
     assert_eq!(
-        records[1].mutation.as_ref().unwrap().phase,
-        maknae_audit_append::MutationPhase::Intent
+        closed.status,
+        maknae_audit_append::MutationStatus::Incomplete
     );
+    assert_eq!(closed.intent_seq, records[1].seq);
     assert_eq!(
-        records[2].mutation.as_ref().unwrap().phase,
-        maknae_audit_append::MutationPhase::Completion
-    );
-    assert_eq!(
-        records[2].mutation.as_ref().unwrap().origin,
-        maknae_audit_append::MutationOrigin::KernelObserved
+        records[2].outcome.reason,
+        "attempt grant not delivered; no effect authorized"
     );
 }
+async fn granted(client: &mut tokio::io::DuplexStream) -> maknae_proto::MutationGrant {
+    match next_response(client).await.unwrap().result {
+        RespResult::Ok(Payload::MutationAttempt(grant)) => grant,
+        other => panic!("expected a replacement grant, got {other:?}"),
+    }
+}
 #[tokio::test]
-async fn a_loop_write_records_its_conversation_on_intent_and_completion() {
+async fn a_loop_write_records_its_conversation_on_intent_progress_and_completion() {
     let fx = Fixture::new("conversation_success", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
     let records = Records::new(0);
-    let response = drive_in(
+    let (mut client, task, held) = replace_start(
         &fx,
+        &target,
         b"new",
         records.clone(),
-        true,
         Some("conv-265-sentinel"),
     )
-    .await
-    .unwrap();
-    assert!(matches!(
-        response.result,
-        RespResult::Ok(Payload::MutationComplete)
-    ));
+    .await;
+    let grant = granted(&mut client).await;
+    replace_as_subject(&mut client, &grant, &held, b"new").await;
+    drop(client);
+    task.await.unwrap();
     let records = records.snapshot();
-    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records.len(), 4, "{records:?}");
     assert_eq!(records[0].conversation, None);
     for r in &records[1..] {
         assert_eq!(
@@ -112,6 +161,7 @@ async fn a_loop_write_records_its_conversation_on_intent_and_completion() {
             "{r:?}"
         );
     }
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
 }
 
 #[tokio::test]
@@ -161,14 +211,48 @@ async fn failed_intent_preserves_existing_bytes_and_length() {
     assert_eq!(std::fs::read(target).unwrap(), b"original-long-sentinel");
 }
 #[tokio::test]
-async fn failed_completion_does_not_claim_rollback() {
+async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
+    use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
     let fx = Fixture::new("completion_fail", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"old").unwrap();
-    assert!(drive(&fx, b"new-sentinel", Records::new(3), true)
-        .await
-        .is_none());
-    assert_eq!(std::fs::read(target).unwrap(), b"new-sentinel");
+    let records = Records::new(3);
+    let (mut client, task, held) =
+        replace_start(&fx, &target, b"new-sentinel", records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    maknae_io::replace_held_file(std::os::fd::AsFd::as_fd(&held), &target, b"new-sentinel")
+        .unwrap();
+    send_report(
+        &mut client,
+        &MutationReport::Batch {
+            id: grant.id,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: target.to_str().unwrap().into(),
+                effect: ReportedEffect::ReplacedFile,
+            }],
+        },
+    )
+    .await;
+    assert!(ack(&mut client).await.is_none());
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"new-sentinel");
+    let records = records.snapshot();
+    assert_eq!(records.len(), 4, "{records:?}");
+    assert_eq!(
+        records[2].mutation.as_ref().unwrap().phase,
+        maknae_audit_append::MutationPhase::Progress
+    );
+    let closed = records[3].mutation.as_ref().unwrap();
+    assert_eq!(
+        closed.status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+    assert_eq!(
+        records[3].outcome.reason,
+        "mutation report not recorded; effects unknown"
+    );
 }
 #[tokio::test]
 async fn read_allow_and_missing_evidence_cannot_write() {
@@ -213,37 +297,72 @@ async fn missing_write_descriptor_preserves_preparation_failure_in_audit() {
 }
 
 #[tokio::test]
+async fn a_replacement_delegating_a_writable_descriptor_is_refused_before_intent() {
+    let fx = Fixture::new("writable_descriptor", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"writable-descriptor-must-preserve-me").unwrap();
+    let records = Records::new(0);
+    let writable: std::os::fd::OwnedFd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .into();
+    let (mut client, task, body) = fx.start(
+        write_verb(&target, b"forbidden-replacement", None),
+        Some(writable),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let response = next_response(&mut client).await.unwrap();
+    drop(client);
+    task.await.unwrap();
+    assert!(matches!(response.result, RespResult::Err(_)));
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"writable-descriptor-must-preserve-me"
+    );
+    let records = records.snapshot();
+    assert_eq!(
+        records.len(),
+        2,
+        "no mutation intent follows writable evidence"
+    );
+    assert_eq!(records[1].outcome.result, "deny");
+    assert_eq!(
+        records[1].outcome.reason,
+        format!(
+            "replacement evidence refused: descriptor confers access beyond location: {}",
+            target.display()
+        )
+    );
+    assert!(records[1].mutation.is_none());
+}
+
+#[tokio::test]
 async fn permitted_alias_write_audits_requested_and_verified_objects() {
     let fx = Fixture::new("permitted_alias_audit", "Write");
     let target = fx.root.join("unique-verified-alias-write-sentinel");
     let alias = fx.root.join("unique-requested-write-alias");
     std::fs::write(&target, b"original-alias-target").unwrap();
     std::os::unix::fs::symlink(&target, &alias).unwrap();
-    let fd = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&alias)
-        .unwrap()
-        .into();
     let records = Records::new(0);
-    let (mut client, task, body) = fx.start(
-        Verb::FsWrite {
-            path: alias.to_str().unwrap().into(),
-            content: Bytes::new(b"verified-alias-effect".to_vec().into()),
-            mode: WriteMode::Existing,
-            conversation: None,
-        },
-        Some(fd),
-        records.clone(),
+    let (mut client, task, held) =
+        replace_start(&fx, &alias, b"verified-alias-effect", records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    assert_eq!(
+        grant.scope,
+        maknae_proto::MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::ReplacedFile,
+        }
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
-    assert!(matches!(
-        next_response(&mut client).await.unwrap().result,
-        RespResult::Ok(Payload::MutationComplete)
-    ));
+    replace_as_subject(&mut client, &grant, &held, b"verified-alias-effect").await;
+    drop(client);
     task.await.unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"verified-alias-effect");
     let records = records.snapshot();
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 4, "{records:?}");
     for record in &records[1..] {
         assert_eq!(record.object.as_deref(), target.to_str());
         assert_eq!(record.object_requested.as_deref(), alias.to_str());
@@ -252,9 +371,14 @@ async fn permitted_alias_write_audits_requested_and_verified_objects() {
         records[1].mutation.as_ref().unwrap().authorized_paths,
         vec![target.to_str().unwrap()]
     );
+    let completion = records.last().unwrap().mutation.as_ref().unwrap();
     assert_eq!(
-        records[2].mutation.as_ref().unwrap().status,
-        maknae_audit_append::MutationStatus::Applied
+        completion.status,
+        maknae_audit_append::MutationStatus::ReportedSuccess
+    );
+    assert_eq!(
+        completion.origin,
+        maknae_audit_append::MutationOrigin::ClientReported
     );
 }
 
@@ -321,7 +445,7 @@ fn create_verb(fx: &Fixture) -> Verb {
             .to_str()
             .unwrap()
             .into(),
-        content: Bytes::new(b"content".to_vec().into()),
+        content_length: 7,
         mode: WriteMode::CreateExclusive,
         conversation: None,
     }
@@ -477,56 +601,35 @@ async fn mismatched_report_and_failed_report_audit_send_no_ack() {
     }
 }
 #[tokio::test]
-async fn cancelled_socket_waiter_does_not_cancel_existing_effect_completion_owner() {
+async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_writes() {
     let fx = Fixture::new("cancel_waiter", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
     std::fs::write(&target, b"original").unwrap();
     let records = GateRecords::new(2);
-    let fd = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&target)
-        .unwrap()
-        .into();
-    let (mut client, task, body) = fx.start(
-        Verb::FsWrite {
-            path: target.to_str().unwrap().into(),
-            content: Bytes::new(b"surviving-worker-effect".to_vec().into()),
-            mode: WriteMode::Existing,
-            conversation: None,
-        },
-        Some(fd),
+    let (mut client, task, _held) = replace_start(
+        &fx,
+        &target,
+        b"daemon-must-not-write",
         records.clone(),
-    );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        None,
+    )
+    .await;
     records.entered.notified().await;
-    assert_eq!(
-        std::fs::read(&target).unwrap(),
-        b"original",
-        "effect must wait for durable intent"
-    );
-    task.abort();
-    let _ = task.await;
-    drop(client);
-    records.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if records.records.lock().unwrap().len() == 3 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        maknae_proto::read_frame(&mut client, 65536)
+    )
     .await
-    .unwrap();
-    assert_eq!(std::fs::read(target).unwrap(), b"surviving-worker-effect");
-    assert_eq!(
-        records.records.lock().unwrap()[2]
-            .mutation
-            .as_ref()
-            .unwrap()
-            .status,
-        maknae_audit_append::MutationStatus::Applied
-    );
+    .is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    records.release.notify_one();
+    assert!(matches!(
+        next_response(&mut client).await.unwrap().result,
+        RespResult::Ok(Payload::MutationAttempt(_))
+    ));
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    drop(client);
+    task.await.unwrap();
 }
 #[tokio::test]
 async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
@@ -559,16 +662,12 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
     std::fs::write(&target, b"denied-sentinel").unwrap();
     let alias = fx.root.join("allowed-alias");
     std::os::unix::fs::symlink(&target, &alias).unwrap();
-    let fd = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&alias)
-        .unwrap()
-        .into();
+    let fd = maknae_io::open_path_for_delegation(&alias).unwrap();
     let records = Records::new(0);
     let (mut client, task, body) = fx.start(
         Verb::FsWrite {
             path: alias.to_str().unwrap().into(),
-            content: Bytes::new(b"bad".to_vec().into()),
+            content_length: b"bad".len() as u64,
             mode: WriteMode::Existing,
             conversation: None,
         },
@@ -599,14 +698,21 @@ async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
         std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
         let target = fx.root.join("unique-existing-write-sentinel");
         std::fs::write(&target, b"before").unwrap();
-        assert!(matches!(
-            drive(&fx, b"same-rule", Records::new(0), true)
-                .await
-                .unwrap()
-                .result,
-            RespResult::Ok(Payload::MutationComplete)
-        ));
-        assert_eq!(std::fs::read(target).unwrap(), b"same-rule");
+        let response = drive(&fx, b"same-rule", Records::new(0), true)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                response.result,
+                RespResult::Ok(Payload::MutationAttempt(ref g)) if g.scope == maknae_proto::MutationScope::Exact {
+                    path: target.to_str().unwrap().into(),
+                    effect: maknae_proto::ReportedEffect::ReplacedFile,
+                }
+            ),
+            "{:?}",
+            response.result
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"before");
         for (asked, components) in [
             ("allowed", vec!["other".into()]),
             ("allowed", vec!["..".into()]),
@@ -812,44 +918,78 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
 }
 
 #[tokio::test]
-async fn renamed_existing_object_after_intent_reports_no_effect_without_rollback_claim() {
+async fn a_replacement_grant_accepts_only_replaced_file_reports() {
+    use maknae_proto::{EffectEntry, MutationReport, ReportedEffect};
     let fx = Fixture::new("late_rename", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
-    std::fs::write(&target, b"unmodified-after-rename").unwrap();
-    let records = GateRecords::new(2);
-    let fd = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&target)
-        .unwrap()
-        .into();
-    let (mut client, task, body) = fx.start(
-        Verb::FsWrite {
-            path: target.to_str().unwrap().into(),
-            content: Bytes::new(Vec::new().into()),
-            mode: WriteMode::Existing,
-            conversation: None,
+    std::fs::write(&target, b"unmodified-after-wrong-report").unwrap();
+    let records = Records::new(0);
+    let (mut client, task, _held) =
+        replace_start(&fx, &target, b"never-written", records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    send_report(
+        &mut client,
+        &MutationReport::Batch {
+            id: grant.id,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: target.to_str().unwrap().into(),
+                effect: ReportedEffect::CreatedFile,
+            }],
         },
-        Some(fd),
-        records.clone(),
-    );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
-    records.entered.notified().await;
-    let renamed = fx.root.join("renamed-sentinel");
-    std::fs::rename(&target, &renamed).unwrap();
-    records.release.notify_one();
-    assert!(matches!(
-        next_response(&mut client).await.unwrap().result,
-        RespResult::Err(_)
-    ));
+    )
+    .await;
+    assert!(ack(&mut client).await.is_none());
+    drop(client);
     task.await.unwrap();
-    assert_eq!(std::fs::read(renamed).unwrap(), b"unmodified-after-rename");
     assert_eq!(
-        records.records.lock().unwrap()[2]
+        std::fs::read(&target).unwrap(),
+        b"unmodified-after-wrong-report"
+    );
+    assert_eq!(
+        records
+            .snapshot()
+            .last()
+            .unwrap()
             .mutation
             .as_ref()
             .unwrap()
             .status,
-        maknae_audit_append::MutationStatus::NoEffect
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+}
+#[tokio::test]
+async fn a_replacement_refused_by_the_os_is_client_reported_os_refused() {
+    let fx = Fixture::new("replace_os_refused", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"os-refused-sentinel").unwrap();
+    let records = Records::new(0);
+    let (mut client, task, _held) =
+        replace_start(&fx, &target, b"never-written", records.clone(), None).await;
+    let grant = granted(&mut client).await;
+    send_report(
+        &mut client,
+        &maknae_proto::MutationReport::Finished {
+            id: grant.id,
+            next_index: 0,
+            outcome: maknae_proto::ReportedFinish::OsRefused,
+            stopped_at: Some(target.to_str().unwrap().into()),
+        },
+    )
+    .await;
+    assert_eq!(ack(&mut client).await.unwrap().next_index, 0);
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"os-refused-sentinel");
+    let records = records.snapshot();
+    let completion = records.last().unwrap().mutation.as_ref().unwrap();
+    assert_eq!(
+        completion.status,
+        maknae_audit_append::MutationStatus::ReportedOsRefused
+    );
+    assert_eq!(
+        completion.origin,
+        maknae_audit_append::MutationOrigin::ClientReported
     );
 }
 #[tokio::test]
@@ -930,10 +1070,7 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
     assert!(next_response(&mut client).await.is_none());
     task.await.unwrap();
     let records = records.snapshot();
-    assert_eq!(
-        records[1].mutation.as_ref().unwrap().phase,
-        maknae_audit_append::MutationPhase::Intent
-    );
+    assert_undelivered_grant_is_incomplete(&records);
     assert_eq!(
         records[1].mutation.as_ref().unwrap().authorized_paths.len(),
         64
@@ -1020,12 +1157,7 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
             assert!(next_response(&mut client).await.is_none());
             task.await.unwrap();
             assert!(!target.exists());
-            let records = records.snapshot();
-            assert_eq!(records.len(), 2, "withheld grant must not accept effects");
-            assert_eq!(
-                records[1].mutation.as_ref().unwrap().phase,
-                maknae_audit_append::MutationPhase::Intent
-            );
+            assert_undelivered_grant_is_incomplete(&records.snapshot());
         }
     }
 }
@@ -1198,11 +1330,26 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
         send_report(&mut client, &finish).await;
         task.await.unwrap();
         assert!(ack(&mut client).await.is_none());
-        assert_eq!(
-            records.snapshot().len(),
-            if fail_grant { 2 } else { 3 },
-            "a failed outbound grant/ack must stop the exchange"
-        );
+        if fail_grant {
+            assert_undelivered_grant_is_incomplete(&records.snapshot());
+        } else {
+            let records = records.snapshot();
+            assert_eq!(
+                records.len(),
+                4,
+                "a failed outbound ack must stop the exchange"
+            );
+            let closed = records[3].mutation.as_ref().unwrap();
+            assert_eq!(
+                closed.status,
+                maknae_audit_append::MutationStatus::Incomplete
+            );
+            assert_eq!(closed.intent_seq, records[1].seq);
+            assert_eq!(
+                records[3].outcome.reason,
+                "mutation acknowledgment not delivered; effects unknown"
+            );
+        }
         assert!(!fx.root.join("unique-created-client-sentinel").exists());
     }
 }
@@ -1296,4 +1443,53 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
         );
         assert_eq!(target.exists(), report_effect);
     }
+}
+
+#[tokio::test]
+async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes() {
+    use maknae_audit_append::{MutationOperation, MutationOrigin, MutationPhase, MutationStatus};
+    use maknae_proto::{MutationScope, ReportedEffect};
+    let fx = Fixture::new("replace_client_reported", "Write");
+    let target = fx.root.join("unique-replace-attempt-sentinel");
+    std::fs::write(&target, b"original-longer-sentinel").unwrap();
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let records = Records::new(0);
+    let (mut client, task, body) = fx.start(
+        write_verb(&target, b"replaced", None),
+        Some(held.try_clone().unwrap()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let response = next_response(&mut client).await.expect("a response frame");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"original-longer-sentinel",
+        "the daemon wrote the subject's file: {:?}",
+        response.result
+    );
+    let RespResult::Ok(Payload::MutationAttempt(grant)) = response.result else {
+        panic!(
+            "expected a subject-side attempt grant, got {:?}",
+            response.result
+        )
+    };
+    assert_eq!(
+        grant.scope,
+        MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: ReportedEffect::ReplacedFile
+        }
+    );
+    replace_as_subject(&mut client, &grant, &held, b"replaced").await;
+    assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
+    task.await.unwrap();
+    let records = records.snapshot();
+    let intent = records[1].mutation.as_ref().unwrap();
+    assert_eq!(intent.operation, Some(MutationOperation::WriteExisting));
+    assert_eq!(intent.content_length, Some(8));
+    assert_eq!(intent.origin, MutationOrigin::KernelObserved);
+    let completion = records.last().unwrap().mutation.as_ref().unwrap();
+    assert_eq!(completion.phase, MutationPhase::Completion);
+    assert_eq!(completion.origin, MutationOrigin::ClientReported);
+    assert_eq!(completion.status, MutationStatus::ReportedSuccess);
 }

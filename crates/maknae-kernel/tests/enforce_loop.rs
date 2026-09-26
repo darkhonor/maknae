@@ -1459,7 +1459,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
         maknae_proto::Verb::SessionNew,
         maknae_proto::Verb::FsWrite {
             path: "/home/test/x".into(),
-            content: maknae_proto::Bytes::new(maknae_io::Zeroizing::new(Vec::new())),
+            content_length: 0,
             mode: maknae_proto::WriteMode::Existing,
             conversation: None,
         },

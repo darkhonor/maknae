@@ -37,7 +37,7 @@ action	session.elicit.create	not-granted	enumerated, decided, unbuilt — answer
 action	session.elicit.complete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.compact	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.read	granted	shipped; decided through the capability grammar
-action	fs.write	granted	shipped; Write path policy shared by user/admin; daemon replacement through subject-writable fd, exclusive creation as audited subject-side attempt (#158)
+action	fs.write	granted	shipped; Write path policy shared by user/admin; replacement and exclusive creation are audited subject-side attempts; the daemon holds only a no-access descriptor (#158, #365)
 action	fs.delete	granted	shipped; Write path policy shared by user/admin; audited subject-side delete attempt, recursive scopes require whole-subtree authority (#158)
 action	fs.move	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	fs.list	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)

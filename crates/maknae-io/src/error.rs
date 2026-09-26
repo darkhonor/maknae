@@ -68,10 +68,6 @@ pub enum IoError {
     MutationPathChanged {
         path: PathBuf,
     },
-    /// Read-only and append descriptors are not existing-file replacement evidence.
-    NotWritableDescriptor {
-        path: PathBuf,
-    },
     /// A recursive descent encountered a different filesystem device.
     DifferentFilesystem {
         path: PathBuf,
@@ -157,6 +153,9 @@ pub enum IoError {
     FdPathUnavailable {
         kind: IoKind,
     },
+    AccessBearingDescriptor {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -171,11 +170,6 @@ impl std::fmt::Display for IoError {
             Self::MutationPathChanged { path } => {
                 write!(f, "mutation path changed: {}", path.display())
             }
-            Self::NotWritableDescriptor { path } => write!(
-                f,
-                "descriptor is not writable without append: {}",
-                path.display()
-            ),
             Self::DifferentFilesystem { path } => {
                 write!(f, "different filesystem refused: {}", path.display())
             }
@@ -232,6 +226,13 @@ impl std::fmt::Display for IoError {
                 write!(
                     f,
                     "cannot determine the delegated descriptor's path: {kind:?}"
+                )
+            }
+            Self::AccessBearingDescriptor { path } => {
+                write!(
+                    f,
+                    "descriptor confers access beyond location: {}",
+                    path.display()
                 )
             }
         }
@@ -307,6 +308,10 @@ mod tests {
         assert!(
             !msg.contains("/proc"),
             "the message must not name a path the failure is not at: {msg}"
+        );
+        assert_eq!(
+            IoError::AccessBearingDescriptor { path: p.clone() }.to_string(),
+            "descriptor confers access beyond location: /etc/maknae/cfg"
         );
         assert_eq!(
             IoError::EscapesAnchor {

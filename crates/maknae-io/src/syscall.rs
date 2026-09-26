@@ -127,6 +127,25 @@ pub(crate) fn open_mutation_directory(path: &Path) -> nix::Result<OwnedFd> {
     nix::fcntl::open(path, mutation_directory_flags(), NixMode::empty())
 }
 
+#[cfg(target_os = "linux")]
+use linux_path_delegation_flags as path_delegation_flags;
+#[cfg(target_os = "macos")]
+use macos_path_delegation_flags as path_delegation_flags;
+
+#[cfg(target_os = "linux")]
+fn linux_path_delegation_flags() -> OFlag {
+    OFlag::O_PATH | OFlag::O_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_delegation_flags() -> OFlag {
+    OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
+}
+
+pub(crate) fn open_path_delegation(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(path, path_delegation_flags(), NixMode::empty())
+}
+
 /// Mutation descent needs search/path access; only directory enumeration needs read.
 pub(crate) fn open_mutation_directory_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
@@ -371,21 +390,49 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
     nix::unistd::fdatasync(fd)
 }
 
-/// Subject open follows aliases so policy decides the kernel-reported target.
-/// No create/truncate: preparation must have no effect before durable intent.
-pub(crate) fn open_writable_delegation(path: &Path) -> nix::Result<OwnedFd> {
+/// No create or truncate: the effect is the caller's, after the grant.
+pub(crate) fn open_writable_existing(path: &Path, extra: OFlag) -> nix::Result<OwnedFd> {
     nix::fcntl::open(
         path,
-        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | extra,
         NixMode::empty(),
     )
 }
 
-/// Inspect the access mode without changing the shared file description's flags.
-pub(crate) fn is_nonappend_writable<F: AsFd>(fd: &F) -> nix::Result<bool> {
-    let flags = OFlag::from_bits_truncate(nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL)?);
-    let access = flags & OFlag::O_ACCMODE;
-    Ok((access == OFlag::O_WRONLY || access == OFlag::O_RDWR) && !flags.contains(OFlag::O_APPEND))
+#[cfg(target_os = "linux")]
+pub(crate) use linux_reopen_writable as reopen_writable;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_reopen_writable as reopen_writable;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_reopen_writable<F: AsFd>(held: &F, _granted: &Path) -> nix::Result<OwnedFd> {
+    use std::os::fd::AsRawFd;
+    open_writable_existing(
+        Path::new(&format!("/proc/self/fd/{}", held.as_fd().as_raw_fd())),
+        OFlag::empty(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_reopen_writable<F: AsFd>(_held: &F, granted: &Path) -> nix::Result<OwnedFd> {
+    open_writable_existing(granted, OFlag::O_NOFOLLOW)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_confers_no_write as confers_no_write;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_confers_no_write as confers_no_write;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
+    Ok(OFlag::from_bits_retain(flags).contains(OFlag::O_PATH))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
+    Ok(OFlag::from_bits_retain(flags) & OFlag::O_ACCMODE == OFlag::O_RDONLY)
 }
 
 pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
@@ -461,6 +508,57 @@ mod tests {
     }
 
     #[test]
+    fn writable_reopen_sets_cloexec_and_leaves_bytes_until_written() {
+        let d = tmp();
+        let p = d.path().join("reopen");
+        std::fs::write(&p, b"safe").unwrap();
+        let held = open_path_delegation(&p).unwrap();
+        let fd = reopen_writable(&held, &p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert_eq!(std::fs::read(&p).unwrap(), b"safe");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_writable_reopen_refuses_a_symlink_at_the_granted_path() {
+        let d = tmp();
+        let real = d.path().join("real");
+        std::fs::write(&real, b"safe").unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let held = open_path_delegation(&real).unwrap();
+        assert_eq!(
+            reopen_writable(&held, &link).err(),
+            Some(nix::errno::Errno::ELOOP)
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), b"safe");
+    }
+
+    #[test]
+    fn path_delegation_open_sets_cloexec_confers_no_write_and_never_creates() {
+        let d = tmp();
+        let p = d.path().join("held");
+        std::fs::write(&p, b"safe").unwrap();
+        let fd = open_path_delegation(&p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert_eq!(nix::unistd::write(&fd, b"x"), Err(nix::errno::Errno::EBADF));
+        assert_eq!(std::fs::read(&p).unwrap(), b"safe");
+        assert!(open_path_delegation(&d.path().join("absent")).is_err());
+        assert!(!d.path().join("absent").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_path_delegation_needs_no_access_to_the_object() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp();
+        let p = d.path().join("no-access");
+        std::fs::write(&p, b"safe").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(open_path_delegation(&p).is_ok());
+    }
+
+    #[test]
     fn mutation_xor_equivalence_requires_disjoint_platform_flag_bits() {
         // This is the executable algebra supporting the narrowly named XOR
         // exemptions; the descriptor tests separately hold actual behavior.
@@ -472,6 +570,17 @@ mod tests {
         groups.push(vec![OFlag::O_SEARCH, OFlag::O_CLOEXEC]);
         #[cfg(target_os = "linux")]
         groups.push(vec![OFlag::O_PATH, OFlag::O_DIRECTORY, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "linux")]
+        groups.push(vec![OFlag::O_PATH, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![
+            OFlag::O_WRONLY,
+            OFlag::O_NONBLOCK,
+            OFlag::O_CLOEXEC,
+            OFlag::O_NOFOLLOW,
+        ]);
         for group in groups {
             let mut bits = OFlag::empty();
             for flag in group {
@@ -496,14 +605,13 @@ mod tests {
     }
 
     #[test]
-    fn writable_delegation_open_sets_cloexec_and_never_creates() {
+    fn writable_existing_open_sets_cloexec_and_never_creates() {
         let d = tmp();
         let p = d.path().join("flags");
         std::fs::write(&p, b"safe").unwrap();
-        let fd = open_writable_delegation(&p).unwrap();
+        let fd = open_writable_existing(&p, OFlag::empty()).unwrap();
         assert!(is_cloexec(&fd));
-        assert!(is_nonappend_writable(&fd).unwrap());
-        assert!(open_writable_delegation(&d.path().join("absent")).is_err());
+        assert!(open_writable_existing(&d.path().join("absent"), OFlag::empty()).is_err());
     }
 
     #[test]

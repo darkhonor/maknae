@@ -20,7 +20,7 @@ workspace = true
 [target.'cfg(unix)'.dependencies]
 # fs   — openat/openat2/renameat/fstat/fstatat/fcntl. Without it none of the fd-relative
 #        primitives this crate exists to provide are reachable.
-# uio  — pwrite for offset-independent replacement of a delegated writable fd.
+# uio  — pwrite for offset-independent replacement through the subject's own writable re-open.
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
 # NOT "user": nothing in production calls geteuid/Uid/User/Group — grep every module up

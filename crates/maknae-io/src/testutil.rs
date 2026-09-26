@@ -30,10 +30,6 @@ fn opted_out() -> bool {
 /// seccomp filter returning EPERM) or the filesystem rejects the name, a quiet
 /// `return` turns each of them into a green no-op. Panicking makes that loud;
 /// a host that genuinely cannot run them opts out explicitly.
-///
-/// Every caller is inside a `#[cfg(target_os = "linux")]` test, so on darwin this is
-/// genuinely unreferenced rather than accidentally so.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn skip_or_fail(what: &str, why: &str) {
     if opted_out() {
         eprintln!("SKIP {what}: {why} (allowed by MAKNAE_IO_ALLOW_SKIPPED_LANES)");

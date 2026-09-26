@@ -575,17 +575,8 @@ fn mutation_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
             ))
         }
     };
-    if operation == FsOperation::WriteExisting {
-        match os_dac_gate(req) {
-            OsDacGate::Satisfied => {}
-            OsDacGate::Deny(why) => return Err(refuse(&format!("os dac: {why}"))),
-            OsDacGate::Indeterminate => return Err(Verdict::Indeterminate),
-            OsDacGate::NotApplicable => {
-                return Err(refuse("filesystem mutation requires OS access"))
-            }
-        }
-    } else if req.resource.0.get(RESOURCE_OS_ACCESSIBLE).is_some() {
-        return Err(refuse("namespace attempt cannot carry an OS preapproval"));
+    if req.resource.0.get(RESOURCE_OS_ACCESSIBLE).is_some() {
+        return Err(refuse("mutation attempt cannot carry an OS preapproval"));
     }
     Ok(scope)
 }
@@ -719,14 +710,14 @@ mod tests {
                 "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\"]\n",
                 Some(std::path::Path::new("/home/operator")),
             ).unwrap();
-            for (action, operation, existing) in [
-                ("fs.write", "write-existing", true),
-                ("fs.write", "write-create", false),
-                ("fs.delete", "delete-entry", false),
-                ("fs.delete", "delete-tree", false),
-                ("fs.mkdir", "mkdir", false),
+            for (action, operation) in [
+                ("fs.write", "write-existing"),
+                ("fs.write", "write-create"),
+                ("fs.delete", "delete-entry"),
+                ("fs.delete", "delete-tree"),
+                ("fs.mkdir", "mkdir"),
             ] {
-                let mut req = read_req(Some("local"), existing.then_some(AttrValue::Bool(true)));
+                let mut req = read_req(Some("local"), None);
                 req.action.0 = action.into();
                 req.context
                     .0
@@ -775,7 +766,12 @@ mod tests {
         )
         .unwrap();
         for (action, operation, lane, accessible) in [
-            ("fs.write", "write-existing", "local", None),
+            (
+                "fs.write",
+                "write-existing",
+                "local",
+                Some(AttrValue::Bool(true)),
+            ),
             (
                 "fs.write",
                 "write-existing",
@@ -831,8 +827,20 @@ mod tests {
             .insert(maknae_security::RESOURCE_OS_ACCESSIBLE, AttrValue::Int(1));
         assert_eq!(
             decide_loaded(&lp, &principal(), &req),
-            Verdict::Indeterminate
+            Verdict::Deny {
+                reason: "mutation attempt cannot carry an OS preapproval".into()
+            }
         );
+        let mut plain = read_req(Some("local"), None);
+        plain.action.0 = "fs.write".into();
+        plain
+            .context
+            .0
+            .insert("fs_operation", AttrValue::Str("write-existing".into()));
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &plain),
+            Verdict::Permit { .. }
+        ));
     }
 
     #[test]
@@ -850,7 +858,7 @@ mod tests {
             "/home/operator/x/",
             "/home/operator/\0x",
         ] {
-            let mut req = read_req(Some("local"), Some(AttrValue::Bool(true)));
+            let mut req = read_req(Some("local"), None);
             req.action.0 = "fs.write".into();
             req.context
                 .0
@@ -859,7 +867,7 @@ mod tests {
                 .0
                 .insert(RESOURCE_PATH, AttrValue::Str(path.into()));
             assert!(
-                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { .. }),
+                matches!(decide_loaded(&lp, &principal(), &req), Verdict::Deny { ref reason } if reason.starts_with("non-canonical resource path")),
                 "{path:?}"
             );
         }
