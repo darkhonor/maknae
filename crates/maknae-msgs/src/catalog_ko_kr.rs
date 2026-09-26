@@ -50,6 +50,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "다음 명령으로 데몬을 시작하세요: systemctl enable --now maknaed"
         }
         MsgId::EnrollRotating => "기존 등록을 발견했어요 — 자격 증명을 교체하고 있어요",
+        MsgId::EnrollRotatePreviousDestroyed => "이전 등록의 자격 증명을 폐기했어요",
         MsgId::EnrollRollbackDestroyed => "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기했어요",
         MsgId::EnrollRollbackDestroyPartial => {
             "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기하려 했지만 일부는 실패했어요 (아래 내용을 확인하세요)"

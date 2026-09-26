@@ -43,6 +43,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         }
         MsgId::EnrollEnableDaemonHint => "Start the daemon with: systemctl enable --now maknaed",
         MsgId::EnrollRotating => "Existing enrollment found — rotating credentials",
+        MsgId::EnrollRotatePreviousDestroyed => "Destroyed the previous enrollment's credentials",
         MsgId::EnrollRollbackDestroyed => {
             "Enrollment failed — destroyed the credentials just issued"
         }

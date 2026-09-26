@@ -1125,6 +1125,8 @@ async fn destroy_and_report(
     }
 }
 
+const ROTATE_CLEANUP_DONE: MsgId = MsgId::EnrollRotatePreviousDestroyed;
+
 /// Rotate's PRE-MINT cleanup (spec §4.1). Destroys `records` (the PREVIOUS
 /// enrollment's accessors, recorded in `enroll-state.yaml`) against `mount`
 /// — the caller MUST pass the mount recorded alongside those accessors
@@ -1151,7 +1153,7 @@ async fn destroy_previous_accessors_or_abort(
     }
     let failures = vault_ops::destroy_all(client, mount, records).await;
     if failures.is_empty() {
-        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
+        eprintln!("{}", msg(locale, ROTATE_CLEANUP_DONE));
         return Ok(());
     }
     let detail = failures
@@ -2501,6 +2503,25 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         .expect("OperatorClient::new performs no network I/O — settings-only");
         let _ = std::fs::remove_file(&ca_path);
         client
+    }
+
+    #[test]
+    fn rotate_cleanup_reports_the_previous_enrollment_not_a_failure() {
+        for (locale, failed) in [
+            (Locale::EnUs, "Enrollment failed"),
+            (Locale::KoKr, "등록에 실패했어요"),
+        ] {
+            assert!(msg(locale, MsgId::EnrollRollbackDestroyed).contains(failed));
+            let rotate = msg(locale, ROTATE_CLEANUP_DONE);
+            assert!(!rotate.contains(failed), "{locale:?}: {rotate}");
+        }
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("async fn destroy_previous_accessors_or_abort(")
+            .expect("the rotate cleanup exists");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("its body ends")];
+        assert!(body.contains("msg(locale, ROTATE_CLEANUP_DONE)"));
+        assert!(!body.contains("EnrollRollbackDestroyed"));
     }
 
     #[tokio::test]
