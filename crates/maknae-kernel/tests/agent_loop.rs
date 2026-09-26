@@ -246,6 +246,7 @@ impl Plane for FixturePlane {
                                 effects: vec![EffectEntry {
                                     path: path.clone(),
                                     effect: ReportedEffect::ReplacedFile,
+                                    length: None,
                                 }],
                             },
                             1,

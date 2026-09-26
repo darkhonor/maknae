@@ -74,6 +74,7 @@ async fn replace_as_subject(
             effects: vec![EffectEntry {
                 path: path.clone(),
                 effect: ReportedEffect::ReplacedFile,
+                length: None,
             }],
         },
     )
@@ -230,6 +231,7 @@ async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReplacedFile,
+                length: None,
             }],
         },
     )
@@ -510,6 +512,7 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::CreatedFile,
+                length: None,
             }],
         },
     )
@@ -886,6 +889,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
             effects: vec![maknae_proto::EffectEntry {
                 path: fx.root.join("tree/child").to_str().unwrap().into(),
                 effect: maknae_proto::ReportedEffect::DeletedEntry,
+                length: None,
             }],
         },
     )
@@ -935,6 +939,7 @@ async fn a_replacement_grant_accepts_only_replaced_file_reports() {
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::CreatedFile,
+                length: None,
             }],
         },
     )
@@ -1122,6 +1127,7 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
                     effects: vec![maknae_proto::EffectEntry {
                         path: target.to_str().unwrap().into(),
                         effect: maknae_proto::ReportedEffect::CreatedFile,
+                        length: None,
                     }],
                 },
             )
@@ -1199,6 +1205,7 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
                     max_effects: 0,
                     max_depth: 0,
                     deadline_ms: 0,
+                    max_bytes: 0,
                 },
             })),
         })
@@ -1306,6 +1313,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
                     .unwrap()
                     .into(),
                 effect: maknae_proto::ReportedEffect::CreatedFile,
+                length: None,
             }],
         };
         let finish = maknae_proto::MutationReport::Finished {
@@ -1407,6 +1415,7 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
                     effects: vec![EffectEntry {
                         path: target.to_str().unwrap().into(),
                         effect: ReportedEffect::CreatedDirectory,
+                        length: None,
                     }],
                 },
             )

@@ -26,6 +26,8 @@ pub struct MutationLimits {
     pub max_depth: u16,
     /// Absolute attempt window from issuance; supplied by transport configuration.
     pub deadline_ms: u64,
+    /// Content bytes a ReadFile grant permits; 0 on every other grant.
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +59,7 @@ pub enum ReportedEffect {
     ReplacedFile,
     CreatedDirectory,
     DeletedEntry,
+    ReadFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +78,8 @@ pub struct EffectEntry {
     /// Canonical absolute path, identical to the prepared namespace spelling.
     pub path: String,
     pub effect: ReportedEffect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,17 +123,33 @@ mod tests {
             session_id: 91,
             intent_seq: 37,
         };
-        for scope in [
-            MutationScope::Exact {
-                path: "/sentinel/create".into(),
-                effect: ReportedEffect::CreatedFile,
-            },
-            MutationScope::RecursiveDelete {
-                root: "/sentinel/delete".into(),
-            },
-            MutationScope::Directories {
-                paths: vec!["/sentinel/a".into(), "/sentinel/a/b".into()],
-            },
+        for (scope, max_bytes) in [
+            (
+                MutationScope::Exact {
+                    path: "/sentinel/create".into(),
+                    effect: ReportedEffect::CreatedFile,
+                },
+                0,
+            ),
+            (
+                MutationScope::Exact {
+                    path: "/sentinel/read".into(),
+                    effect: ReportedEffect::ReadFile,
+                },
+                65024,
+            ),
+            (
+                MutationScope::RecursiveDelete {
+                    root: "/sentinel/delete".into(),
+                },
+                0,
+            ),
+            (
+                MutationScope::Directories {
+                    paths: vec!["/sentinel/a".into(), "/sentinel/a/b".into()],
+                },
+                0,
+            ),
         ] {
             roundtrip(MutationGrant {
                 id,
@@ -137,6 +158,7 @@ mod tests {
                     max_effects: 4096,
                     max_depth: 128,
                     deadline_ms: 5000,
+                    max_bytes,
                 },
             });
         }
@@ -145,6 +167,7 @@ mod tests {
             ReportedEffect::ReplacedFile,
             ReportedEffect::CreatedDirectory,
             ReportedEffect::DeletedEntry,
+            ReportedEffect::ReadFile,
         ] {
             roundtrip(MutationReport::Batch {
                 id,
@@ -152,9 +175,19 @@ mod tests {
                 effects: vec![EffectEntry {
                     path: "/sentinel/effect".into(),
                     effect,
+                    length: None,
                 }],
             });
         }
+        roundtrip(MutationReport::Batch {
+            id,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: "/sentinel/read".into(),
+                effect: ReportedEffect::ReadFile,
+                length: Some(u64::MAX),
+            }],
+        });
         for outcome in [
             ReportedFinish::Success,
             ReportedFinish::OsRefused,
@@ -174,5 +207,29 @@ mod tests {
         roundtrip(MutationAck { id, next_index: 18 });
         roundtrip(WriteMode::Existing);
         roundtrip(WriteMode::CreateExclusive);
+    }
+
+    #[test]
+    fn a_read_effect_carries_its_length_and_no_other_effect_encodes_one() {
+        let encoded = |length| {
+            let mut bytes = Vec::new();
+            let entry = EffectEntry {
+                path: "/sentinel/read".into(),
+                effect: ReportedEffect::ReadFile,
+                length,
+            };
+            ciborium::into_writer(&entry, &mut bytes).unwrap();
+            let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+            value
+                .into_map()
+                .unwrap()
+                .into_iter()
+                .map(|(k, v)| (k.into_text().unwrap(), v))
+                .collect::<Vec<_>>()
+        };
+        assert!(!encoded(None).iter().any(|(k, _)| k == "length"));
+        assert!(encoded(Some(7))
+            .iter()
+            .any(|(k, v)| k == "length" && *v == ciborium::Value::Integer(7.into())));
     }
 }

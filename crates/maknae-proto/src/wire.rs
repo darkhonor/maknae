@@ -1062,6 +1062,7 @@ mod tests {
                 max_effects: 1,
                 max_depth: 1,
                 deadline_ms: 5000,
+                max_bytes: 0,
             },
         });
         let response = Response {

@@ -7,6 +7,7 @@ always	MutationGrant.scope:MutationScope	only prepared resources already permitt
 always	MutationId.intent_seq:u64	the durable intent that authorized this attempt
 always	MutationId.session_id:u64	the caller's live connection correlation
 always	MutationLimits.deadline_ms:u64	configured attempt duration; the CLI conservatively anchors before its request
+always	MutationLimits.max_bytes:u64	the enforced content bound for a read grant; zero on every grant that reads nothing
 always	MutationLimits.max_depth:u16	the caller needs the enforced traversal depth bound
 always	MutationLimits.max_effects:u32	the caller needs the enforced effect count bound
 always	MutationScope.Directories.paths:Vec<String>	verified intended path or prefixes, disclosed only after their composed Permit
@@ -19,4 +20,5 @@ always	MutationScope.RecursiveDelete:variant	closed authorized scope shape; ever
 always	ReportedEffect.CreatedDirectory:variant	closed requested effect kind, with no content or additional resource
 always	ReportedEffect.CreatedFile:variant	closed requested effect kind, with no content or additional resource
 always	ReportedEffect.DeletedEntry:variant	closed requested effect kind, with no content or additional resource
+always	ReportedEffect.ReadFile:variant	closed requested effect kind, with no content or additional resource
 always	ReportedEffect.ReplacedFile:variant	closed requested effect kind, with no content or additional resource

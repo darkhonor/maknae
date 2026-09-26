@@ -297,6 +297,7 @@ async fn commit_intent<E: AuditEmit>(
         FsOperation::DeleteEntry => MutationOperation::DeleteEntry,
         FsOperation::DeleteTree => MutationOperation::DeleteTree,
         FsOperation::Mkdir => MutationOperation::Mkdir,
+        FsOperation::Read => MutationOperation::Read,
     });
     meta.authorized_paths = paths;
     record.mutation = Some(meta);
@@ -479,6 +480,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         max_effects: maknae_proto::MAX_MUTATION_EFFECTS,
         max_depth: maknae_proto::MAX_MUTATION_DEPTH,
         deadline_ms: cfg.read_timeout_ms,
+        max_bytes: 0,
     };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
     let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();
@@ -565,7 +567,9 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                                 MutationEffectKind::CreatedDirectory
                             }
                             ReportedEffect::DeletedEntry => MutationEffectKind::DeletedEntry,
+                            ReportedEffect::ReadFile => MutationEffectKind::ReadFile,
                         },
+                        length: e.length,
                     })
                     .collect();
                 false

@@ -301,6 +301,7 @@ fn error_step(e: MutationFailure, effect: ReportedEffect, path: String) -> Step 
         effect: changed.then(|| EffectEntry {
             path: path.clone(),
             effect,
+            length: None,
         }),
         finish: Some((outcome, Some(path))),
     }
@@ -347,6 +348,7 @@ impl Worker {
         let entry = EffectEntry {
             path: path.into(),
             effect,
+            length: None,
         };
         if !fits(
             &batch(self.grant.id, self.next_index, entry),
@@ -388,6 +390,7 @@ impl Worker {
                         effect: Some(EffectEntry {
                             path,
                             effect: ReportedEffect::ReplacedFile,
+                            length: None,
                         }),
                         finish: Some((ReportedFinish::Success, None)),
                     },
@@ -412,6 +415,7 @@ impl Worker {
                         effect: Some(EffectEntry {
                             path,
                             effect: ReportedEffect::CreatedFile,
+                            length: None,
                         }),
                         finish: Some((ReportedFinish::Success, None)),
                     },
@@ -443,6 +447,7 @@ impl Worker {
                         let effect = Some(EffectEntry {
                             path: path.clone(),
                             effect: ReportedEffect::CreatedDirectory,
+                            length: None,
                         });
                         if components.is_empty() {
                             return Step {
@@ -554,6 +559,7 @@ impl Worker {
                                 effect: Some(EffectEntry {
                                     path,
                                     effect: ReportedEffect::DeletedEntry,
+                                    length: None,
                                 }),
                                 finish: done.then_some((ReportedFinish::Success, None)),
                             };
@@ -844,6 +850,7 @@ mod tests {
                 max_effects: proto::MAX_MUTATION_EFFECTS,
                 max_depth: proto::MAX_MUTATION_DEPTH,
                 deadline_ms: 5000,
+                max_bytes: 0,
             },
         }
     }
@@ -1379,6 +1386,7 @@ mod tests {
                     effects: vec![EffectEntry {
                         path: path.clone(),
                         effect: ReportedEffect::ReplacedFile,
+                        length: None,
                     }],
                 },
                 MutationReport::Finished {
@@ -1559,6 +1567,7 @@ mod tests {
                 max_effects: effects,
                 max_depth: depth,
                 deadline_ms: time,
+                max_bytes: 0,
             };
             grants.push(g);
         }
@@ -1686,7 +1695,8 @@ mod tests {
                 step.effect,
                 changed.then_some(EffectEntry {
                     path,
-                    effect: ReportedEffect::CreatedFile
+                    effect: ReportedEffect::CreatedFile,
+                    length: None,
                 })
             );
         }
@@ -1912,6 +1922,7 @@ mod tests {
             EffectEntry {
                 path: path.into(),
                 effect: ReportedEffect::DeletedEntry,
+                length: None,
             },
         ))
         .unwrap()
