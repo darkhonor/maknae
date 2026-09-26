@@ -71,9 +71,9 @@ pub use delegated::{
 };
 pub use error::{IoError, IoKind};
 pub use mutation::{
-    replace_existing, verify_mutation_directory, verify_writable_object, DirectoryCursor,
-    EffectState, MutationDirectory, MutationEffect, MutationEffectKind, MutationFailure,
-    MutationRequired, WritableObject,
+    replace_existing, replace_held_file, verify_mutation_directory, verify_writable_object,
+    DirectoryCursor, EffectState, MutationDirectory, MutationEffect, MutationEffectKind,
+    MutationFailure, MutationRequired, WritableObject,
 };
 pub use normalize::normalize;
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.

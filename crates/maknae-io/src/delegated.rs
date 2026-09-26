@@ -163,7 +163,7 @@ pub struct Received {
 /// stays on the trusted side. It applies no requirement of its own, changes nothing
 /// the daemon checks (those are `fstat`-based), and has no effect on a regular file's
 /// reads. `open_writable_for_delegation` has carried the same flag, for the same
-/// reason, since it was written (`syscall::open_writable_delegation`).
+/// reason, since it was written (`syscall::open_writable_existing`).
 ///
 /// The flag comes from `nix::fcntl::OFlag`, the same typed family every other open in
 /// this crate composes from, by way of `OpenOptionsExt::custom_flags` — a single flag,
@@ -192,7 +192,7 @@ pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
 /// Subject-side, nontruncating writable open for existing-file delegation.
 /// Failure must still lead to an audited request without evidence.
 pub fn open_writable_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
-    crate::syscall::open_writable_delegation(path).map_err(Into::into)
+    crate::syscall::open_writable_existing(path).map_err(Into::into)
 }
 
 /// Subject-side directory open. Proves no permission to mutate its children.

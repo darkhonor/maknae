@@ -390,14 +390,32 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
     nix::unistd::fdatasync(fd)
 }
 
-/// Subject open follows aliases so policy decides the kernel-reported target.
-/// No create/truncate: preparation must have no effect before durable intent.
-pub(crate) fn open_writable_delegation(path: &Path) -> nix::Result<OwnedFd> {
+/// No create or truncate: the effect is the caller's, after the grant.
+pub(crate) fn open_writable_existing(path: &Path) -> nix::Result<OwnedFd> {
     nix::fcntl::open(
         path,
         OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
         NixMode::empty(),
     )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_reopen_writable as reopen_writable;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_reopen_writable as reopen_writable;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_reopen_writable<F: AsFd>(held: &F, _granted: &Path) -> nix::Result<OwnedFd> {
+    use std::os::fd::AsRawFd;
+    open_writable_existing(Path::new(&format!(
+        "/proc/self/fd/{}",
+        held.as_fd().as_raw_fd()
+    )))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_reopen_writable<F: AsFd>(_held: &F, granted: &Path) -> nix::Result<OwnedFd> {
+    open_writable_existing(granted)
 }
 
 /// Inspect the access mode without changing the shared file description's flags.
@@ -480,6 +498,17 @@ mod tests {
     }
 
     #[test]
+    fn writable_reopen_sets_cloexec_and_leaves_bytes_until_written() {
+        let d = tmp();
+        let p = d.path().join("reopen");
+        std::fs::write(&p, b"safe").unwrap();
+        let held = open_path_delegation(&p).unwrap();
+        let fd = reopen_writable(&held, &p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert_eq!(std::fs::read(&p).unwrap(), b"safe");
+    }
+
+    #[test]
     fn path_delegation_open_sets_cloexec_confers_no_write_and_never_creates() {
         let d = tmp();
         let p = d.path().join("held");
@@ -543,14 +572,14 @@ mod tests {
     }
 
     #[test]
-    fn writable_delegation_open_sets_cloexec_and_never_creates() {
+    fn writable_existing_open_sets_cloexec_and_never_creates() {
         let d = tmp();
         let p = d.path().join("flags");
         std::fs::write(&p, b"safe").unwrap();
-        let fd = open_writable_delegation(&p).unwrap();
+        let fd = open_writable_existing(&p).unwrap();
         assert!(is_cloexec(&fd));
         assert!(is_nonappend_writable(&fd).unwrap());
-        assert!(open_writable_delegation(&d.path().join("absent")).is_err());
+        assert!(open_writable_existing(&d.path().join("absent")).is_err());
     }
 
     #[test]

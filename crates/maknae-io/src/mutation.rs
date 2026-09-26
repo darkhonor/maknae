@@ -272,6 +272,55 @@ fn replace_bytes(
     sync(fd).map_err(|e| failure(path, EffectState::DurabilityUnknown, io_error(e, path)))
 }
 
+const REPLACEABLE: TargetRequired = TargetRequired {
+    nlink_exactly_one: true,
+    ..TargetRequired::OS_DAC_REGULAR
+};
+
+fn same_object(a: &nix::sys::stat::FileStat, b: &nix::sys::stat::FileStat) -> bool {
+    a.st_dev == b.st_dev && a.st_ino == b.st_ino
+}
+
+pub fn replace_held_file(
+    held: BorrowedFd<'_>,
+    expected: &Path,
+    bytes: &[u8],
+) -> Result<(), MutationFailure> {
+    checked_path(expected).map_err(no_effect(expected))?;
+    let pinned = syscall::fstat(&held)
+        .map_err(at(expected))
+        .map_err(no_effect(expected))?;
+    crate::checks::check_target(&pinned, expected, &REPLACEABLE).map_err(no_effect(expected))?;
+    let fd = syscall::reopen_writable(&held, expected).map_err(|e| {
+        let source = if e == nix::errno::Errno::ENOENT {
+            IoError::MutationPathChanged {
+                path: expected.to_path_buf(),
+            }
+        } else {
+            io_error(e, expected)
+        };
+        failure(expected, EffectState::NoEffect, source)
+    })?;
+    let check = || {
+        let st = syscall::fstat(&fd).map_err(at(expected))?;
+        crate::checks::check_target(&st, expected, &REPLACEABLE)?;
+        if !same_object(&st, &pinned) {
+            return Err(IoError::MutationPathChanged {
+                path: expected.to_path_buf(),
+            });
+        }
+        same_path(&syscall::fd_path(&fd).map_err(at(expected))?, expected)
+    };
+    replace_bytes(
+        &fd,
+        expected,
+        bytes,
+        check,
+        syscall::write_at,
+        syscall::fsync_fd,
+    )
+}
+
 impl MutationDirectory {
     /// Bound namespace syscall starts by a cooperative monotonic deadline.
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
@@ -473,6 +522,126 @@ mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom};
     use std::os::unix::fs::{symlink, PermissionsExt};
+    fn held(p: &Path) -> OwnedFd {
+        crate::open_path_for_delegation(p).unwrap()
+    }
+    #[test]
+    fn held_replacement_truncates_through_a_fresh_writable_open_and_keeps_identity() {
+        crate::testutil::isolated(
+            "mutation::tests::held_replacement_truncates_through_a_fresh_writable_open_and_keeps_identity",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let p = root(&d).join("held-replace-sentinel");
+                std::fs::write(&p, b"original long bytes").unwrap();
+                let mut shared = OpenOptions::new().write(true).open(&p).unwrap();
+                shared.seek(SeekFrom::Start(9)).unwrap();
+                let before = syscall::stat_path(&p).unwrap();
+                let fd = held(&p);
+                replace_held_file(fd.as_fd(), &p, b"new").unwrap();
+                assert_eq!(std::fs::read(&p).unwrap(), b"new");
+                assert_eq!(shared.stream_position().unwrap(), 9);
+                assert!(same_object(&before, &syscall::stat_path(&p).unwrap()));
+                replace_held_file(fd.as_fd(), &p, b"").unwrap();
+                assert!(std::fs::read(&p).unwrap().is_empty());
+            },
+        );
+    }
+    #[test]
+    fn held_replacement_refuses_directories_links_and_moved_objects_without_effect() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = root(&d);
+        assert_eq!(
+            replace_held_file(held(&dir).as_fd(), &dir, b"bad")
+                .unwrap_err()
+                .state,
+            EffectState::NoEffect
+        );
+        let p = dir.join("linked-sentinel");
+        std::fs::write(&p, b"untouched").unwrap();
+        std::fs::hard_link(&p, dir.join("second-name")).unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        assert!(matches!(e.source, IoError::MultiplyLinked { .. }), "{e:?}");
+        std::fs::remove_file(dir.join("second-name")).unwrap();
+        let fd = held(&p);
+        std::fs::rename(&p, dir.join("moved")).unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(
+            matches!(e.source, IoError::MutationPathChanged { .. }),
+            "{e:?}"
+        );
+        std::fs::write(&p, b"newcomer").unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert_eq!(std::fs::read(&p).unwrap(), b"newcomer");
+        assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
+    }
+    #[test]
+    fn identity_is_device_and_inode_together() {
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (root(&d).join("a"), root(&d).join("b"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let sa = syscall::stat_path(&a).unwrap();
+        assert!(same_object(
+            &sa,
+            &syscall::fstat(&File::open(&a).unwrap()).unwrap()
+        ));
+        assert!(!same_object(&sa, &syscall::stat_path(&b).unwrap()));
+        let mut elsewhere = sa;
+        elsewhere.st_dev = sa.st_dev.wrapping_add(1);
+        assert!(!same_object(&sa, &elsewhere));
+    }
+    #[test]
+    fn held_replacement_is_refused_by_the_subjects_own_permissions() {
+        if nix::unistd::geteuid().is_root() {
+            crate::testutil::skip_or_fail(
+                "held_replacement_is_refused_by_the_subjects_own_permissions",
+                "running as root, which writes a 0444 file and voids the premise",
+            );
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("read-only-sentinel");
+        std::fs::write(&p, b"untouched").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(
+            matches!(
+                e.source,
+                IoError::Io {
+                    kind: crate::IoKind::PermissionDenied,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), b"untouched");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reopen_reaches_the_held_inode_without_walking_its_path() {
+        if nix::unistd::geteuid().is_root() {
+            crate::testutil::skip_or_fail(
+                "linux_reopen_reaches_the_held_inode_without_walking_its_path",
+                "running as root, which traverses a 0600 directory and voids the premise",
+            );
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let dir = root(&d).join("sub");
+        std::fs::create_dir(&dir).unwrap();
+        let p = dir.join("held-sentinel");
+        std::fs::write(&p, b"old").unwrap();
+        let fd = held(&p);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = replace_held_file(fd.as_fd(), &p, b"new");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+    }
+
     fn root(d: &tempfile::TempDir) -> PathBuf {
         d.path().canonicalize().unwrap()
     }
