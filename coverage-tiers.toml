@@ -308,7 +308,7 @@ files = [
   # kernel-observed completion. Guard failures can damage the subject's own
   # files or misreport progress; real filesystem/ack tests remain required.
   # It also holds the read content-release guard (bytes released only after the
-  # acknowledged completion), controlled by hand probe P6.
+  # acknowledged completion), pinned by an_unacknowledged_success_releases_no_content.
   "bins/maknae/src/mutation.rs",
 ]
 

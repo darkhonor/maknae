@@ -2655,7 +2655,7 @@ async fn a_readable_descriptor_is_refused_before_intent() {
 }
 
 #[tokio::test]
-async fn a_read_whose_report_cannot_be_recorded_withholds_the_content() {
+async fn a_read_whose_report_cannot_be_recorded_is_not_acknowledged_and_ends_incomplete() {
     let fx = common::Fixture::new("read_report_unrecorded", "Read");
     let target = fx.root.join("unrecorded-read-sentinel");
     std::fs::write(&target, b"unrecorded read bytes").unwrap();

@@ -682,7 +682,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
 ) -> Result<Option<maknae_io::Zeroizing<Vec<u8>>>, String> {
     run_attempt(prepared, grant, stream, cfg, request_started)
         .await
-        .map(|(_, content)| content)
+        .map(|(success, content)| content.filter(|_| success))
 }
 type Attempted = (bool, Option<maknae_io::Zeroizing<Vec<u8>>>);
 async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(

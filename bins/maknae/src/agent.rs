@@ -66,7 +66,8 @@ pub fn mint_conversation_id() -> String {
 /// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
 /// refusal of an ARMED request is `Refused` — the one outcome the model may
 /// not appeal. An armed `Unauthorized` is the kernel's refusal before any
-/// grant; the wire carries no reason (ADR-0019). An unarmed refusal, any other
+/// grant; the wire carries no reason (ADR-0019), so it also covers evidence and
+/// capacity refusals (#344, #370). An unarmed refusal, any other
 /// code (a `BadRequest` for `/a/../b` is a client-shape fault), any protocol
 /// surprise and any transport error is `Unavailable`. So is a grant that ends
 /// without an acknowledged `Success` (OS refusal, limit, changed object, lost

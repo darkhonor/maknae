@@ -245,9 +245,8 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 }
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
-/// carries `uid` only (i64 carriage of the u32 — lossless). A reserved `name`
-/// token used to sit beside it for runtime-originated requests; ADR-0024 struck
-/// it (#276), so the uid is the whole subject. `Read` carries the client-supplied
+/// carries `uid` only (i64 carriage of the u32 — lossless); the uid is the whole
+/// subject (ADR-0024). `Read` carries the client-supplied
 /// path as the resource `path` attribute; resource/context otherwise empty.
 pub fn build_authz_request(
     verb: &Verb,
