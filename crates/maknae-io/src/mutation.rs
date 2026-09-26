@@ -482,12 +482,9 @@ mod tests {
     fn held_replacement_refuses_directories_links_and_moved_objects_without_effect() {
         let d = tempfile::tempdir().unwrap();
         let dir = root(&d);
-        assert_eq!(
-            replace_held_file(held(&dir).as_fd(), &dir, b"bad")
-                .unwrap_err()
-                .state,
-            EffectState::NoEffect
-        );
+        let e = replace_held_file(held(&dir).as_fd(), &dir, b"bad").unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(matches!(e.source, IoError::NotRegularFile { .. }), "{e:?}");
         let p = dir.join("linked-sentinel");
         std::fs::write(&p, b"untouched").unwrap();
         std::fs::hard_link(&p, dir.join("second-name")).unwrap();
@@ -561,17 +558,22 @@ mod tests {
             );
             return;
         }
-        let d = tempfile::tempdir().unwrap();
-        let dir = root(&d).join("sub");
-        std::fs::create_dir(&dir).unwrap();
-        let p = dir.join("held-sentinel");
-        std::fs::write(&p, b"old").unwrap();
-        let fd = held(&p);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let result = replace_held_file(fd.as_fd(), &p, b"new");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        result.unwrap();
-        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+        crate::testutil::isolated(
+            "mutation::tests::linux_reopen_reaches_the_held_inode_without_walking_its_path",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let dir = root(&d).join("sub");
+                std::fs::create_dir(&dir).unwrap();
+                let p = dir.join("held-sentinel");
+                std::fs::write(&p, b"old").unwrap();
+                let fd = held(&p);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let result = replace_held_file(fd.as_fd(), &p, b"new");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                result.unwrap();
+                assert_eq!(std::fs::read(&p).unwrap(), b"new");
+            },
+        );
     }
 
     fn root(d: &tempfile::TempDir) -> PathBuf {
