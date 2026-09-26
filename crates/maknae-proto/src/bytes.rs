@@ -1,15 +1,13 @@
-//! CBOR byte-string carriage for file content (spec D5). serde's derive on
-//! `Vec<u8>` emits a CBOR ARRAY (~2 wire bytes per content byte, which would
-//! halve the real read ceiling and route oversize to a client-side framing
-//! error instead of `TooLarge`); this newtype pins the byte-string major type
-//! with a hand-written impl — deliberately no `serde_bytes` dependency
-//! (supply-chain: an unreviewed pinned dep for twenty lines of visitor).
-//! Content is secret-adjacent (the deny-list grammar exists because home
-//! files are): the buffer zeroizes on drop, and `Debug` redacts.
+//! CBOR byte-string carriage for content the CLI holds. serde's derive on
+//! `Vec<u8>` emits a CBOR ARRAY (~2 bytes per content byte); this newtype
+//! pins the byte-string major type with a hand-written impl — deliberately no
+//! `serde_bytes` dependency (supply-chain: an unreviewed pinned dep for twenty
+//! lines of visitor). Content is secret-adjacent (the deny-list grammar exists
+//! because home files are): the buffer zeroizes on drop, and `Debug` redacts.
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
-/// File content on the wire. CBOR byte-string major type (asserted by test),
+/// File content held by the subject. CBOR byte-string major type (asserted by test),
 /// zeroize-on-drop, redacting `Debug`. Decode intermediates are not wiped —
 /// ciborium's growth copies and error-path buffer, and the scratch
 /// `from_reader` supplies (ADR-0026).
@@ -24,9 +22,8 @@ impl Bytes {
     }
 }
 
-/// Redacting: `Response`/`Payload` derive `Debug`, so a derived impl here
-/// would dump home-file content into any `{:?}` (e.g. a future eprintln on a
-/// write-failure path). Length only.
+/// Redacting: its holders derive `Debug`, so a derived impl here would dump
+/// home-file content into any `{:?}`. Length only.
 impl std::fmt::Debug for Bytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Bytes(<{} bytes>)", self.0.len())

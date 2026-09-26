@@ -165,6 +165,10 @@ fn credential_helper() {
         send(&stream, &file);
         send(&stream, &directory);
         stream.read_exact(&mut [0]).unwrap();
+        assert_eq!(
+            &*maknae_io::read_held_file(file.as_fd(), &project.join("existing"), 4096).unwrap(),
+            b"subject-writable-original"
+        );
         maknae_io::replace_held_file(
             file.as_fd(),
             &project.join("existing"),
@@ -190,6 +194,9 @@ fn credential_helper() {
         let file = receive(&stream);
         let directory = receive(&stream);
         assert!(maknae_io::open_path_for_delegation(&project.join("existing")).is_err());
+        let e =
+            maknae_io::read_held_file(file.as_fd(), &project.join("existing"), 4096).unwrap_err();
+        assert_eq!(e.state, maknae_io::EffectState::NoEffect);
         let e = maknae_io::replace_held_file(
             file.as_fd(),
             &project.join("existing"),

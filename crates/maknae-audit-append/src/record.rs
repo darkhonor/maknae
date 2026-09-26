@@ -175,6 +175,7 @@ pub enum MutationEffectKind {
     ReplacedFile,
     CreatedDirectory,
     DeletedEntry,
+    ReadFile,
 }
 /// Immutable prepared operation; distinguishes subtree authorization from one entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,11 +185,14 @@ pub enum MutationOperation {
     DeleteEntry,
     DeleteTree,
     Mkdir,
+    Read,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationEffectRecord {
     pub path: String,
     pub effect: MutationEffectKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
 }
 /// Trusted schema outside the deployer's free-form AU-3(1) extension. Session ID
 /// lives on AuditRecord; intent_seq correlates every phase within that session.
@@ -386,6 +390,7 @@ mod tests {
             effects: vec![MutationEffectRecord {
                 path: "/sentinel".into(),
                 effect: MutationEffectKind::CreatedFile,
+                length: None,
             }],
             stopped_at: None,
         });
@@ -398,6 +403,43 @@ mod tests {
         );
         let invalid = encoded.replace("ClientReported", "VerifiedClient");
         assert!(serde_json::from_str::<AuditRecord>(&invalid).is_err());
+    }
+
+    #[test]
+    fn a_read_effect_records_its_reported_length_and_other_effects_omit_it() {
+        let audit = MutationAudit {
+            operation: Some(MutationOperation::Read),
+            authorized_paths: vec!["/sentinel/read".into()],
+            intent_seq: 3,
+            phase: MutationPhase::Progress,
+            origin: MutationOrigin::ClientReported,
+            status: MutationStatus::ReportedProgress,
+            content_length: None,
+            first_index: Some(0),
+            effects: vec![
+                MutationEffectRecord {
+                    path: "/sentinel/read".into(),
+                    effect: MutationEffectKind::ReadFile,
+                    length: Some(25),
+                },
+                MutationEffectRecord {
+                    path: "/sentinel/created".into(),
+                    effect: MutationEffectKind::CreatedFile,
+                    length: None,
+                },
+            ],
+            stopped_at: None,
+        };
+        let json = serde_json::to_string(&audit).unwrap();
+        assert!(
+            json.contains("\"effect\":\"ReadFile\",\"length\":25"),
+            "{json}"
+        );
+        assert!(!json.contains("\"CreatedFile\",\"length\""), "{json}");
+        assert_eq!(
+            serde_json::to_string(&MutationOperation::Read).unwrap(),
+            "\"Read\""
+        );
     }
 
     #[test]

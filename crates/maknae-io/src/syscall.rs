@@ -391,10 +391,10 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
 }
 
 /// No create or truncate: the effect is the caller's, after the grant.
-pub(crate) fn open_writable_existing(path: &Path, extra: OFlag) -> nix::Result<OwnedFd> {
+pub(crate) fn open_existing(path: &Path, access: OFlag, extra: OFlag) -> nix::Result<OwnedFd> {
     nix::fcntl::open(
         path,
-        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | extra,
+        access | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | extra,
         NixMode::empty(),
     )
 }
@@ -407,15 +407,36 @@ pub(crate) use macos_reopen_writable as reopen_writable;
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_reopen_writable<F: AsFd>(held: &F, _granted: &Path) -> nix::Result<OwnedFd> {
     use std::os::fd::AsRawFd;
-    open_writable_existing(
+    open_existing(
         Path::new(&format!("/proc/self/fd/{}", held.as_fd().as_raw_fd())),
+        OFlag::O_WRONLY,
         OFlag::empty(),
     )
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_reopen_writable<F: AsFd>(_held: &F, granted: &Path) -> nix::Result<OwnedFd> {
-    open_writable_existing(granted, OFlag::O_NOFOLLOW)
+    open_existing(granted, OFlag::O_WRONLY, OFlag::O_NOFOLLOW)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_reopen_readable as reopen_readable;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_reopen_readable as reopen_readable;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_reopen_readable<F: AsFd>(held: &F, _granted: &Path) -> nix::Result<OwnedFd> {
+    use std::os::fd::AsRawFd;
+    open_existing(
+        Path::new(&format!("/proc/self/fd/{}", held.as_fd().as_raw_fd())),
+        OFlag::O_RDONLY,
+        OFlag::empty(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_reopen_readable<F: AsFd>(_held: &F, granted: &Path) -> nix::Result<OwnedFd> {
+    open_existing(granted, OFlag::O_RDONLY, OFlag::O_NOFOLLOW)
 }
 
 #[cfg(target_os = "linux")]
@@ -518,6 +539,18 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"safe");
     }
 
+    #[test]
+    fn readable_reopen_sets_cloexec_and_confers_no_write() {
+        let d = tmp();
+        let p = d.path().join("reopen-read");
+        std::fs::write(&p, b"safe").unwrap();
+        let held = open_path_delegation(&p).unwrap();
+        let fd = reopen_readable(&held, &p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert_eq!(nix::unistd::write(&fd, b"x"), Err(nix::errno::Errno::EBADF));
+        assert_eq!(std::fs::read(&p).unwrap(), b"safe");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_writable_reopen_refuses_a_symlink_at_the_granted_path() {
@@ -564,6 +597,7 @@ mod tests {
         // exemptions; the descriptor tests separately hold actual behavior.
         let mut groups = vec![
             vec![OFlag::O_WRONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC],
+            vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC],
             vec![mutation_directory_flags(), OFlag::O_NOFOLLOW],
         ];
         #[cfg(target_os = "macos")]
@@ -577,6 +611,13 @@ mod tests {
         #[cfg(target_os = "macos")]
         groups.push(vec![
             OFlag::O_WRONLY,
+            OFlag::O_NONBLOCK,
+            OFlag::O_CLOEXEC,
+            OFlag::O_NOFOLLOW,
+        ]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![
+            OFlag::O_RDONLY,
             OFlag::O_NONBLOCK,
             OFlag::O_CLOEXEC,
             OFlag::O_NOFOLLOW,
@@ -605,13 +646,13 @@ mod tests {
     }
 
     #[test]
-    fn writable_existing_open_sets_cloexec_and_never_creates() {
+    fn existing_open_sets_cloexec_and_never_creates() {
         let d = tmp();
         let p = d.path().join("flags");
         std::fs::write(&p, b"safe").unwrap();
-        let fd = open_writable_existing(&p, OFlag::empty()).unwrap();
+        let fd = open_existing(&p, OFlag::O_WRONLY, OFlag::empty()).unwrap();
         assert!(is_cloexec(&fd));
-        assert!(open_writable_existing(&d.path().join("absent"), OFlag::empty()).is_err());
+        assert!(open_existing(&d.path().join("absent"), OFlag::O_WRONLY, OFlag::empty()).is_err());
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl Fixture {
         // `a_hardlink_alias_of_a_denied_file_is_refused` was denied at confinement
         // before the nlink check it exists to prove -- `verify_delegated` runs
         // `strip_prefix` BEFORE `check_target`, where nlink lives, and the test's
-        // `contains("os dac")` cannot tell the two apart. (ADR-0009 §5 said the
+        // `contains("os dac")` could not tell the two apart. (ADR-0009 §5 said the
         // reverse, "refused before confinement is even consulted"; corrected in
         // place, dated, in this same change.)
         // `a_permit_outside_the_anchored_root_is_refused_distinctly`
@@ -149,12 +149,10 @@ fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     .unwrap()
 }
 
-/// Drive a request whose subject DELEGATES a descriptor for `delegate`, the way a
-/// real client does: the client process opens the object itself, so the kernel has
-/// already run the whole permission check for that subject, and the descriptor it
-/// hands over IS the OS's answer (ADR-0009 decision 1).
+/// Drive a read as a real client does: the subject holds a location-only descriptor,
+/// then reads after the grant.
 #[allow(clippy::too_many_arguments)]
-async fn drive_read<P>(
+async fn read_attempt<P>(
     fx_principal: &maknae_config::Principal,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
@@ -162,30 +160,78 @@ async fn drive_read<P>(
     verb: maknae_proto::Verb,
     timeout: Duration,
     delegate: &std::path::Path,
-) -> Option<Vec<u8>>
+) -> common::ReadRun
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
-    let fds = maknae_io::DelegatedFds::new(4);
-    // `open` here is the SUBJECT's open. If it fails, the subject genuinely cannot
-    // read the object and no descriptor is delegated -- which is itself the case
-    // ADR-0009 decision 2 turns into a Deny, so the test still exercises a real path.
-    if let Ok(f) = std::fs::File::open(delegate) {
-        fds.push(std::os::fd::OwnedFd::from(f));
-    }
-    drive_with(
+    read_attempt_with(
         fx_principal,
         authorizer,
         emit,
         peer_uid,
         verb,
         timeout,
-        fds,
-        Arc::new(Default::default()),
-        maknae_config::transport_from_section(None).unwrap(),
-        Arc::new("US".to_string()),
+        delegate,
+        || {},
     )
     .await
+}
+
+/// `read_attempt`, with `before_read` run after the descriptor is taken and before
+/// the subject reads.
+#[allow(clippy::too_many_arguments)]
+async fn read_attempt_with<P>(
+    fx_principal: &maknae_config::Principal,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegate: &std::path::Path,
+    before_read: impl FnOnce(),
+) -> common::ReadRun
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    let held = maknae_io::open_path_for_delegation(delegate).ok();
+    let fds = maknae_io::DelegatedFds::new(4);
+    if let Some(fd) = &held {
+        fds.push(fd.try_clone().unwrap());
+    }
+    let (mut client, server) = tokio::io::duplex(256 * 1024);
+    let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+    let task = tokio::spawn(maknae_kernel::handle(
+        server,
+        "maknae://d/plane/cli".to_string(),
+        peer_uid,
+        true,
+        None,
+        emit,
+        1,
+        maknae_config::transport_from_section(None).unwrap(),
+        serde_json::json!({}),
+        authorizer,
+        Arc::new(fx_principal.clone()),
+        Arc::new(Default::default()),
+        backend_name,
+        Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+        maknae_kernel::unavailable_egress(),
+        timeout,
+        maknae_security::Lane::Local,
+        fds,
+    ));
+    maknae_proto::write_frame(&mut client, &request_frame(verb))
+        .await
+        .unwrap();
+    before_read();
+    let run = common::read_as_subject(&mut client, held.as_ref()).await;
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the handler finishes")
+        .unwrap();
+    run
 }
 
 /// Drive one request through `handle()` with the given authorizer; return
@@ -284,6 +330,14 @@ fn request_record(recs: &[AuditRecord]) -> &AuditRecord {
     recs.iter()
         .find(|r| r.event == "request")
         .expect("a request record must exist")
+}
+
+fn read_content(run: &common::ReadRun) -> Option<&[u8]> {
+    run.content.as_ref().map(|c| c.as_slice())
+}
+
+fn mutation_of(record: &AuditRecord) -> &maknae_audit_append::MutationAudit {
+    record.mutation.as_ref().expect("a mutation record")
 }
 
 // ---------------------------------------------------------------------------
@@ -510,19 +564,21 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("deny frame");
+    .await;
+    assert_eq!(run.finish, None);
+    let frame = run.first.expect("deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
@@ -557,8 +613,8 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
 /// `principal.home` is written by `maknae enroll` VERBATIM from `getpwuid` -- the
 /// directory service's value, not an operator's choice, and re-derived on every
 /// enroll -- and the daemon feeds that one value to FOUR consumers: the delegated
-/// lane's confinement root (`handler::delegated_plan`, reached at decision time
-/// AND again inside the read PEP), which is prefix-checked against the
+/// lane's confinement root (`handler::delegated_plan`, reached at attempt
+/// preparation), which is prefix-checked against the
 /// KERNEL-reported path of the subject's descriptor; the `~` referent of every
 /// policy glob (`PathGlob::parse`); and the boot-time anchor probe in `run.rs`.
 /// Because the kernel reports the RESOLVED form and the configured form never
@@ -596,27 +652,28 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
     // that the object, the policy and the fixture are sound -- so the deny below
     // is attributable to the home's FORM. (It does not by itself prove a descriptor
     // was delegated through the link; the `std::fs::read` check before the second
-    // drive does that, because `drive_read` swallows a failed subject open and an
-    // undelivered descriptor yields the identical `os accessibility unknown`.)
+    // drive does that, because `read_attempt` swallows a failed subject open and an
+    // undelivered descriptor yields the identical `read descriptor missing`.)
     let real_target = fx.dir.join("notes.txt").to_string_lossy().into_owned();
     let ctl = RecEmit::new();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         fx.authorizer(),
         ctl.clone(),
         me,
         maknae_proto::Verb::Read {
             path: real_target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&real_target),
     )
-    .await
-    .expect("positive control answers");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
-        other => panic!("positive control must PERMIT through the real home, got {other:?}"),
-    }
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(content),
+        "positive control must PERMIT through the real home"
+    );
     assert_eq!(request_record(&ctl.records()).outcome.result, "permit");
 
     // The link lives BESIDE the canonical real dir -- same parent, so on both
@@ -670,32 +727,29 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
     );
 
     let emit = RecEmit::new();
-    let frame = drive_read(
+    let run = read_attempt(
         &via_link,
         pdp_via_link,
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("a deny frame");
+    .await;
     let _ = std::fs::remove_file(&link);
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(
-            &*b.0, content,
-            "a symlinked enrolled home must serve the bytes, not deny"
-        ),
-        other => panic!(
-            "#216: a symlinked principal.home must PERMIT once boot canonicalises. \
-             A DENY here means the resolution stopped reaching one of the four \
-             consumers -- `os accessibility unknown` points at the confinement \
-             root, `no capability entry` at the `~` glob expansion. Got {other:?}"
-        ),
-    }
+    assert_eq!(
+        read_content(&run),
+        Some(content),
+        "#216: a symlinked principal.home must PERMIT once boot canonicalises. \
+         A DENY here means the resolution stopped reaching one of the four \
+         consumers -- `read evidence refused` points at the confinement \
+         root, `no capability entry` at the `~` glob expansion. Trail: {:?}",
+        request_record(&emit.records()).outcome.reason
+    );
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
     // The trail records the RESOLVED object (ADR-0009 decision 6: the verified
@@ -723,23 +777,24 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     std::fs::write(&target, sentinel).unwrap();
     let emit = RecEmit::new();
     let authorizer = composed(&fx, "UNCLASSIFIED");
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         authorizer.clone(),
         emit.clone(),
         me.as_raw(),
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
+            conversation: None,
         },
         Duration::from_secs(5),
         &target,
     )
-    .await
-    .expect("authorized user receives a response");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(bytes)) => assert_eq!(&*bytes.0, sentinel),
-        other => panic!("ordinary development requires a real read, got {other:?}"),
-    }
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(&sentinel[..]),
+        "ordinary development requires a real read"
+    );
     let records = emit.records();
     let rec = request_record(&records);
     assert_eq!(rec.outcome.result, "permit");
@@ -769,18 +824,20 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
         user.name,
     ));
     let emit = RecEmit::new();
-    let contained = drive_read(
+    let contained = read_attempt(
         &fx.principal,
         authorizer,
         emit.clone(),
         me.as_raw(),
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
+            conversation: None,
         },
         Duration::from_secs(5),
         &target,
     )
     .await
+    .first
     .unwrap();
     assert!(
         matches!(maknae_proto::decode_response(&contained).unwrap().result,
@@ -794,7 +851,8 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
 }
 
 #[tokio::test]
-async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
+async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_answers_at_the_reopen(
+) {
     let fx = Fixture::new("shared-filesystem-refusals");
     let me = nix::unistd::geteuid();
     let user = nix::unistd::User::from_uid(me).unwrap().unwrap();
@@ -807,20 +865,22 @@ async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
             user.name,
         ));
         // The descriptor really arrives: this must reach the path deny,
-        // not pass vacuously because the OS proof was missing.
+        // not pass vacuously because the descriptor was missing.
         let emit = RecEmit::new();
-        let frame = drive_read(
+        let frame = read_attempt(
             &fx.principal,
             composed(&fx, "UNCLASSIFIED"),
             emit.clone(),
             me.as_raw(),
             maknae_proto::Verb::Read {
                 path: target.to_str().unwrap().into(),
+                conversation: None,
             },
             Duration::from_secs(5),
             &target,
         )
         .await
+        .first
         .unwrap();
         assert!(
             matches!(maknae_proto::decode_response(&frame).unwrap().result,
@@ -837,7 +897,7 @@ async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
         );
         assert!(!frame.windows(sentinel.len()).any(|w| w == sentinel));
 
-        // A universally allowed path still needs subject OS authority.
+        // A universally allowed path still needs the subject's descriptor.
         let emit = RecEmit::new();
         let frame = drive(
             &fx.principal,
@@ -846,6 +906,7 @@ async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
             me.as_raw(),
             maknae_proto::Verb::Read {
                 path: fx.dir.join("allowed.txt").to_str().unwrap().into(),
+                conversation: None,
             },
             Duration::from_secs(5),
         )
@@ -860,8 +921,50 @@ async fn filesystem_access_for_users_and_admins_keeps_os_and_path_refusals() {
             request_record(&records)
                 .outcome
                 .reason
-                .contains("os accessibility unknown"),
+                .contains("read descriptor missing"),
             "{role}"
+        );
+
+        let allowed = fx.dir.join("allowed.txt");
+        std::fs::write(&allowed, b"os-refused-sentinel").unwrap();
+        std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let emit = RecEmit::new();
+        let run = read_attempt_with(
+            &fx.principal,
+            composed(&fx, "UNCLASSIFIED"),
+            emit.clone(),
+            me.as_raw(),
+            maknae_proto::Verb::Read {
+                path: allowed.to_str().unwrap().into(),
+                conversation: None,
+            },
+            Duration::from_secs(5),
+            &allowed,
+            || {
+                std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o000)).unwrap();
+                if std::fs::read(&allowed).is_ok() {
+                    panic!("premise void: this process reads a 0000 file (root?)")
+                }
+            },
+        )
+        .await;
+        std::fs::remove_file(&allowed).unwrap();
+        assert_eq!(
+            run.finish,
+            Some(maknae_proto::ReportedFinish::OsRefused),
+            "{role}"
+        );
+        assert_eq!(read_content(&run), None);
+        let records = emit.records();
+        assert_eq!(request_record(&records).outcome.result, "permit");
+        let last = mutation_of(records.last().unwrap());
+        assert_eq!(
+            last.status,
+            maknae_audit_append::MutationStatus::ReportedOsRefused
+        );
+        assert_eq!(
+            last.origin,
+            maknae_audit_append::MutationOrigin::ClientReported
         );
     }
 }
@@ -881,34 +984,20 @@ async fn a_permitted_read_returns_the_file_bytes() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("permitted read answers");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
-        other => panic!("expected content, got {other:?}"),
-    }
-    // Wire-level byte-string proof (spec test obligation): the raw frame must
-    // contain the CBOR definite-length BYTE STRING header (0x40 | len for
-    // len<24) followed by the content verbatim — the derive's ARRAY form
-    // encodes each byte >= 0x18 as two wire bytes and cannot contain this
-    // sequence.
-    let mut expected = vec![0x40u8 | content.len() as u8];
-    expected.extend_from_slice(content);
-    assert!(
-        frame.windows(expected.len()).any(|w| w == expected),
-        "read content must ride as a CBOR byte string on the wire"
-    );
+    .await;
+    assert_eq!(read_content(&run), Some(content));
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.object.as_deref(), Some(target.as_str()));
@@ -916,6 +1005,33 @@ async fn a_permitted_read_returns_the_file_bytes() {
         req.object_requested, None,
         "asked and decided agree, so the divergence field stays absent — its presence \
          is the anomaly signal and must not be diluted by the ordinary case"
+    );
+    let records = emit.records();
+    assert_eq!(
+        mutation_of(&req).operation,
+        Some(maknae_audit_append::MutationOperation::Read)
+    );
+    let progress = records
+        .iter()
+        .filter_map(|r| r.mutation.as_ref())
+        .find(|m| m.phase == maknae_audit_append::MutationPhase::Progress)
+        .expect("a progress record");
+    assert_eq!(
+        progress.effects,
+        vec![maknae_audit_append::MutationEffectRecord {
+            path: target.clone(),
+            effect: maknae_audit_append::MutationEffectKind::ReadFile,
+            length: Some(content.len() as u64),
+        }]
+    );
+    let last = mutation_of(records.last().unwrap());
+    assert_eq!(
+        last.status,
+        maknae_audit_append::MutationStatus::ReportedSuccess
+    );
+    assert_eq!(
+        last.origin,
+        maknae_audit_append::MutationOrigin::ClientReported
     );
 }
 
@@ -934,18 +1050,20 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let frame = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
     .await
+    .first
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
@@ -1006,7 +1124,7 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     std::fs::hard_link(fx.dir.join(".ssh/id_rsa"), fx.dir.join("innocent")).unwrap();
     let target = fx.dir.join("innocent").to_string_lossy().into_owned();
     // The subject CAN open the alias, so a descriptor IS delegated below and the
-    // `os dac` refusal that follows is not "no descriptor arrived". That rules
+    // `read evidence` refusal that follows is not "no descriptor arrived". That rules
     // out ONE of the two ways this pass goes vacuous; the other -- a confinement
     // refusal upstream of the nlink check (#216) -- is held only by
     // `Fixture::new`'s canonicalize, and this assertion cannot see it.
@@ -1017,18 +1135,20 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let frame = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
     .await
+    .first
     .expect("refusal frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
@@ -1038,18 +1158,12 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
         other => panic!("hardlink alias must refuse (nlink_exactly_one): {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    // CHANGED BY ADR-0009: `nlink_exactly_one` is now checked while VERIFYING the
-    // delegated descriptor, before the decision — so a multiply-linked object never
-    // establishes OS access at all and the verdict is a composed Deny rather than a
-    // PEP refusal. The outcome is right and strictly earlier.
-    //
-    // OWED (#84 / #181 / ADR-0008 D5, "land it once"): this reason cannot yet
-    // distinguish "a descriptor arrived and failed verification" from "no descriptor
-    // arrived". Both deny, so nothing is unsafe — but an operator cannot tell a
-    // hard-link alias from a client that sent nothing.
+    // `nlink_exactly_one` is checked while VERIFYING the delegated descriptor, at
+    // attempt preparation, before the decision.
     assert!(
-        req.outcome.reason.contains("os dac"),
-        "the refusal is OS-DAC-attributed: {}",
+        req.outcome.reason.contains("read evidence refused")
+            && !req.outcome.reason.contains("descriptor missing"),
+        "the refusal is the descriptor's verification: {}",
         req.outcome.reason
     );
 }
@@ -1065,18 +1179,20 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let frame = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
     .await
+    .first
     .expect("unavailable frame");
     // Restore so Drop can clean up.
     std::fs::set_permissions(&fx.dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1086,9 +1202,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     // home, which needs only search on its parent and no permission on the home
     // itself. A home any non-principal can write is still refused.
     //
-    // What changed is the SHAPE of the refusal, for the better: it is now a composed
-    // Deny at the PDP rather than a PEP unavailability. ADR-0009's "it produces a
-    // verdict instead of a failure" — the trail records a decision, not an outage.
+    // It is refused at attempt preparation: the trail records a deny, not an outage.
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
@@ -1098,10 +1212,15 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome.reason.starts_with("read evidence refused"),
+        "{}",
+        req.outcome.reason
+    );
 }
 
 #[tokio::test]
-async fn an_oversize_file_is_refused_too_large_after_a_real_permit() {
+async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permit() {
     let fx = Fixture::new("oversize");
     fx.write_policy(SHIPPED_POLICY);
     // Default frame_max_bytes 65536; budget = 65536-512. 70000 > budget.
@@ -1115,32 +1234,36 @@ async fn an_oversize_file_is_refused_too_large_after_a_real_permit() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("TooLarge frame");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Err(e) => {
-            assert_eq!(e.code, ProtoErrCode::TooLarge);
-            assert_eq!(e.message, "resource too large");
+    .await;
+    let first = run.first.as_deref().expect("a grant frame");
+    match maknae_proto::decode_response(first).unwrap().result {
+        RespResult::Ok(Payload::MutationAttempt(grant)) => {
+            assert_eq!(grant.limits.max_bytes, 65024)
         }
-        other => panic!("oversize must refuse TooLarge, never truncate: {other:?}"),
+        other => panic!("oversize is a permitted attempt with a byte limit: {other:?}"),
     }
-    let req = request_record(&emit.records()).clone();
+    assert_eq!(run.finish, Some(maknae_proto::ReportedFinish::LimitReached));
+    assert_eq!(read_content(&run), None);
+    let records = emit.records();
+    assert_eq!(request_record(&records).outcome.result, "permit");
+    let last = mutation_of(records.last().unwrap());
     assert_eq!(
-        req.outcome.result, "permit",
-        "a Permit was rendered; delivery was refused"
+        last.status,
+        maknae_audit_append::MutationStatus::ReportedLimitReached
     );
-    assert_eq!(req.outcome.posture, "refused-oversize");
+    assert_eq!(last.stopped_at.as_deref(), Some(target.as_str()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,14 +1427,9 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     std::fs::create_dir_all(&outside_dir).unwrap();
     // Canonical for fixture hygiene, matching `Fixture::new` (#216); it does not
     // change this test's outcome. The grant below is never consulted: the object
-    // is outside `principal.home`, so `verify_delegated` fails confinement, no OS
-    // answer is stamped, and the `fs.read` arm's os-dac gate denies BEFORE
-    // `decide_fs` (the only caller of the glob matcher) ever runs. The reason
-    // assertion below is what pins that ordering: were the gate bypassed, the
-    // ASKED path is what gets stamped (no verified object), the glob written
-    // from the same variable matches it, and either matcher answer -- permit or
-    // `no capability entry` -- changes the reason. The mutant dies in both
-    // path forms.
+    // is outside `principal.home`, so `verify_delegated` fails confinement at
+    // attempt preparation, BEFORE `decide_fs` (the only caller of the glob
+    // matcher) ever runs. The reason assertion below pins that ordering.
     let outside_dir = outside_dir
         .canonicalize()
         .expect("canonicalize the outside dir");
@@ -1329,24 +1447,22 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     );
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let frame = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: outside.to_string_lossy().into_owned(),
+            conversation: None,
         },
         Duration::from_secs(5),
         &outside,
     )
     .await
+    .first
     .expect("outside-root frame");
-    // CHANGED BY ADR-0009. Previously the PDP PERMITTED an operator-granted absolute
-    // path and the PEP refused it afterwards, so the trail recorded "permit, then
-    // refused-outside-root". Confinement is now one of the two proofs the decision
-    // itself requires (decision 3), so an object outside the enrolled home never
-    // establishes OS access and the verdict is a real Deny.
+    // Confinement is one of the proofs the attempt requires (ADR-0009 decision 3).
     //
     // The property this test exists for is unchanged and better served: a grant the
     // operator wrote for a path outside the home does NOT yield the bytes, and the
@@ -1360,20 +1476,13 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
-    // "Distinctly": a composed Deny at the PDP, not a delivery refusal. A
-    // `ReadRefusal::Refused` renders the same wire triple and the same
-    // `deny` result but can never carry this reason -- and the reason also
-    // proves the os-dac gate short-circuited before the absolute grant was
-    // evaluated: neither a matcher permit nor a `no capability entry` abstain
-    // renders it, so a gate-bypass mutant dies here (a confinement-deletion
-    // mutant delivers bytes and dies at the frame match above). What this
-    // reason cannot do is separate "outside the
-    // anchored root" from "root soundness failed" -- both render it (see the
-    // note on `Fixture::new`); "no descriptor arrived" is ruled out by the
+    // "Distinctly": neither a matcher permit nor a `no capability entry` abstain
+    // renders this reason. "No descriptor arrived" is ruled out by the
     // `std::fs::read` above.
-    assert_eq!(
-        req.outcome.reason, "os dac: os accessibility unknown",
-        "an object outside the enrolled home never establishes OS access"
+    assert!(
+        req.outcome.reason.starts_with("read evidence refused: "),
+        "an object outside the enrolled home is refused at preparation: {}",
+        req.outcome.reason
     );
     let leak = b"outside the enrolled home";
     assert!(
@@ -1425,7 +1534,10 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
         fx.authorizer(),
         emit.clone(),
         me,
-        maknae_proto::Verb::Read { path: evasive },
+        maknae_proto::Verb::Read {
+            path: evasive,
+            conversation: None,
+        },
         Duration::from_secs(5),
     )
     .await
@@ -1711,8 +1823,7 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
         other => panic!("expected an explicit refusal, got {other:?}"),
     }
     // And the TRAIL must not claim the disclosure happened. The pre-dispatch
-    // record says permit/authorized; a second record corrects the posture,
-    // exactly as the read PEP does for these same four conditions.
+    // record says permit/authorized; a second record corrects the posture.
     let last = emit.records().last().cloned().expect("a record");
     assert_eq!(last.outcome.result, "deny");
     assert_eq!(
@@ -2252,9 +2363,9 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
     );
 }
 
-/// Case 5: a delegated, OS-readable object that no capability entry matches.
-/// Preconditions per the plan: a REAL delegated fd (without one, the os-dac
-/// gate denies first with `os dac:`); the file inside the fixture home
+/// Case 5: a delegated object that no capability entry matches.
+/// Preconditions per the plan: a REAL delegated fd (without one, preparation
+/// refuses first: `read descriptor missing`); the file inside the fixture home
 /// (confinement); and a NARROW allow list -- under the shipped `Read(~/**)`
 /// every in-home path AllowMatches and this test would Permit instead.
 #[tokio::test]
@@ -2266,18 +2377,20 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
     std::fs::write(fx.dir.join("outside.txt"), b"not under any entry").unwrap();
     let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
     let emit = RecEmit::new();
-    let frame = drive_read(
+    let frame = read_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
         0,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
     .await
+    .first
     .expect("a deny frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Err(e) => {
@@ -2372,23 +2485,24 @@ async fn under_a_secret_ceiling_unmarked_content_is_served_as_unclassified() {
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         composed(&fx, "SECRET"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("a frame");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
-        other => panic!("a SECRET ceiling must SERVE unmarked content: {other:?}"),
-    }
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(content),
+        "a SECRET ceiling must SERVE unmarked content"
+    );
     let rec = request_record(&emit.records()).clone();
     assert_eq!(rec.action, "fs.read");
     assert_eq!(rec.outcome.result, "permit");
@@ -2411,22 +2525,215 @@ async fn at_baseline_the_composition_permits_what_the_baseline_permits() {
     let target = fx.dir.join("notes.bin").to_string_lossy().into_owned();
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let frame = drive_read(
+    let run = read_attempt(
         &fx.principal,
         composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
         maknae_proto::Verb::Read {
             path: target.clone(),
+            conversation: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
     )
-    .await
-    .expect("permitted read answers");
-    match maknae_proto::decode_response(&frame).unwrap().result {
-        RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(&*b.0, content),
-        other => panic!("expected content, got {other:?}"),
-    }
+    .await;
+    assert_eq!(read_content(&run), Some(content));
     assert_eq!(request_record(&emit.records()).outcome.result, "permit");
+}
+
+#[tokio::test]
+async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
+    let fx = common::Fixture::new("read_client_performed", "Read");
+    let target = fx.root.join("unique-read-attempt-sentinel");
+    std::fs::write(&target, b"SENTINEL-365-READ-CONTENT").unwrap();
+    let records = common::Records::new(0);
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+        },
+        Some(held.try_clone().unwrap()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    drop(client);
+    task.await.unwrap();
+    let frame = run.first.as_deref().expect("a response frame");
+    let needle = b"SENTINEL-365-READ-CONTENT";
+    let response = maknae_proto::decode_response(frame).unwrap();
+    assert!(
+        !frame.windows(needle.len()).any(|w| w == needle),
+        "the daemon read the subject's file: {:?}",
+        response.result
+    );
+    let RespResult::Ok(Payload::MutationAttempt(grant)) = &response.result else {
+        panic!(
+            "expected a subject-side read grant, got {:?}",
+            response.result
+        )
+    };
+    assert_eq!(
+        grant.scope,
+        maknae_proto::MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::ReadFile,
+        }
+    );
+    assert_eq!(grant.limits.max_bytes, 65024);
+    assert_eq!(read_content(&run), Some(&needle[..]));
+    let records = records.snapshot();
+    let phase = |phase| {
+        records
+            .iter()
+            .filter_map(|r| r.mutation.as_ref())
+            .find(|m| m.phase == phase)
+            .unwrap_or_else(|| panic!("a {phase:?} record"))
+    };
+    let intent = phase(maknae_audit_append::MutationPhase::Intent);
+    assert_eq!(
+        intent.origin,
+        maknae_audit_append::MutationOrigin::KernelObserved
+    );
+    assert_eq!(
+        intent.operation,
+        Some(maknae_audit_append::MutationOperation::Read)
+    );
+    assert_eq!(intent.content_length, None);
+    let progress = phase(maknae_audit_append::MutationPhase::Progress);
+    assert_eq!(
+        progress.effects[0].effect,
+        maknae_audit_append::MutationEffectKind::ReadFile
+    );
+    assert_eq!(progress.effects[0].length, Some(25));
+    let completion = mutation_of(records.last().unwrap());
+    assert_eq!(
+        completion.origin,
+        maknae_audit_append::MutationOrigin::ClientReported
+    );
+    assert_eq!(
+        completion.status,
+        maknae_audit_append::MutationStatus::ReportedSuccess
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_readable_descriptor_is_refused_before_intent() {
+    let fx = common::Fixture::new("read_readable_descriptor", "Read");
+    let target = fx.root.join("readable-descriptor-sentinel");
+    std::fs::write(&target, b"readable descriptor bytes").unwrap();
+    let records = common::Records::new(0);
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+        },
+        Some(std::fs::File::open(&target).unwrap().into()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, None).await;
+    drop(client);
+    task.await.unwrap();
+    let frame = run.first.as_deref().expect("a refusal frame");
+    assert!(
+        matches!(maknae_proto::decode_response(frame).unwrap().result,
+            RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized),
+        "a descriptor that confers read access must be refused"
+    );
+    let records = records.snapshot();
+    assert!(
+        records
+            .iter()
+            .any(|r| r.outcome.reason.contains("confers access beyond location")),
+        "{records:?}"
+    );
+    assert!(records.iter().all(|r| r.mutation.is_none()), "{records:?}");
+}
+
+#[tokio::test]
+async fn a_read_whose_report_cannot_be_recorded_is_not_acknowledged_and_ends_incomplete() {
+    let fx = common::Fixture::new("read_report_unrecorded", "Read");
+    let target = fx.root.join("unrecorded-read-sentinel");
+    std::fs::write(&target, b"unrecorded read bytes").unwrap();
+    let records = common::Records::new(3);
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+        },
+        Some(held.try_clone().unwrap()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_as_subject(&mut client, Some(&held)).await;
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(read_content(&run), None);
+    assert_eq!(
+        mutation_of(records.snapshot().last().unwrap()).status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+}
+
+#[tokio::test]
+async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
+    let fx = common::Fixture::new("read_report_over_limit", "Read");
+    let target = fx.root.join("over-limit-report-sentinel");
+    std::fs::write(&target, b"over limit report bytes").unwrap();
+    let records = common::Records::new(0);
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+        },
+        Some(maknae_io::open_path_for_delegation(&target).unwrap()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let frame = tokio::time::timeout(
+        Duration::from_secs(2),
+        maknae_proto::read_frame(&mut client, 1 << 20),
+    )
+    .await
+    .expect("a grant frame")
+    .unwrap();
+    let RespResult::Ok(Payload::MutationAttempt(grant)) =
+        maknae_proto::decode_response(&frame).unwrap().result
+    else {
+        panic!("expected a read grant")
+    };
+    let report = maknae_proto::MutationReport::Batch {
+        id: grant.id,
+        first_index: 0,
+        effects: vec![maknae_proto::EffectEntry {
+            path: target.to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::ReadFile,
+            length: Some(grant.limits.max_bytes + 1),
+        }],
+    };
+    maknae_proto::write_frame(
+        &mut client,
+        &maknae_proto::encode_mutation_report(&report).unwrap(),
+    )
+    .await
+    .unwrap();
+    let ack = tokio::time::timeout(
+        Duration::from_secs(2),
+        maknae_proto::read_frame(&mut client, 65536),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    assert_eq!(ack, None, "an over-limit report is never acknowledged");
+    drop(client);
+    task.await.unwrap();
+    assert_eq!(
+        mutation_of(records.snapshot().last().unwrap()).status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
 }

@@ -61,7 +61,7 @@ The operator confirmed that namespace mutations must work within the OS's actual
 
 **Amended 2026-09-26 (#365):** this paragraph.
 
-This extends the existing-object proof below. Every read and write is a subject-side attempt: the daemon decides it against the object's location and label and records it, and the supported CLI performs it under the subject's own credentials, with the outcome client-reported. The daemon receives only `O_PATH` descriptors, to verify the location it authorizes; it never reads or writes a subject's file content. Namespace preparation verifies an existing directory descriptor and constructs intended paths from its kernel-reported location and validated child components. Directory verification has its own type requirement; the regular-file `nlink_exactly_one` rule is not applicable to directories. A parent descriptor must never produce `os_accessible=true` for the intended mutation. Users and admins have identical filesystem authority, bounded by universal path policy, mandatory composition, and actual subject OS permissions.
+This extends the existing-object proof below. Every read and write is a subject-side attempt: the daemon decides it against the object's location and label and records it, and the supported CLI performs it under the subject's own credentials, with the outcome client-reported. The daemon accepts as evidence only no-access descriptors (`O_PATH`; on macOS a read-only descriptor until #368), to verify the location it authorizes, and never reads any descriptor it is handed; it never reads or writes a subject's file content. Namespace preparation verifies an existing directory descriptor and constructs intended paths from its kernel-reported location and validated child components. Directory verification has its own type requirement; the regular-file `nlink_exactly_one` rule is not applicable to directories. A parent descriptor must never produce `os_accessible=true` for the intended mutation. Users and admins have identical filesystem authority, bounded by universal path policy, mandatory composition, and actual subject OS permissions.
 
 The shipped policy permits `Write(~/projects/**)` independently of `Read(~/**)` and pairs the sensitive Read denies with Write denies. Replacement and single-entry deletion decide the verified object or parent-plus-leaf; recursive deletion requires a provable whole-subtree Write grant with no potentially intersecting deny. `mkdir --parents` decides every prospective prefix. Root deletion, malformed components, unexpected descriptor kinds, and unsupported remote execution refuse. Namespace directory acquisition uses Linux `O_PATH` or macOS `O_SEARCH`, so a directory that the user may write/search need not be listable. Enumeration still requires read permission. Symlink entries can be deleted without following their targets, and recursive descent refuses symlinks and detected cross-filesystem transitions.
 
@@ -69,28 +69,32 @@ The guarantee for namespace operations is authorization issuance and attributed 
 
 ### 1. The subject's OS access is established by the subject's own `open(2)`. The daemon never assumes credentials.
 
-On the local lane the client process **is** the subject — that is where `SO_PEERCRED` gets its uid. The client opens the file itself and delegates the resulting file descriptor to the daemon over `SCM_RIGHTS` ancillary data on the existing UDS.
+**Amended 2026-09-26 (#365):** this decision's body.
 
-An open file descriptor is not a name; it is an **unforgeable record of a completed authorization**. The permission check happens exactly once, at `open(2)`, and the kernel evaluates the whole stack for that subject — DAC bits, POSIX ACLs, supplementary groups, SELinux/AppArmor labels, mount flags. Nothing is reimplemented, nothing is approximated, and no capability is required of the daemon.
+On the local lane the client process **is** the subject — that is where `SO_PEERCRED` gets its uid. The client opens the object with no access (`O_PATH` on Linux; `O_RDONLY` on macOS pending [#368](https://github.com/darkhonor/maknae/issues/368)) and delegates that descriptor over `SCM_RIGHTS` on the existing UDS, so the daemon can verify where the object is.
 
-**The fd's existence is the OS's answer.** It follows that **#186's first owed bullet is superseded: `TargetRequired { owner, mode_mask }` are NOT to be populated on this path.** They remain `None`, and that is now correct and intentional rather than a gap — evaluating them daemon-side is precisely the mode-algebra reimplementation the operator forbade.
+After the grant, the client re-opens the object for the granted operation under its own credentials — through `/proc/self/fd/N` on Linux, by path with `O_NOFOLLOW` and a device and inode comparison on macOS — and performs it. The permission check happens at that re-open, and the kernel evaluates the whole stack for that subject — DAC bits, POSIX ACLs, supplementary groups, SELinux/AppArmor labels, mount flags. Nothing is reimplemented, nothing is approximated, and no capability is required of the daemon.
+
+**The OS's answer reaches the daemon as the client's report**, recorded `ClientReported`. **`TargetRequired { owner, mode_mask }` are NOT populated on this path**: evaluating them daemon-side is precisely the mode-algebra reimplementation the operator forbade.
 
 ### 2. A `Read` that arrives with no delegated fd is a `Deny`, not a client-side error
 
-The client that cannot open the file **still sends the request**, without an fd. The daemon stamps the failure and the PDP returns a real `Deny` with an OS-DAC reason.
+**Amended 2026-09-26 (#365):** this decision's body.
 
-This is #186's *"it produces a verdict instead of a failure"* requirement, and it is what keeps the denial in the AU-3 trail ([ADR-0019](ADR-0019-audit-record-model.md)). A client that silently failed locally would leave the refusal unrecorded.
+The client that cannot open the object **still sends the request**, without a descriptor. The daemon refuses it before the PDP and records the refusal (`read descriptor missing`), which keeps the denial in the AU-3 trail ([ADR-0019](ADR-0019-audit-record-model.md)). A client that silently failed locally would leave the refusal unrecorded.
 
-The daemon cannot distinguish *"the client could not open it"* from *"the client chose to send no fd."* **It does not need to: both deny**, and a client that denies itself is not a threat.
+The daemon cannot distinguish *"the client could not open it"* from *"the client chose to send no descriptor."* **It does not need to: both are refused**, and a client that refuses itself is not a threat. A client the OS refuses at its re-open reports it, and the completion is `ReportedOsRefused`.
 
 ### 3. Access and confinement are separate proofs. Both are required.
 
+**Amended 2026-09-26 (#365):** the table and the sentence following it.
+
 | Proof | Established by | Guarantees |
 |---|---|---|
-| the delegated fd | the subject's own `open(2)` | the subject genuinely has OS access to this object |
-| the confinement check | the daemon, on its own fd table | the object lies beneath the enrolled home |
+| the delegated no-access descriptor | the daemon, on its own fd table | where the object is: the kernel-reported path the PDP decides on, beneath the enrolled home |
+| the client's re-open | the subject's own `open(2)` | the subject has OS access to this object for this operation |
 
-Neither substitutes for the other. The fd says nothing about *where*; confinement says nothing about *who*. Confinement remains a **Maknae** control — the `~/**` grant — independent of what OS DAC permits, so a subject reading its own world-readable file outside the home is still refused.
+Neither substitutes for the other. The re-open says nothing about *where*; the descriptor's location says nothing about *who*. Confinement remains a **Maknae** control — the `~/**` grant — independent of what OS DAC permits, so a subject reading its own world-readable file outside the home is still refused.
 
 ### 4. Confinement is established from the daemon's own fd table, never by daemon-side path resolution
 
@@ -99,7 +103,9 @@ The daemon asks the kernel where the received fd points, using its **own** `/pro
 - **Linux:** `readlink("/proc/self/fd/N")`
 - **macOS:** `fcntl(fd, F_GETPATH)` — **VERIFIED 2026-08-30** on a `macos-26` runner, the full delegated suite (18 tests) green. `F_GETPATH` and not `F_GETPATH_NOFIRMLINK`: on APFS `/Users` is a firmlink to `/System/Volumes/Data/Users` and the two calls return the two forms; the user-visible form is what an operator writes in `principal.home` and what `realpath` reports, so it is what the confinement prefix-check compares against. *(Corrected 2026-09-04, #216: `principal.home` is not operator-written — `maknae enroll` takes it verbatim from `getpwuid` and re-derives it on every run, with no canonicalization at enroll or load. The `F_GETPATH` choice stands on the form `getpwuid` actually returns on macOS — `/Users/alex`, the firmlink-side name — being the form `F_GETPATH` reports; `realpath` agrees but is nowhere on the path. Where the passwd form and the kernel-reported form differ, every read denies fail-closed, which #216 tracked.)* *(**Resolved 2026-09-12, #216.** The daemon no longer compares two forms. `authz_boot_gate` canonicalizes `principal.home` ONCE, at or above `Principal`, through `maknae_io::resolve_dir` — which is the SAME `F_GETPATH` / `/proc/self/fd` resolver `verify_delegated` names a delegated descriptor with, so the confinement root and the kernel-reported path agree by CONSTRUCTION rather than by assertion. All four consumers read that one value: the confinement root at both call sites, the `~` expansion every allow/deny glob is parsed against, and the boot anchor probe. An unresolvable home refuses boot (`AuthzBootRefusal::UnresolvableHome`) instead of falling back to the configured string. Maintainer ruling: **boot** canonicalizes, not enroll — `bins/maknae` is untrusted by design, so the trust plane must not depend on the CLI having written a canonical value; enroll canonicalizes only for its own ACL/AppArmor grant-writing. Operators keep writing `~`, which is the point: nobody should need to know whether their home is NFS-mounted to express policy.)* If that is wrong the failure is **fail-closed** — a form mismatch makes `strip_prefix` fail, which denies — never a bypass.
 
-Neither touches the subject's directories, so **no permission on the home is required at any level and STIG `0700` homes work unchanged.** Containment then reduces to the component-wise prefix check `read_plan` already performs (never `str::strip_prefix` — `/home/opx` is a string-prefix of `/home/op`).
+**Amended 2026-09-26 (#365):** this paragraph's check.
+
+Neither touches the subject's directories, so **no permission on the home is required at any level and STIG `0700` homes work unchanged.** Containment then reduces to the component-wise prefix check `delegated_plan` performs (never `str::strip_prefix` — `/home/opx` is a string-prefix of `/home/op`).
 
 This decision is what removes `open_anchor_resolved` from the read path, and it is the only reason a `0700` home is servable.
 
@@ -133,24 +139,15 @@ Dropping the anchor **open** does not drop the anchor **requirement**. `AnchorRe
 
 For each thing the anchor open enforced: inode pinning is replaced by the delegated fd (a stronger pin — an open file description cannot change identity); owner and mode are re-established by `stat` as above; symlink refusal at intermediate components is superseded by decision 6, deliberately.
 
-### 8. OS DAC is lane-conditional, and the lane is derived from the accepting listener
+**Amended 2026-09-26 (#365):** decision 8 — heading, body, and table.
 
-The request carries two attributes:
+### 8. Filesystem attempts are local-lane only, and the lane is derived from the accepting listener
 
-- **`resource.os_accessible`** — `AttrValue::Bool`, stamped **only** when the OS answered.
-- **`context.dac_lane`** — `AttrValue::Str("local" | "remote")`, always stamped, derived from **which listener accepted the connection** (#114's per-listener split).
+Every request carries `context.dac_lane` — `AttrValue::Str("local" | "remote")`, always stamped, derived from **which listener accepted the connection** (#114's per-listener split) — and every filesystem attempt carries `context.fs_operation`, stamped by the kernel's preparation.
 
-`maknae-authz-basic` decides, **code-defined and unconfigurable** — in the same class as `Role::Adversary`'s deny-all, and **no `authz.yaml` key enables, disables, or overrides it**:
+`maknae-authz-basic` decides `fs.read`, `fs.write`, `fs.delete`, and `fs.mkdir` only on the `local` lane with a preparation matching the action; any other lane, an absent or mismatched preparation, or any `resource.os_accessible` attribute is a **`Deny`**. This is **code-defined and unconfigurable** — in the same class as `Role::Adversary`'s deny-all, and **no `authz.yaml` key enables, disables, or overrides it**. No PEP stamps `os_accessible`: the OS answers when the client performs the operation (decision 1). A remote subject has no process or descriptor on this host, so it has no subject-side attempt; its filesystem access is [#195](https://github.com/darkhonor/maknae/issues/195)'s owed design.
 
-| `dac_lane` | `os_accessible` | Result |
-|---|---|---|
-| `local` | `true` | the DAC operand is satisfied; the rest of the policy decides |
-| `local` | `false` | **`Deny`** — OS DAC refuses this subject this object |
-| `local` | *absent* | **`Deny`** — unknown; the daemon should have been able to ask and could not ([ADR-0008](ADR-0008-authorization-composition-contract.md) decision 4, no operand fails open) |
-| `remote` | *absent* | **not applicable** — OS DAC is structurally not the control here; the operand contributes nothing and the rest of the policy carries the decision |
-| *absent or unrecognized* | any | **`Deny`** — fail closed |
-
-The lane is the **only** thing distinguishing *"absent means Deny"* from *"absent means not applicable."* It must therefore be un-spoofable: **it is derived from the accepting listener and never from a request field, header, session claim, or anything else a client can influence.** Anything that lets a local request present as remote escapes OS DAC entirely — this is the single most important control in this ADR.
+The lane must be un-spoofable: **it is derived from the accepting listener and never from a request field, header, session claim, or anything else a client can influence.** Anything that lets a remote request present as local admits it to a decision that assumes a subject on this host — this is the single most important control in this ADR.
 
 ### 9. The composed decision is never more permissive on the remote lane than on the local lane for the same object
 
@@ -164,7 +161,9 @@ Choosing that route requires **amending ADR-0006**, not merely implementing #117
 
 ### 11. The remote lane's DAC-equivalent is unsolved and out of scope
 
-Naming the gap is part of the decision, so that nobody reads decision 8's *"not applicable"* as *"handled elsewhere."* It is not handled anywhere yet. Tracked as [#195](https://github.com/darkhonor/maknae/issues/195), a sub-issue of [#117](https://github.com/darkhonor/maknae/issues/117), which is unbuilt — so there is no live hole, only an owed design.
+**Amended 2026-09-26 (#365):** this paragraph's first sentence.
+
+Naming the gap is part of the decision, so that nobody reads decision 8's remote-lane refusal as *"handled elsewhere."* It is not handled anywhere yet. Tracked as [#195](https://github.com/darkhonor/maknae/issues/195), a sub-issue of [#117](https://github.com/darkhonor/maknae/issues/117), which is unbuilt — so there is no live hole, only an owed design.
 
 ## Consequences
 
@@ -231,13 +230,19 @@ Naming the gap is part of the decision, so that nobody reads decision 8's *"not 
 
 - **Delegated fds are a resource the daemon must bound.** Received descriptors count against `RLIMIT_NOFILE`. A per-message cap, `MSG_CMSG_CLOEXEC`, `MSG_CTRUNC` handling, and close-on-drop **on every error path** are requirements, not hygiene — the classic failure is leaking fds on the refusal path, which is the path an attacker controls.
 
-- **A delegated fd must be proved to be a readable regular file.** `fstat` for regular-file and `nlink`, `fcntl(F_GETFL)` for access mode. A fd to a FIFO, socket, TTY, or device would otherwise block the read or stream unboundedly.
+**Amended 2026-09-26 (#365):** this bullet.
 
-- **Stale authority is accepted and named.** The kernel never re-checks an open fd, so a client that opened at `0644` and sends the fd after a `chmod 0600` presents authority it no longer holds. This is **not** an escalation — it is identical to having read the bytes before the change — and it is unavoidable under any fd-delegation design. **It supersedes #186's expected-test 5e** (*"`maknae-io` re-enforces at open"*): there is no second open to re-enforce at. The honest property is the delegated fd plus `nlink == 1`, not a re-check.
+- **A delegated descriptor must be a single-link regular file and, on Linux, `O_PATH`** (`fstat`; `fcntl(F_GETFL)`, `refuse_access_bearing`). On macOS the interim `O_RDONLY` descriptor is admitted and never read through ([#368](https://github.com/darkhonor/maknae/issues/368)). The client's re-open binds to the same object (device, inode, `nlink == 1`, kernel-reported path) before it reads or writes.
+
+**Amended 2026-09-26 (#365):** this bullet.
+
+- **Authority is checked at the client's re-open.** The delegated descriptor carries no access, so the OS evaluates the subject's current permissions when the client re-opens the object for the granted operation; a `chmod` that removes the subject's access between preparation and the attempt is refused there and reported. An altered client can skip the re-open, but it already holds the subject's OS authority, so that is not an escalation.
 
 - **[#162](https://github.com/darkhonor/maknae/issues/162) is not solved by this ADR.** Fd delegation works only where the client can open the object; a client cannot open `/etc/maknae/maknae.yaml`, which is the whole point of that issue. Stated so that no one reads this decision as covering it.
 
-- **The mutating verbs inherit the mechanism, not the design.** [#158](https://github.com/darkhonor/maknae/issues/158), [#159](https://github.com/darkhonor/maknae/issues/159), [#160](https://github.com/darkhonor/maknae/issues/160) will delegate an `O_WRONLY` fd on the same shape — and `ProtectHome=read-only` stops constraining them, because the client performs the open. Their own semantics (atomicity, `O_TRUNC`, partial writes, `fs.chmod`/`fs.chown` where no fd is opened at all) are **not** decided here.
+**Amended 2026-09-26 (#365):** this bullet.
+
+- **Reads and replacements delegate a no-access descriptor of the object; namespace operations delegate one of the parent directory.** The client performs every attempt, so `ProtectHome=` does not constrain it. Operations with no descriptor at all (`fs.chmod`/`fs.chown`) are **not** decided here.
 
 - **The audit reason must distinguish denied-by-OS-DAC from denied-by-policy**, and both from unknown-lane and confinement failure. Same reason-enrichment work already owed by [#84](https://github.com/darkhonor/maknae/issues/84), [#181](https://github.com/darkhonor/maknae/issues/181), and ADR-0008 decision 5 — **land it once.**
 
@@ -263,7 +268,7 @@ Naming the gap is part of the decision, so that nobody reads decision 8's *"not 
 - [ADR-0019](ADR-0019-audit-record-model.md) — the trail obligations above
 - `packaging/common/maknaed.service` — the measured capability posture that forecloses credential switching
 - `crates/maknae-io/src/syscall.rs::open_parent_by_path` (`O_RDONLY|O_DIRECTORY` — read, not search), `crates/maknae-io/src/anchor.rs::open_anchor_resolved`
-- `crates/maknae-kernel/src/handler.rs::read_plan`, `::build_authz_request`; `crates/maknae-kernel/src/run.rs::read_pep`
+- **Amended 2026-09-26 (#365):** this reference. `crates/maknae-kernel/src/handler.rs::delegated_plan`, `::build_authz_request`; `crates/maknae-kernel/src/mutation.rs::prepare`; `crates/maknae-io/src/mutation.rs::read_held_file`
 - [#195](https://github.com/darkhonor/maknae/issues/195) — the remote-lane DAC gap (decisions 8, 9, 10, 11), a sub-issue of [#117](https://github.com/darkhonor/maknae/issues/117), the gateway epic
 - [#194](https://github.com/darkhonor/maknae/issues/194) — `fs.read` cannot serve a STIG'd `0700` home; fixed as a consequence of decision 4
 - [#114](https://github.com/darkhonor/maknae/issues/114) — the per-listener split decision 8's lane derivation rests on

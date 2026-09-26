@@ -65,14 +65,14 @@ pub use anchor::{
 pub use audit_append::open_audit_append;
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
-    open_directory_for_delegation, open_for_delegation, open_path_for_delegation, read_delegated,
-    recv_delegated, refuse_write_access, send_delegated, verify_delegated, Delegated, DelegatedFds,
-    DelegatedRequired, Received, DELEGATED_FDS_PER_CONNECTION,
+    open_directory_for_delegation, open_path_for_delegation, recv_delegated, refuse_access_bearing,
+    send_delegated, verify_delegated, Delegated, DelegatedFds, DelegatedRequired, Received,
+    DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use mutation::{
-    replace_held_file, verify_mutation_directory, DirectoryCursor, EffectState, MutationDirectory,
-    MutationEffect, MutationEffectKind, MutationFailure, MutationRequired,
+    read_held_file, replace_held_file, verify_mutation_directory, DirectoryCursor, EffectState,
+    MutationDirectory, MutationEffect, MutationEffectKind, MutationFailure, MutationRequired,
 };
 pub use normalize::normalize;
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.

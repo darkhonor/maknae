@@ -572,9 +572,17 @@ mod tests {
             RESOURCE_PATH_KEY,
             AttrValue::Str("/home/operator/.ssh/id_rsa".into()),
         );
+        fs_req.context.0.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            AttrValue::Str("local".into()),
+        );
+        fs_req.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str("read".into()),
+        );
         assert!(matches!(
             decide::decide_loaded(&lp, &principal(), &fs_req),
-            Verdict::Deny { .. }
+            Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")
         ));
         // An UNBOUND uid gets no role under the shipped defaults -- the half
         // that used to be asserted through the reserved `agent` name (#276).

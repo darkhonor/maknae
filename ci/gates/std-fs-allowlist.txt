@@ -77,45 +77,16 @@ crates/maknae-vault/src/socket.rs|std::fs::set_permissions(path, std::fs::Permis
 crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
 crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(path);
 
-# The read PEP's target requirement (handler.rs::delegated_plan). These two `None`s
-# are DELIBERATE and, since ADR-0009 (2026-08-30), load-bearing rather than merely
-# tolerated. The original justification here — "a target owner/mode requirement
-# would refuse legitimately-shared home files the operator's own modes expose" —
-# was true but weak, and is superseded: under ADR-0009 the subject opens the object
-# itself and delegates the descriptor, so **the descriptor IS the OS's answer**.
-# Populating owner/mode_mask here would mean recomputing the mode algebra daemon-side,
-# which ACLs, supplementary groups, SELinux and AppArmor make non-equivalent to what
-# the kernel decides — and which the operator explicitly forbade. The boundary
-# requirement lives on the ANCHOR (owner + 0o022); the target names
-# nlink_exactly_one + regular_file + a read-time-only max_bytes, and nlink is
-# load-bearing three ways
-# (ADR-0009 decision 5). Do not "complete" these fields; #186 owed-bullet 1 was
-# corrected for exactly this reason.
+# The object-descriptor target requirement (handler.rs::delegated_plan). These two
+# `None`s are DELIBERATE and load-bearing (ADR-0009): the descriptor proves location
+# only and the OS answers at the subject's own re-open. Populating owner/mode_mask here
+# would mean recomputing the mode algebra daemon-side, which ACLs, supplementary
+# groups, SELinux and AppArmor make non-equivalent to what the kernel decides — and
+# which the operator explicitly forbade. The boundary requirement lives on the ANCHOR
+# (owner + 0o022); the target names nlink_exactly_one + regular_file, and nlink is
+# load-bearing three ways (ADR-0009 decision 5). Do not "complete" these fields.
 crates/maknae-kernel/src/handler.rs|owner: None,
 crates/maknae-kernel/src/handler.rs|mode_mask: None,
-
-# ADR-0009 open_for_delegation — the SUBJECT's own open, performed by the untrusted
-# CLIENT under its own credentials. This is the ONE std::fs call in the crate whose
-# point is that it applies no requirement: the kernel's answer for that subject is the
-# whole product, and the descriptor carries it to a daemon that never resolves the
-# name. O_NOFOLLOW is deliberately absent (decision 6 has the daemon decide on the
-# RESOLVED path, so an in-home symlink must work and a malicious one must resolve to
-# the object the deny list names); object kind, link count and size are the daemon's to
-# require, on this very descriptor, and duplicating them here would put policy in an
-# untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
-# lifecycle stays in one crate and the client needs no exemption of its own.
-#
-# Updated 2026-09-22 (#241, codex round 2): the call is now an OpenOptions chain
-# carrying O_NONBLOCK (nix::fcntl::OFlag, via OpenOptionsExt::custom_flags) and the
-# inventory line moved with it. The flag is NOT a requirement — it is what makes the
-# open TERMINATE: a model-chosen read_file of a writer-less FIFO blocked the untrusted
-# CLI forever, outside every transport timeout, so the request never reached the PDP.
-# The daemon's regular_file requirement still refuses the object. Kept as std::fs
-# under this same exemption rather than moved to syscall.rs, where a nix::fcntl::open
-# would need a new disjoint-bitflag exemption in the mutation inventory for a flag a
-# behavioural test already holds
-# (delegated.rs::open_for_delegation_does_not_block_on_a_writerless_fifo).
-crates/maknae-io/src/delegated.rs|std::fs::OpenOptions::new()
 
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
@@ -123,7 +94,7 @@ crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
 # #158 delegated directories prove location; subject namespace syscalls decide OS permission.
 crates/maknae-io/src/mutation.rs|owner: None,
 crates/maknae-io/src/mutation.rs|mode_mask: None,
-# #365 the subject's re-open is where the OS decides the write; the held object need only be regular and single-link.
+# #365 the subject's re-open is where the OS decides the read or write; the held object need only be regular and single-link.
 crates/maknae-io/src/mutation.rs|..TargetRequired::OS_DAC_REGULAR
 
 # #158: CLI verifies the granted parent location; OS checks namespace access at

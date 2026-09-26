@@ -58,6 +58,17 @@ impl MutationExchange {
         {
             return Err(ReportError::Limit);
         }
+        if limits.max_bytes != 0
+            && !matches!(
+                scope,
+                MutationScope::Exact {
+                    effect: ReportedEffect::ReadFile,
+                    ..
+                }
+            )
+        {
+            return Err(ReportError::Limit);
+        }
         match &scope {
             MutationScope::Exact { path, .. } => {
                 canonical_path(path)?;
@@ -150,6 +161,14 @@ impl MutationExchange {
                     };
                     if entry.effect != expected {
                         return Err(ReportError::WrongEffect);
+                    }
+                    if entry.effect == ReportedEffect::ReadFile {
+                        let n = entry.length.ok_or(ReportError::InconsistentClaim)?;
+                        if n > self.limits.max_bytes {
+                            return Err(ReportError::Limit);
+                        }
+                    } else if entry.length.is_some() {
+                        return Err(ReportError::InconsistentClaim);
                     }
                 }
                 if let MutationScope::RecursiveDelete { root } = &self.scope {
@@ -288,6 +307,24 @@ mod tests {
             max_effects: 4096,
             max_depth: 128,
             deadline_ms: 5000,
+            max_bytes: 0,
+        }
+    }
+    fn read_limits(max_bytes: u64) -> MutationLimits {
+        MutationLimits {
+            max_bytes,
+            ..limits()
+        }
+    }
+    fn read_entry(length: Option<u64>) -> MutationReport {
+        MutationReport::Batch {
+            id: ID,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: "/sentinel/read".into(),
+                effect: ReportedEffect::ReadFile,
+                length,
+            }],
         }
     }
     fn tree() -> MutationExchange {
@@ -309,6 +346,7 @@ mod tests {
                 .map(|p| EffectEntry {
                     path: (*p).into(),
                     effect,
+                    length: None,
                 })
                 .collect(),
         }
@@ -738,6 +776,7 @@ mod tests {
                 max_effects: 1,
                 max_depth: 1,
                 deadline_ms: 5000,
+                max_bytes: 0,
             },
         )
         .unwrap();
@@ -1027,6 +1066,83 @@ mod tests {
             MutationExchange::begin(ID, MutationScope::Directories { paths: vec![] }, limits())
                 .unwrap_err(),
             ReportError::OutOfScope
+        );
+    }
+
+    #[test]
+    fn only_a_read_grant_may_carry_a_byte_limit() {
+        let read = MutationScope::Exact {
+            path: "/sentinel/read".into(),
+            effect: ReportedEffect::ReadFile,
+        };
+        assert!(MutationExchange::begin(ID, read.clone(), read_limits(0)).is_ok());
+        assert!(MutationExchange::begin(ID, read, read_limits(65024)).is_ok());
+        for scope in [
+            MutationScope::Exact {
+                path: "/sentinel/read".into(),
+                effect: ReportedEffect::ReplacedFile,
+            },
+            MutationScope::RecursiveDelete {
+                root: "/sentinel/tree".into(),
+            },
+            MutationScope::Directories {
+                paths: vec!["/sentinel/a".into()],
+            },
+        ] {
+            assert_eq!(
+                MutationExchange::begin(ID, scope, read_limits(1)).unwrap_err(),
+                ReportError::Limit
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_report_needs_a_length_within_the_limit_and_other_effects_carry_none() {
+        let begin = |max| {
+            MutationExchange::begin(
+                ID,
+                MutationScope::Exact {
+                    path: "/sentinel/read".into(),
+                    effect: ReportedEffect::ReadFile,
+                },
+                read_limits(max),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            begin(10).validate_report(&read_entry(None)).unwrap_err(),
+            ReportError::InconsistentClaim
+        );
+        assert_eq!(
+            begin(10)
+                .validate_report(&read_entry(Some(11)))
+                .unwrap_err(),
+            ReportError::Limit
+        );
+        let mut ok = begin(10);
+        let pending = ok.validate_report(&read_entry(Some(10))).unwrap();
+        assert_eq!(ok.acknowledge(pending).unwrap().next_index, 1);
+        let mut create = MutationExchange::begin(
+            ID,
+            MutationScope::Exact {
+                path: "/sentinel/c".into(),
+                effect: ReportedEffect::CreatedFile,
+            },
+            limits(),
+        )
+        .unwrap();
+        let claimed = MutationReport::Batch {
+            id: ID,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: "/sentinel/c".into(),
+                effect: ReportedEffect::CreatedFile,
+                length: Some(0),
+            }],
+        };
+        assert_eq!(
+            create.validate_report(&claimed).unwrap_err(),
+            ReportError::InconsistentClaim
         );
     }
 }

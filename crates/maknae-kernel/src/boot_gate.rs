@@ -80,7 +80,7 @@ fn authz_boot_gate_with(
     // #216 -- THE ONE PLACE THE CANONICAL FORM OF `principal.home` IS ESTABLISHED.
     // It must land here, at or above `Principal`, and never at a call site: the
     // value feeds FOUR consumers -- `handler::delegated_plan`'s confinement root
-    // (reached BOTH at decision time and again inside the read PEP), the `~`
+    // (reached at attempt preparation), the `~`
     // expansion every allow/deny glob is parsed against, and the boot anchor
     // probe. Canonicalizing only some of them permits at decision and then dies
     // in the PEP with a different record shape.
@@ -504,7 +504,7 @@ mod tests {
     /// #216 — the enrolled home is canonicalized ONCE, HERE, before the PDP is
     /// built, so the `~` expansion in the policy (`authz.rs::PathGlob::parse`)
     /// and the confinement root the PEP prefix-checks (`handler::delegated_plan`,
-    /// reached from BOTH `run.rs` decide and the read PEP) name the SAME form the
+    /// reached at attempt preparation) name the SAME form the
     /// kernel reports for a delegated descriptor (`F_GETPATH` / `/proc/self/fd`).
     ///
     /// Maintainer ruling 2026-09-12, option B: **boot** canonicalizes, not enroll.

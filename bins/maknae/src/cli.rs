@@ -12,8 +12,7 @@
 //! the "wire path" sentence below, though it has been a direct dependency and on
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `clap` and `maknae-io` (delegation arming — `open_for_delegation` in
-//! `send_verb`, and `mutation.rs`); `maknae-agent` is the agent loop's
+//! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` is the agent loop's
 //! (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
 //! `security-framework` are `enroll/`-only. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
@@ -99,10 +98,10 @@ enum Command {
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
-    /// Read a file under the enrolled home through the daemon's reference
-    /// monitor (the policy in /etc/maknae/authz.yaml decides; raw bytes to
-    /// stdout). Paths are sent lexically absolute; `..` is refused by the
-    /// daemon's canonical pre-gate.
+    /// Read a file under the enrolled home: the daemon decides (the policy in
+    /// /etc/maknae/authz.yaml), and the CLI reads under your credentials; raw
+    /// bytes to stdout. Paths are sent lexically absolute; `..` is refused by
+    /// the daemon's canonical pre-gate.
     Read {
         /// File to read (absolute, or relative to the current directory).
         path: std::path::PathBuf,
@@ -167,7 +166,10 @@ impl From<Verb> for maknae_proto::Verb {
         match v {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
-            Verb::Read { path } => maknae_proto::Verb::Read { path },
+            Verb::Read { path } => maknae_proto::Verb::Read {
+                path,
+                conversation: None,
+            },
             Verb::Write { path } => maknae_proto::Verb::FsWrite {
                 path,
                 content_length: 0,
@@ -273,28 +275,6 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     outcome
 }
 
-/// The object this verb delegates a descriptor for, if any.
-///
-/// Only terms that NAME an object have one (ADR-0009). `ping` and `whoami` name none,
-/// so an unarmed connection writes plainly and the daemon's OS-DAC gate never asks
-/// about them.
-fn delegated_object(verb: &Verb) -> Option<&str> {
-    match verb {
-        Verb::Read { path } => Some(path.as_str()),
-        // The three admin disclosures name NO object: the state they report is
-        // the daemon's own, never a client-supplied path, so there is nothing
-        // for a subject to delegate a descriptor for.
-        Verb::Ping
-        | Verb::Write { .. }
-        | Verb::Delete { .. }
-        | Verb::Mkdir { .. }
-        | Verb::Whoami
-        | Verb::AdminStatus
-        | Verb::AdminConfigShow
-        | Verb::AdminSubjectList => None,
-    }
-}
-
 /// The post-mint round trip: connect → request → (bounded) response → print. Split out so
 /// [`execute`] can revoke the minted token on EVERY return path (success or error) before
 /// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
@@ -303,9 +283,8 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 /// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
 /// `maknae agent` prints its own (`agent::run`'s `println!` of the final answer). The
 /// sendable core is [`send_verb`], which prints no result, so a caller that sends many
-/// verbs is not also a printer. `send_verb` is not silent: it writes three arming
-/// diagnostics to stderr (`cannot prepare filesystem operation`, `cannot open`,
-/// `cannot delegate`), and
+/// verbs is not also a printer. `send_verb` is not silent: it writes one arming
+/// diagnostic to stderr (`cannot prepare filesystem operation`), and
 /// `mutation::execute`, which it calls on the `MutationAttempt` path, prints too.
 async fn round_trip(
     verb: Verb,
@@ -315,16 +294,7 @@ async fn round_trip(
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
 ) -> Result<bool, String> {
-    match send_verb(
-        request_verb,
-        content,
-        delegated_object(&verb),
-        transport,
-        client,
-        ca,
-    )
-    .await?
-    {
+    match send_verb(request_verb, content, transport, client, ca).await? {
         SentOutcome::Payload(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
             // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
@@ -334,6 +304,16 @@ async fn round_trip(
             Ok(true)
         }
         SentOutcome::WriteDone { applied } => Ok(applied),
+        SentOutcome::ReadDone { content: Some(c) } => {
+            // Raw bytes, no trailing newline, no lossy conversion — a
+            // non-UTF-8 file is legal content.
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&c.0)
+                .map_err(|e| format!("writing content to stdout: {e}"))?;
+            Ok(true)
+        }
+        SentOutcome::ReadDone { content: None } => Ok(false),
         SentOutcome::Refused { code, message, .. } => {
             eprintln!("maknae: daemon refused: {code:?}: {message}");
             Ok(false)
@@ -342,7 +322,7 @@ async fn round_trip(
 }
 
 /// What one sent verb came back as, with no RESULT printed — the caller decides what a
-/// terminal (or a model) is told. (`send_verb`'s three arming diagnostics go to stderr;
+/// terminal (or a model) is told. (`send_verb`'s arming diagnostic goes to stderr;
 /// see [`send_verb`].)
 ///
 /// `Refused` carries the code AND the message because [`round_trip`] prints both; dropping
@@ -356,27 +336,11 @@ pub(crate) enum SentOutcome {
     /// A mutation reached a terminal state. `applied` is true ONLY for a client-reported
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
     WriteDone { applied: bool },
-    /// The daemon refused, with the wire's own code and message and no reason beyond them
-    /// (ADR-0019).
-    ///
-    /// `armed` belongs to the READ/delegated-object lane, the only lane that reads it. On
-    /// that lane it is false in exactly two cases — `maknae_io::open_for_delegation`
-    /// returned `Err`, or the stream could not arm a descriptor — and true otherwise. On
-    /// the MUTATION lane it is always true, including when `prepare` recorded a
-    /// `preparation_error` and `descriptor()` is `Ok(None)` so nothing was armed; that
-    /// costs nothing, because `write_outcome` never reads it and every non-`Applied` write
-    /// is already `Unknown`. So `armed` is never a claim that a descriptor was attached:
-    /// `armed: false` records failed descriptor PREPARATION on the CLIENT, on either of two
-    /// branches — `open_for_delegation` returned `Err` (the subject's own OS-DAC, or a path
-    /// that does not exist), or the stream could not arm one, which attempts no open and so
-    /// says nothing about the subject's rights (documented unreachable today, fail-closed
-    /// anyway). What the kernel then refuses, and why, depends on the gates the request
-    /// meets first: the lexical pre-gate, then the descriptor, then the PDP. A nonexistent
-    /// path that also carries `..` travels unarmed and comes back `BadRequest` for its
-    /// shape — `run.rs`'s pre-gate runs before any descriptor evaluation — not as a
-    /// want-of-descriptor deny (ADR-0009 decision 2), which is what the other orderings
-    /// reach. Neither branch is a decision about the object's content, and a caller must
-    /// not report either as one.
+    /// A read attempt ended; `content` is `Some` only after an acknowledged client-reported `Success`.
+    ReadDone {
+        content: Option<maknae_proto::Bytes>,
+    },
+    /// The daemon refused, with the wire's own code and message (ADR-0019). `armed` is false, on a filesystem verb, iff the CLI delegated no descriptor, so no decision was made about the object.
     Refused {
         code: maknae_proto::ProtoErrCode,
         message: String,
@@ -385,17 +349,11 @@ pub(crate) enum SentOutcome {
 }
 
 /// Send ONE verb over the post-mint plane and report what came back, printing no RESULT —
-/// the caller decides what a terminal (or a model) is told. Not silent: the three arming
-/// failures below go to stderr, and `mutation::execute` prints on the write path.
-///
-/// `object` is the path to open and delegate a descriptor for, passed EXPLICITLY rather
-/// than derived here: the delegated object is keyed by the CLI's own [`Verb`] (see
-/// [`delegated_object`]), so that exhaustive match stays in one place and a caller with no
-/// CLI `Verb` at all can still arm a read exactly as `maknae read` does (ADR-0009).
+/// the caller decides what a terminal (or a model) is told. Not silent: the arming
+/// diagnostic below goes to stderr, and `mutation::execute` prints on the attempt path.
 pub(crate) async fn send_verb(
     request_verb: maknae_proto::Verb,
     content: Option<maknae_proto::Bytes>,
-    object: Option<&str>,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
@@ -419,64 +377,26 @@ pub(crate) async fn send_verb(
         Ok(r) => r.map_err(|e| e.to_string())?,
     };
 
-    // ADR-0009: for a term that names an object, WE open it — as the subject — and
-    // delegate the descriptor. The kernel therefore runs the whole permission check
-    // (DAC bits, ACLs, supplementary groups, SELinux) under our own credentials, and
-    // the daemon decides on an object it never had to resolve a name to find.
+    // ADR-0009: for a term that names an object, WE open it — as the subject, for
+    // location only — and delegate the descriptor. The OS answers at our own re-open
+    // after the grant, and the daemon decides on an object it never resolved a name to.
     //
     // Armed AFTER the handshake, deliberately: the handshake's own writes would
     // otherwise consume the descriptor.
-    //
-    // If the open FAILS — or, on the branch below, the stream cannot arm at all — the
-    // request is still sent, unarmed. That is not a fallback — the request is DECIDED
-    // rather than dropped, and the refusal lands in the audit trail, which is the whole
-    // reason not to fail silently here. WHICH refusal depends on the gate it meets first:
-    // a lexically canonical path reaches the descriptor check and is denied for want of
-    // one (ADR-0009 decision 2); a path the kernel's lexical pre-gate rejects — an empty,
-    // `.` or `..` segment, or a trailing `/` — comes back `BadRequest` for its shape,
-    // before descriptor evaluation runs at all.
     let prepared = crate::mutation::prepare(request_verb.clone(), content);
-    // True unless the read lane below clears it, which it does on EITHER of two
-    // branches: `open_for_delegation` returned `Err`, or the stream could not arm a
-    // descriptor. A verb that names no object has nothing to delegate and is armed by
-    // definition (see [`SentOutcome::Refused`], which states the iff).
     let mut armed = true;
     if let Some(prepared) = &prepared {
         if let Some(error) = prepared.preparation_error() {
             eprintln!("maknae: cannot prepare filesystem operation: {error}");
         }
-        if let (Some(fd), Some(armer)) = (
+        match (
             prepared.descriptor().map_err(|e| e.to_string())?,
             stream.armer(),
         ) {
-            armer.arm(fd);
-        }
-    } else if let Some(object) = object {
-        // Split from the armer, deliberately: the single `if let` tuple this
-        // replaces conflated "this verb names no object" with "this stream
-        // cannot arm a descriptor", and left `armed` TRUE on the second. The
-        // kernel would then deny for want of a descriptor, and the CLI would
-        // report that generic `Unauthorized` as an ARMED refusal — the loop
-        // renders an armed one as "Not authorized", asserting a decision
-        // nobody made, which is exactly the class #241 fixed at
-        // `read_outcome`. Unreachable today (a client stream always has an
-        // armer) and therefore carries no test: there is no way to construct
-        // the state from outside, and a test that could would be testing its
-        // own fixture. Fail closed anyway.
-        match stream.armer() {
-            Some(armer) => match maknae_io::open_for_delegation(std::path::Path::new(object)) {
-                Ok(fd) => {
-                    armer.arm(fd);
-                }
-                Err(e) => {
-                    eprintln!("maknae: cannot open {object}: {e}");
-                    armed = false;
-                }
-            },
-            None => {
-                eprintln!("maknae: cannot delegate {object}: this stream cannot arm a descriptor");
-                armed = false;
+            (Some(fd), Some(armer)) => {
+                armer.arm(fd);
             }
+            _ => armed = false,
         }
     }
 
@@ -531,6 +451,19 @@ pub(crate) async fn send_verb(
         RespResult::Ok(Payload::MutationAttempt(grant)) => {
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
+            if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
+                let content = crate::mutation::execute_read(
+                    prepared,
+                    grant,
+                    &mut stream,
+                    transport,
+                    request_started,
+                )
+                .await?;
+                return Ok(SentOutcome::ReadDone {
+                    content: content.map(maknae_proto::Bytes::new),
+                });
+            }
             let applied =
                 crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
                     .await?;
@@ -583,15 +516,6 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
             Ok(())
         }
-        (Verb::Read { .. }, Payload::ReadContent(content)) => {
-            // Raw bytes, no trailing newline, no lossy conversion — a
-            // non-UTF-8 file is legal content.
-            use std::io::Write;
-            std::io::stdout()
-                .write_all(&content.0)
-                .map_err(|e| format!("writing content to stdout: {e}"))?;
-            Ok(())
-        }
         (Verb::AdminStatus, Payload::Status(s)) => {
             // Labels live in the format strings, not as bare literals: the
             // authz-composition drift gate's vocabulary net rejects a bare
@@ -628,7 +552,6 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         // producing side forced the decision; the consuming side did not.
         (v, p @ Payload::Pong)
         | (v, p @ Payload::Whoami(_))
-        | (v, p @ Payload::ReadContent(_))
         | (v, p @ Payload::ConfigView(_))
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
@@ -786,33 +709,6 @@ mod tests {
             e.contains("exceeds the configured frame budget"),
             "unexpected message: {e}"
         );
-    }
-
-    /// Only terms that NAME an object delegate one. `ping` and `whoami` name none, so
-    /// the client must not manufacture a descriptor for them — an unarmed connection
-    /// writes plainly, and the daemon's gate does not ask about OS DAC for a term with
-    /// no object.
-    #[test]
-    fn only_object_naming_verbs_delegate_a_descriptor() {
-        assert_eq!(
-            super::delegated_object(&super::Verb::Read {
-                path: "/home/op/notes".into()
-            }),
-            Some("/home/op/notes")
-        );
-        assert_eq!(super::delegated_object(&super::Verb::Ping), None);
-        assert_eq!(super::delegated_object(&super::Verb::Whoami), None);
-        // The three admin disclosures too. `delegated_object` gained these arms
-        // and this test did not: flipping one to `Some(..)` would make the
-        // untrusted client manufacture and delegate a descriptor for a term
-        // that names no object, and left the whole suite green.
-        for v in [
-            super::Verb::AdminStatus,
-            super::Verb::AdminConfigShow,
-            super::Verb::AdminSubjectList,
-        ] {
-            assert_eq!(super::delegated_object(&v), None, "{v:?} names no object");
-        }
     }
 
     use super::*;
@@ -1180,30 +1076,16 @@ mod tests {
         assert_eq!(
             v,
             maknae_proto::Verb::Read {
-                path: "/a/b".into()
+                path: "/a/b".into(),
+                conversation: None,
             }
         );
     }
 
     #[test]
-    fn read_payload_arm_accepts_content_and_refuses_mismatch() {
-        use maknae_proto::Bytes;
-        let ok = print_payload_for_verb(
-            Verb::Read { path: "/a".into() },
-            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
-        );
-        assert!(ok.is_ok());
+    fn a_read_accepts_no_plain_payload() {
         let mismatch = print_payload_for_verb(Verb::Read { path: "/a".into() }, Payload::Pong);
         assert!(mismatch.is_err(), "a Pong for a read is a protocol error");
-        let mismatch2 = print_payload_for_verb(
-            Verb::Ping,
-            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
-        );
-        assert!(mismatch2.is_err(), "content for a ping is a protocol error");
-    }
-
-    fn maknae_io_zeroizing(v: Vec<u8>) -> zeroize::Zeroizing<Vec<u8>> {
-        zeroize::Zeroizing::new(v)
     }
 
     /// The future `send_verb` returns must be `Send`: the CLI's `impl Plane`
@@ -1220,6 +1102,6 @@ mod tests {
         ca: &maknae_vault::CaBundle,
     ) {
         fn s<T: Send>(_: T) {}
-        s(send_verb(maknae_proto::Verb::Ping, None, None, t, c, ca));
+        s(send_verb(maknae_proto::Verb::Ping, None, t, c, ca));
     }
 }

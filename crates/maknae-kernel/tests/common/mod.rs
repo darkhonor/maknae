@@ -513,3 +513,123 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+
+/// The subject's half of a read attempt, as `bins/maknae`'s `mutation::execute_read` performs it.
+pub struct ReadRun {
+    pub first: Option<Vec<u8>>,
+    pub content: Option<maknae_io::Zeroizing<Vec<u8>>>,
+    pub finish: Option<maknae_proto::ReportedFinish>,
+}
+async fn report_acked(
+    client: &mut tokio::io::DuplexStream,
+    report: maknae_proto::MutationReport,
+) -> Option<maknae_proto::MutationAck> {
+    maknae_proto::write_frame(
+        client,
+        &maknae_proto::encode_mutation_report(&report).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        maknae_proto::read_frame(client, 65536),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .and_then(|b| maknae_proto::decode_mutation_ack(&b).ok())
+}
+pub async fn read_as_subject(
+    client: &mut tokio::io::DuplexStream,
+    held: Option<&OwnedFd>,
+) -> ReadRun {
+    use maknae_proto::{
+        EffectEntry, MutationReport, MutationScope, Payload, ReportedEffect, ReportedFinish,
+        RespResult,
+    };
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        maknae_proto::read_frame(client, 1 << 20),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let grant = first
+        .as_deref()
+        .and_then(|b| maknae_proto::decode_response(b).ok())
+        .and_then(|r| match r.result {
+            RespResult::Ok(Payload::MutationAttempt(g)) => Some(g),
+            _ => None,
+        });
+    let (Some(grant), Some(held)) = (grant, held) else {
+        return ReadRun {
+            first,
+            content: None,
+            finish: None,
+        };
+    };
+    let MutationScope::Exact {
+        path,
+        effect: ReportedEffect::ReadFile,
+    } = &grant.scope
+    else {
+        panic!("a read must be granted Exact ReadFile: {:?}", grant.scope)
+    };
+    match maknae_io::read_held_file(
+        std::os::fd::AsFd::as_fd(held),
+        std::path::Path::new(path),
+        grant.limits.max_bytes,
+    ) {
+        Ok(bytes) => {
+            let batch = MutationReport::Batch {
+                id: grant.id,
+                first_index: 0,
+                effects: vec![EffectEntry {
+                    path: path.clone(),
+                    effect: ReportedEffect::ReadFile,
+                    length: Some(bytes.len() as u64),
+                }],
+            };
+            let acked = report_acked(client, batch).await.map(|a| a.next_index) == Some(1)
+                && report_acked(
+                    client,
+                    MutationReport::Finished {
+                        id: grant.id,
+                        next_index: 1,
+                        outcome: ReportedFinish::Success,
+                        stopped_at: None,
+                    },
+                )
+                .await
+                .is_some();
+            ReadRun {
+                first,
+                content: acked.then_some(bytes),
+                finish: Some(ReportedFinish::Success),
+            }
+        }
+        Err(e) => {
+            let outcome = match e.source {
+                maknae_io::IoError::TargetTooLarge { .. } => ReportedFinish::LimitReached,
+                maknae_io::IoError::MutationPathChanged { .. }
+                | maknae_io::IoError::SizeChanged { .. } => ReportedFinish::PathChanged,
+                _ => ReportedFinish::OsRefused,
+            };
+            report_acked(
+                client,
+                MutationReport::Finished {
+                    id: grant.id,
+                    next_index: 0,
+                    outcome,
+                    stopped_at: Some(path.clone()),
+                },
+            )
+            .await;
+            ReadRun {
+                first,
+                content: None,
+                finish: Some(outcome),
+            }
+        }
+    }
+}

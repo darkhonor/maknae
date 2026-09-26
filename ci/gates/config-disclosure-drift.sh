@@ -140,7 +140,7 @@ fi
 # until someone classifies what it disclosing MEANS:
 #   unit        -- carries nothing.
 #   bytes       -- opaque content whose disclosure was decided by its OWN PEP
-#                  (the Read path's PDP verdict), not by this gate.
+#                  (the session.prompt verdict), not by this gate.
 #   preredacted -- values that already went through `effective_view`'s
 #                  deny-by-default fold; carries NO decision of its own, and
 #                  MUST NOT be used for anything that skips that fold.
@@ -150,12 +150,11 @@ fi
 PAYLOAD_DISPOSITIONS=(
   "Pong|unit"
   "Whoami|struct:WhoamiView"
-  "ReadContent|bytes"
   "ConfigView|preredacted"
   "Status|struct:StatusView"
   "SubjectList|struct:RoleBindingView"
   "MutationAttempt|authorized-attempt"
-  "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP), like ReadContent
+  "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP)
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

@@ -7,7 +7,8 @@
 //! Four limits of this file, so its coverage is not read wider than it is.
 //! First, the write lane driven here is the REPLACEMENT lane and only that:
 //! `FixturePlane::write` sends `WriteMode::Existing`, and replaces the file
-//! itself after a `MutationAttempt` grant. The CREATE
+//! itself after a `MutationAttempt` grant, and `FixturePlane::read` reads after
+//! a `MutationAttempt` grant through `maknae_io::read_held_file`. The CREATE
 //! lane — `WriteMode::CreateExclusive`, a `MutationAttempt` grant,
 //! `mutation::execute` — is never driven against the brain from here (#241);
 //! its coverage lives where the lane lives, in `bins/maknae`'s `mutation`
@@ -162,44 +163,36 @@ impl Plane for FixturePlane {
             other => Err(PlaneError::Transport(format!("{other:?}"))),
         }
     }
-    async fn read(&mut self, path: &str) -> ReadOutcome {
-        // ADR-0009: the subject opens; the kernel decides on the delegated descriptor.
-        let fd = std::fs::File::open(path)
-            .ok()
-            .map(std::os::fd::OwnedFd::from);
-        // Production's `armed` flag, learned from the same trigger: `send_verb`
-        // sets it false when its own `open_for_delegation` returned `Err`, or
-        // when its stream could not arm a descriptor, and sent the request
-        // unarmed anyway — which is this `None`. One real divergence, and it is
-        // liveness rather than permission: production sets `O_NONBLOCK` and
-        // this does not. A writer-less FIFO opens immediately there — armed —
-        // and the daemon's `regular_file` requirement refuses the object; here
-        // the same open would block the test forever. Neither open adds a
-        // check beyond the operating system's own `open(2)`; the kernel
-        // decides on the delegated descriptor. So the `armed` derivation is
-        // faithful.
-        let armed = fd.is_some();
-        match self.verb(Verb::Read { path: path.into() }, fd).await.result {
-            // The buffer is MOVED, never copied out of its `Zeroizing`
-            // (`maknae_proto::Bytes::new`) — the same hop `read_outcome` makes.
-            RespResult::Ok(Payload::ReadContent(b)) => ReadOutcome::Content(b.0),
-            // Exactly as production's `read_outcome` decides it: ONLY an
-            // authorization refusal of an ARMED request is `Refused`.
-            // Collapsing every code into `Refused` would leave the deny test
-            // green for a kernel that answered a PDP deny with `Internal` —
-            // the trail records the "deny" class for `Unavailable`/`TimedOut`
-            // too (`handler.rs:480-501`) — while the real CLI rendered
-            // "read unavailable". And an UNARMED refusal is not a verdict on
-            // content either way: on the paths this file sends it is the
-            // subject's own ENOENT/EACCES reaching the kernel's
-            // want-of-descriptor deny, and a path that also fails the lexical
-            // pre-gate would come back `BadRequest` before that — so it is
-            // `Unavailable` here as it is there (#241).
-            RespResult::Err(_) if !armed => ReadOutcome::Unavailable,
-            RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::Unauthorized => {
+    async fn read(&mut self, conversation: &str, path: &str) -> ReadOutcome {
+        // Mapped exactly as production's `read_outcome` maps `send_verb`'s outcome.
+        let held = maknae_io::open_path_for_delegation(std::path::Path::new(path)).ok();
+        let (mut client, task, body) = self.fx.start_egress(
+            Verb::Read {
+                path: path.into(),
+                conversation: Some(conversation.into()),
+            },
+            held.as_ref().map(|fd| fd.try_clone().unwrap()),
+            Arc::clone(&self.records),
+            maknae_config::transport_from_section(None).unwrap(),
+            Some("openai"),
+            self.egress.clone(),
+        );
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        let run = common::read_as_subject(&mut client, held.as_ref()).await;
+        drop(client);
+        task.await.unwrap();
+        let first = run
+            .first
+            .as_deref()
+            .and_then(|b| maknae_proto::decode_response(b).ok())
+            .map(|r| r.result);
+        match (run.content, first, held.is_some()) {
+            (Some(b), _, _) => ReadOutcome::Content(b),
+            (None, Some(RespResult::Err(e)), true)
+                if e.code == maknae_proto::ProtoErrCode::Unauthorized =>
+            {
                 ReadOutcome::Refused
             }
-            RespResult::Err(_) => ReadOutcome::Unavailable,
             _ => ReadOutcome::Unavailable,
         }
     }
@@ -246,6 +239,7 @@ impl Plane for FixturePlane {
                                 effects: vec![EffectEntry {
                                     path: path.clone(),
                                     effect: ReportedEffect::ReplacedFile,
+                                    length: None,
                                 }],
                             },
                             1,
@@ -388,6 +382,19 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         first_read < first_write,
         "read decided before write: {actions:?}"
     );
+    let reads: Vec<_> = recs.iter().filter(|r| r.action == "fs.read").collect();
+    assert_eq!(reads.len(), 3, "intent + progress + completion: {reads:?}");
+    assert_eq!(
+        reads[1].mutation.as_ref().unwrap().effects[0].effect,
+        maknae_audit_append::MutationEffectKind::ReadFile
+    );
+    assert_eq!(
+        reads.last().unwrap().mutation.as_ref().unwrap().status,
+        maknae_audit_append::MutationStatus::ReportedSuccess
+    );
+    assert!(reads
+        .iter()
+        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
     assert!(recs
         .iter()
         .filter(|r| r.action == "session.prompt")

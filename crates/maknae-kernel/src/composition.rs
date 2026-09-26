@@ -213,8 +213,7 @@ mod tests {
     }
 
     /// A read the baseline PERMITS: a real `Read(~/**)` grant for the enrolled
-    /// principal, a path under its home, and the OS's answer stamped `true`
-    /// (exactly what `build_authz_request` stamps after `verify_delegated`).
+    /// principal, a path under its home, prepared as a local read attempt.
     fn permitted_read(home: &std::path::Path) -> Request {
         permitted_read_marked(home, None)
     }
@@ -232,10 +231,6 @@ mod tests {
             "path",
             AttrValue::Str(home.join("notes.txt").display().to_string()),
         );
-        resource.insert(
-            maknae_security::RESOURCE_OS_ACCESSIBLE,
-            AttrValue::Bool(true),
-        );
         if let Some(m) = marking {
             resource.insert(
                 maknae_security::RESOURCE_CLASSIFICATION,
@@ -246,6 +241,10 @@ mod tests {
         context.insert(
             maknae_security::CONTEXT_DAC_LANE,
             AttrValue::Str(maknae_security::Lane::Local.as_str().to_string()),
+        );
+        context.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str("read".into()),
         );
         Request {
             subject: Subject(subject),

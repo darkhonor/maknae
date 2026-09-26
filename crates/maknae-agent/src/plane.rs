@@ -5,58 +5,28 @@ use maknae_proto::{PromptReply, Turn};
 use std::future::Future;
 
 /// `Refused` is the wire's `Unauthorized` on an ARMED read — for a read that
-/// word is honest (no side effect). `Unavailable` is everything else, and it
-/// is wider than a transport failure (widened 2026-09-22, #241): a missing
-/// frame or a timeout, yes, but also a `BadRequest` — a client-shape fault the
-/// subject can fix, not a decision — and an UNARMED refusal of any code.
-/// `armed: false` records that the CLIENT could not prepare a descriptor, on
-/// either of two branches: `open_for_delegation` returned `Err`, or the stream
-/// could not arm one — and only the first attempts an open, so only the first
-/// says anything about the path. What the kernel then refuses, and why,
-/// depends on which gate the request meets first (lexical pre-gate, then the
-/// descriptor, then the PDP): a path that is both nonexistent and
-/// non-canonical travels unarmed and comes back `BadRequest` for its shape,
-/// never reaching a want-of-descriptor deny. Either way it is not a verdict on
-/// content. The mapping is made and tested in `read_outcome`, in
-/// `bins/maknae`'s `agent`.
+/// word is honest (no side effect). `Unavailable` is everything else: a missing
+/// frame or a timeout, a `BadRequest` (a client-shape fault the subject can
+/// fix, not a decision), an UNARMED refusal of any code (`armed: false`: the
+/// client could not prepare a descriptor), and a grant that ended without an
+/// acknowledged success. None of these is a verdict on content. The mapping is
+/// made and tested in `read_outcome`, in `bins/maknae`'s `agent`.
 ///
-/// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: the buffer is
-/// kernel-served home-file content, and `maknae_proto::Bytes::new` states the
-/// rule the read path obeys — MOVE the buffer through, never copy content out
-/// of a `Zeroizing` into a plain `Vec`.
-///
-/// What that buys, precisely: the served bytes are moved from
-/// `maknae_proto::Bytes` into this variant, moved on into
-/// [`crate::render::ToolOutcome::ReadContent`], rendered into a
+/// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: it is the CLI's
+/// own zeroizing read buffer, moved through, never copied out into a plain
+/// `Vec` (`maknae_proto::Bytes::new` states the rule). It is moved on into
+/// [`crate::render::ToolOutcome::ReadContent`] and rendered into a
 /// `Zeroizing<String>` that [`crate::render::render`] allocates ONCE with
-/// headroom for its suffix on the UTF-8 content path — appended in place, so
-/// the served body is never reallocated and no old allocation is freed
-/// unzeroized (corrected 2026-09-22, #241: before the headroom it was; scoped
-/// 2026-09-22, #344: the guarantee belongs to the UTF-8 sub-arm, the only one
-/// that carries served content. The non-UTF-8 sub-arm returns a
-/// renderer-authored `binary content, N bytes` out of `format!`'s own
-/// over-allocation and MAY grow on the suffix — measured at a 100-byte body
-/// with a one-digit step counter: 45 bytes into a capacity doubled from 44.
-/// Nothing served is freed there, because nothing served is in it) — and
-/// copied from there into
-/// a `maknae_proto::SecretText`, which zeroizes too. So on the READ direction
-/// the content never lands in a plain buffer anywhere in this crate's chain.
-/// It is not a claim that nothing is ever copied: the render and the
-/// `SecretText` are copies, both into zeroizing destinations, and that is the
-/// property, not zero-copy. Nor is it a claim about the platform beyond this
-/// crate — the deputy hands the same bytes to `reqwest`'s `.json()`, which
-/// serialises through `serde_json::to_vec` into a plain body buffer, and the
-/// CLI that implements this trait reads the frame through
-/// `maknae_proto::read_frame`, which is
-/// `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))` and
-/// so hands the served bytes on in a plain `Vec<u8>` two frames below this
-/// variant (`RealPlane::read` → `send_verb` → `read_frame`) — a #241 code
-/// gap, named here rather than fixed by #344's prose pass. And it is not a
-/// claim about the WRITE direction, which has a known residue: the
-/// model's write content arrives as a JSON string, and any escape in it is
-/// un-escaped into a scratch allocation serde_json owns and frees outside
-/// anything this crate can reach — accepted residual, #241, stated in full at
-/// `route.rs`'s `ZeroizingString`.
+/// headroom for its suffix on the UTF-8 content path, so the body is never
+/// reallocated. The non-UTF-8 sub-arm returns a renderer-authored
+/// `binary content, N bytes` that MAY grow on the suffix; nothing read is in
+/// it. The render is copied into a `maknae_proto::SecretText`, which zeroizes
+/// too: copies into zeroizing destinations, not zero-copy. Beyond this crate,
+/// the deputy hands the same bytes to `reqwest`'s `.json()`, which serialises
+/// into a plain body buffer. The WRITE direction has a known residue: escapes
+/// in the model's JSON write content are un-escaped into a scratch allocation
+/// serde_json owns — accepted residual, #241, stated in full at `route.rs`'s
+/// `ZeroizingString`.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Content(zeroize::Zeroizing<Vec<u8>>),
@@ -66,7 +36,7 @@ pub enum ReadOutcome {
 
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
 /// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
-/// `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
+/// `Content(Zeroizing([83, 69, …]))`, dumping home-file content
 /// into any `{:?}`, including a test's `panic!("{other:?}")`. Length
 /// only. The other two arms carry nothing but their own names.
 impl std::fmt::Debug for ReadOutcome {
@@ -116,7 +86,7 @@ pub trait Plane {
         conversation: &str,
         turns: &[Turn],
     ) -> impl Future<Output = Result<PromptReply, PlaneError>> + Send;
-    fn read(&mut self, path: &str) -> impl Future<Output = ReadOutcome> + Send;
+    fn read(&mut self, conversation: &str, path: &str) -> impl Future<Output = ReadOutcome> + Send;
     fn write(
         &mut self,
         conversation: &str,
@@ -177,7 +147,7 @@ mod tests {
         assert_ne!(PlaneError::Malformed, PlaneError::Refused);
     }
 
-    /// The served bytes are kernel-served home-file content, so
+    /// The served bytes are home-file content, so
     /// `ReadOutcome`'s `Debug` is hand-written and redacting — the crate
     /// convention `route.rs`'s `ToolRequest` already follows.
     #[test]

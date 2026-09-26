@@ -23,20 +23,11 @@ pub struct Context(pub Attributes);
 ///
 /// Defined HERE, in the seam both sides depend on, rather than as a literal in the
 /// kernel and a `const` in each backend. A key whose spelling can drift between the
-/// writer and the reader is a decision that silently stops being made — and this
-/// particular key is what separates "unknown, so deny" from "not applicable, so
-/// abstain" (ADR-0009 decision 8).
+/// writer and the reader is a decision that silently stops being made — and a
+/// filesystem attempt is decided only on `local` (ADR-0009 decision 8).
 pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 
-/// The resource attribute carrying the OPERATING SYSTEM'S ANSWER on whether this
-/// subject may access this object.
-///
-/// **The answer, never the raw bits.** Owner, mode and gid are deliberately NOT put on
-/// the request for a backend to recompute: ACLs, supplementary groups, SELinux and
-/// AppArmor make a hand-rolled mode calculation non-equivalent to what the kernel
-/// decides, so the kernel is asked and its verdict is stamped (ADR-0009 decision 1).
-/// Absent on the local lane means UNKNOWN and denies; absent on the remote lane means
-/// structurally inapplicable — which is why the lane must be read first.
+/// No PEP stamps this; a filesystem attempt carrying it is refused (ADR-0009 decision 8). Owner, mode and gid are never put on a request for a backend to recompute.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 
 /// Kernel-stamped mutation preparation kind (#158). Never copied from client
@@ -51,6 +42,7 @@ pub enum FsOperation {
     DeleteEntry,
     DeleteTree,
     Mkdir,
+    Read,
 }
 
 impl FsOperation {
@@ -61,6 +53,7 @@ impl FsOperation {
             Self::DeleteEntry => "delete-entry",
             Self::DeleteTree => "delete-tree",
             Self::Mkdir => "mkdir",
+            Self::Read => "read",
         }
     }
 
@@ -71,6 +64,7 @@ impl FsOperation {
             "delete-entry" => Some(Self::DeleteEntry),
             "delete-tree" => Some(Self::DeleteTree),
             "mkdir" => Some(Self::Mkdir),
+            "read" => Some(Self::Read),
             _ => None,
         }
     }
@@ -152,12 +146,9 @@ pub struct Request {
 mod tests {
     use super::*;
 
-    /// The lane vocabulary is a CLOSED set whose two members mean opposite things to
-    /// a backend: on `local` an absent `os_accessible` is unknown and denies; on
-    /// `remote` it is structurally not applicable and the operand abstains (ADR-0009
-    /// decision 8). Swap these two strings and every remote request starts being
-    /// judged as though the OS could have been asked — so the spelling is asserted,
-    /// not assumed.
+    /// The lane vocabulary is a CLOSED set: a filesystem attempt is decided only on
+    /// `local` (ADR-0009 decision 8). Swap these two strings and every remote request
+    /// is judged as a local subject — so the spelling is asserted, not assumed.
     #[test]
     fn the_lane_vocabulary_is_pinned_in_both_directions() {
         assert_eq!(Lane::Local.as_str(), "local");
@@ -194,11 +185,12 @@ mod operation_tests {
             (FsOperation::DeleteEntry, "delete-entry"),
             (FsOperation::DeleteTree, "delete-tree"),
             (FsOperation::Mkdir, "mkdir"),
+            (FsOperation::Read, "read"),
         ] {
             assert_eq!(operation.as_str(), spelling);
             assert_eq!(FsOperation::parse(spelling), Some(operation));
         }
-        for unknown in ["", "write", "WriteExisting", "read", "mkdir "] {
+        for unknown in ["", "write", "WriteExisting", "Read", "mkdir "] {
             assert_eq!(FsOperation::parse(unknown), None);
         }
     }

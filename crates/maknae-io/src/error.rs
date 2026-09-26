@@ -92,7 +92,7 @@ pub enum IoError {
         nlink: u64,
     },
     /// The target's size exceeds the caller's named `max_bytes` requirement —
-    /// refused before any allocation (#77: the read PEP's frame budget).
+    /// refused before any allocation (a read grant's byte limit).
     TargetTooLarge {
         path: PathBuf,
         limit: u64,

@@ -57,19 +57,17 @@ use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    read_refusal_disposition, verb_to_action, Dispatch, ReadRefusal, ServeOutcome,
-    AUTHZ_DECIDE_TIMEOUT,
+    verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_config::Principal;
-use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref, Zeroizing};
-use maknae_proto::{encode_response_zeroizing, Bytes, ProtoErrCode, ProtoError};
+use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref};
+use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
 
 static AUTHZ_DECIDE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
-static READ_PEP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 static GROUP_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 // #240a: the egress send's own breaker. It is admitted BEFORE `spawn_blocking`,
-// like the four siblings — that ordering IS the control ("failing closed
+// like its siblings — that ordering IS the control ("failing closed
 // WITHOUT spawning more blocking work"). A breaker consulted inside
 // `Egress::send` runs on a thread that is already spawned and, on deadline
 // expiry, already abandoned.
@@ -77,10 +75,6 @@ static EGRESS_SEND_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> =
 
 fn authz_decide_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(AUTHZ_DECIDE_BREAKER.get_or_init(|| Arc::new(Default::default())))
-}
-
-fn read_pep_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
-    Arc::clone(READ_PEP_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
 fn group_lookup_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
@@ -183,7 +177,7 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
     // group lookup, the frame read, the PDP decision, the verb's own blocking
-    // step under the same bound (the read PEP, the subject enumeration — a
+    // step under the same bound (the subject enumeration — a
     // second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the provider call, the
     // response write (bounded by the read timeout), the close — then the
     // margin for the audit appends.
@@ -625,7 +619,7 @@ pub async fn handle<S, E, P>(
     // runs FIRST — a malformed path is the BadRequest class (like a decode
     // failure -- though a decode failure itself is audited and CLOSED, never
     // answered; only this post-decode gate writes BadRequest), and the PDP is never consulted for it.
-    if let Verb::Read { path } = &request.verb {
+    if let Verb::Read { path, .. } = &request.verb {
         if let Err(why) = lexical_pregate(path) {
             let appended = emit_request_outcome(
                 &emit,
@@ -682,6 +676,12 @@ pub async fn handle<S, E, P>(
             "write",
             "conversation identifier not acceptable".to_string(),
         )),
+        Verb::Read {
+            conversation: Some(conversation),
+            ..
+        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
+            Some(("read", "conversation identifier not acceptable".to_string()))
+        }
         _ => None,
     };
     if let Some((noun, reason)) = pregate {
@@ -719,7 +719,7 @@ pub async fn handle<S, E, P>(
 
     if matches!(
         request.verb,
-        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. }
+        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } | Verb::Read { .. }
     ) {
         let mut record = make_record(
             "request",
@@ -740,7 +740,8 @@ pub async fn handle<S, E, P>(
         );
         // #275: the peer identity, bounded and audit-only.
         record.subject.user = admitted_user(peer_user.as_deref());
-        if let Verb::FsWrite { conversation, .. } = &request.verb {
+        if let Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } = &request.verb
+        {
             record.conversation.clone_from(conversation);
         }
         crate::mutation::handle(
@@ -768,29 +769,10 @@ pub async fn handle<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    // ADR-0009: for a term that names an object, the subject's OWN descriptor is the
-    // OS's answer. Take and verify it BEFORE the decision — the PDP must decide on the
-    // kernel-reported path, not on the string the client chose to send, so the shipped
-    // deny list evaluates the object rather than an alias for it (decision 6).
-    //
-    // Absent or unverifiable means the OS was never established. That is a `Deny` at
-    // the PDP (decision 2), never a fallback to a daemon-side open — the fallback IS
-    // the confused deputy this ADR exists to close.
-    let verified_read: Option<(std::os::fd::OwnedFd, String)> = match &request.verb {
-        maknae_proto::Verb::Read { .. } => delegated.take().and_then(|fd| {
-            // No budget here: oversize must not become an authorization failure.
-            let plan = crate::handler::delegated_plan(&principal.home, principal.uid, None);
-            maknae_io::verify_delegated(std::os::fd::AsFd::as_fd(&fd), plan)
-                .ok()
-                .map(|v| (fd, v.path.to_string_lossy().into_owned()))
-        }),
-        _ => None,
-    };
     let sec_req = build_authz_request(
         &request.verb,
         peer_uid,
         lane,
-        verified_read.as_ref().map(|(_, p)| p.as_str()),
         (*provider).as_ref().map(|p| p.name.as_str()),
     );
     let authz_breaker = authz_decide_breaker();
@@ -851,26 +833,6 @@ pub async fn handle<S, E, P>(
             }
         }
     };
-    // The trail's AU-3 object is the path the DECISION was made on — the kernel's
-    // answer for the subject's delegated descriptor (ADR-0009 decision 6) — falling
-    // back to the client's own string when no descriptor was established, which is
-    // then all the trail has to record.
-    let object_path = match &request.verb {
-        Verb::Read { path } => Some(
-            verified_read
-                .as_ref()
-                .map(|(_, real)| real.clone())
-                .unwrap_or_else(|| path.clone()),
-        ),
-        _ => None,
-    };
-    // Recorded ONLY on divergence, so its presence stays a signal rather than noise:
-    // a client naming one object while a different one is evaluated is either
-    // following a symlink it did not expect, or probing for one.
-    let object_asked = match (&request.verb, &object_path) {
-        (Verb::Read { path }, Some(decided)) if decided != path => Some(path.clone()),
-        _ => None,
-    };
     let obligations = match finalize(verdict) {
         Decision::Deny { reason } => {
             // Deny: the reason goes to the TRAIL, never the wire (spec D3);
@@ -888,8 +850,8 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
-                object_path.as_deref(),
-                object_asked.as_deref(),
+                None,
+                None,
                 "deny",
                 &reason,
                 "unauthorized",
@@ -926,8 +888,8 @@ pub async fn handle<S, E, P>(
             session_id,
             seq.next(),
             verb_to_action(&request.verb),
-            object_path.as_deref(),
-            object_asked.as_deref(),
+            None,
+            None,
             "deny",
             &format!("unhonorable obligation: {}", unhonorable.0),
             "unauthorized",
@@ -949,9 +911,7 @@ pub async fn handle<S, E, P>(
 
     // 3. Dispatch + audit-then-respond. The request record is appended BEFORE
     // the response write and claims only authorization facts true at append
-    // time; for reads the record additionally carries the outcome the PEP
-    // actually produced (the invariant gates DISCLOSURE — content read into
-    // daemon memory whose record cannot append is dropped undisclosed).
+    // time.
     match dispatch_verb(&request.verb) {
         Dispatch::MutationRequested => {
             let appended = emit_request_outcome(
@@ -965,8 +925,8 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
-                object_path.as_deref(),
-                object_asked.as_deref(),
+                None,
+                None,
                 "deny",
                 "mutation dispatch reached without prepared evidence",
                 "unauthorized",
@@ -1004,8 +964,8 @@ pub async fn handle<S, E, P>(
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
-                object_path.as_deref(),
-                object_asked.as_deref(),
+                None,
+                None,
                 "permit",
                 "permitted; term not implemented",
                 "not-implemented",
@@ -1171,10 +1131,7 @@ pub async fn handle<S, E, P>(
                             // request whose caller received `Internal`.
                             // ADR-0019 pins `unavailable` in the posture domain
                             // precisely so a Permit-then-not-performed cannot
-                            // read as a completed action, and the read PEP maps
-                            // these same four conditions -- breaker open, at
-                            // capacity, timeout, join failure -- to
-                            // `deny`/`unavailable`.
+                            // read as a completed action.
                             let corrected = emit_request_outcome(
                                 &emit,
                                 &host,
@@ -1193,10 +1150,7 @@ pub async fn handle<S, E, P>(
                                 // here and only one is benign: "this backend
                                 // does not enumerate" is the shipped default's
                                 // permanent state, while "the breaker is open"
-                                // is an incident. Collapsing them made the
-                                // POSTURE parity with the read PEP true and the
-                                // REASON parity false -- which the comment
-                                // claimed.
+                                // is an incident.
                                 &format!("binding enumeration unavailable: {why}"),
                                 "unavailable",
                                 &au3_1,
@@ -1228,7 +1182,6 @@ pub async fn handle<S, E, P>(
                         }
                     }
                 }
-                Dispatch::ReadRequested(_) => unreachable!("outer match excludes reads"),
                 Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
@@ -1282,12 +1235,6 @@ pub async fn handle<S, E, P>(
                 }
             }
         }
-        // UNUSED, and that is the design showing through: the read arm no longer
-        // touches the client's string for anything. The object it reads is the
-        // descriptor the subject delegated, and the path it audits is the kernel's
-        // answer for that descriptor (`object_path`, computed before the decision).
-        // If this binding is ever needed again, something has started trusting the
-        // client's name (ADR-0009 decision 6).
         Dispatch::PromptRequested => {
             let Verb::SessionPrompt {
                 conversation,
@@ -1423,7 +1370,7 @@ pub async fn handle<S, E, P>(
             //    The intent is shared by Arc so the outcome record can be
             //    derived from it even if the worker is abandoned on expiry.
             let intent = Arc::new(intent);
-            // #240a: admitted BEFORE the spawn, matching the four siblings.
+            // #240a: admitted BEFORE the spawn, matching its siblings.
             // `run.rs` handed #240 this obligation by name; the ordering is the
             // whole control, not the presence of a breaker.
             let egress_breaker = egress_send_breaker();
@@ -1591,8 +1538,7 @@ pub async fn handle<S, E, P>(
                 match (send_outcome, reply) {
                     (_, Some(reply)) => {
                         // 5. within-cap: encode into a buffer that never grows
-                        //    (no un-zeroized partial copies in freed heap; the
-                        //    Read path's rule).
+                        //    (no un-zeroized partial copies in freed heap).
                         let cap = crate::egress::reply_capacity(&reply);
                         let response = Response {
                             protocol_version: PROTOCOL_VERSION,
@@ -1670,167 +1616,8 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::ReadRequested(_client_path) => {
-            // The read PEP (spec D5): per-request anchor at the enrolled home,
-            // named requirements, bounded on the blocking pool like the decide.
-            let budget = crate::handler::read_budget(cfg.frame_max_bytes);
-            let read_breaker = read_pep_breaker();
-            let read_admission = { read_breaker.lock().await.begin_attempt_at(Instant::now()) };
-            let read_result = match read_admission {
-                BreakerAdmission::RefuseOpen => {
-                    Err(ReadRefusal::Unavailable("read circuit breaker open".into()))
-                }
-                BreakerAdmission::RefuseAtCapacity => Err(ReadRefusal::Unavailable(
-                    "read blocking worker budget exhausted".into(),
-                )),
-                BreakerAdmission::Admit => {
-                    let outcome = {
-                        let home = principal.home.clone();
-                        let owner = principal.uid;
-                        // Permitted implies verified: the PDP only says yes on this
-                        // term when a descriptor was established above.
-                        let fd = verified_read.map(|(fd, _)| fd);
-                        tokio::time::timeout(
-                            authz_decide_timeout,
-                            tokio::task::spawn_blocking(move || read_pep(fd, &home, owner, budget)),
-                        )
-                        .await
-                    };
-                    match outcome {
-                        Ok(Ok(r)) => {
-                            read_breaker.lock().await.record_success();
-                            r
-                        }
-                        Ok(Err(_join)) => {
-                            // The read worker ended instead of being orphaned;
-                            // fail closed without tripping the timeout breaker.
-                            read_breaker.lock().await.record_success();
-                            Err(ReadRefusal::JoinFailed)
-                        }
-                        Err(_elapsed) => {
-                            if read_breaker.lock().await.record_timeout_at(Instant::now())
-                                == BreakerTransition::Tripped
-                            {
-                                eprintln!(
-                                "maknaed: read PEP circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more target-read work",
-                                authz_decide_timeout.as_secs()
-                            );
-                            }
-                            Err(ReadRefusal::TimedOut)
-                        }
-                    }
-                }
-            };
-            match read_result {
-                Ok(content) => {
-                    let content_len = content.len();
-                    let appended = emit_request_outcome(
-                        &emit,
-                        &host,
-                        &socket,
-                        peer_uid,
-                        &peer_uri,
-                        peer_user.as_deref(),
-                        decided_role,
-                        session_id,
-                        seq.next(),
-                        verb_to_action(&request.verb),
-                        object_path.as_deref(),
-                        object_asked.as_deref(),
-                        "permit",
-                        "authorized",
-                        "authorized",
-                        &au3_1,
-                    )
-                    .await;
-                    if !may_respond(appended) {
-                        // Content stays in daemon memory and is dropped
-                        // (zeroized) undisclosed — the invariant holds.
-                        close_bounded(&mut stream).await;
-                        return;
-                    }
-                    let response = Response {
-                        protocol_version: PROTOCOL_VERSION,
-                        result: RespResult::Ok(Payload::ReadContent(Bytes::new(content))),
-                    };
-                    // Zeroizing, pre-sized encode (spec D5): no realloc, no
-                    // un-zeroized partial copies; buffer zeroizes after write.
-                    deliver_read(
-                        &mut stream,
-                        &cfg,
-                        encode_response_zeroizing(
-                            &response,
-                            content_len + crate::handler::FRAME_ENVELOPE_MARGIN as usize,
-                        ),
-                        &emit,
-                        &host,
-                        &socket,
-                        peer_uid,
-                        &peer_uri,
-                        peer_user.as_deref(),
-                        decided_role,
-                        session_id,
-                        &seq,
-                        verb_to_action(&request.verb),
-                        &au3_1,
-                    )
-                    .await;
-                }
-                Err(refusal) => {
-                    let (result, reason, posture, code, msg) = read_refusal_disposition(&refusal);
-                    let appended = emit_request_outcome(
-                        &emit,
-                        &host,
-                        &socket,
-                        peer_uid,
-                        &peer_uri,
-                        peer_user.as_deref(),
-                        decided_role,
-                        session_id,
-                        seq.next(),
-                        verb_to_action(&request.verb),
-                        object_path.as_deref(),
-                        object_asked.as_deref(),
-                        result,
-                        &reason,
-                        posture,
-                        &au3_1,
-                    )
-                    .await;
-                    if may_respond(appended) {
-                        write_error_bounded(&mut stream, &cfg, code, msg).await;
-                    }
-                }
-            }
-        }
     }
     close_bounded(&mut stream).await;
-}
-
-/// The blocking half of the read PEP: THIN orchestration over the T1
-/// decision logic (`handler::delegated_plan` names every requirement;
-/// `handler::map_read_error` types every refusal) — this fn only performs
-/// the two maknae-io calls the plan prescribes. Per-request anchor open:
-/// the same Zero-Trust cadence as the policy re-read.
-fn read_pep(
-    fd: Option<std::os::fd::OwnedFd>,
-    home: &std::path::Path,
-    owner_uid: u32,
-    budget: u64,
-) -> Result<Zeroizing<Vec<u8>>, ReadRefusal> {
-    // Unreachable on a permit — the gate denies without a verified descriptor — but
-    // named rather than unwrapped, because "cannot happen" is how fail-open arrives.
-    let fd = fd.ok_or_else(|| ReadRefusal::Refused("no delegated descriptor".into()))?;
-    // Re-verified inside `read_delegated`, immediately before the bytes are taken. If
-    // the object changed between the decision and the read, the read refuses: this is
-    // the TOCTOU backstop, adapted — there is no second OPEN to enforce at, so the
-    // check rides the descriptor that was already pinned.
-    maknae_io::read_delegated(
-        &fd,
-        crate::handler::delegated_plan(home, owner_uid, Some(budget)),
-    )
-    .map(|(_path, bytes)| bytes)
-    .map_err(crate::handler::map_read_error)
 }
 
 /// Append a pre-built record and say so in the journal if it fails, like every
@@ -1964,46 +1751,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     }
 }
 
-/// The read path's delivery of an encoded response; an encode failure after
-/// the permit record gets the same correction every other verb gets (#265 B1).
-#[allow(clippy::too_many_arguments)]
-async fn deliver_read<S, E: AuditEmit + Send + Sync, B: AsRef<[u8]>>(
-    stream: &mut S,
-    cfg: &TransportConfig,
-    encoded: Result<B, maknae_proto::ProtoCodecError>,
-    emit: &Arc<E>,
-    host: &str,
-    socket: &str,
-    peer_uid: u32,
-    peer_uri: &str,
-    peer_user: Option<&str>,
-    role: Option<&'static str>,
-    session_id: u64,
-    seq: &Seq,
-    action: &str,
-    au3_1: &serde_json::Value,
-) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    match encoded {
-        Ok(bytes) => {
-            let _ = tokio::time::timeout(
-                Duration::from_millis(cfg.read_timeout_ms),
-                write_frame(stream, bytes.as_ref()),
-            )
-            .await;
-        }
-        Err(_) => {
-            refuse_unencodable_bounded(
-                stream, cfg, emit, host, socket, peer_uid, peer_uri, peer_user, role, session_id,
-                seq, action, au3_1,
-            )
-            .await
-        }
-    }
-}
-
-/// SIZE-BOUNDED write of an already-encoded response, like the read path: a
+/// SIZE-BOUNDED write of an already-encoded response: a
 /// PERMIT whose delivery is refused is refused EXPLICITLY (`TooLarge` with a
 /// corrective record), never truncated and never silently oversized. The write
 /// is bounded by `read_timeout_ms`, which doubles as the write bound (both cap
@@ -4517,61 +4265,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             crate::posture::Posture::Unverified,
             "a marker with the right mechanism but the wrong target must not \
              determine HrotSealed"
-        );
-    }
-}
-
-#[cfg(test)]
-mod read_delivery_tests {
-    use super::*;
-
-    struct Recorded(std::sync::Mutex<Vec<AuditRecord>>);
-    impl AuditEmit for Recorded {
-        fn emit(
-            &self,
-            rec: &AuditRecord,
-        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
-            self.0.lock().unwrap().push(rec.clone());
-            async { Ok(()) }
-        }
-    }
-
-    #[tokio::test]
-    async fn an_unencodable_read_is_corrected_on_the_trail_and_the_wire() {
-        let (mut ours, mut theirs) = tokio::io::duplex(4096);
-        let emit = Arc::new(Recorded(std::sync::Mutex::new(Vec::new())));
-        let cfg = maknae_config::transport_from_section(None).unwrap();
-        let seq = Seq::new();
-        let _permit_record = seq.next();
-        deliver_read(
-            &mut ours,
-            &cfg,
-            Err::<Vec<u8>, _>(maknae_proto::ProtoCodecError::Encode("injected".into())),
-            &emit,
-            "h",
-            "s",
-            1000,
-            "maknae://d/plane/cli",
-            None,
-            Some("user"),
-            7,
-            &seq,
-            "fs.read",
-            &serde_json::Value::Null,
-        )
-        .await;
-        drop(ours);
-        let recs = emit.0.lock().unwrap().clone();
-        assert_eq!(recs.len(), 1, "{recs:?}");
-        assert_eq!(recs[0].seq, 2);
-        assert_eq!(recs[0].outcome.posture, "unavailable");
-        assert!(recs[0].outcome.reason.contains("could not be encoded"));
-        let body = maknae_proto::read_frame(&mut theirs, 65536).await.unwrap();
-        let resp = maknae_proto::decode_response(&body).unwrap();
-        assert!(
-            matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Internal),
-            "{:?}",
-            resp.result
         );
     }
 }

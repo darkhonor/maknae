@@ -481,9 +481,8 @@ pub enum SendOutcome {
 /// whose delivery is unknown (`Failed`, `DeadlineExpired`, `OutcomeUnknown`),
 /// is a `deny`, never a `permit` that reads
 /// "send failed"; a reply the kernel refused to deliver (`LandedUndelivered`)
-/// stays `permit`, because the content DID leave and the trail must say so
-/// (the `refused-oversize` pairing of `read_refusal_disposition`). Every
-/// posture is inside ADR-0019's pinned domain; the egress-specific fact is
+/// stays `permit`, because the content DID leave and the trail must say so.
+/// Every posture is inside ADR-0019's pinned domain; the egress-specific fact is
 /// `egress.status`. The strings are the ones the syslog cap test measures;
 /// changing one means re-measuring.
 pub fn outcome_for(
@@ -525,7 +524,7 @@ pub fn outcome_for(
             "unavailable",
         ),
         // `permit` + `refused-oversize`: the pairing ADR-0019 pins for a permit
-        // whose delivery is refused (the Read path's TooLarge corrective).
+        // whose delivery is refused.
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::Oversize,
@@ -607,8 +606,7 @@ pub fn reply_text_length(reply: &PromptReply) -> u64 {
 
 /// The zeroizing encode buffer's capacity for a TEXT-ONLY reply (the kernel
 /// refuses any other before consulting this): an upper bound, so
-/// `encode_response_zeroizing` never reallocates (the Read path's rule,
-/// applied to a multi-block payload). Compared against `frame_max_bytes`
+/// `encode_response_zeroizing` never reallocates. Compared against `frame_max_bytes`
 /// BEFORE encoding: an over-cap reply is refused without ever being copied.
 /// The bound is padded, so the effective ceiling is
 /// `frame_max_bytes - 512 - 32*blocks` of text: fail-closed by a margin,
@@ -1555,8 +1553,7 @@ mod tests {
                 None,
             ),
             // permit: the decision WAS a permit and the content DID leave; only
-            // delivery back was refused (the same pairing as the Read path's
-            // refused-oversize corrective, locked by enforce_loop.rs).
+            // delivery back was refused.
             (
                 SendOutcome::LandedUndelivered {
                     reply_length: 7,

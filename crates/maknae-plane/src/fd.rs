@@ -84,7 +84,7 @@ pub(crate) enum Step<T> {
 /// The read loop's only decision, split out so it can be asserted directly.
 ///
 /// Both `poll_read` here and `poll_write` in [`crate::send`] are thin orchestration
-/// over it -- the same shape `run.rs::read_pep` uses over `handler::delegated_plan`.
+/// over it -- the same shape `mutation.rs::prepare` uses over `handler::delegated_plan`.
 /// Inlined into either loop this branch is reachable only by racing tokio's readiness
 /// against the kernel, which no unit test can do deterministically; separated, all
 /// three arms are ordinary inputs, and BOTH directions share one tested decision

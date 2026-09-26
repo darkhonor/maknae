@@ -74,6 +74,7 @@ async fn replace_as_subject(
             effects: vec![EffectEntry {
                 path: path.clone(),
                 effect: ReportedEffect::ReplacedFile,
+                length: None,
             }],
         },
     )
@@ -203,6 +204,35 @@ async fn an_unacceptable_conversation_id_refuses_the_write_before_the_pdp() {
 }
 
 #[tokio::test]
+async fn an_unacceptable_conversation_id_refuses_the_read_before_the_pdp() {
+    let long = "x".repeat(33);
+    for bad in ["", "has space", "a/b", long.as_str()] {
+        let fx = Fixture::new("conversation_bad_read", "Read");
+        let target = fx.root.join("unique-existing-read-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let records = Records::new(0);
+        let fd = maknae_io::open_path_for_delegation(&target).unwrap();
+        let verb = Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: Some(bad.into()),
+        };
+        let (mut client, task, body) = fx.start(verb, Some(fd), records.clone());
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        let response = next_response(&mut client).await.unwrap();
+        drop(client);
+        task.await.unwrap();
+        assert!(
+            matches!(&response.result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::BadRequest),
+            "{bad:?}: {:?}",
+            response.result
+        );
+        let records = records.snapshot();
+        assert!(records.iter().all(|r| r.mutation.is_none()), "{bad:?}");
+        assert!(records.iter().all(|r| r.conversation.is_none()), "{bad:?}");
+    }
+}
+
+#[tokio::test]
 async fn failed_intent_preserves_existing_bytes_and_length() {
     let fx = Fixture::new("intent_fail", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");
@@ -230,6 +260,7 @@ async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::ReplacedFile,
+                length: None,
             }],
         },
     )
@@ -510,6 +541,7 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::CreatedFile,
+                length: None,
             }],
         },
     )
@@ -886,6 +918,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
             effects: vec![maknae_proto::EffectEntry {
                 path: fx.root.join("tree/child").to_str().unwrap().into(),
                 effect: maknae_proto::ReportedEffect::DeletedEntry,
+                length: None,
             }],
         },
     )
@@ -935,6 +968,7 @@ async fn a_replacement_grant_accepts_only_replaced_file_reports() {
             effects: vec![EffectEntry {
                 path: target.to_str().unwrap().into(),
                 effect: ReportedEffect::CreatedFile,
+                length: None,
             }],
         },
     )
@@ -1122,6 +1156,7 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
                     effects: vec![maknae_proto::EffectEntry {
                         path: target.to_str().unwrap().into(),
                         effect: maknae_proto::ReportedEffect::CreatedFile,
+                        length: None,
                     }],
                 },
             )
@@ -1199,6 +1234,7 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
                     max_effects: 0,
                     max_depth: 0,
                     deadline_ms: 0,
+                    max_bytes: 0,
                 },
             })),
         })
@@ -1306,6 +1342,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
                     .unwrap()
                     .into(),
                 effect: maknae_proto::ReportedEffect::CreatedFile,
+                length: None,
             }],
         };
         let finish = maknae_proto::MutationReport::Finished {
@@ -1407,6 +1444,7 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
                     effects: vec![EffectEntry {
                         path: target.to_str().unwrap().into(),
                         effect: ReportedEffect::CreatedDirectory,
+                        length: None,
                     }],
                 },
             )
