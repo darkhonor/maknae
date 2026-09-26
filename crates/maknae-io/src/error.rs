@@ -68,10 +68,6 @@ pub enum IoError {
     MutationPathChanged {
         path: PathBuf,
     },
-    /// Read-only and append descriptors are not existing-file replacement evidence.
-    NotWritableDescriptor {
-        path: PathBuf,
-    },
     /// A recursive descent encountered a different filesystem device.
     DifferentFilesystem {
         path: PathBuf,
@@ -171,11 +167,6 @@ impl std::fmt::Display for IoError {
             Self::MutationPathChanged { path } => {
                 write!(f, "mutation path changed: {}", path.display())
             }
-            Self::NotWritableDescriptor { path } => write!(
-                f,
-                "descriptor is not writable without append: {}",
-                path.display()
-            ),
             Self::DifferentFilesystem { path } => {
                 write!(f, "different filesystem refused: {}", path.display())
             }

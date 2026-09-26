@@ -418,13 +418,6 @@ pub(crate) fn macos_reopen_writable<F: AsFd>(_held: &F, granted: &Path) -> nix::
     open_writable_existing(granted)
 }
 
-/// Inspect the access mode without changing the shared file description's flags.
-pub(crate) fn is_nonappend_writable<F: AsFd>(fd: &F) -> nix::Result<bool> {
-    let flags = OFlag::from_bits_truncate(nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL)?);
-    let access = flags & OFlag::O_ACCMODE;
-    Ok((access == OFlag::O_WRONLY || access == OFlag::O_RDWR) && !flags.contains(OFlag::O_APPEND))
-}
-
 pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
     nix::sys::uio::pwrite(fd, bytes, offset)
 }
@@ -578,7 +571,6 @@ mod tests {
         std::fs::write(&p, b"safe").unwrap();
         let fd = open_writable_existing(&p).unwrap();
         assert!(is_cloexec(&fd));
-        assert!(is_nonappend_writable(&fd).unwrap());
         assert!(open_writable_existing(&d.path().join("absent")).is_err());
     }
 

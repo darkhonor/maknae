@@ -115,11 +115,11 @@ fn distinct_credentials_preserve_os_authority() {
     };
     let mut subject_child = spawn(&subject, "subject");
     let mut subject_socket = accept();
-    let writable = receive(&subject_socket);
+    let file = receive(&subject_socket);
     let directory = receive(&subject_socket);
     let mut service_child = spawn(&service, "service");
     let mut service_socket = accept();
-    send(&service_socket, &writable);
+    send(&service_socket, &file);
     send(&service_socket, &directory);
     service_socket.read_exact(&mut [0]).unwrap();
     subject_socket.write_all(b"g").unwrap();
@@ -127,7 +127,7 @@ fn distinct_credentials_preserve_os_authority() {
     wait(&mut subject_child);
     assert_eq!(
         std::fs::read(existing).unwrap(),
-        b"written-through-subject-fd"
+        b"written-by-subject-reopen"
     );
     assert_eq!(std::fs::read(locked).unwrap(), b"root-only-sentinel");
     assert!(!project.join("created").exists());
@@ -160,17 +160,26 @@ fn credential_helper() {
         },
     };
     if role == "subject" {
-        let file = maknae_io::open_writable_for_delegation(&project.join("existing")).unwrap();
-        assert_eq!(
-            maknae_io::open_writable_for_delegation(&project.join("locked"))
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+        let file = maknae_io::open_path_for_delegation(&project.join("existing")).unwrap();
         let directory = maknae_io::open_directory_for_delegation(&project).unwrap();
         send(&stream, &file);
         send(&stream, &directory);
         stream.read_exact(&mut [0]).unwrap();
+        maknae_io::replace_held_file(
+            file.as_fd(),
+            &project.join("existing"),
+            b"written-by-subject-reopen",
+        )
+        .unwrap();
+        let e = maknae_io::replace_held_file(
+            maknae_io::open_path_for_delegation(&project.join("locked"))
+                .unwrap()
+                .as_fd(),
+            &project.join("locked"),
+            b"x",
+        )
+        .unwrap_err();
+        assert_eq!(e.state, maknae_io::EffectState::NoEffect);
         let directory = maknae_io::verify_mutation_directory(directory, required).unwrap();
         directory.create_exclusive("created", b"new").unwrap();
         directory.remove_entry("created").unwrap();
@@ -180,23 +189,21 @@ fn credential_helper() {
         assert_eq!(role, "service");
         let file = receive(&stream);
         let directory = receive(&stream);
-        assert!(maknae_io::open_writable_for_delegation(&project.join("existing")).is_err());
-        let object = maknae_io::verify_writable_object(
-            file,
-            maknae_io::DelegatedRequired {
-                confined_beneath: home,
-                root_required: required.root_required.clone(),
-                target: maknae_io::TargetRequired {
-                    owner: None,
-                    mode_mask: None,
-                    nlink_exactly_one: true,
-                    regular_file: true,
-                    max_bytes: None,
-                },
-            },
+        assert!(maknae_io::open_path_for_delegation(&project.join("existing")).is_err());
+        let e = maknae_io::replace_held_file(
+            file.as_fd(),
+            &project.join("existing"),
+            b"service-forbidden",
         )
-        .unwrap();
-        maknae_io::replace_existing(object, b"written-through-subject-fd").unwrap();
+        .unwrap_err();
+        assert_eq!(e.state, maknae_io::EffectState::NoEffect);
+        assert!(matches!(
+            e.source,
+            maknae_io::IoError::Io {
+                kind: maknae_io::IoKind::PermissionDenied,
+                ..
+            }
+        ));
         let directory = maknae_io::verify_mutation_directory(directory, required).unwrap();
         for failure in [
             directory
