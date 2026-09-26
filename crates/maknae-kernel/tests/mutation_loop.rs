@@ -2,7 +2,7 @@
 mod common;
 use common::{Fixture, Records};
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
-use maknae_proto::{Bytes, Payload, RespResult, Verb, WriteMode};
+use maknae_proto::{Payload, RespResult, Verb, WriteMode};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -36,7 +36,7 @@ async fn drive_in(
 fn write_verb(target: &std::path::Path, bytes: &[u8], conversation: Option<&str>) -> Verb {
     Verb::FsWrite {
         path: target.to_str().unwrap().into(),
-        content: Bytes::new(bytes.to_vec().into()),
+        content_length: bytes.len() as u64,
         mode: WriteMode::Existing,
         conversation: conversation.map(str::to_string),
     }
@@ -377,7 +377,7 @@ fn create_verb(fx: &Fixture) -> Verb {
             .to_str()
             .unwrap()
             .into(),
-        content: Bytes::new(b"content".to_vec().into()),
+        content_length: 7,
         mode: WriteMode::CreateExclusive,
         conversation: None,
     }
@@ -599,7 +599,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
     let (mut client, task, body) = fx.start(
         Verb::FsWrite {
             path: alias.to_str().unwrap().into(),
-            content: Bytes::new(b"bad".to_vec().into()),
+            content_length: b"bad".len() as u64,
             mode: WriteMode::Existing,
             conversation: None,
         },
@@ -1380,12 +1380,7 @@ async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes(
     let held = maknae_io::open_path_for_delegation(&target).unwrap();
     let records = Records::new(0);
     let (mut client, task, body) = fx.start(
-        Verb::FsWrite {
-            path: target.to_str().unwrap().into(),
-            content: Bytes::new(b"replaced".to_vec().into()),
-            mode: WriteMode::Existing,
-            conversation: None,
-        },
+        write_verb(&target, b"replaced", None),
         Some(held.try_clone().unwrap()),
         records.clone(),
     );

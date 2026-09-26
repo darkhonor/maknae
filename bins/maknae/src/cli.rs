@@ -170,7 +170,7 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::Read { path } => maknae_proto::Verb::Read { path },
             Verb::Write { path } => maknae_proto::Verb::FsWrite {
                 path,
-                content: maknae_proto::Bytes::new(zeroize::Zeroizing::new(Vec::new())),
+                content_length: 0,
                 mode: maknae_proto::WriteMode::Existing,
                 conversation: None,
             },
@@ -191,38 +191,30 @@ fn request_from_input(
     verb: Verb,
     frame_max: usize,
     input: &mut impl std::io::Read,
-) -> Result<maknae_proto::Verb, String> {
+) -> Result<(maknae_proto::Verb, Option<maknae_proto::Bytes>), String> {
     let mut request: maknae_proto::Verb = verb.into();
-    if let maknae_proto::Verb::FsWrite { content, .. } = &mut request {
-        let cap = frame_max.checked_add(1).ok_or("invalid frame budget")?;
-        let mut bytes = zeroize::Zeroizing::new(vec![0; cap]);
-        let mut used = 0;
-        loop {
-            match input.read(&mut bytes[used..]) {
-                Ok(0) => break,
-                Ok(n) => {
-                    used += n;
-                    if used > frame_max {
-                        return Err("stdin content exceeds the configured frame budget".into());
-                    }
+    let maknae_proto::Verb::FsWrite { content_length, .. } = &mut request else {
+        return Ok((request, None));
+    };
+    let cap = frame_max.checked_add(1).ok_or("invalid frame budget")?;
+    let mut bytes = zeroize::Zeroizing::new(vec![0; cap]);
+    let mut used = 0;
+    loop {
+        match input.read(&mut bytes[used..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                used += n;
+                if used > frame_max {
+                    return Err("stdin content exceeds the configured frame budget".into());
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(format!("reading stdin: {e}")),
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("reading stdin: {e}")),
         }
-        bytes.truncate(used);
-        *content = maknae_proto::Bytes::new(bytes);
-        // Includes the actual CBOR envelope, not just the content length.
-        encode_request_zeroizing(
-            &Request {
-                protocol_version: PROTOCOL_VERSION,
-                verb: request.clone(),
-            },
-            frame_max,
-        )
-        .map_err(|e| e.to_string())?;
     }
-    Ok(request)
+    *content_length = used as u64;
+    bytes.truncate(used);
+    Ok((request, Some(maknae_proto::Bytes::new(bytes))))
 }
 
 fn absolute_path(path: PathBuf) -> Result<String, String> {
@@ -260,7 +252,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
 
-    let request = request_from_input(
+    let (request, content) = request_from_input(
         verb.clone(),
         transport.frame_max_bytes,
         &mut std::io::stdin().lock(),
@@ -276,7 +268,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     // must revoke it, or the token leaks. Capture the whole round-trip outcome, revoke the
     // token UNCONDITIONALLY, THEN propagate. (A pre-mint failure above skips revoke — there
     // is nothing minted to revoke.)
-    let outcome = round_trip(verb, request, &transport, &client, &ca).await;
+    let outcome = round_trip(verb, request, content, &transport, &client, &ca).await;
     client.shutdown().await;
     outcome
 }
@@ -318,11 +310,21 @@ fn delegated_object(verb: &Verb) -> Option<&str> {
 async fn round_trip(
     verb: Verb,
     request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
 ) -> Result<bool, String> {
-    match send_verb(request_verb, delegated_object(&verb), transport, client, ca).await? {
+    match send_verb(
+        request_verb,
+        content,
+        delegated_object(&verb),
+        transport,
+        client,
+        ca,
+    )
+    .await?
+    {
         SentOutcome::Payload(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
             // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
@@ -351,9 +353,8 @@ pub(crate) enum SentOutcome {
     /// A successful payload, NOT yet checked against the verb that asked for it —
     /// [`print_payload_for_verb`] is what rejects an answer to a different question.
     Payload(maknae_proto::Payload),
-    /// A mutation reached a terminal state. `applied` is true ONLY for a clean kernel
-    /// `MutationComplete` or a client-reported `Ok(true)` — and the latter is a CLAIM
-    /// (ADR-0023 decision 4), never a kernel assertion.
+    /// A mutation reached a terminal state. `applied` is true ONLY for a client-reported
+    /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
     WriteDone { applied: bool },
     /// The daemon refused, with the wire's own code and message and no reason beyond them
     /// (ADR-0019).
@@ -393,6 +394,7 @@ pub(crate) enum SentOutcome {
 /// CLI `Verb` at all can still arm a read exactly as `maknae read` does (ADR-0009).
 pub(crate) async fn send_verb(
     request_verb: maknae_proto::Verb,
+    content: Option<maknae_proto::Bytes>,
     object: Option<&str>,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
@@ -433,7 +435,7 @@ pub(crate) async fn send_verb(
     // one (ADR-0009 decision 2); a path the kernel's lexical pre-gate rejects — an empty,
     // `.` or `..` segment, or a trailing `/` — comes back `BadRequest` for its shape,
     // before descriptor evaluation runs at all.
-    let prepared = crate::mutation::prepare(request_verb.clone());
+    let prepared = crate::mutation::prepare(request_verb.clone(), content);
     // True unless the read lane below clears it, which it does on EITHER of two
     // branches: `open_for_delegation` returned `Err`, or the stream could not arm a
     // descriptor. A verb that names no object has nothing to delegate and is armed by
@@ -534,14 +536,6 @@ pub(crate) async fn send_verb(
                     .await?;
             Ok(SentOutcome::WriteDone { applied })
         }
-        RespResult::Ok(Payload::MutationComplete) => {
-            if !matches!(prepared.as_ref(), Some(p) if !p.is_namespace()) {
-                return Err(
-                    "protocol error: daemon completion for a namespace or ordinary request".into(),
-                );
-            }
-            Ok(SentOutcome::WriteDone { applied: true })
-        }
         RespResult::Ok(payload) => Ok(SentOutcome::Payload(payload)),
         RespResult::Err(e) => Ok(SentOutcome::Refused {
             code: e.code,
@@ -551,8 +545,8 @@ pub(crate) async fn send_verb(
     }
 }
 
-/// Build an `FsWrite` for `content` the caller already holds in memory, under the same
-/// frame budget [`request_from_input`] enforces on stdin bytes.
+/// Build an `FsWrite` for `content` the caller already holds in memory, bounded by the
+/// frame budget [`request_from_input`] applies to stdin; the request carries only the length.
 ///
 /// The mode is `Existing` — what `maknae write` sends too — because
 /// [`crate::mutation::prepare`] overrides it at open time (`CreateExclusive` on a
@@ -562,29 +556,17 @@ pub(crate) fn write_request(
     content: zeroize::Zeroizing<Vec<u8>>,
     conversation: Option<String>,
     frame_max: usize,
-) -> Result<maknae_proto::Verb, String> {
-    // Judged BEFORE the encode, so an over-budget write is refused in the caller's
-    // own words rather than as an opaque codec failure — the same wording family as
-    // the stdin path's check above.
+) -> Result<(maknae_proto::Verb, maknae_proto::Bytes), String> {
     if content.len() > frame_max {
         return Err("content exceeds the configured frame budget".to_string());
     }
     let request = maknae_proto::Verb::FsWrite {
         conversation,
         path,
-        content: maknae_proto::Bytes::new(content),
+        content_length: content.len() as u64,
         mode: maknae_proto::WriteMode::Existing,
     };
-    // Includes the actual CBOR envelope, not just the content length.
-    encode_request_zeroizing(
-        &Request {
-            protocol_version: PROTOCOL_VERSION,
-            verb: request.clone(),
-        },
-        frame_max,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(request)
+    Ok((request, maknae_proto::Bytes::new(content)))
 }
 
 /// Print the successful `payload` IFF its variant matches the requested `verb`
@@ -650,7 +632,6 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::ConfigView(_))
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
-        | (v, p @ Payload::MutationComplete)
         | (v, p @ Payload::SubjectList(_))
         | (v, p @ Payload::PromptReply(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
@@ -758,25 +739,27 @@ mod tests {
         let verb = Verb::Write {
             path: "/projects/binary".into(),
         };
-        let request = request_from_input(verb.clone(), 512, &mut &[0, 255, 7][..]).unwrap();
-        let maknae_proto::Verb::FsWrite { content, .. } = request else {
-            panic!("write expected")
-        };
-        assert_eq!(content.0.as_slice(), &[0, 255, 7]);
+        let (request, content) =
+            request_from_input(verb.clone(), 512, &mut &[0, 255, 7][..]).unwrap();
+        assert!(matches!(
+            request,
+            maknae_proto::Verb::FsWrite {
+                content_length: 3,
+                ..
+            }
+        ));
+        assert_eq!(content.unwrap().0.as_slice(), &[0, 255, 7]);
         assert!(request_from_input(verb.clone(), 2, &mut &[1, 2, 3][..]).is_err());
-        assert!(
-            request_from_input(verb, 8, &mut &[][..]).is_err(),
-            "envelope alone exceeds budget"
-        );
+        let (_, empty) = request_from_input(verb, 8, &mut &[][..]).unwrap();
+        assert!(empty.unwrap().0.is_empty());
     }
 
     /// The in-memory write lane's own budget check, direct — `request_from_input`'s
     /// stdin test above cannot reach it, and the agent loop (#241) is the only
-    /// caller. Over-budget content must be refused BEFORE the encode, with the
-    /// stdin path's wording, not as an opaque codec failure.
+    /// caller.
     #[test]
     fn write_request_carries_the_conversation_it_is_given() {
-        let v = write_request(
+        let (v, _) = write_request(
             "/projects/a".into(),
             zeroize::Zeroizing::new(b"x".to_vec()),
             Some("conv-cli".into()),
@@ -785,7 +768,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             v,
-            maknae_proto::Verb::FsWrite { conversation: Some(ref c), .. } if c == "conv-cli"
+            maknae_proto::Verb::FsWrite {
+                conversation: Some(ref c),
+                content_length: 1,
+                ..
+            } if c == "conv-cli"
         ));
     }
 
@@ -1236,6 +1223,6 @@ mod tests {
         ca: &maknae_vault::CaBundle,
     ) {
         fn s<T: Send>(_: T) {}
-        s(send_verb(maknae_proto::Verb::Ping, None, t, c, ca));
+        s(send_verb(maknae_proto::Verb::Ping, None, None, t, c, ca));
     }
 }

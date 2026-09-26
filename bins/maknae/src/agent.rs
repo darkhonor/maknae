@@ -201,7 +201,7 @@ impl Plane for RealPlane<'_> {
         {
             return Err(PlaneError::FrameTooLarge);
         }
-        prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
+        prompt_outcome(send_verb(verb, None, None, self.transport, self.client, self.ca).await)
     }
     async fn read(&mut self, path: &str) -> ReadOutcome {
         // The object is passed so the read is ARMED exactly as `maknae read`
@@ -211,6 +211,7 @@ impl Plane for RealPlane<'_> {
                 Verb::Read {
                     path: path.to_string(),
                 },
+                None,
                 Some(path),
                 self.transport,
                 self.client,
@@ -222,7 +223,7 @@ impl Plane for RealPlane<'_> {
     async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
         // The frame-budget refusal is LOCAL and pre-send — nothing left
         // the process, nothing is on the trail, the file is untouched.
-        let Ok(verb) = write_request(
+        let Ok((verb, content)) = write_request(
             path.to_string(),
             zeroize::Zeroizing::new(content.to_vec()),
             Some(conversation.to_string()),
@@ -230,7 +231,17 @@ impl Plane for RealPlane<'_> {
         ) else {
             return WriteOutcome::NotSent;
         };
-        write_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
+        write_outcome(
+            send_verb(
+                verb,
+                Some(content),
+                None,
+                self.transport,
+                self.client,
+                self.ca,
+            )
+            .await,
+        )
     }
 }
 

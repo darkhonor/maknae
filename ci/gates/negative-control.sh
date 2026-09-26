@@ -897,7 +897,6 @@ pub enum Payload {
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     Status(StatusView),
     SubjectList(Vec<RoleBindingView>),
-    MutationComplete,
     MutationAttempt(crate::MutationGrant),
     PromptReply(PromptReply),
 }

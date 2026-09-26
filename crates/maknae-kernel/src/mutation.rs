@@ -443,8 +443,8 @@ where
         refuse(stream, cfg, &*emit, record, reason).await;
         return true;
     }
-    let length = if let Verb::FsWrite { content, .. } = verb {
-        Some(content.0.len() as u64)
+    let length = if let Verb::FsWrite { content_length, .. } = verb {
+        Some(*content_length)
     } else {
         None
     };
@@ -623,7 +623,6 @@ async fn incomplete<E: AuditEmit>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::Bytes;
     use std::os::unix::fs::PermissionsExt;
 
     struct Fixture {
@@ -763,7 +762,7 @@ mod tests {
         std::fs::write(&target, b"untouched").unwrap();
         let verb = Verb::FsWrite {
             path: target.to_str().unwrap().into(),
-            content: Bytes::new(Vec::new().into()),
+            content_length: 0,
             mode: WriteMode::Existing,
             conversation: None,
         };
@@ -932,7 +931,7 @@ mod tests {
         .is_err());
         let write = || Verb::FsWrite {
             path: target.to_str().unwrap().into(),
-            content: Bytes::new(Vec::new().into()),
+            content_length: 0,
             mode: WriteMode::Existing,
             conversation: None,
         };

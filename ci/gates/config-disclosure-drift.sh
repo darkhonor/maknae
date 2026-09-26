@@ -154,7 +154,6 @@ PAYLOAD_DISPOSITIONS=(
   "ConfigView|preredacted"
   "Status|struct:StatusView"
   "SubjectList|struct:RoleBindingView"
-  "MutationComplete|unit"
   "MutationAttempt|authorized-attempt"
   "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP), like ReadContent
 )

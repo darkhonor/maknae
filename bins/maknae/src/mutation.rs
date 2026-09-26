@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct PreparedMutation {
     request: proto::Verb,
+    content: Option<proto::Bytes>,
     fd: Option<OwnedFd>,
     error: Option<String>,
     components: Vec<String>,
@@ -32,15 +33,6 @@ impl PreparedMutation {
     }
     pub fn preparation_error(&self) -> Option<&str> {
         self.error.as_deref()
-    }
-    pub fn is_namespace(&self) -> bool {
-        !matches!(
-            self.request,
-            proto::Verb::FsWrite {
-                mode: WriteMode::Existing,
-                ..
-            }
-        )
     }
 }
 
@@ -68,7 +60,10 @@ fn split(path: &str) -> io::Result<(PathBuf, String)> {
 
 /// Opening evidence never creates, truncates, removes or publishes anything.
 /// An open failure retains the request so the daemon can audit its refusal.
-pub fn prepare(mut request: proto::Verb) -> Option<PreparedMutation> {
+pub fn prepare(
+    mut request: proto::Verb,
+    content: Option<proto::Bytes>,
+) -> Option<PreparedMutation> {
     let mut components = Vec::new();
     let opened = match &mut request {
         proto::Verb::FsWrite { path, mode, .. } => {
@@ -135,6 +130,7 @@ pub fn prepare(mut request: proto::Verb) -> Option<PreparedMutation> {
     };
     Some(PreparedMutation {
         request,
+        content,
         fd,
         error,
         components,
@@ -670,10 +666,12 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .ok_or("mutation grant without prepared evidence")?;
         let work = match granted {
             Granted::Object(path) => match prepared.request {
-                proto::Verb::FsWrite { content, .. } => Work::Replace {
+                proto::Verb::FsWrite { .. } => Work::Replace {
                     held: evidence,
                     path,
-                    bytes: content,
+                    bytes: prepared
+                        .content
+                        .ok_or_else(|| "write content missing".to_string())?,
                 },
                 _ => return Err("unexpected mutation operation".into()),
             },
@@ -694,12 +692,13 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 match prepared.request {
                     proto::Verb::FsWrite {
                         mode: WriteMode::CreateExclusive,
-                        content,
                         ..
                     } => Work::Create {
                         parent,
                         leaf,
-                        bytes: content,
+                        bytes: prepared
+                            .content
+                            .ok_or_else(|| "write content missing".to_string())?,
                     },
                     proto::Verb::FsDelete { recursive, .. } => Work::Delete {
                         parent,
@@ -801,25 +800,36 @@ mod tests {
     fn write(path: String) -> proto::Verb {
         proto::Verb::FsWrite {
             path,
-            content: proto::Bytes::new(zeroize::Zeroizing::new(b"new bytes".to_vec())),
+            content_length: 9,
             mode: proto::WriteMode::Existing,
             conversation: None,
         }
+    }
+    fn prepare_write(path: String) -> Option<PreparedMutation> {
+        prepare(
+            write(path),
+            Some(proto::Bytes::new(zeroize::Zeroizing::new(
+                b"new bytes".to_vec(),
+            ))),
+        )
     }
     #[test]
     fn preparation_preserves_existing_sentinel_and_missing_entries() {
         let d = Fixture::new();
         let p = d.path("prepare-original-sentinel");
         std::fs::write(&p, b"original preserved bytes").unwrap();
-        assert!(prepare(write(p.clone())).is_some());
+        assert!(prepare_write(p.clone()).is_some());
         assert_eq!(std::fs::read(p).unwrap(), b"original preserved bytes");
-        assert!(prepare(write(d.path("prepare-absent-sentinel"))).is_some());
+        assert!(prepare_write(d.path("prepare-absent-sentinel")).is_some());
         assert!(!d.0.join("prepare-absent-sentinel").exists());
-        assert!(prepare(proto::Verb::FsMkdir {
-            path: d.path("prepare-parent/child"),
-            parents: true,
-            components: vec![]
-        })
+        assert!(prepare(
+            proto::Verb::FsMkdir {
+                path: d.path("prepare-parent/child"),
+                parents: true,
+                components: vec![]
+            },
+            None
+        )
         .is_some());
         assert!(!d.0.join("prepare-parent").exists());
     }
@@ -895,7 +905,7 @@ mod tests {
     fn preparation_keeps_evidence_and_never_reinterprets_other_open_errors() {
         let d = Fixture::new();
         std::fs::write(d.path("original"), b"unchanged").unwrap();
-        let p = prepare(write(d.path("original"))).unwrap();
+        let p = prepare_write(d.path("original")).unwrap();
         assert!(matches!(
             p.request(),
             proto::Verb::FsWrite {
@@ -903,10 +913,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(!p.is_namespace());
         assert!(p.descriptor().unwrap().is_some());
         assert_eq!(p.preparation_error(), None);
-        let absent = prepare(write(d.path("absent"))).unwrap();
+        let absent = prepare_write(d.path("absent")).unwrap();
         assert!(matches!(
             absent.request(),
             proto::Verb::FsWrite {
@@ -914,7 +923,7 @@ mod tests {
                 ..
             }
         ));
-        let directory = prepare(write(d.0.to_str().unwrap().into())).unwrap();
+        let directory = prepare_write(d.0.to_str().unwrap().into()).unwrap();
         assert!(matches!(
             directory.request(),
             proto::Verb::FsWrite {
@@ -923,7 +932,7 @@ mod tests {
             }
         ));
         assert!(directory.descriptor().unwrap().is_some());
-        let beneath_file = prepare(write(d.path("original/child"))).unwrap();
+        let beneath_file = prepare_write(d.path("original/child")).unwrap();
         assert!(matches!(
             beneath_file.request(),
             proto::Verb::FsWrite {
@@ -933,15 +942,15 @@ mod tests {
         ));
         assert!(beneath_file.preparation_error().is_some());
         assert!(beneath_file.descriptor().unwrap().is_none());
-        let malformed = prepare(mkdir(d.path(".."), true)).unwrap();
+        let malformed = prepare(mkdir(d.path(".."), true), None).unwrap();
         assert!(malformed.preparation_error().is_some());
-        assert!(prepare(proto::Verb::Ping).is_none());
+        assert!(prepare(proto::Verb::Ping, None).is_none());
     }
     #[tokio::test]
     async fn exclusive_collision_preserves_intervening_sentinel() {
         let d = Fixture::new();
         let path = d.path("exclusive-collision-sentinel");
-        let prepared = prepare(write(path.clone())).unwrap();
+        let prepared = prepare_write(path.clone()).unwrap();
         std::fs::write(&path, b"intervening owner bytes").unwrap();
         let (result, reports) = acknowledged(
             prepared,
@@ -968,7 +977,7 @@ mod tests {
         let d = Fixture::new();
         let path = d.path("created-content-sentinel");
         let (result, reports) = acknowledged(
-            prepare(write(path.clone())).unwrap(),
+            prepare_write(path.clone()).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedFile,
@@ -987,7 +996,7 @@ mod tests {
         let d = Fixture::new();
         let outside = Fixture::new();
         let paths = vec![d.path("new-parent"), d.path("new-parent/child-sentinel")];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         std::os::unix::fs::symlink(&outside.0, &paths[0]).unwrap();
         let (result, _) = acknowledged(
             prepared,
@@ -999,7 +1008,7 @@ mod tests {
         assert!(!outside.0.join("child-sentinel").exists());
         std::fs::create_dir(d.path("real-existing")).unwrap();
         let (result, reports) = acknowledged(
-            prepare(mkdir(d.path("real-existing"), true)).unwrap(),
+            prepare(mkdir(d.path("real-existing"), true), None).unwrap(),
             grant(MutationScope::Directories {
                 paths: vec![d.path("real-existing")],
             }),
@@ -1027,7 +1036,7 @@ mod tests {
         std::fs::write(outside.path("outside-preserved-sentinel"), b"safe outside").unwrap();
         std::os::unix::fs::symlink(&outside.0, d.path("recursive-root/link")).unwrap();
         let (result, reports) = acknowledged(
-            prepare(delete(root.clone(), true)).unwrap(),
+            prepare(delete(root.clone(), true), None).unwrap(),
             grant(MutationScope::RecursiveDelete { root: root.clone() }),
             TransportConfig::default(),
         )
@@ -1055,7 +1064,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(d.path("nonrecursive/keep-sentinel"), b"keep").unwrap();
         let (result, reports) = acknowledged(
-            prepare(delete(root.clone(), false)).unwrap(),
+            prepare(delete(root.clone(), false), None).unwrap(),
             grant(MutationScope::Exact {
                 path: root,
                 effect: ReportedEffect::DeletedEntry,
@@ -1082,7 +1091,7 @@ mod tests {
             ..TransportConfig::default()
         };
         let (result, _) = acknowledged(
-            prepare(write(path.clone())).unwrap(),
+            prepare_write(path.clone()).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedFile,
@@ -1094,7 +1103,7 @@ mod tests {
         assert!(!Path::new(&path).exists());
         let outside = Fixture::new();
         let (result, _) = acknowledged(
-            prepare(write(path.clone())).unwrap(),
+            prepare_write(path.clone()).unwrap(),
             grant(MutationScope::Exact {
                 path: outside.path("no-effect-sentinel"),
                 effect: ReportedEffect::CreatedFile,
@@ -1113,7 +1122,7 @@ mod tests {
             d.path("ack-parent"),
             d.path("ack-parent/not-created-sentinel"),
         ];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         let (mut client, mut server) = tokio::io::duplex(65536);
         let task = tokio::spawn(async move {
             execute(
@@ -1152,7 +1161,7 @@ mod tests {
             frame_max_bytes: base_size,
             ..TransportConfig::default()
         };
-        let (result, reports) = acknowledged(prepare(write(path.clone())).unwrap(), g, cfg).await;
+        let (result, reports) = acknowledged(prepare_write(path.clone()).unwrap(), g, cfg).await;
         assert_eq!(result, Ok(false));
         assert!(!Path::new(&path).exists());
         assert!(matches!(
@@ -1172,7 +1181,7 @@ mod tests {
         });
         g.limits.max_effects = 1;
         let (result, reports) = acknowledged(
-            prepare(mkdir(paths[1].clone(), true)).unwrap(),
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
             g,
             TransportConfig::default(),
         )
@@ -1199,7 +1208,7 @@ mod tests {
             d.path("wrong-ack-parent"),
             d.path("wrong-ack-parent/untouched-sentinel"),
         ];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         let g = grant(MutationScope::Directories { paths });
         let id = g.id;
         let (mut client, mut server) = tokio::io::duplex(65536);
@@ -1233,7 +1242,7 @@ mod tests {
             std::fs::create_dir(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             let (result, _) = acknowledged(
-                prepare(delete(path.clone(), true)).unwrap(),
+                prepare(delete(path.clone(), true), None).unwrap(),
                 grant(MutationScope::RecursiveDelete { root: path.clone() }),
                 TransportConfig::default(),
             )
@@ -1249,7 +1258,7 @@ mod tests {
             d.path("partial-parent"),
             d.path("partial-parent/collision-sentinel"),
         ];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         let g = grant(MutationScope::Directories {
             paths: paths.clone(),
         });
@@ -1295,7 +1304,7 @@ mod tests {
             d.path("deadline-parent"),
             d.path("deadline-parent/untouched-sentinel"),
         ];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         let g = grant(MutationScope::Directories { paths });
         let (mut client, mut server) = tokio::io::duplex(65536);
         let cfg = TransportConfig {
@@ -1317,7 +1326,7 @@ mod tests {
         let path = d.path("existing-lane-sentinel");
         std::fs::write(&path, b"retained bytes").unwrap();
         let (result, _) = acknowledged(
-            prepare(write(path.clone())).unwrap(),
+            prepare_write(path.clone()).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedFile,
@@ -1329,7 +1338,7 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"retained bytes");
         let path = d.path("wrong-action-sentinel");
         let (result, _) = acknowledged(
-            prepare(mkdir(path.clone(), false)).unwrap(),
+            prepare(mkdir(path.clone(), false), None).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedFile,
@@ -1353,7 +1362,7 @@ mod tests {
         });
         let id = g.id;
         let (result, reports) = acknowledged(
-            prepare(write(path.clone())).unwrap(),
+            prepare_write(path.clone()).unwrap(),
             g,
             TransportConfig::default(),
         )
@@ -1386,7 +1395,7 @@ mod tests {
         let d = Fixture::new();
         let path = d.path("rename-sentinel");
         std::fs::write(&path, b"moved bytes").unwrap();
-        let prepared = prepare(write(path.clone())).unwrap();
+        let prepared = prepare_write(path.clone()).unwrap();
         std::fs::rename(&path, d.path("moved-sentinel")).unwrap();
         let (result, reports) = acknowledged(
             prepared,
@@ -1416,7 +1425,7 @@ mod tests {
         let d = Fixture::new();
         let path = d.path("replacement-grant-sentinel");
         std::fs::write(&path, b"kept").unwrap();
-        let prepared = prepare(write(path.clone())).unwrap();
+        let prepared = prepare_write(path.clone()).unwrap();
         for scope in [
             MutationScope::Exact {
                 path: path.clone(),
@@ -1434,7 +1443,7 @@ mod tests {
             path: path.clone(),
             effect: ReportedEffect::ReplacedFile,
         });
-        let beneath_file = prepare(write(d.path("replacement-grant-sentinel/child"))).unwrap();
+        let beneath_file = prepare_write(d.path("replacement-grant-sentinel/child")).unwrap();
         assert!(grant_replacement(&beneath_file, &valid).is_err());
         assert_eq!(
             grant_replacement(&prepared, &valid),
@@ -1450,7 +1459,7 @@ mod tests {
         let path = d.path("no-access-sentinel");
         std::fs::write(&path, b"no access bytes").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let prepared = prepare(write(path.clone())).unwrap();
+        let prepared = prepare_write(path.clone()).unwrap();
         assert!(prepared.descriptor().unwrap().is_some());
         assert_eq!(prepared.preparation_error(), None);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -1460,15 +1469,15 @@ mod tests {
     fn malformed_preparation_and_mkdir_depth_are_refused_without_entries() {
         let d = Fixture::new();
         for suffix in ["", ".", "..", "bad\0name"] {
-            let prepared = prepare(write(format!("{}/{suffix}", d.0.display()))).unwrap();
+            let prepared = prepare_write(format!("{}/{suffix}", d.0.display())).unwrap();
             assert!(prepared.preparation_error().is_some());
             assert!(prepared.descriptor().unwrap().is_none());
         }
         std::fs::write(d.path("parent-file"), b"safe").unwrap();
-        let prepared = prepare(mkdir(d.path("parent-file/child"), true)).unwrap();
+        let prepared = prepare(mkdir(d.path("parent-file/child"), true), None).unwrap();
         assert!(prepared.preparation_error().is_some());
         let deep = format!("{}/{}leaf", d.0.display(), "absent/".repeat(128));
-        let prepared = prepare(mkdir(deep, true)).unwrap();
+        let prepared = prepare(mkdir(deep, true), None).unwrap();
         assert!(prepared.preparation_error().unwrap().contains("depth"));
         assert!(!d.0.join("absent").exists());
         assert_eq!(std::fs::read(d.path("parent-file")).unwrap(), b"safe");
@@ -1478,7 +1487,7 @@ mod tests {
         let d = Fixture::new();
         let path = d.path("exact-created-sentinel");
         let (result, reports) = acknowledged(
-            prepare(mkdir(path.clone(), false)).unwrap(),
+            prepare(mkdir(path.clone(), false), None).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedDirectory,
@@ -1492,7 +1501,7 @@ mod tests {
             matches!(&reports[..], [MutationReport::Batch { effects, .. }, MutationReport::Finished { next_index: 1, .. }] if effects[0].effect == ReportedEffect::CreatedDirectory)
         );
         let (result, reports) = acknowledged(
-            prepare(mkdir(path.clone(), false)).unwrap(),
+            prepare(mkdir(path.clone(), false), None).unwrap(),
             grant(MutationScope::Exact {
                 path,
                 effect: ReportedEffect::CreatedDirectory,
@@ -1511,7 +1520,7 @@ mod tests {
         ));
         let paths = vec![d.path("nested"), d.path("nested/child")];
         let (result, reports) = acknowledged(
-            prepare(mkdir(paths[1].clone(), true)).unwrap(),
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
             grant(MutationScope::Directories {
                 paths: paths.clone(),
             }),
@@ -1566,7 +1575,7 @@ mod tests {
         }
         for g in grants {
             let (result, reports) = acknowledged(
-                prepare(write(path.clone())).unwrap(),
+                prepare_write(path.clone()).unwrap(),
                 g,
                 TransportConfig::default(),
             )
@@ -1577,7 +1586,7 @@ mod tests {
         }
         std::fs::create_dir(d.path("nested-parent")).unwrap();
         let (result, _) = acknowledged(
-            prepare(write(d.path("nested-parent/grant-sentinel"))).unwrap(),
+            prepare_write(d.path("nested-parent/grant-sentinel")).unwrap(),
             base,
             TransportConfig::default(),
         )
@@ -1586,7 +1595,7 @@ mod tests {
         assert!(!d.0.join("nested-parent/grant-sentinel").exists());
         let paths = vec![d.path("new-prefix"), d.path("wrong-prefix/last")];
         let (result, _) = acknowledged(
-            prepare(mkdir(d.path("new-prefix/last"), true)).unwrap(),
+            prepare(mkdir(d.path("new-prefix/last"), true), None).unwrap(),
             grant(MutationScope::Directories { paths }),
             TransportConfig::default(),
         )
@@ -1605,7 +1614,7 @@ mod tests {
         });
         g.limits.max_depth = 1;
         let (result, reports) = acknowledged(
-            prepare(delete(d.path("depth"), true)).unwrap(),
+            prepare(delete(d.path("depth"), true), None).unwrap(),
             g,
             TransportConfig::default(),
         )
@@ -1625,7 +1634,7 @@ mod tests {
         ));
         std::fs::set_permissions(d.path("depth"), std::fs::Permissions::from_mode(0o300)).unwrap();
         let (result, reports) = acknowledged(
-            prepare(delete(d.path("depth"), true)).unwrap(),
+            prepare(delete(d.path("depth"), true), None).unwrap(),
             grant(MutationScope::RecursiveDelete {
                 root: d.path("depth"),
             }),
@@ -1781,7 +1790,7 @@ mod tests {
     #[test]
     fn grant_validation_rejects_relative_scope_and_wrong_prefix_count() {
         let d = Fixture::new();
-        let prepared = prepare(write(d.path("leaf"))).unwrap();
+        let prepared = prepare_write(d.path("leaf")).unwrap();
         assert!(grant_parent(
             &prepared,
             &grant(MutationScope::Exact {
@@ -1790,7 +1799,7 @@ mod tests {
             })
         )
         .is_err());
-        let prepared = prepare(mkdir(d.path("new/child"), true)).unwrap();
+        let prepared = prepare(mkdir(d.path("new/child"), true), None).unwrap();
         for paths in [
             vec![],
             vec![d.path("new")],
@@ -1927,7 +1936,7 @@ mod tests {
         });
         g.limits.max_depth = 1;
         let (result, reports) = acknowledged(
-            prepare(mkdir(paths[1].clone(), true)).unwrap(),
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
             g,
             TransportConfig::default(),
         )
@@ -1952,7 +1961,7 @@ mod tests {
         });
         g.limits.max_depth = 2;
         let (result, _) = acknowledged(
-            prepare(mkdir(paths[1].clone(), true)).unwrap(),
+            prepare(mkdir(paths[1].clone(), true), None).unwrap(),
             g,
             TransportConfig::default(),
         )
@@ -1964,7 +1973,7 @@ mod tests {
     async fn delayed_grant_cannot_restart_expired_request_window() {
         let d = Fixture::new();
         let path = d.path("delayed-grant-untouched-sentinel");
-        let prepared = prepare(write(path.clone())).unwrap();
+        let prepared = prepare_write(path.clone()).unwrap();
         let cfg = TransportConfig {
             read_timeout_ms: 1000,
             ..TransportConfig::default()
@@ -1996,7 +2005,7 @@ mod tests {
             d.path("elapsed-parent"),
             d.path("elapsed-parent/untouched-sentinel"),
         ];
-        let prepared = prepare(mkdir(paths[1].clone(), true)).unwrap();
+        let prepared = prepare(mkdir(paths[1].clone(), true), None).unwrap();
         let g = grant(MutationScope::Directories { paths });
         let cfg = TransportConfig {
             read_timeout_ms: 1000,

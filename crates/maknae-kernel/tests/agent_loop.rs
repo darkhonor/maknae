@@ -212,7 +212,7 @@ impl Plane for FixturePlane {
         let verb = Verb::FsWrite {
             conversation: Some(conversation.into()),
             path: path.into(),
-            content: maknae_proto::Bytes::new(Zeroizing::new(content.to_vec())),
+            content_length: content.len() as u64,
             mode: maknae_proto::WriteMode::Existing,
         };
         let (mut client, task, body) = self.fx.start_egress(
