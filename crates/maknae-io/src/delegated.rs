@@ -315,7 +315,7 @@ pub fn read_delegated(
     Ok((verified.path, bytes))
 }
 
-pub fn refuse_write_access(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
+pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
     if crate::syscall::confers_no_write(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
     {
@@ -1180,12 +1180,12 @@ mod tests {
     }
 
     #[test]
-    fn only_a_no_write_descriptor_is_accepted_as_replacement_evidence() {
+    fn only_a_location_descriptor_is_accepted_as_object_evidence() {
         let d = tempfile::tempdir().expect("tempdir");
         let p = d.path().join("held");
         std::fs::write(&p, b"safe").expect("write");
         let held = open_path_for_delegation(&p).expect("no-access open");
-        assert_eq!(refuse_write_access(held.as_fd(), &p), Ok(()));
+        assert_eq!(refuse_access_bearing(held.as_fd(), &p), Ok(()));
         for (read, write) in [(false, true), (true, true)] {
             let fd: OwnedFd = std::fs::OpenOptions::new()
                 .read(read)
@@ -1194,7 +1194,7 @@ mod tests {
                 .expect("writable open")
                 .into();
             assert_eq!(
-                refuse_write_access(fd.as_fd(), &p),
+                refuse_access_bearing(fd.as_fd(), &p),
                 Err(IoError::AccessBearingDescriptor { path: p.clone() })
             );
         }
@@ -1202,7 +1202,7 @@ mod tests {
         {
             let readable: OwnedFd = std::fs::File::open(&p).expect("readable open").into();
             assert_eq!(
-                refuse_write_access(readable.as_fd(), &p),
+                refuse_access_bearing(readable.as_fd(), &p),
                 Err(IoError::AccessBearingDescriptor { path: p.clone() })
             );
         }

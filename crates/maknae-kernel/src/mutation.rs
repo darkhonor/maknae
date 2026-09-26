@@ -51,9 +51,10 @@ struct DurableIntent {
 
 fn path(verb: &Verb) -> Option<&str> {
     match verb {
-        Verb::FsWrite { path, .. } | Verb::FsDelete { path, .. } | Verb::FsMkdir { path, .. } => {
-            Some(path)
-        }
+        Verb::FsWrite { path, .. }
+        | Verb::FsDelete { path, .. }
+        | Verb::FsMkdir { path, .. }
+        | Verb::Read { path, .. } => Some(path),
         _ => None,
     }
 }
@@ -81,19 +82,36 @@ fn prepare(
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
     }
-    let fd = fd.ok_or("mutation descriptor missing")?;
-    if let Verb::FsWrite {
-        mode: WriteMode::Existing,
-        ..
-    } = verb
-    {
+    let read = matches!(verb, Verb::Read { .. });
+    let fd = fd.ok_or(if read {
+        "read descriptor missing"
+    } else {
+        "mutation descriptor missing"
+    })?;
+    let object = match &verb {
+        Verb::Read { .. } => Some((
+            "read evidence refused",
+            FsOperation::Read,
+            ReportedEffect::ReadFile,
+        )),
+        Verb::FsWrite {
+            mode: WriteMode::Existing,
+            ..
+        } => Some((
+            "replacement evidence refused",
+            FsOperation::WriteExisting,
+            ReportedEffect::ReplacedFile,
+        )),
+        _ => None,
+    };
+    if let Some((refused, kind, effect)) = object {
         let verified = maknae_io::verify_delegated(
             fd.as_fd(),
             delegated_plan(&principal.home, principal.uid, None),
         )
-        .map_err(|e| format!("replacement evidence refused: {e}"))?;
-        maknae_io::refuse_write_access(fd.as_fd(), &verified.path)
-            .map_err(|e| format!("replacement evidence refused: {e}"))?;
+        .map_err(|e| format!("{refused}: {e}"))?;
+        maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path)
+            .map_err(|e| format!("{refused}: {e}"))?;
         let path = verified
             .path
             .to_str()
@@ -104,10 +122,10 @@ fn prepare(
             _evidence: Evidence::Object { _fd: fd },
             scope: MutationScope::Exact {
                 path: path.clone(),
-                effect: ReportedEffect::ReplacedFile,
+                effect,
             },
             paths: vec![path],
-            kind: FsOperation::WriteExisting,
+            kind,
         });
     }
     let directory = maknae_io::verify_mutation_directory(
@@ -693,6 +711,50 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn a_read_is_prepared_on_a_location_descriptor_as_an_exact_read() {
+        let fx = Fixture::new();
+        let target = fx.root.join("read-prepare-sentinel");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let read = || Verb::Read {
+            path: target.to_str().unwrap().into(),
+        };
+        let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
+        let prepared = prepare(read(), held(), &fx.principal, Lane::Local).unwrap();
+        assert_eq!(prepared.kind, FsOperation::Read);
+        assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
+        assert_eq!(
+            prepared.scope,
+            MutationScope::Exact {
+                path: target.to_str().unwrap().into(),
+                effect: ReportedEffect::ReadFile
+            }
+        );
+        assert_eq!(
+            prepare(read(), None, &fx.principal, Lane::Local)
+                .err()
+                .as_deref(),
+            Some("read descriptor missing")
+        );
+        assert!(prepare(read(), held(), &fx.principal, Lane::Remote).is_err());
+        assert!(prepare(read(), Some(fx.fd()), &fx.principal, Lane::Local)
+            .err()
+            .unwrap()
+            .starts_with("read evidence refused"));
+        #[cfg(target_os = "linux")]
+        assert!(prepare(
+            read(),
+            Some(std::fs::File::open(&target).unwrap().into()),
+            &fx.principal,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .contains("confers access beyond location"));
+        std::fs::hard_link(&target, fx.root.join("second-read-link")).unwrap();
+        assert!(prepare(read(), held(), &fx.principal, Lane::Local).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let path = fx.root.join("authz.yaml");
