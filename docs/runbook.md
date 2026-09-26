@@ -685,7 +685,7 @@ What to find:
 | `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
 | `fs.read` | `object` = the canonical path, `result:"permit"` |
-| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"`, `origin:"KernelObserved"`, `status:"IntentOnly"` (the intent is the kernel's own record) |
+| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing`, what an enforcing host without #365 PR 1 records) |

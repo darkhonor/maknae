@@ -150,7 +150,7 @@ Dated as-built amendment; rides the #222 PR. It closes the darwin gap the #189 a
 
 **Amended 2026-09-26 (#365):** this paragraph and the two below.
 
-The reference monitor verifies immutable execution evidence and obtains a real composed Permit for every intended resource before appending an intent. The intent carries the prepared operation, authorized paths, and content length where applicable; file bytes are never audit data. An intent append failure prevents issuance of an attempt grant.
+The reference monitor verifies immutable execution evidence and obtains a real composed Permit for every intended resource before appending an intent. The intent carries the prepared operation, authorized paths, and, for a write, the content length the request declares (a client claim; the kernel never sees the bytes); file bytes are never audit data. An intent append failure prevents issuance of an attempt grant.
 
 Existing-file replacement is a subject-side attempt like the operations below: the daemon verifies a no-access descriptor for location and kind, decides, durably records intent, and grants the replacement; the CLI writes under the subject's credentials. `KernelObserved` appears only on the kernel's own intent and `Incomplete` records.
 
