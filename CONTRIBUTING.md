@@ -43,6 +43,8 @@ Maknae is a Rust workspace. The toolchain version is pinned via [`rust-toolchain
 
 The pre-push gates need a few cargo subcommands and helpers beyond rustup. **Derive the authoritative list from [`.github/workflows/ci.yml`](.github/workflows/ci.yml)** — it installs exactly what the gate runs, so it stays current as the gate evolves. As of this writing that is `cargo-deny` (supply-chain policy, against [`deny.toml`](deny.toml)), `cargo-llvm-cov` + the `llvm-tools` component (coverage), `cargo-mutants` (the mutation gate), and `python3` / `bash` for the `ci/gates/*` scripts. Install the cargo subcommands with `cargo install <name>` using the versions in CI; for reproducible mutation results use `cargo install cargo-mutants --version 27.1.0 --locked`.
 
+On Linux the test suite also needs the **`acl`** package (`setfacl`, `getfacl`): enroll's home-ACL revoke test drives them against a scratch directory and fails without them. CI does not install it; the `ubuntu-latest` runner image ships it.
+
 ### Cloning on Windows — turn symlinks on *first*
 
 This repository tracks `CLAUDE.md` as a **symlink** to `AGENTS.md`. Git materializes it as a real link only when `core.symlinks` is on — on Windows that means **Developer Mode is enabled** (Settings → System → For developers) or git ran elevated. Otherwise git writes `CLAUDE.md` as a plain ~9-byte text file containing the string `AGENTS.md`, silently, and any tool that reads `CLAUDE.md` for the project's conventions gets *no guidance at all*.
