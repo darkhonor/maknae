@@ -612,11 +612,11 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
 ///
 /// `principal.home` is written by `maknae enroll` VERBATIM from `getpwuid` -- the
 /// directory service's value, not an operator's choice, and re-derived on every
-/// enroll -- and the daemon feeds that one value to FOUR consumers: the delegated
+/// enroll -- and the daemon feeds that one value to TWO consumers: the delegated
 /// lane's confinement root (`handler::delegated_plan`, reached at attempt
 /// preparation), which is prefix-checked against the
-/// KERNEL-reported path of the subject's descriptor; the `~` referent of every
-/// policy glob (`PathGlob::parse`); and the boot-time anchor probe in `run.rs`.
+/// KERNEL-reported path of the subject's descriptor; and the `~` referent of every
+/// policy glob (`PathGlob::parse`).
 /// Because the kernel reports the RESOLVED form and the configured form never
 /// prefix-matched it, a `/home -> /export/home` layout, an autofs/NFS estate or
 /// any macOS `/var`-rooted path could not serve a single read. Not a bypass -- a

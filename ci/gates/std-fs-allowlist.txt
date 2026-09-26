@@ -7,13 +7,13 @@ bins/maknae/src/enroll/artifact_write.rs|std::fs::write(&artifact.path, bytes).m
 bins/maknae/src/enroll/mod.rs|let _ = std::fs::remove_file(&out_path);
 bins/maknae/src/enroll/mod.rs|let _ = std::fs::remove_file(&out_path); // best-effort cleanup
 
-# #77 read-path grant: the AppArmor local include is a root-context, warn-on-failure
-# provisioning write to /etc/apparmor.d/local (not a maknae-managed artifact tree);
-# maknae-io's anchored-write contract targets maknae artifact dirs and would add an
-# anchor for a foreign, distro-owned path — the same enrollment-transaction rationale
-# as artifact_write above.
-bins/maknae/src/enroll/mod.rs|let _ = std::fs::create_dir_all(local_dir);
-bins/maknae/src/enroll/mod.rs|if let Err(e) = std::fs::write(&inc, snippet) {
+# #365 legacy revoke: enroll reads and removes its own earlier AppArmor local include,
+# a root-context, warn-on-failure change in /etc/apparmor.d/local (not a maknae-managed
+# artifact tree); maknae-io's anchored contract targets maknae artifact dirs and would
+# add an anchor for a foreign, distro-owned path — the same enrollment-transaction
+# rationale as artifact_write above.
+bins/maknae/src/enroll/mod.rs|let text = match std::fs::read_to_string(path) {
+bins/maknae/src/enroll/mod.rs|std::fs::remove_file(path)?;
 
 # Enrollment input reads intentionally preserve their existing caller-selected symlink and
 # permission semantics. maknae-io has no follow-final-symlink read contract; migration would

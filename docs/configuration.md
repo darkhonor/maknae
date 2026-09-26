@@ -740,8 +740,7 @@ vault:
 > refuses any world bit on `<config-dir>` (`mode & 0o007`, §2.2). The fix is a POSIX ACL
 > `u:_maknae-egress:rx` on `/etc/maknae` — `r` as well as `x`, because the anchored
 > reader opens the directory `O_RDONLY|O_DIRECTORY` and a search-only entry fails that
-> open; set by the package's `postinst`/`%post` and re-asserted by `maknae enroll` (the
-> same `rx` mechanism enroll already uses for the daemon's home grant) — and `0644` on
+> open; set by the package's `postinst`/`%post` and re-asserted by `maknae enroll` — and `0644` on
 > this file. A *write*-granting ACL would raise the group bits into the
 > loader's `0o022` mask and be refused, so the root-artifact check is not weakened. §2.2's
 > "keep the config tree free of world ACLs" still holds: this is a user entry for one named

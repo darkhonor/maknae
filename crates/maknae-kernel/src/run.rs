@@ -60,7 +60,6 @@ use crate::handler::{
     verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_config::Principal;
-use maknae_io::{open_anchor_resolved, AnchorRequired, StrategyPref};
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
 
@@ -3009,24 +3008,6 @@ async fn boot_after_sink(
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
     let principal = Arc::new(principal);
-
-    // Read-path anchor PROBE (spec D1/D5a): warn-only — an unreachable home
-    // (missing ACL, unmounted) degrades the READ VERB, it must never
-    // crash-loop the trust plane; ping/whoami keep serving and the anchor is
-    // re-opened per request anyway (reads deny until the condition clears).
-    if let Err(e) = open_anchor_resolved(
-        &principal.home,
-        AnchorRequired {
-            owner: Some(principal.uid),
-            mode_mask: Some(0o022),
-        },
-        StrategyPref::Auto,
-    ) {
-        eprintln!(
-            "maknaed: read verb unavailable — home anchor probe failed for {}: {e} (ping/whoami unaffected; fix the home ACL/mode and reads recover without restart)",
-            principal.home.display()
-        );
-    }
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
