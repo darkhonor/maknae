@@ -214,7 +214,7 @@ files = [
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
-  # #158: namespace/report evidence, descriptor mutations, and durable audit admission.
+  # #158/#365: namespace/report evidence, subject-side attempts, and durable audit admission.
   "crates/maknae-kernel/src/mutation_exchange.rs",
   "crates/maknae-kernel/src/mutation.rs",
   "crates/maknae-io/src/mutation.rs",
@@ -251,7 +251,7 @@ files = [
   # plane.rs is here, not in T3 (moved 2026-09-22, #241 CR1): it is not the
   # bare-declarations file its T3 entry called it. `ReadOutcome`'s `Debug` is
   # hand-written and REDACTING — a derived one prints
-  # `Content(Zeroizing([83, 69, …]))`, dumping kernel-served home-file content
+  # `Content(Zeroizing([83, 69, …]))`, dumping home-file content
   # into any `{:?}`, including a test's `panic!("{other:?}")`. A redaction
   # control is executable logic and belongs under the T1 floor.
   "crates/maknae-agent/src/plane.rs",

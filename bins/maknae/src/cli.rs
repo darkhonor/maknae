@@ -98,10 +98,10 @@ enum Command {
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
-    /// Read a file under the enrolled home through the daemon's reference
-    /// monitor (the policy in /etc/maknae/authz.yaml decides; raw bytes to
-    /// stdout). Paths are sent lexically absolute; `..` is refused by the
-    /// daemon's canonical pre-gate.
+    /// Read a file under the enrolled home: the daemon decides (the policy in
+    /// /etc/maknae/authz.yaml), and the CLI reads under your credentials; raw
+    /// bytes to stdout. Paths are sent lexically absolute; `..` is refused by
+    /// the daemon's canonical pre-gate.
     Read {
         /// File to read (absolute, or relative to the current directory).
         path: std::path::PathBuf,

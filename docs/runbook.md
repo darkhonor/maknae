@@ -458,7 +458,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Per-request AUTHORIZATION (#77)** — the DECISION half: every admitted request is
   decided by the PDP — the `Composition` of `maknae-authz-basic` and the
   classification-ceiling operand, behind the `maknae-security` seam (#148/#154) —
-  policy re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`;
+  policy re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`
+  (the kernel decides; the CLI reads under your credentials);
   `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
   `not authorized`, the trail says which pattern and which object. Re-roling or
   removing an identity ALREADY KNOWN at boot bites on the NEXT request, no
@@ -511,6 +512,7 @@ Prove Maknae works as an agent on a **packaged** Linux install. An operator enro
 - **The RPM, built on the target OS** (`packaging/rpm/README.md`), so its SELinux module is compiled against that host's policy.
 - **`jq` and `semanage`**: `sudo dnf install -y jq policycoreutils-python-utils`.
 - **#365 PR 1 landed** (writes are subject-side attempts, and the SELinux policy lets `maknaed` receive no-access home descriptors). Before it, the shipped SELinux policy refuses every write on an enforcing host (`denied { ioctl }` for `maknaed_t` on `user_home_t` `dir`), and the trail records `fs.write` `deny`, reason `mutation descriptor missing`.
+- **#365 PR 2 landed** (reads are subject-side attempts).
 - **A provider API key**, which you will put into Vault in step 6. It never goes in a file on this host.
 
 ### 1. Install
@@ -684,7 +686,10 @@ What to find:
 | `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation` |
 | `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
-| `fs.read` | `object` = the canonical path, `result:"permit"` |
+| `fs.read` intent | `object` = the canonical path, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `origin:"KernelObserved"`, `status:"IntentOnly"`, no `content_length` |
+| `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N}]` |
+| `fs.read` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
+| `fs.read` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `read descriptor missing` or `read evidence refused: …`) |
 | `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
@@ -696,12 +701,11 @@ There is **one `session.prompt` intent-and-outcome pair per model turn that is s
 
 **Correlation:**
 - `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
-- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write`.
-- `fs.read` records carry **no** conversation. Match them by `subject` and time window, and say so when you quote them.
+- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write` and `fs.read`.
 
 ### 12. The refused turns
 
-- **An oversize read.** Ask the agent to read a file larger than the kernel's read budget (`transport.frame_max_bytes` − 512 = 65024 bytes by default), e.g. `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`. The kernel refuses delivery and records it: `fs.read`, result `permit`, reason `delivery refused: oversize`, posture `refused-oversize`. The model is told the read was unavailable and usually answers anyway, with exit `0`.
+- **An oversize read.** Ask the agent to read a file larger than the read grant's byte limit (`transport.frame_max_bytes` − 512 = 65024 bytes by default), e.g. `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`. The CLI refuses the read against the grant's byte limit and reports it: `fs.read` completion `status:"ReportedLimitReached"`, with no `ReadFile` effect. The model is told the read was unavailable and usually answers anyway, with exit `0`.
 - **Over the conversation cap.** Two files, each inside the read budget, that together exceed the frame: `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the frame, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
 - **Marked content above the system level** (#242, the diagnostic-artifact case). **Not runnable yet.** Nothing stamps a marking on content until #229, so there is nothing to refuse.
 
@@ -738,7 +742,7 @@ sudo grep -h 'type=FANOTIFY' /var/log/audit/audit.log* | grep -i maknae    # fap
 
 Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured missing AVC records that the log holds. The log rotates quickly, so run this soon after step 10.
 
-**Expected:** no denials. A denial is a finding: quote it. This chapter is the first run of the delegated read descriptor under an enforcing policy.
+**Expected:** no denials. A denial is a finding: quote it. This chapter is the first run of the location-only read descriptor under an enforcing policy.
 
 ### What it proves
 

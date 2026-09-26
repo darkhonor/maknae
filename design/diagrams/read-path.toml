@@ -4,9 +4,9 @@
 # a reader is expected to check it.
 #
 # Participants are the LIFELINES, in the order they are drawn. The OS appears
-# TWICE on purpose. That is the whole of ADR-0009: the same kernel, asked by two
-# different principals, returns two different answers, and only the subject's
-# answer is the one that may authorize a read.
+# TWICE on purpose. That is the whole of ADR-0009: the daemon asks the OS only
+# WHERE the object is, from its own fd table; the subject asks the OS whether it
+# may read it, and only the subject's answer performs the read.
 
 [[participant]]
 id = "subject"
@@ -63,30 +63,30 @@ label = "maknae read <path>"
 from = "cli"
 to = "os_subject"
 kind = "call"
-label = "open_for_delegation(path)"
-evidence = "crates/maknae-io/src/delegated.rs:158 · bins/maknae/src/cli.rs:215"
+label = "open_path_for_delegation(path)"
+evidence = "crates/maknae-io/src/delegated.rs:131 · bins/maknae/src/mutation.rs:125"
 
 [[step]]
 from = "os_subject"
 to = "cli"
 kind = "reply"
-label = "fd — or EACCES"
-evidence = "the OS decides as the SUBJECT; this is the answer that counts"
+label = "location-only fd — or ENOENT"
+evidence = "O_PATH on Linux: no access is conferred and none is checked on the object"
 
 [[step]]
 from = "cli"
 to = "daemon"
 kind = "call"
 label = "Request{Read} + SCM_RIGHTS(fd) over the mTLS plane"
-evidence = "crates/maknae-io/src/delegated.rs:182 send_delegated · crates/maknae-plane/src/send.rs:42 FdSender"
-note = "A failed open still sends, UNARMED. Not a fallback: the daemon then has no descriptor, so it denies. (cli.rs:211)"
+evidence = "crates/maknae-io/src/delegated.rs:160 send_delegated · crates/maknae-plane/src/send.rs:42 FdSender · bins/maknae/src/cli.rs:387"
+note = "A failed open still sends, UNARMED. The daemon then has no descriptor and refuses it before the PDP: read descriptor missing."
 
 [[step]]
 from = "daemon"
 to = "daemon"
 kind = "self"
 label = "recv_delegated → FdCollector"
-evidence = "crates/maknae-io/src/delegated.rs:219 · crates/maknae-plane/src/fd.rs:42"
+evidence = "crates/maknae-io/src/delegated.rs:197 · crates/maknae-plane/src/fd.rs:42"
 note = "recvmsg, never read(2): a plain read silently DESTROYS the attached descriptor."
 
 [[step]]
@@ -94,30 +94,30 @@ from = "daemon"
 to = "daemon"
 kind = "self"
 label = "lexical_pregate(path)"
-evidence = "crates/maknae-kernel/src/run.rs:488"
+evidence = "crates/maknae-kernel/src/run.rs:622 · crates/maknae-kernel/src/mutation.rs:68"
 note = "A malformed path is BadRequest — no authorization decision is reached at all."
 
 [[step]]
 from = "daemon"
 to = "os_daemon"
 kind = "call"
-label = "verify_delegated(fd)"
-evidence = "crates/maknae-io/src/delegated.rs:286 · crates/maknae-kernel/src/run.rs:538"
-note = "Reads the daemon's OWN fd table (/proc/self/fd). Needs no permission on the object's directories — which is why a 0700 home still works."
+label = "verify_delegated + refuse_access_bearing"
+evidence = "crates/maknae-io/src/delegated.rs:247 · crates/maknae-io/src/delegated.rs:236 · crates/maknae-kernel/src/mutation.rs:74 prepare"
+note = "Reads the daemon's OWN fd table (/proc/self/fd). Needs no permission on the object's directories — which is why a 0700 home still works. A descriptor that confers access is refused."
 
 [[step]]
 from = "os_daemon"
 to = "daemon"
 kind = "reply"
 label = "kernel-reported path + fstat"
-evidence = "confinement beneath home, nlink == 1, owner and mode"
+evidence = "confinement beneath home, nlink == 1, regular file"
 
 [[step]]
 from = "daemon"
 to = "daemon"
 kind = "self"
-label = "build_authz_request(verb, uid, lane, os_path)"
-evidence = "crates/maknae-kernel/src/run.rs:544"
+label = "build_authz_request + fs_operation=read"
+evidence = "crates/maknae-kernel/src/handler.rs:252 · crates/maknae-kernel/src/mutation.rs:240 authorize"
 note = "Built on the KERNEL-REPORTED path, never the string the client sent — so the deny list evaluates the object, not an alias for it (ADR-0009 D6)."
 
 [[step]]
@@ -125,7 +125,7 @@ from = "daemon"
 to = "authz"
 kind = "call"
 label = "guarded_decide(&dyn Authorizer, &Request)"
-evidence = "crates/maknae-security/src/compose.rs:70 · crates/maknae-kernel/src/run.rs:565"
+evidence = "crates/maknae-security/src/compose.rs:112 · crates/maknae-kernel/src/mutation.rs:259"
 note = "THE SEAM, and the only crossing on this diagram that is not a process boundary — an in-process trait-object call on a spawn_blocking worker. maknae-authz-basic is what a deployment swaps to change the decision model (ADR-0004); maknae-authz-dcs would sit here."
 
 [[step]]
@@ -139,34 +139,67 @@ from = "daemon"
 to = "daemon"
 kind = "self"
 label = "combine([...]) + finalize"
-evidence = "crates/maknae-security/src/compose.rs:20 · crates/maknae-security/src/verdict.rs:47"
-note = "Composition runs in the KERNEL, not the backend: deny-overrides is the daemon's rule, so no backend can waive another's Deny. An absent or unverifiable descriptor is a Deny here — never a daemon-side open."
+evidence = "crates/maknae-security/src/compose.rs:44 · crates/maknae-security/src/verdict.rs:64"
+note = "Composition runs in the KERNEL, not the backend: deny-overrides is the daemon's rule, so no backend can waive another's Deny. fs.read is decided only on the local lane, and never on an OS preapproval."
 
 [[step]]
 from = "daemon"
 to = "audit"
 kind = "call"
-label = "emit_request_outcome(...)"
-evidence = "crates/maknae-kernel/src/run.rs:626"
+label = "commit_intent (Read)"
+evidence = "crates/maknae-kernel/src/mutation.rs:293"
 
 [[step]]
 from = "audit"
 to = "daemon"
 kind = "reply"
 label = "appended"
-evidence = "crates/maknae-kernel/src/run.rs:749 may_respond(appended)"
-note = "Audit-then-respond: the reply is gated on the record landing. No trail, no answer."
-
-[[step]]
-from = "daemon"
-to = "os_daemon"
-kind = "call"
-label = "read_delegated(fd)"
-evidence = "crates/maknae-io/src/delegated.rs:270 · crates/maknae-kernel/src/run.rs:920"
-note = "RE-VERIFIES immediately before taking the bytes. The gap between decision and read is where TOCTOU lives, so it is closed here rather than assumed away."
+note = "No grant without a durable intent. No trail, no read."
 
 [[step]]
 from = "daemon"
 to = "cli"
 kind = "reply"
-label = "bytes"
+label = "MutationAttempt(Exact ReadFile, max_bytes)"
+evidence = "crates/maknae-kernel/src/mutation.rs:483 attempt"
+
+[[step]]
+from = "cli"
+to = "os_subject"
+kind = "call"
+label = "read_held_file: re-open (/proc/self/fd/N)"
+evidence = "crates/maknae-io/src/mutation.rs:285 · crates/maknae-io/src/syscall.rs:425"
+note = "The OS decides the read HERE, as the subject. The fresh fd is bound to the held object (dev/ino, nlink == 1, path, size ≤ max_bytes) before a byte is read."
+
+[[step]]
+from = "os_subject"
+to = "cli"
+kind = "reply"
+label = "bytes — or EACCES"
+
+[[step]]
+from = "cli"
+to = "daemon"
+kind = "call"
+label = "MutationReport Batch{ReadFile, length} · Finished"
+
+[[step]]
+from = "daemon"
+to = "audit"
+kind = "call"
+label = "progress · completion (ClientReported)"
+evidence = "crates/maknae-kernel/src/mutation.rs:574"
+
+[[step]]
+from = "daemon"
+to = "cli"
+kind = "reply"
+label = "acks"
+
+[[step]]
+from = "cli"
+to = "subject"
+kind = "reply"
+label = "bytes to stdout, after the acknowledged Success"
+evidence = "bins/maknae/src/mutation.rs:842 · bins/maknae/src/cli.rs:307"
+note = "Content is released only once its completion record is durable. The daemon never read it."

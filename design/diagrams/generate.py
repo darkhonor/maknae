@@ -841,9 +841,9 @@ def d5_readpath(prov: str) -> str:
 
     p = [text(LEFT - 52, 44, "The fs.read path — boundary crossings", 16, "600"),
          text(LEFT - 52, 64, "One request, end to end. The OS appears TWICE because that is the "
-              "whole of ADR-0009: the same kernel, asked by two different", 11, fill=MUTED),
-         text(LEFT - 52, 79, "principals, answers differently — and only the subject's answer may "
-              "authorize a read. Each step names the code that implements it.", 11, fill=MUTED)] + p
+              "whole of ADR-0009: the daemon asks only where the object is, and", 11, fill=MUTED),
+         text(LEFT - 52, 79, "only the subject's own re-open performs the read. "
+              "Each step names the code that implements it.", 11, fill=MUTED)] + p
     p.append(footer(W, H, f"source: {content_stamp('design/diagrams/read-path.toml')}"))
     return svg(W, H, "\n".join(p), "Maknae fs.read boundary crossings",
                "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
