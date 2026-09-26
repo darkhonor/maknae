@@ -691,6 +691,11 @@ why = "The /proc/self/fd lane failing for a descriptor the caller already holds 
 
 [[exception]]
 path = "crates/maknae-io/src/delegated.rs"
+anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))"
+why = "refuse_write_access's F_GETFL runs on a descriptor verify_delegated resolved and fstat'ed immediately before, so it is valid and open; an invalid BorrowedFd cannot be constructed without unsafe (forbidden). A pure errno passthrough, and it fails closed: the error is a refusal (#365)."
+
+[[exception]]
+path = "crates/maknae-io/src/delegated.rs"
 anchor = ".map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))"
 why = "Identical in kind to the anchor.rs fstat exception above, and strictly weaker: this fstat runs on a descriptor whose /proc/self/fd entry resolved two lines earlier, so the fd is demonstrably valid and open at that instant. A pure errno passthrough with no decision."
 
