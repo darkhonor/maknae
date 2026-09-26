@@ -510,7 +510,7 @@ Prove Maknae works as an agent on a **packaged** Linux install. An operator enro
 - **The Vault CA** as a PEM file on the host.
 - **The RPM, built on the target OS** (`packaging/rpm/README.md`), so its SELinux module is compiled against that host's policy.
 - **`jq` and `semanage`**: `sudo dnf install -y jq policycoreutils-python-utils`.
-- **#365 landed.** Until it does, the shipped SELinux policy refuses every write on an enforcing host (`denied { ioctl }` for `maknaed_t` on `user_home_t` `dir`), and the trail records `fs.write` `deny`, reason `mutation descriptor missing`.
+- **#365 PR 1 landed** (writes are subject-side attempts, and the SELinux policy lets `maknaed` receive no-access home descriptors). Before it, the shipped SELinux policy refuses every write on an enforcing host (`denied { ioctl }` for `maknaed_t` on `user_home_t` `dir`), and the trail records `fs.write` `deny`, reason `mutation descriptor missing`.
 - **A provider API key**, which you will put into Vault in step 6. It never goes in a file on this host.
 
 ### 1. Install
@@ -686,9 +686,9 @@ What to find:
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
 | `fs.read` | `object` = the canonical path, `result:"permit"` |
 | `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"`, `origin:"KernelObserved"`, `status:"IntentOnly"` (the intent is the kernel's own record) |
-| `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created file in `effects` |
+| `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
-| `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing` before #365) |
+| `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing`, what an enforcing host without #365 PR 1 records) |
 
 There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
 
