@@ -705,6 +705,14 @@ mod tests {
     #[test]
     fn resolve_dir_needs_no_read_permission_on_the_directory() {
         use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::Uid::effective().is_root() {
+            crate::testutil::skip_or_fail(
+                "resolve_dir_needs_no_read_permission_on_the_directory",
+                "running as root, which ignores the 0o100 permission bits the \
+                 fixture depends on",
+            );
+            return;
+        }
         let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("searchonly");
@@ -718,7 +726,7 @@ mod tests {
 
         assert!(
             readable_open.is_err(),
-            "the directory must refuse a read open, which a root run cannot show"
+            "the fixture must refuse a read open"
         );
         assert_eq!(search_only.expect("a search-only dir resolves"), readable);
     }
