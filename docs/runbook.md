@@ -493,3 +493,266 @@ open indefinitely.
 socket file and the memory-only kernel leaf are gone when it exits, and its Vault token
 is revoked on shutdown. The CLI never holds state between invocations — each `maknae`
 run mints, connects, asks, revokes, exits.
+
+---
+
+## Chapter 4 — It acts (packaged agent conversation, #242)
+
+Prove Maknae works as an agent on a **packaged** Linux install. An operator enrolls, registers an OpenAI-compatible provider whose key is held only in Vault, and holds a short conversation in which the model reads one file and writes another through the kernel. Every leg is decided and audited: the prompt goes out through the egress deputy (`maknae-egress`), and the read and the write are decided by `maknaed`. The audit lines you quote at the end are the evidence.
+
+**Model.** Runs on the maintainer's key use `model: gpt-5.6-luna` (ruling 2026-09-13, recorded on #242). If you test on your own key, the model is your choice.
+
+### Prerequisites
+
+- **RHEL / Rocky 10**, SELinux enforcing, **with a TPM2** (a vTPM on a VM). Enroll refuses without a working `systemd-creds --with-key=tpm2` round-trip. fapolicyd may be active. RHEL 9 cannot run this chapter: `maknae enroll` seals with `systemd-creds --user`, which needs systemd ≥ 256, and el9 ships 252 (`packaging/rpm/README.md`).
+- **Vault with `deploy/vault-pki` applied** (`terraform apply -var 'deployment_id=<id>'`). This creates the AppRole mount `maknae-approle`, the PKI mounts, the **KV v2** mount `maknae-kv`, the three AppRoles (`maknaed`, `maknae`, `maknae-egress`) and their policies. `maknae-egress` may read `maknae-kv/data/maknae/providers/*` and revoke its own token, and nothing else. Enroll creates none of these; it expects them.
+- **An operator Vault token carrying the `maknae-enroll` policy** (`vault token create -policy=maknae-enroll`). Without it, every enroll call returns 403.
+- **The Vault CA** as a PEM file on the host.
+- **The RPM, built on the target OS** (`packaging/rpm/README.md`), so its SELinux module is compiled against that host's policy.
+- **`jq` and `semanage`**: `sudo dnf install -y jq policycoreutils-python-utils`.
+- **#365 landed.** Until it does, the shipped SELinux policy refuses every write on an enforcing host (`denied { ioctl }` for `maknaed_t` on `user_home_t` `dir`), and the trail records `fs.write` `deny`, reason `mutation descriptor missing`.
+- **A provider API key**, which you will put into Vault in step 6. It never goes in a file on this host.
+
+### 1. Install
+
+```bash
+sudo dnf install ./maknae-<ver>-1.el10.x86_64.rpm
+id _maknae; id _maknae-egress; getenforce
+```
+
+A locally built package is unsigned. On a host that enforces GPG checks for local packages, either sign it (`packaging/sign.sh`) or pass `--nogpgcheck` for that one transaction.
+
+### 2. Label the Vault port (SELinux)
+
+```bash
+sudo /usr/libexec/maknae/maknae-selinux-ports.sh add 8200   # your Vault's TCP port
+```
+
+### 3. Enroll
+
+```bash
+sudo maknae enroll \
+  --deployment-id <id> \
+  --vault-addr https://<vault-host>:8200 \
+  --vault-ca /path/to/vault-ca.pem
+```
+
+- **`--vault-addr`** must be `https://` and carry an explicit port.
+- **CA:** give exactly one of `--vault-ca` or `--ca-dir`.
+- **Operator token:** you are prompted for it; `--token-file <path>` reads it from a file instead. `VAULT_TOKEN` is scrubbed from the environment and ignored.
+- **Run it through `sudo`.** Bare root is refused, because enroll takes the operator's identity from `SUDO_UID`/`SUDO_USER`.
+- **What enroll does:**
+  - Mints the SecretIDs for all three planes. The two daemon SecretIDs are sealed to the TPM2; the CLI's is sealed with `systemd-creds --user`.
+  - Writes the CA chain.
+  - Adds you to the `maknae` group.
+  - **Rewrites `/etc/maknae/maknae.yaml`** with four sections: `core`, `vault`, `audit`, `principal`.
+- **Anything else you put in `maknae.yaml` is lost on the next enroll.** That is why the provider goes in `config.d/` (step 5).
+- **A host enrolled before the deputy existed must re-enroll**, so that the `maknae-egress` plane gets its SecretID.
+
+Log out and back in (or `newgrp maknae`) so your shell carries the group.
+
+### 4. Declare the deputy's bounds
+
+The deputy reads `/etc/maknae/egress-bounds.yaml`. Its owner must be root and it must not be group- or world-writable. It is `0644` because `_maknae-egress` is in neither `root` nor `_maknae`.
+
+```bash
+sudo tee /etc/maknae/egress-bounds.yaml >/dev/null <<'EOF'
+kv_mount: maknae-kv
+key_vault_path_prefix: maknae/providers
+vault:
+  addr: https://<vault-host>:8200
+EOF
+sudo chown root:root /etc/maknae/egress-bounds.yaml
+sudo chmod 0644 /etc/maknae/egress-bounds.yaml
+sudo restorecon -v /etc/maknae/egress-bounds.yaml
+```
+
+`key_vault_path_prefix` must **equal** the Terraform `provider_key_prefix` (default `maknae/providers`). **Nothing checks this equality.** A mismatch boots clean and becomes a 403 when the key is read (`docs/configuration.md` §6.1).
+
+### 5. Register the provider
+
+The package does not create `config.d/`. The directory and the file must be root-owned and not group- or world-writable; `660`/`770` are refused (`docs/configuration.md` §9.3).
+
+```bash
+sudo install -d -m 0750 -o root -g _maknae /etc/maknae/config.d
+sudo tee /etc/maknae/config.d/10-provider.yaml >/dev/null <<'EOF'
+provider:
+  name: openai
+  endpoint: https://api.openai.com/v1/chat/completions
+  model: gpt-5.6-luna
+  key_vault_path: maknae/providers/openai
+  key_field: api-key
+EOF
+sudo chown root:_maknae /etc/maknae/config.d/10-provider.yaml
+sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
+sudo restorecon -Rv /etc/maknae
+```
+
+- **`endpoint` is POSTed exactly as written.** Give the full chat-completions URL, not the API base (`crates/maknae-llm/src/client.rs`).
+- **All five keys are required.** A field named `key`, `api_key`, `token` or `secret` is refused as a plaintext key.
+- **`key_vault_path` is mount-relative**, carries no `data/` segment, and must sit **strictly beneath** the prefix from step 4, or boot refuses with `OutsideBounds`.
+
+### 6. Put the key in Vault
+
+From a machine and token allowed to write the path, not from this host:
+
+```bash
+read -rsp 'API key: ' KEY && echo && [ -n "$KEY" ] && printf %s "$KEY" | vault kv put maknae-kv/maknae/providers/openai api-key=-; unset KEY
+```
+
+`printf %s` keeps a trailing newline out of the stored value. A newline would make every provider call fail, because it is not allowed in the `Authorization` header.
+
+The field name must equal `key_field`; nothing defaults. The deputy caches the key for the life of its process, so after rotating the key run `sudo systemctl restart maknae-egress.service`.
+
+### 7. Grant the prompt
+
+Append to `/etc/maknae/authz.yaml`. `tee -a` keeps its owner, mode and label. The policy is re-read on every request, so no restart is needed:
+
+```bash
+sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
+roles:
+  admin:
+    allow: ["session.prompt"]
+destinations:
+  admin:
+    allow: ["provider:openai"]
+EOF
+sudo stat -c '%U:%G %a %C %n' /etc/maknae/authz.yaml   # root:_maknae 640
+```
+
+**Grant `admin`, not `user`.** The shipped policy has no `bindings:` key, and without one the enrolled principal resolves to **`admin`** (`crates/maknae-authz-basic/src/binding.rs`). If you add `bindings:`, that default stops applying and the grants belong under whichever role you bind.
+
+The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`.
+
+### 8. Prepare the files
+
+```bash
+mkdir -p ~/projects/maknae-242
+printf 'Maknae is a security kernel for AI agents.\n' > ~/projects/maknae-242/input.txt
+rm -f ~/projects/maknae-242/output.txt
+```
+
+**Do not create `output.txt`.** The kernel decides the write and records its intent; the CLI creates the file under your own permissions and reports the outcome. The kernel does not read or write your files (ADR-0009, #365).
+
+Before any re-run of step 10, repeat `rm -f ~/projects/maknae-242/output.txt`. A second write to the same file takes the replace lane (`mutation.operation:"WriteExisting"`).
+
+### 9. Start
+
+```bash
+sudo systemctl enable --now maknae-egress.socket
+sudo systemctl enable maknaed && sudo systemctl restart maknaed
+systemctl is-active maknaed maknae-egress.socket
+unset MAKNAE_CONFIG_DIR                      # Chapters 2–3 set it; enroll's CLI config is ~/.maknae
+maknae ping                                  # expect: pong
+```
+
+**Restart, don't just enable.** The provider is registered at boot, and `enable --now` does nothing to a daemon that is already running. A daemon still on its old configuration denies every prompt with `no provider registered for session.prompt`.
+
+- **The deputy is socket-activated.** It starts on the first prompt, and before it accepts that connection it runs a Vault login-and-revoke probe.
+- **Neither daemon prints a "ready" line.** A failure prints `refusing to start: …` to the journal (`journalctl -u maknaed -u maknae-egress`).
+- **Without the socket unit, every permitted prompt is refused** with the reason `egress backend not ready`.
+
+### 10. Hold the conversation
+
+```bash
+START=$(date -u +%Y-%m-%dT%H:%M:%S)
+maknae agent "Read $HOME/projects/maknae-242/input.txt, write a one-sentence summary of it to $HOME/projects/maknae-242/output.txt, then tell me what you wrote."
+cat ~/projects/maknae-242/output.txt
+```
+
+- **Paths must be absolute.** The loop refuses relative paths.
+- **Exit codes:** the model's answer on stdout with exit `0`; a stop is `maknae agent: stopped: …` with exit `2`.
+- **Record what happened.** An exit `2` or an error is a finding. Capture it together with the audit lines from step 11.
+
+### 11. Quote the audit trail
+
+The trail is `/var/log/maknae/audit.jsonl`. Its directory is `0700 _maknae`, so reading it needs `sudo`.
+
+```bash
+: "${START:?run step 10 in this shell}"
+sudo jq -c --arg t "$START" 'select(.ts >= $t) | select(.action=="session.prompt" or .action=="fs.read" or .action=="fs.write") | {seq, ts, action, object, result: .outcome.result, reason: .outcome.reason, posture: .outcome.posture, egress, mutation, conversation}' /var/log/maknae/audit.jsonl
+sudo jq -c 'select(.event=="boot" and .action=="authz") | {ts, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 1
+```
+
+`ts` is UTC, which is why `START` is taken with `date -u`.
+
+What to find:
+
+| Record | Shape |
+|---|---|
+| Boot composition evidence | `event:"boot"`, `action:"authz"`, reason `authorization composition: …; system: …; ceiling: …`. Written at every boot, before serving |
+| `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation` |
+| `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
+| `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
+| `fs.read` | `object` = the canonical path, `result:"permit"` |
+| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"`, `origin:"KernelObserved"`, `status:"IntentOnly"` (the intent is the kernel's own record) |
+| `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created file in `effects` |
+| `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
+| `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing` before #365) |
+
+There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
+
+**Correlation:**
+- `session_id` is per connection and each turn is a connection, so it does **not** group the conversation.
+- `conversation` does. It is in `egress.conversation` on prompt records and top-level on `fs.write`.
+- `fs.read` records carry **no** conversation. Match them by `subject` and time window, and say so when you quote them.
+
+### 12. The refused turns
+
+- **An oversize read.** Ask the agent to read a file larger than the kernel's read budget (`transport.frame_max_bytes` − 512 = 65024 bytes by default), e.g. `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`. The kernel refuses delivery and records it: `fs.read`, result `permit`, reason `delivery refused: oversize`, posture `refused-oversize`. The model is told the read was unavailable and usually answers anyway, with exit `0`.
+- **Over the conversation cap.** Two files, each inside the read budget, that together exceed the frame: `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the frame, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
+- **Marked content above the system level** (#242, the diagnostic-artifact case). **Not runnable yet.** Nothing stamps a marking on content until #229, so there is nothing to refuse.
+
+### 13. Custody check (manual)
+
+The custody assertion is **not built** (ADR-0023, ADR-0026). Check it by hand:
+
+```bash
+id                                                   # the operator: in maknae, not _maknae or _maknae-egress
+sudo stat -c '%U:%G %a %n' /etc/maknae /etc/maknae/private /etc/maknae/egress \
+  /etc/maknae/private/maknae-egress-secret-id.cred /etc/maknae/egress/maknae-egress-approle-id
+sudo getfacl -p /etc/maknae
+sudo test -e /run/credentials/maknae-egress.service/maknae-egress-secret-id && echo "runtime credential present"
+for f in /etc/maknae/private/maknae-egress-secret-id.cred \
+         /etc/maknae/egress/maknae-egress-approle-id \
+         /run/credentials/maknae-egress.service/maknae-egress-secret-id; do
+  test -r "$f" && echo "READABLE: $f" || echo "not readable: $f"
+done
+sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "READABLE by _maknae" || echo "not readable by _maknae"
+```
+
+- **Expected owners and modes:** `/etc/maknae` `root:_maknae 750`, with an ACL entry for `_maknae-egress` only; `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; the sealed `.cred` `root:root 400`; the RoleID `root:_maknae-egress 640`.
+- **Expected reads:** every `test -r` says `not readable`, for the operator and for `_maknae`.
+  - The operator's `not readable` proves only that `/etc/maknae` (`root:_maknae 750`) cannot be traversed. Judge the file modes from the `stat` output. The same holds for `_maknae` and `egress/` (`root:_maknae-egress 750`).
+  - The runtime credential exists only once the deputy has started. Run `maknae agent` once, and confirm `runtime credential present` before reading its `test -r` line.
+- **What this check does not cover:** the operator's own `maknae-enroll` token can mint a `maknae-egress` SecretID in Vault. That lies outside the file-custody claim; state it alongside the result.
+
+### 14. SELinux
+
+```bash
+sudo grep -h 'type=AVC' /var/log/audit/audit.log* | grep -E 'maknaed_t|maknae_egress_t'
+sudo grep -h 'type=FANOTIFY' /var/log/audit/audit.log* | grep -i maknae    # fapolicyd denials
+```
+
+Search with `grep`: on a STIG'd Rocky 10 host `ausearch -m AVC` was measured missing AVC records that the log holds. The log rotates quickly, so run this soon after step 10.
+
+**Expected:** no denials. A denial is a finding: quote it. This chapter is the first run of the delegated read descriptor under an enforcing policy.
+
+### What it proves
+
+- **A packaged Maknae acts as an agent against a real provider:** one conversation, one read, one write, and every leg decided by `maknaed` and audited before its delivery or effect.
+- **The write is performed by the client under your own permissions**; the kernel only decides it and records it.
+- **The provider key lives only in Vault** and is read only by the deputy, under its own AppRole and policy.
+- **The trail shows each decision and its outcome in order**, with the boot composition record ahead of them.
+
+### Teardown
+
+```bash
+sudo systemctl disable --now maknae-egress.socket maknae-egress.service
+sudo rm /etc/maknae/config.d/10-provider.yaml /etc/maknae/egress-bounds.yaml
+sudoedit /etc/maknae/authz.yaml                 # remove the roles:/destinations: block from step 7
+sudo systemctl restart maknaed
+sudo /usr/libexec/maknae/maknae-selinux-ports.sh remove 8200
+rm -r ~/projects/maknae-242
+vault kv metadata delete maknae-kv/maknae/providers/openai   # when the key is retired
+```
