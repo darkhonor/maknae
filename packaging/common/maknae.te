@@ -169,22 +169,22 @@ neverallow maknae_egress_t maknae_secret_t:file { read open };
 allow maknaed_t maknae_private_t:dir { open read search getattr };
 allow maknaed_t maknae_private_t:file { read open getattr };
 
-# #365: the daemon resolves and stats the enrolled home by path and receives the
-# subject's no-access (O_PATH) descriptors; it opens and reads nothing in a home.
-# Receipt is checked as ioctl; the xperm rules allow only command 0x0000, which no
-# filesystem implements. These are TYPES, host-wide; the PDP grammar scopes per user.
+# #365: the daemon stats the enrolled home by path and receives the subject's
+# no-access (O_PATH) descriptors; it opens and reads nothing in a home. Receipt is
+# checked as ioctl; the xperm rules allow only command 0x0000, which no filesystem
+# implements. Receipt covers every home content type so the PDP decides, and the
+# trail records, every object the subject names, denied ones included. Search on
+# /home and reading a symlinked home path come from the base policy.
 gen_require(`
-    type home_root_t;
+    attribute user_home_type;
     type user_home_dir_t;
-    type user_home_t;
 ')
-allow maknaed_t home_root_t:dir search;
 allow maknaed_t user_home_dir_t:dir { getattr ioctl };
-allow maknaed_t user_home_t:dir { getattr ioctl };
-allow maknaed_t user_home_t:file { getattr ioctl };
-allowxperm maknaed_t user_home_t:dir ioctl 0x0000;
-allowxperm maknaed_t user_home_t:file ioctl 0x0000;
+allow maknaed_t user_home_type:dir { getattr ioctl };
+allow maknaed_t user_home_type:file { getattr ioctl };
 allowxperm maknaed_t user_home_dir_t:dir ioctl 0x0000;
+allowxperm maknaed_t user_home_type:dir ioctl 0x0000;
+allowxperm maknaed_t user_home_type:file ioctl 0x0000;
 
 # CRITICAL (maknae-specific; Microkosmos has no analog — it uses EnvironmentFile=):
 # LoadCredentialEncrypted= makes systemd DECRYPT the SecretID into a per-service
