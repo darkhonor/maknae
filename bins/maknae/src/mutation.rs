@@ -981,7 +981,13 @@ mod tests {
         })
     }
     fn read(path: String) -> Option<PreparedMutation> {
-        prepare(proto::Verb::Read { path }, None)
+        prepare(
+            proto::Verb::Read {
+                path,
+                conversation: None,
+            },
+            None,
+        )
     }
     fn read_grant(path: &str, max_bytes: u64) -> MutationGrant {
         let mut g = grant(MutationScope::Exact {

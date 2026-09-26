@@ -202,7 +202,7 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// The length and NUL rules are applied to READS as well, although the read
 /// leg states neither, and that is not the router outrunning the kernel:
 /// neither shape can ever be SERVED. Such a read travels, and then the
-/// subject's own `open_for_delegation` cannot open it — a NUL byte is not a
+/// subject's own `open_path_for_delegation` cannot open it — a NUL byte is not a
 /// filename, and `MAX_MUTATION_PATH_BYTES` is 4096, the whole of Linux's
 /// `PATH_MAX` and four times macOS's — so the request goes UNARMED. What the
 /// kernel answers then depends on the gate the path meets first: a NUL byte
@@ -412,7 +412,7 @@ mod tests {
         // Applied to READS too, and that is NOT the router being stricter than
         // the kernel: neither shape can ever be SERVED. The read leg states no
         // NUL or length rule, so such a read travels — and then the subject's
-        // own `open_for_delegation` cannot open it (a NUL byte is not a
+        // own `open_path_for_delegation` cannot open it (a NUL byte is not a
         // filename; the constant is 4096, which is the whole of Linux's
         // PATH_MAX and four times macOS's), the request goes UNARMED — and,
         // if the path is otherwise lexically canonical, the kernel denies it

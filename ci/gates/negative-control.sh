@@ -893,7 +893,6 @@ pub struct WhoamiView {
 pub enum Payload {
     Pong,
     Whoami(WhoamiView),
-    ReadContent(crate::Bytes),
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     Status(StatusView),
     SubjectList(Vec<RoleBindingView>),

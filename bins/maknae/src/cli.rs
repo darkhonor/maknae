@@ -166,7 +166,10 @@ impl From<Verb> for maknae_proto::Verb {
         match v {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
-            Verb::Read { path } => maknae_proto::Verb::Read { path },
+            Verb::Read { path } => maknae_proto::Verb::Read {
+                path,
+                conversation: None,
+            },
             Verb::Write { path } => maknae_proto::Verb::FsWrite {
                 path,
                 content_length: 0,
@@ -549,7 +552,6 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         // producing side forced the decision; the consuming side did not.
         (v, p @ Payload::Pong)
         | (v, p @ Payload::Whoami(_))
-        | (v, p @ Payload::ReadContent(_))
         | (v, p @ Payload::ConfigView(_))
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
@@ -1074,30 +1076,16 @@ mod tests {
         assert_eq!(
             v,
             maknae_proto::Verb::Read {
-                path: "/a/b".into()
+                path: "/a/b".into(),
+                conversation: None,
             }
         );
     }
 
     #[test]
     fn a_read_accepts_no_plain_payload() {
-        use maknae_proto::Bytes;
-        let content = print_payload_for_verb(
-            Verb::Read { path: "/a".into() },
-            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
-        );
-        assert!(content.is_err(), "read content arrives only by attempt");
         let mismatch = print_payload_for_verb(Verb::Read { path: "/a".into() }, Payload::Pong);
         assert!(mismatch.is_err(), "a Pong for a read is a protocol error");
-        let mismatch2 = print_payload_for_verb(
-            Verb::Ping,
-            Payload::ReadContent(Bytes::new(maknae_io_zeroizing(vec![b'x']))),
-        );
-        assert!(mismatch2.is_err(), "content for a ping is a protocol error");
-    }
-
-    fn maknae_io_zeroizing(v: Vec<u8>) -> zeroize::Zeroizing<Vec<u8>> {
-        zeroize::Zeroizing::new(v)
     }
 
     /// The future `send_verb` returns must be `Send`: the CLI's `impl Plane`

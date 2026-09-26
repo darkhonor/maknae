@@ -676,6 +676,12 @@ pub async fn handle<S, E, P>(
             "write",
             "conversation identifier not acceptable".to_string(),
         )),
+        Verb::Read {
+            conversation: Some(conversation),
+            ..
+        } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
+            Some(("read", "conversation identifier not acceptable".to_string()))
+        }
         _ => None,
     };
     if let Some((noun, reason)) = pregate {
@@ -734,7 +740,8 @@ pub async fn handle<S, E, P>(
         );
         // #275: the peer identity, bounded and audit-only.
         record.subject.user = admitted_user(peer_user.as_deref());
-        if let Verb::FsWrite { conversation, .. } = &request.verb {
+        if let Verb::FsWrite { conversation, .. } | Verb::Read { conversation, .. } = &request.verb
+        {
             record.conversation.clone_from(conversation);
         }
         crate::mutation::handle(

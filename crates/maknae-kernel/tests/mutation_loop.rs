@@ -204,6 +204,35 @@ async fn an_unacceptable_conversation_id_refuses_the_write_before_the_pdp() {
 }
 
 #[tokio::test]
+async fn an_unacceptable_conversation_id_refuses_the_read_before_the_pdp() {
+    let long = "x".repeat(33);
+    for bad in ["", "has space", "a/b", long.as_str()] {
+        let fx = Fixture::new("conversation_bad_read", "Read");
+        let target = fx.root.join("unique-existing-read-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let records = Records::new(0);
+        let fd = maknae_io::open_path_for_delegation(&target).unwrap();
+        let verb = Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: Some(bad.into()),
+        };
+        let (mut client, task, body) = fx.start(verb, Some(fd), records.clone());
+        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        let response = next_response(&mut client).await.unwrap();
+        drop(client);
+        task.await.unwrap();
+        assert!(
+            matches!(&response.result, RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::BadRequest),
+            "{bad:?}: {:?}",
+            response.result
+        );
+        let records = records.snapshot();
+        assert!(records.iter().all(|r| r.mutation.is_none()), "{bad:?}");
+        assert!(records.iter().all(|r| r.conversation.is_none()), "{bad:?}");
+    }
+}
+
+#[tokio::test]
 async fn failed_intent_preserves_existing_bytes_and_length() {
     let fx = Fixture::new("intent_fail", "Write");
     let target = fx.root.join("unique-existing-write-sentinel");

@@ -166,11 +166,12 @@ impl Plane for RealPlane<'_> {
         }
         prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
     }
-    async fn read(&mut self, path: &str) -> ReadOutcome {
+    async fn read(&mut self, conversation: &str, path: &str) -> ReadOutcome {
         read_outcome(
             send_verb(
                 Verb::Read {
                     path: path.to_string(),
+                    conversation: Some(conversation.to_string()),
                 },
                 None,
                 self.transport,

@@ -163,11 +163,14 @@ impl Plane for FixturePlane {
             other => Err(PlaneError::Transport(format!("{other:?}"))),
         }
     }
-    async fn read(&mut self, path: &str) -> ReadOutcome {
+    async fn read(&mut self, conversation: &str, path: &str) -> ReadOutcome {
         // Mapped exactly as production's `read_outcome` maps `send_verb`'s outcome.
         let held = maknae_io::open_path_for_delegation(std::path::Path::new(path)).ok();
         let (mut client, task, body) = self.fx.start_egress(
-            Verb::Read { path: path.into() },
+            Verb::Read {
+                path: path.into(),
+                conversation: Some(conversation.into()),
+            },
             held.as_ref().map(|fd| fd.try_clone().unwrap()),
             Arc::clone(&self.records),
             maknae_config::transport_from_section(None).unwrap(),
@@ -389,6 +392,9 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         reads.last().unwrap().mutation.as_ref().unwrap().status,
         maknae_audit_append::MutationStatus::ReportedSuccess
     );
+    assert!(reads
+        .iter()
+        .all(|r| r.conversation.as_deref() == Some("agent-e2e-conv")));
     assert!(recs
         .iter()
         .filter(|r| r.action == "session.prompt")

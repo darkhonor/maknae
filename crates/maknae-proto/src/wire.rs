@@ -2,7 +2,7 @@
 use crate::error::ProtoCodecError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-// PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/`Payload::ReadContent`/
+// PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/
 // `ProtoErrCode::TooLarge` are ADDITIVE CBOR enum variants — no version bump.
 // #162 adds `Payload::{ConfigView, Status, SubjectList}` the same way, appended
 // at the tail. A client built before them has no subcommand that can elicit
@@ -391,11 +391,14 @@ pub enum Verb {
     /// from. A summary of restricted content is still restricted, and compaction
     /// must not be a laundering step (#147, #8).
     SessionCompact,
-    /// Return file content. A disclosure, gated by #77's audit-then-respond
-    /// invariant — the record is durably appended BEFORE any content is released.
-    /// Maknae returns bytes; ACP v1's counterpart is text-only — a divergence the
-    /// mapping carries.
-    Read { path: String },
+    /// Read a file. A subject-side attempt: the daemon decides and records it, and the
+    /// subject reads under its own credentials and reports the byte count (#365). ACP
+    /// v1's counterpart is text-only — a divergence the mapping carries.
+    Read {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+    },
     /// Create or replace a file. The subject writes the bytes under its own credentials;
     /// the request carries only their length, a client claim recorded on the intent (#365).
     FsWrite {
@@ -506,9 +509,6 @@ pub struct WhoamiView {
 pub enum Payload {
     Pong,
     Whoami(WhoamiView),
-    /// File content for a permitted `Read` — byte-string on the wire,
-    /// zeroize-on-drop, redacting Debug (see [`crate::Bytes`]).
-    ReadContent(crate::Bytes),
     /// The effective configuration for a permitted `admin.config.show`:
     /// section → (dotted field path → rendered value).
     ///
@@ -590,8 +590,7 @@ pub enum ProtoErrCode {
     Unauthorized,
     BadRequest,
     Internal,
-    /// A permitted read whose content exceeds the daemon's frame budget —
-    /// delivery refused, never truncated (spec D5).
+    /// A permitted response that exceeds the frame budget — delivery refused, never truncated.
     TooLarge,
     /// An enumerated term the daemon decided and PERMITTED, but whose behaviour
     /// is not built. Returned ONLY after a Permit — a denied caller receives
@@ -674,11 +673,9 @@ pub fn decode_mutation_report(bytes: &[u8]) -> Result<crate::MutationReport, Pro
 pub fn decode_mutation_ack(bytes: &[u8]) -> Result<crate::MutationAck, ProtoCodecError> {
     decode_followup(bytes)
 }
-/// Encode into a pre-sized zeroizing buffer — the read path's encode (spec
-/// D5: zeroization preserved to the wire). Pre-sizing prevents realloc from
-/// leaving un-zeroized partial copies of content in freed heap; `capacity`
-/// should be the frame budget plus envelope margin. Ping/Whoami keep the
-/// plain [`encode_response`].
+/// Encode into a pre-sized zeroizing buffer (the prompt reply's encode). Pre-sizing
+/// prevents realloc from leaving un-zeroized partial copies of content in freed heap;
+/// `capacity` should be the frame budget plus envelope margin.
 pub fn encode_response_zeroizing(
     r: &Response,
     capacity: usize,
@@ -1170,39 +1167,30 @@ mod tests {
     }
     mod v2 {
         use super::super::*;
-        use zeroize::Zeroizing;
 
         #[test]
         fn read_verb_round_trips_with_path() {
-            let r = Request {
-                protocol_version: PROTOCOL_VERSION,
-                verb: Verb::Read {
-                    path: "/home/op/notes.txt".into(),
-                },
-            };
-            let back = decode_request(&encode_request(&r).unwrap()).unwrap();
-            assert_eq!(
-                back.verb,
-                Verb::Read {
-                    path: "/home/op/notes.txt".into()
-                }
-            );
-        }
-
-        #[test]
-        fn read_content_round_trips_bytes() {
-            let r = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(vec![
-                    0xff, 0x00,
-                ])))),
-            };
-            match decode_response(&encode_response(&r).unwrap())
-                .unwrap()
-                .result
-            {
-                RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(*b.0, vec![0xff, 0x00]),
-                other => panic!("wrong variant: {other:?}"),
+            for conversation in [Some("c1".to_string()), None] {
+                let r = Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    verb: Verb::Read {
+                        path: "/home/op/notes.txt".into(),
+                        conversation: conversation.clone(),
+                    },
+                };
+                let bytes = encode_request(&r).unwrap();
+                assert_eq!(
+                    bytes.windows(12).any(|w| w == b"conversation"),
+                    conversation.is_some()
+                );
+                let back = decode_request(&bytes).unwrap();
+                assert_eq!(
+                    back.verb,
+                    Verb::Read {
+                        path: "/home/op/notes.txt".into(),
+                        conversation
+                    }
+                );
             }
         }
 
@@ -1243,6 +1231,7 @@ mod tests {
                 protocol_version: 1,
                 verb: Verb::Read {
                     path: "/home/op/x".into(),
+                    conversation: None,
                 },
             };
             let mut b = Vec::new();
@@ -1250,7 +1239,8 @@ mod tests {
             assert_eq!(
                 decode_request(&b).unwrap().verb,
                 Verb::Read {
-                    path: "/home/op/x".into()
+                    path: "/home/op/x".into(),
+                    conversation: None,
                 }
             );
         }
@@ -1273,12 +1263,15 @@ mod tests {
 
         #[test]
         fn encode_response_zeroizing_carries_content_and_does_not_grow() {
-            let content = vec![0xabu8; 1000];
+            let content = "a".repeat(1000);
             let r = Response {
                 protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::ReadContent(crate::Bytes(Zeroizing::new(
-                    content.clone(),
-                )))),
+                result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                    blocks: vec![ContentBlock::Text {
+                        text: SecretText(zeroize::Zeroizing::new(content.clone())),
+                    }],
+                    tool_calls: vec![],
+                })),
             };
             let cap = 1000 + 1024;
             let buf = encode_response_zeroizing(&r, cap).unwrap();
@@ -1291,7 +1284,12 @@ mod tests {
             // And the content actually rides inside.
             let back = decode_response(&buf).unwrap();
             match back.result {
-                RespResult::Ok(Payload::ReadContent(b)) => assert_eq!(*b.0, content),
+                RespResult::Ok(Payload::PromptReply(p)) => assert_eq!(
+                    p.blocks,
+                    vec![ContentBlock::Text {
+                        text: SecretText(zeroize::Zeroizing::new(content))
+                    }]
+                ),
                 other => panic!("wrong variant: {other:?}"),
             }
         }

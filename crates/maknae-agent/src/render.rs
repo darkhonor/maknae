@@ -25,7 +25,7 @@ pub enum ToolOutcome {
 
 /// Redacting, by hand — the crate convention (`route.rs`'s `ToolRequest`,
 /// `maknae-proto`'s `Bytes` and `SecretText`): a derived `Debug` prints
-/// `ReadContent(Zeroizing([83, 69, …]))`, dumping kernel-served home-file
+/// `ReadContent(Zeroizing([83, 69, …]))`, dumping home-file
 /// content into any `{:?}`, including a test's `panic!("{other:?}")`.
 /// Length only. `BadCall`'s `String` IS printed — it is router-authored text
 /// (a tool name, a serde message), and it carries nothing this crate received
@@ -66,11 +66,11 @@ pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds
 /// plus slack. No other arm reserves it, and none needs to — see [`render`],
 /// whose doc scopes the guarantee to this sub-arm and says what the others
 /// hold instead. Sized here rather than measured at each call because the body
-/// it protects is kernel-served content.
+/// it protects is home-file content.
 const SUFFIX_HEADROOM: usize = 32;
 
 /// The output is a `Zeroizing<String>`, and it is BUILT as one. On the read
-/// path this text IS the kernel-served file content, so a plain `String`
+/// path this text IS the home-file content, so a plain `String`
 /// anywhere on the way — including a `format!` that copies a finished body into
 /// a fresh buffer — would leave a non-zeroizing copy of home-file bytes behind
 /// until the allocator reused the page.
@@ -79,12 +79,12 @@ const SUFFIX_HEADROOM: usize = 32;
 /// earlier text claimed the append alone was enough; scoped again
 /// 2026-09-22, #344 — it was stated over the whole `ReadContent` arm, and the
 /// arm has two sub-arms): on the UTF-8 TEXT path, the only path that carries
-/// kernel-served content, the read arm allocates
+/// home-file content, the read arm allocates
 /// ONCE, with `SUFFIX_HEADROOM` for the suffix, appends in place, and hands
 /// that single zeroizing buffer to the transcript. There is no second plain
 /// buffer and no reallocation of the body. Without the headroom the first
 /// `push_str` reallocated: capacity equalled length, so the body was
-/// memcpy'd into a fresh allocation and the old one — kernel-served content —
+/// memcpy'd into a fresh allocation and the old one — home-file content —
 /// was freed unzeroized. The non-UTF-8 sub-arm relies on `format!`'s
 /// over-allocation rather than on named headroom, so whether the suffix
 /// reallocates depends on the digit counts (measured with `rustc -O`:
@@ -100,18 +100,12 @@ const SUFFIX_HEADROOM: usize = 32;
 /// The caller ([`crate::transcript::Transcript::push_tool_result`]) copies this
 /// into a `SecretText`, which zeroizes too — so on the READ direction the
 /// content lands in no plain buffer anywhere in THIS crate's chain, from
-/// `maknae_proto::Bytes` through to the transcript's `SecretText`. Scoped by
-/// component deliberately (2026-09-22, #344): once a `Tool` turn leaves the
-/// trust plane the deputy hands it to `reqwest`'s `.json()`, which serialises
-/// through `serde_json::to_vec` into a plain body buffer, so the bytes do sit
-/// in un-zeroized heap there — and the NEARER residue is the CLI's own, two
-/// frames below the `ReadOutcome` this renders (`RealPlane::read` →
-/// `send_verb` → `read_frame`): `maknae_proto::read_frame`
-/// is `read_frame_zeroizing(..).map(|mut body| std::mem::take(&mut *body))`,
-/// so the served frame is moved out of its `Zeroizing` into a plain
-/// `Vec<u8>` before the brain ever sees it. A #241 code gap, not fixed by
-/// #344's prose pass. Same discipline as [`crate::plane::ReadOutcome`] one
-/// layer up, whose doc also names the write direction's residue.
+/// [`crate::plane::ReadOutcome`] through to the transcript's `SecretText`.
+/// Scoped by component deliberately: once a `Tool` turn leaves the trust plane
+/// the deputy hands it to `reqwest`'s `.json()`, which serialises through
+/// `serde_json::to_vec` into a plain body buffer. Same discipline as
+/// [`crate::plane::ReadOutcome`] one layer up, whose doc also names the write
+/// direction's residue.
 ///
 /// One caller obligation: `Zeroizing<String>`'s `Debug` is the inner
 /// `String`'s — it is NOT redacting, unlike [`ToolOutcome`]'s above — so a
@@ -246,7 +240,7 @@ mod tests {
         }
     }
 
-    /// The read bytes are kernel-served home-file content, so
+    /// The read bytes are home-file content, so
     /// `ToolOutcome`'s `Debug` is hand-written and redacting — the crate
     /// convention `route.rs`'s `ToolRequest` already follows.
     #[test]
@@ -281,9 +275,9 @@ mod tests {
         }
     }
 
-    /// The UTF-8 read sub-arm — the only one that carries kernel-served
+    /// The UTF-8 read sub-arm — the only one that carries home-file
     /// content — allocates ONCE, with headroom, and never grows: a growth
-    /// memcpy's the kernel-served body into a fresh buffer and frees the old
+    /// memcpy's the home-file body into a fresh buffer and frees the old
     /// allocation WITHOUT zeroizing it (measured on #241 — the earlier
     /// `String::from(s)` had capacity == len, so the first `push_str` moved
     /// the body). The observable from outside the function: the returned

@@ -167,7 +167,7 @@ pub async fn drive<P: Plane>(
                             "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most {} bytes and no NUL byte",
                             maknae_proto::MAX_MUTATION_PATH_BYTES
                         )),
-                        Ok(ToolRequest::Read { path, .. }) => match plane.read(&path).await {
+                        Ok(ToolRequest::Read { path, .. }) => match plane.read(transcript.conversation(), &path).await {
                             ReadOutcome::Content(b) => ToolOutcome::ReadContent(b),
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
@@ -283,7 +283,7 @@ mod tests {
             self.prompts += 1;
             self.replies.pop_front().expect("script exhausted")
         }
-        async fn read(&mut self, p: &str) -> ReadOutcome {
+        async fn read(&mut self, _c: &str, p: &str) -> ReadOutcome {
             self.reads.push(p.into());
             self.read_outcome.clone()
         }

@@ -629,14 +629,23 @@ mod tests {
     fn verb_action_names_are_the_taxonomy() {
         assert_eq!(verb_to_action(&Verb::Ping), "liveness.ping");
         assert_eq!(verb_to_action(&Verb::Whoami), "admin.whoami");
-        assert_eq!(verb_to_action(&Verb::Read { path: "/x".into() }), "fs.read");
+        assert_eq!(
+            verb_to_action(&Verb::Read {
+                path: "/x".into(),
+                conversation: None
+            }),
+            "fs.read"
+        );
     }
 
     #[test]
     fn verb_action_names_are_pairwise_distinct() {
         let p = verb_to_action(&Verb::Ping);
         let w = verb_to_action(&Verb::Whoami);
-        let r = verb_to_action(&Verb::Read { path: "/x".into() });
+        let r = verb_to_action(&Verb::Read {
+            path: "/x".into(),
+            conversation: None,
+        });
         assert_ne!(p, w);
         assert_ne!(p, r);
         assert_ne!(w, r);
@@ -646,16 +655,23 @@ mod tests {
     fn a_read_dispatches_to_the_attempt_lane() {
         assert_eq!(
             dispatch_verb(&Verb::Read {
-                path: "/home/op/a".into()
+                path: "/home/op/a".into(),
+                conversation: None,
             }),
             Dispatch::MutationRequested
         );
         assert_ne!(
-            dispatch_verb(&Verb::Read { path: "/x".into() }),
+            dispatch_verb(&Verb::Read {
+                path: "/x".into(),
+                conversation: None
+            }),
             Dispatch::Pong
         );
         assert_ne!(
-            dispatch_verb(&Verb::Read { path: "/x".into() }),
+            dispatch_verb(&Verb::Read {
+                path: "/x".into(),
+                conversation: None
+            }),
             Dispatch::WhoamiRequested
         );
     }
@@ -712,6 +728,7 @@ mod tests {
         let r = build_authz_request(
             &Verb::Read {
                 path: "/home/op/n".into(),
+                conversation: None,
             },
             501,
             maknae_security::Lane::Local,
@@ -752,6 +769,7 @@ mod tests {
         let smuggled = build_authz_request(
             &Verb::Read {
                 path: "/home/op/remote".into(),
+                conversation: None,
             },
             501,
             Lane::Local,
@@ -931,6 +949,7 @@ mod tests {
             Verb::SessionCompact,
             Verb::Read {
                 path: String::new(),
+                conversation: None,
             },
             Verb::FsWrite {
                 path: "/x".into(),
@@ -1137,7 +1156,13 @@ mod tests {
         for (verb, key) in [
             (Verb::Ping, "Ping"),
             (Verb::Whoami, "Whoami"),
-            (Verb::Read { path: "/x".into() }, "Read"),
+            (
+                Verb::Read {
+                    path: "/x".into(),
+                    conversation: None,
+                },
+                "Read",
+            ),
         ] {
             let bytes = maknae_proto::encode_request(&maknae_proto::Request {
                 protocol_version: maknae_proto::PROTOCOL_VERSION,
