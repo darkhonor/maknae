@@ -1198,6 +1198,14 @@ mod tests {
                 Err(IoError::AccessBearingDescriptor { path: p.clone() })
             );
         }
+        #[cfg(target_os = "linux")]
+        {
+            let readable: OwnedFd = std::fs::File::open(&p).expect("readable open").into();
+            assert_eq!(
+                refuse_write_access(readable.as_fd(), &p),
+                Err(IoError::AccessBearingDescriptor { path: p.clone() })
+            );
+        }
         assert_eq!(std::fs::read(&p).expect("read"), b"safe");
     }
 }

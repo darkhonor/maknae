@@ -689,6 +689,8 @@ What to find:
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing`, what an enforcing host without #365 PR 1 records) |
+| `fs.write` descriptor refused | `result:"deny"`, reason `replacement evidence refused: descriptor confers access beyond location: …` (a descriptor that could read or write was delegated) |
+| `fs.write` incomplete | `mutation.phase:"Completion"`, `status:"Incomplete"`, `intent_seq` pointing at the intent; the reason names what was lost (`attempt grant not delivered; no effect authorized`, `mutation acknowledgment not delivered; effects unknown`, or a missing report) |
 
 There is **one `session.prompt` intent-and-outcome pair per model turn that is sent**, so a read-then-write conversation has several.
 

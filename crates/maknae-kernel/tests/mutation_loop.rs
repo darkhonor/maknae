@@ -239,10 +239,19 @@ async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
     task.await.unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"new-sentinel");
     let records = records.snapshot();
-    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records.len(), 4, "{records:?}");
     assert_eq!(
         records[2].mutation.as_ref().unwrap().phase,
         maknae_audit_append::MutationPhase::Progress
+    );
+    let closed = records[3].mutation.as_ref().unwrap();
+    assert_eq!(
+        closed.status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+    assert_eq!(
+        records[3].outcome.reason,
+        "mutation report not recorded; effects unknown"
     );
 }
 #[tokio::test]
@@ -1324,10 +1333,21 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
         if fail_grant {
             assert_undelivered_grant_is_incomplete(&records.snapshot());
         } else {
+            let records = records.snapshot();
             assert_eq!(
-                records.snapshot().len(),
-                3,
+                records.len(),
+                4,
                 "a failed outbound ack must stop the exchange"
+            );
+            let closed = records[3].mutation.as_ref().unwrap();
+            assert_eq!(
+                closed.status,
+                maknae_audit_append::MutationStatus::Incomplete
+            );
+            assert_eq!(closed.intent_seq, records[1].seq);
+            assert_eq!(
+                records[3].outcome.reason,
+                "mutation acknowledgment not delivered; effects unknown"
             );
         }
         assert!(!fx.root.join("unique-created-client-sentinel").exists());

@@ -596,12 +596,22 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             tokio::time::timeout_at(deadline, emit.emit(&record)).await,
             Ok(Ok(()))
         ) {
+            incomplete(
+                cfg,
+                emit,
+                &intent,
+                seq,
+                "mutation report not recorded; effects unknown",
+            )
+            .await;
             return;
         }
         let Ok(ack) = exchange.acknowledge(pending) else {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         };
         let Ok(bytes) = maknae_proto::encode_mutation_ack(&ack) else {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         };
         // The grant already fit this immutable frame budget. Even an ack with
@@ -611,6 +621,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
             tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
             Ok(Ok(()))
         ) {
+            incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
             return;
         }
         if terminal {
@@ -618,6 +629,8 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         }
     }
 }
+const ACK_UNDELIVERED: &str = "mutation acknowledgment not delivered; effects unknown";
+
 async fn incomplete<E: AuditEmit>(
     cfg: &TransportConfig,
     emit: &E,
