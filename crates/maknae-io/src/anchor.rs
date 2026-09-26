@@ -345,16 +345,20 @@ pub fn open_anchor_resolved(
 /// leave the two forms free to drift apart again; resolving through the kernel's
 /// own answer makes agreement structural rather than asserted.
 ///
-/// The directory is opened `O_RDONLY|O_DIRECTORY`, symlink-following **by
-/// design** — resolving the link is the job. Descendant resolution elsewhere in
-/// this crate remains symlink-refusing; nothing here relaxes that.
+/// The directory is opened with no access (`O_PATH|O_DIRECTORY` on Linux,
+/// `O_SEARCH` on macOS), so resolving needs search on its ancestors and no
+/// permission on the directory itself. `O_DIRECTORY` also triggers automount,
+/// which an autofs home needs. The open is symlink-following **by design** —
+/// resolving the link is the job. Descendant resolution elsewhere in this crate
+/// remains symlink-refusing; nothing here relaxes that.
 pub fn resolve_dir(path: &Path) -> Result<PathBuf, IoError> {
     if !path.is_absolute() {
         return Err(IoError::RelativeAnchor {
             path: path.to_path_buf(),
         });
     }
-    let fd = syscall::open_parent_by_path(path).map_err(|e| syscall::map_open_errno(e, path))?;
+    let fd =
+        syscall::open_mutation_directory(path).map_err(|e| syscall::map_open_errno(e, path))?;
     syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
         kind: crate::checks::kind_of_errno(e),
     })
@@ -696,6 +700,22 @@ mod tests {
             "a symlinked path must resolve to the same form as the real one"
         );
         assert_ne!(via_link, link, "the link's own form must not survive");
+    }
+
+    #[test]
+    fn resolve_dir_needs_no_read_permission_on_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("searchonly");
+        std::fs::create_dir_all(&dir).unwrap();
+        let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
+        let search_only = super::resolve_dir(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(search_only.expect("a search-only dir resolves"), readable);
     }
 
     /// Fail-closed: a path with no directory behind it is an error, never a
