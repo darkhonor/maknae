@@ -2430,3 +2430,62 @@ async fn at_baseline_the_composition_permits_what_the_baseline_permits() {
     }
     assert_eq!(request_record(&emit.records()).outcome.result, "permit");
 }
+
+#[tokio::test]
+#[ignore = "#365 reproduce-first: red until reads move to the client"]
+async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
+    let fx = common::Fixture::new("read_client_performed", "Read");
+    let target = fx.root.join("unique-read-attempt-sentinel");
+    std::fs::write(&target, b"SENTINEL-365-READ-CONTENT").unwrap();
+    let records = common::Records::new(0);
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+        },
+        Some(maknae_io::open_for_delegation(&target).unwrap()),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let frame = tokio::time::timeout(
+        Duration::from_secs(2),
+        maknae_proto::read_frame(&mut client, 1 << 20),
+    )
+    .await
+    .expect("a response frame")
+    .unwrap();
+    let needle = b"SENTINEL-365-READ-CONTENT";
+    let response = maknae_proto::decode_response(&frame).unwrap();
+    assert!(
+        !frame.windows(needle.len()).any(|w| w == needle),
+        "the daemon read the subject's file: {:?}",
+        response.result
+    );
+    let RespResult::Ok(Payload::MutationAttempt(grant)) = &response.result else {
+        panic!(
+            "expected a subject-side read grant, got {:?}",
+            response.result
+        )
+    };
+    assert!(
+        matches!(&grant.scope, maknae_proto::MutationScope::Exact { path, .. }
+            if path == target.to_str().unwrap()),
+        "{:?}",
+        grant.scope
+    );
+    drop(client);
+    task.await.unwrap();
+    let records = records.snapshot();
+    let intent = records
+        .iter()
+        .filter_map(|r| r.mutation.as_ref())
+        .find(|m| m.phase == maknae_audit_append::MutationPhase::Intent)
+        .expect("a durable read intent");
+    assert_eq!(
+        intent.origin,
+        maknae_audit_append::MutationOrigin::KernelObserved
+    );
+    assert_eq!(
+        records.last().unwrap().mutation.as_ref().unwrap().status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+}
