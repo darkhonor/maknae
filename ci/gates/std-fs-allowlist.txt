@@ -88,29 +88,6 @@ crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(path);
 crates/maknae-kernel/src/handler.rs|owner: None,
 crates/maknae-kernel/src/handler.rs|mode_mask: None,
 
-# ADR-0009 open_for_delegation — the SUBJECT's own open, performed by the untrusted
-# CLIENT under its own credentials. This is the ONE std::fs call in the crate whose
-# point is that it applies no requirement: the kernel's answer for that subject is the
-# whole product, and the descriptor carries it to a daemon that never resolves the
-# name. O_NOFOLLOW is deliberately absent (decision 6 has the daemon decide on the
-# RESOLVED path, so an in-home symlink must work and a malicious one must resolve to
-# the object the deny list names); object kind, link count and size are the daemon's to
-# require, on this very descriptor, and duplicating them here would put policy in an
-# untrusted process. Lives in maknae-io rather than in bins/maknae so the delegation
-# lifecycle stays in one crate and the client needs no exemption of its own.
-#
-# Updated 2026-09-22 (#241, codex round 2): the call is now an OpenOptions chain
-# carrying O_NONBLOCK (nix::fcntl::OFlag, via OpenOptionsExt::custom_flags) and the
-# inventory line moved with it. The flag is NOT a requirement — it is what makes the
-# open TERMINATE: a model-chosen read_file of a writer-less FIFO blocked the untrusted
-# CLI forever, outside every transport timeout, so the request never reached the PDP.
-# The daemon's regular_file requirement still refuses the object. Kept as std::fs
-# under this same exemption rather than moved to syscall.rs, where a nix::fcntl::open
-# would need a new disjoint-bitflag exemption in the mutation inventory for a flag a
-# behavioural test already holds
-# (delegated.rs::open_for_delegation_does_not_block_on_a_writerless_fifo).
-crates/maknae-io/src/delegated.rs|std::fs::OpenOptions::new()
-
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
 

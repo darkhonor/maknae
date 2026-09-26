@@ -70,7 +70,7 @@ pub struct TargetRequired {
     pub regular_file: bool,
     /// Refuse a target whose size exceeds this many bytes, BEFORE any buffer
     /// is allocated (#77 read path: a permitted 20 GiB file must not OOM the
-    /// TCB). `None` = no size requirement — a named absence, like the others.
+    /// reader). `None` = no size requirement — a named absence, like the others.
     pub max_bytes: Option<u64>,
 }
 

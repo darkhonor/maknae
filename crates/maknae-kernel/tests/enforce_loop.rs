@@ -2631,7 +2631,7 @@ async fn a_readable_descriptor_is_refused_before_intent() {
             path: target.to_str().unwrap().into(),
             conversation: None,
         },
-        Some(maknae_io::open_for_delegation(&target).unwrap()),
+        Some(std::fs::File::open(&target).unwrap().into()),
         records.clone(),
     );
     maknae_proto::write_frame(&mut client, &body).await.unwrap();

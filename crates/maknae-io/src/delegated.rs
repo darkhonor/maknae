@@ -1,8 +1,7 @@
 //! Verification of a file descriptor delegated by a subject (ADR-0009).
 //!
-//! The subject's own `open(2)` already ran the kernel's whole permission check --
-//! DAC bits, POSIX ACLs, supplementary groups, SELinux/AppArmor. **The descriptor
-//! IS the OS's answer**, which is why nothing here recomputes the mode algebra and
+//! The subject's descriptor proves where the object is; the subject's own re-open is
+//! where the OS answers. That is why nothing here recomputes the mode algebra and
 //! why `TargetRequired { owner, mode_mask }` stay `None` on this path.
 //!
 //! What the descriptor does NOT prove is *where* the object is. Confinement is a
@@ -12,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -29,9 +28,8 @@ pub struct DelegatedRequired {
     ///
     /// **Not an `Option`, deliberately.** Elsewhere in this crate `None` is a
     /// named "this caller requires no such check". Here there is no such caller:
-    /// ADR-0009 decision 3 makes confinement one of the two proofs a delegated
-    /// descriptor always needs, and the descriptor itself proves only *access*,
-    /// never *where*. Making the unconfined state inexpressible is stronger than
+    /// ADR-0009 decision 3 makes confinement a proof every delegated descriptor
+    /// needs. Making the unconfined state inexpressible is stronger than
     /// documenting that nobody should ask for it — the same reasoning ADR-0008
     /// decision 1 applies to the baseline authorizer.
     pub confined_beneath: PathBuf,
@@ -129,62 +127,7 @@ pub struct Received {
     pub fds: Vec<OwnedFd>,
 }
 
-/// Open an object the caller intends to **delegate** to the trust plane (ADR-0009).
-///
-/// The first step of the delegation lifecycle, performed by the SUBJECT under its own
-/// credentials — which is the whole point: the kernel runs the complete permission
-/// check here (DAC bits, POSIX ACLs, supplementary groups, SELinux/AppArmor), and the
-/// resulting descriptor IS that answer, carried to a daemon that never has to resolve
-/// the name to find the object.
-///
-/// **It names NO requirements, and that absence is the design rather than an
-/// oversight.** Everywhere else in this crate the caller names what it requires and
-/// `None` is a named, greppable value. Here the honest requirement is *nothing*:
-///
-/// - **Symlinks are followed, deliberately.** ADR-0009 decision 6 has the daemon decide
-///   on the resolved path, so `~/current -> ~/versions/v3` must work and
-///   `~/innocent -> ~/.ssh/id_rsa` must resolve to the object the deny list names.
-///   `O_NOFOLLOW` here would break the first and hide the second.
-/// - **Object kind, link count and size are the DAEMON's to require.** It applies them
-///   to this very descriptor ([`verify_delegated`], [`read_delegated`]). Duplicating
-///   them client-side would put policy in an untrusted process and give two places to
-///   disagree.
-///
-/// So the client's job is to open, honestly, as itself — and to send the request even
-/// when this fails, so the refusal is DECIDED and audited rather than lost (decision 2).
-///
-/// **`O_NONBLOCK` is the one flag it sets**, and it is not a requirement — it is what
-/// makes the open TERMINATE (#241, codex round 2). A model-chosen `read_file` of a
-/// FIFO with no writer blocked this open forever: a synchronous open inside the
-/// untrusted CLI, outside every transport timeout, so the request never reached the
-/// kernel, the PDP never decided it, and normal credential shutdown never ran. With
-/// the flag, a writer-less read-side FIFO opens immediately and the DAEMON's
-/// `regular_file` requirement refuses the object exactly as before — the judgement
-/// stays on the trusted side. It applies no requirement of its own, changes nothing
-/// the daemon checks (those are `fstat`-based), and has no effect on a regular file's
-/// reads. `open_path_for_delegation`'s macOS lane carries the same flag for the same
-/// reason (`syscall::macos_path_delegation_flags`).
-///
-/// The flag comes from `nix::fcntl::OFlag`, the same typed family every other open in
-/// this crate composes from, by way of `OpenOptionsExt::custom_flags` — a single flag,
-/// so there is no bitflag union here for a mutant to rewrite. `std::fs` is kept (this
-/// is the crate's one reviewed exemption, `ci/gates/std-fs-allowlist.txt`) rather than
-/// moved to `syscall.rs`, because a `nix::fcntl::open` there would need a new
-/// disjoint-union exemption in the mutation inventory for a flag that is already
-/// held by a behavioural test.
-///
-/// Returns `std::io::Result` because the OS's refusal is the meaningful outcome and
-/// this function applies no requirement of its own to fail.
-pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
-    use std::os::unix::fs::OpenOptionsExt;
-    Ok(OwnedFd::from(
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
-            .open(path)?,
-    ))
-}
-
+/// The subject's own open for delegation: location only (Linux `O_PATH`; macOS `O_RDONLY` pending #368).
 pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     crate::syscall::open_path_delegation(path).map_err(Into::into)
 }
@@ -290,31 +233,6 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
     })
 }
 
-/// Verify a subject-delegated descriptor and read it, in one step.
-///
-/// **This is what replaces the daemon's own `open` on the read path.** The subject
-/// already opened the object, so the kernel has already run the whole permission
-/// check for that subject -- DAC bits, POSIX ACLs, supplementary groups,
-/// SELinux/AppArmor. The daemon adds confinement (a Maknae control the descriptor
-/// says nothing about) and the named target requirements, then reads from the very
-/// descriptor it checked. No name is resolved, so no permission on the subject's
-/// directories is required at any level, and a STIG `0700` home is servable (#194).
-///
-/// Returns the KERNEL-REPORTED path alongside the bytes: that is ground truth and
-/// what the PDP decides on (ADR-0009 decision 6), never the client-supplied string.
-pub fn read_delegated(
-    fd: &OwnedFd,
-    req: DelegatedRequired,
-) -> Result<(PathBuf, crate::Zeroizing<Vec<u8>>), IoError> {
-    // Cloned before `req` is consumed: the read re-applies the named requirements to
-    // the SAME descriptor immediately before use. Cheap, and it means no window
-    // exists between "checked" and "read" for a caller to widen by accident.
-    let target = req.target.clone();
-    let verified = verify_delegated(fd.as_fd(), req)?;
-    let bytes = crate::anchor::read_checked_fd(fd, &verified.path, &target)?;
-    Ok((verified.path, bytes))
-}
-
 pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
     if crate::syscall::confers_no_write(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
@@ -325,9 +243,7 @@ pub fn refuse_access_bearing(fd: BorrowedFd<'_>, path: &std::path::Path) -> Resu
     }
 }
 
-/// Verify a subject-delegated descriptor. Does not consume the fd: the caller
-/// still reads from the very descriptor that was checked, so there is no
-/// check-then-reopen window.
+/// Verify a subject-delegated descriptor's location and kind. Does not consume the fd.
 pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<Delegated, IoError> {
     let path = crate::syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
         kind: crate::checks::kind_of_errno(e),
@@ -350,11 +266,10 @@ pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<De
     if path.strip_prefix(&req.confined_beneath).is_err() {
         return Err(IoError::EscapesAnchor { path });
     }
-    // The named requirements, taken from the SAME descriptor the caller will read
-    // -- no reopen, so no check-then-use window. `owner`/`mode_mask` stay `None`
-    // on this path by design (ADR-0009 decision 1): the descriptor is already the
-    // OS's answer, and recomputing the mode algebra here is what the operator
-    // forbade.
+    // The named requirements, taken from the SAME descriptor. `owner`/`mode_mask`
+    // stay `None` on this path by design (ADR-0009 decision 1): the OS answers at
+    // the subject's own re-open, and recomputing the mode algebra here is what the
+    // operator forbade.
     let st = crate::syscall::fstat(&fd)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &path))?;
     crate::checks::check_target(&st, &path, &req.target)?;
@@ -484,36 +399,8 @@ mod tests {
         );
     }
 
-    /// The whole mechanism end to end: the subject's descriptor is verified and then
-    /// READ FROM DIRECTLY. The daemon never resolves the name, so it needs no
-    /// permission on the subject's directories -- and the bytes come from the very
-    /// inode that was checked, with no reopen in between.
     #[test]
-    fn a_delegated_fd_is_verified_then_read_from_directly() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let notes = home.join("notes.bin");
-        let content: &[u8] = &[0x4d, 0x41, 0x4b, 0xff, 0x00, 0x4e]; // non-UTF-8 is legal
-        std::fs::write(&notes, content).expect("write");
-        let f = std::fs::File::open(&notes).expect("the subject opens it");
-
-        let (path, bytes) = read_delegated(
-            &OwnedFd::from(f),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        )
-        .expect("verified and read");
-        assert_eq!(path, notes, "the PDP decides on the kernel-reported path");
-        assert_eq!(&*bytes, content);
-    }
-
-    /// Confinement is enforced BEFORE a single byte is read: an fd outside the root
-    /// must never reach the read at all.
-    #[test]
-    fn an_unconfined_delegated_fd_is_refused_before_any_bytes_are_read() {
+    fn an_unconfined_delegated_fd_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
         let base = confinement_root(root.path());
         let home = base.join("home");
@@ -523,8 +410,8 @@ mod tests {
         std::fs::write(&outside, b"NOT YOURS").expect("write");
         let f = std::fs::File::open(&outside).expect("open");
 
-        match read_delegated(
-            &OwnedFd::from(f),
+        match verify_delegated(
+            f.as_fd(),
             DelegatedRequired {
                 confined_beneath: home,
                 root_required: maknae_io_root_req(),
@@ -532,7 +419,7 @@ mod tests {
             },
         ) {
             Err(IoError::EscapesAnchor { .. }) => {}
-            other => panic!("an unconfined fd must be refused before the read: {other:?}"),
+            other => panic!("an unconfined fd must be refused: {other:?}"),
         }
     }
 
@@ -669,35 +556,6 @@ mod tests {
         }
     }
 
-    /// Oversize is enforced at READ time, not decision time -- so it must refuse here,
-    /// after verification has already passed. #77 spec D5: a permitted object that
-    /// will not fit is a delivery refusal, never truncation.
-    #[test]
-    fn read_delegated_refuses_an_object_past_the_read_time_budget() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let big = home.join("big");
-        std::fs::write(&big, b"more than four bytes").expect("write");
-        let f = std::fs::File::open(&big).expect("open");
-
-        match read_delegated(
-            &OwnedFd::from(f),
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: TargetRequired {
-                    max_bytes: Some(4),
-                    ..target()
-                },
-            },
-        ) {
-            Err(IoError::TargetTooLarge { limit, actual, .. }) => {
-                assert_eq!((limit, actual), (4, 20))
-            }
-            other => panic!("an oversize object must be refused at the read: {other:?}"),
-        }
-    }
-
     /// The two primitives are each other's inverse, and asserting them as a ROUND
     /// TRIP is what keeps them so: a send that attached the descriptor to the wrong
     /// message, or a receive that dropped it, fails here rather than in an
@@ -819,121 +677,6 @@ mod tests {
         );
     }
 
-    /// Valid metadata is not read authority: an untrusted peer can delegate an
-    /// O_WRONLY descriptor. Reopening its path would wrongly use the daemon's own
-    /// authority; swallowing the read error would turn refusal into empty success.
-    #[test]
-    fn a_write_only_delegated_descriptor_is_refused_at_read_time() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let home = confinement_root(root.path());
-        let path = a_file(&home, "write-only", b"must not be disclosed by reopening");
-        let fd = OwnedFd::from(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("open write-only"),
-        );
-        let requirements = || DelegatedRequired {
-            confined_beneath: home.clone(),
-            root_required: maknae_io_root_req(),
-            target: target(),
-        };
-        assert_eq!(
-            verify_delegated(fd.as_fd(), requirements())
-                .expect("premise: confinement and target metadata are valid")
-                .path,
-            path
-        );
-        assert_eq!(
-            read_delegated(&fd, requirements()).expect_err("write authority is not read authority"),
-            IoError::Io {
-                path,
-                kind: crate::IoKind::Other {
-                    raw: nix::errno::Errno::EBADF as i32,
-                },
-            }
-        );
-    }
-
-    /// The SUBJECT's open — the first step of the delegation lifecycle, and the one
-    /// that makes the kernel the decider. It is deliberately unconstrained.
-    #[test]
-    fn open_for_delegation_yields_a_descriptor_for_a_readable_object() {
-        use std::os::unix::fs::MetadataExt;
-        let root = tempfile::tempdir().expect("tempdir");
-        let notes = root.path().join("notes");
-        std::fs::write(&notes, b"content").expect("write");
-        let want = std::fs::metadata(&notes).expect("stat").ino();
-
-        let fd = open_for_delegation(&notes).expect("the subject can open its own file");
-        assert_eq!(
-            std::fs::File::from(fd).metadata().expect("stat").ino(),
-            want
-        );
-    }
-
-    /// codex round 2, IMPORTANT 1. A model-chosen `read_file` of a FIFO with no
-    /// writer blocked this open FOREVER — a synchronous `File::open` inside the
-    /// untrusted CLI, outside every transport timeout. The request never reached the
-    /// kernel, so the PDP never decided it, the step budget could not advance, and
-    /// normal credential shutdown never ran. `O_NONBLOCK` makes the open return at
-    /// once; the DAEMON's `regular_file` requirement is still what refuses the object
-    /// (`a_delegated_fd_to_a_non_regular_file_is_refused` directly above), so nothing
-    /// moved into the untrusted process.
-    ///
-    /// A watchdog in the TEST, not a killable child process (which is what this
-    /// crate's other FIFO controls use): the failure mode here is detectable — the
-    /// open either answers within the budget or it does not — so `recv_timeout` turns
-    /// the hang into a RED assertion instead of a stalled worker. The spawned thread
-    /// is left blocked on a RED run and reaped at process exit.
-    #[test]
-    fn open_for_delegation_does_not_block_on_a_writerless_fifo() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let pipe = root.path().join("waiting");
-        nix::unistd::mkfifo(
-            &pipe,
-            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-        )
-        .expect("mkfifo");
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let probe = pipe.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(open_for_delegation(&probe).map(|_| ()));
-        });
-        // PROMPTLY, and either answer is correct: the kind of object is the
-        // daemon's to require, never this function's.
-        let got = rx.recv_timeout(std::time::Duration::from_secs(2));
-        assert!(
-            got.is_ok(),
-            "open_for_delegation blocked on a writerless FIFO: the request never reaches the PDP"
-        );
-
-        // And a REGULAR file is unaffected, THROUGH THE DAEMON'S OWN PATH:
-        // `read_delegated` re-applies the named requirements to this very
-        // descriptor (`fstat`-based, so the file-status flag is invisible to
-        // them) and reads from it. `O_NONBLOCK` has no effect on a regular
-        // file's reads, and this is the control that says so rather than
-        // assuming it — the crate's other end-to-end read test opens with a
-        // plain `File::open` and would not notice.
-        let home = confinement_root(root.path());
-        let notes = home.join("notes.bin");
-        let content: &[u8] = &[0x4d, 0x41, 0x4b, 0xff, 0x00, 0x4e];
-        std::fs::write(&notes, content).expect("write");
-        let fd = open_for_delegation(&notes).expect("a regular file still opens");
-        let (got_path, bytes) = read_delegated(
-            &fd,
-            DelegatedRequired {
-                confined_beneath: home,
-                root_required: maknae_io_root_req(),
-                target: target(),
-            },
-        )
-        .expect("verified and read");
-        assert_eq!(got_path, notes);
-        assert_eq!(&*bytes, content);
-    }
-
     #[test]
     fn open_path_for_delegation_does_not_block_on_a_writerless_fifo() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -971,31 +714,6 @@ mod tests {
         )
         .expect("location and kind verify through a no-access descriptor");
         assert_eq!(verified.path, p);
-    }
-
-    /// When the OS refuses the SUBJECT, there is nothing to delegate — and the caller
-    /// must still send its request so the refusal is DECIDED and audited rather than
-    /// failing silently client-side (ADR-0009 decision 2). This asserts the error is
-    /// surfaced rather than swallowed.
-    #[test]
-    fn open_for_delegation_surfaces_the_os_refusal() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "open_for_delegation_surfaces_the_os_refusal",
-                "running as root, which opens a 0000 file and voids the premise",
-            );
-            return;
-        }
-        let root = tempfile::tempdir().expect("tempdir");
-        let secret = root.path().join("secret");
-        std::fs::write(&secret, b"x").expect("write");
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-
-        let got = open_for_delegation(&secret);
-        assert_eq!(
-            got.expect_err("a 0000 file must not open").kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
     }
 
     /// A delegated fd is honest authority over an OBJECT -- it says nothing about
@@ -1061,7 +779,7 @@ mod tests {
     }
 
     /// The frame budget is a named bound, refused BEFORE any buffer is allocated:
-    /// a permitted 20 GiB file must not OOM the TCB.
+    /// a permitted 20 GiB file must not OOM the reader.
     #[test]
     fn a_delegated_fd_over_the_named_budget_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
