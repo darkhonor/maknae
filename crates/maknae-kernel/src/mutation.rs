@@ -92,6 +92,8 @@ fn prepare(
             delegated_plan(&principal.home, principal.uid, None),
         )
         .map_err(|e| format!("replacement evidence refused: {e}"))?;
+        maknae_io::refuse_write_access(fd.as_fd(), &verified.path)
+            .map_err(|e| format!("replacement evidence refused: {e}"))?;
         let path = verified
             .path
             .to_str()
@@ -478,25 +480,37 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         max_depth: maknae_proto::MAX_MUTATION_DEPTH,
         deadline_ms: cfg.read_timeout_ms,
     };
-    let Ok(mut exchange) = MutationExchange::begin(id, scope.clone(), limits) else {
-        return;
-    };
-    let grant = MutationGrant { id, scope, limits };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
-    let Ok(bytes) = maknae_proto::encode_response(&Response {
+    let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();
+    let bytes = maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Ok(Payload::MutationAttempt(grant)),
-    }) else {
-        return;
-    };
-    if bytes.len() > cfg.frame_max_bytes
-        || !matches!(
+        result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
+            id,
+            scope,
+            limits,
+        })),
+    })
+    .ok()
+    .filter(|bytes| bytes.len() <= cfg.frame_max_bytes);
+    let delivered = match (exchange, bytes) {
+        (Some(exchange), Some(bytes)) => matches!(
             tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
             Ok(Ok(()))
         )
-    {
+        .then_some(exchange),
+        _ => None,
+    };
+    let Some(mut exchange) = delivered else {
+        incomplete(
+            cfg,
+            emit,
+            &intent,
+            seq,
+            "attempt grant not delivered; no effect authorized",
+        )
+        .await;
         return;
-    }
+    };
     loop {
         let result = tokio::time::timeout_at(
             deadline,

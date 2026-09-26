@@ -153,6 +153,9 @@ pub enum IoError {
     FdPathUnavailable {
         kind: IoKind,
     },
+    AccessBearingDescriptor {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -223,6 +226,13 @@ impl std::fmt::Display for IoError {
                 write!(
                     f,
                     "cannot determine the delegated descriptor's path: {kind:?}"
+                )
+            }
+            Self::AccessBearingDescriptor { path } => {
+                write!(
+                    f,
+                    "descriptor confers access beyond location: {}",
+                    path.display()
                 )
             }
         }
@@ -298,6 +308,10 @@ mod tests {
         assert!(
             !msg.contains("/proc"),
             "the message must not name a path the failure is not at: {msg}"
+        );
+        assert_eq!(
+            IoError::AccessBearingDescriptor { path: p.clone() }.to_string(),
+            "descriptor confers access beyond location: /etc/maknae/cfg"
         );
         assert_eq!(
             IoError::EscapesAnchor {

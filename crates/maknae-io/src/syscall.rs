@@ -391,10 +391,10 @@ pub(crate) fn sync_data<F: AsFd>(fd: &F) -> nix::Result<()> {
 }
 
 /// No create or truncate: the effect is the caller's, after the grant.
-pub(crate) fn open_writable_existing(path: &Path) -> nix::Result<OwnedFd> {
+pub(crate) fn open_writable_existing(path: &Path, extra: OFlag) -> nix::Result<OwnedFd> {
     nix::fcntl::open(
         path,
-        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC | extra,
         NixMode::empty(),
     )
 }
@@ -407,15 +407,32 @@ pub(crate) use macos_reopen_writable as reopen_writable;
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_reopen_writable<F: AsFd>(held: &F, _granted: &Path) -> nix::Result<OwnedFd> {
     use std::os::fd::AsRawFd;
-    open_writable_existing(Path::new(&format!(
-        "/proc/self/fd/{}",
-        held.as_fd().as_raw_fd()
-    )))
+    open_writable_existing(
+        Path::new(&format!("/proc/self/fd/{}", held.as_fd().as_raw_fd())),
+        OFlag::empty(),
+    )
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_reopen_writable<F: AsFd>(_held: &F, granted: &Path) -> nix::Result<OwnedFd> {
-    open_writable_existing(granted)
+    open_writable_existing(granted, OFlag::O_NOFOLLOW)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_confers_no_write as confers_no_write;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_confers_no_write as confers_no_write;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
+    Ok(OFlag::from_bits_retain(flags).contains(OFlag::O_PATH))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_confers_no_write<F: AsFd>(fd: &F) -> nix::Result<bool> {
+    let flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
+    Ok(OFlag::from_bits_retain(flags) & OFlag::O_ACCMODE == OFlag::O_RDONLY)
 }
 
 pub(crate) fn write_at<F: AsFd>(fd: &F, bytes: &[u8], offset: i64) -> nix::Result<usize> {
@@ -501,6 +518,22 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"safe");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_writable_reopen_refuses_a_symlink_at_the_granted_path() {
+        let d = tmp();
+        let real = d.path().join("real");
+        std::fs::write(&real, b"safe").unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let held = open_path_delegation(&real).unwrap();
+        assert_eq!(
+            reopen_writable(&held, &link).err(),
+            Some(nix::errno::Errno::ELOOP)
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), b"safe");
+    }
+
     #[test]
     fn path_delegation_open_sets_cloexec_confers_no_write_and_never_creates() {
         let d = tmp();
@@ -541,6 +574,13 @@ mod tests {
         groups.push(vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC]);
         #[cfg(target_os = "linux")]
         groups.push(vec![OFlag::O_PATH, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![
+            OFlag::O_WRONLY,
+            OFlag::O_NONBLOCK,
+            OFlag::O_CLOEXEC,
+            OFlag::O_NOFOLLOW,
+        ]);
         for group in groups {
             let mut bits = OFlag::empty();
             for flag in group {
@@ -569,9 +609,9 @@ mod tests {
         let d = tmp();
         let p = d.path().join("flags");
         std::fs::write(&p, b"safe").unwrap();
-        let fd = open_writable_existing(&p).unwrap();
+        let fd = open_writable_existing(&p, OFlag::empty()).unwrap();
         assert!(is_cloexec(&fd));
-        assert!(open_writable_existing(&d.path().join("absent")).is_err());
+        assert!(open_writable_existing(&d.path().join("absent"), OFlag::empty()).is_err());
     }
 
     #[test]

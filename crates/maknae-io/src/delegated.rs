@@ -315,6 +315,16 @@ pub fn read_delegated(
     Ok((verified.path, bytes))
 }
 
+pub fn refuse_write_access(fd: BorrowedFd<'_>, path: &std::path::Path) -> Result<(), IoError> {
+    if crate::syscall::confers_no_write(&fd)
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?
+    {
+        Ok(())
+    } else {
+        Err(IoError::AccessBearingDescriptor { path: path.into() })
+    }
+}
+
 /// Verify a subject-delegated descriptor. Does not consume the fd: the caller
 /// still reads from the very descriptor that was checked, so there is no
 /// check-then-reopen window.
@@ -1167,5 +1177,27 @@ mod tests {
             ),
             other => panic!("an fd outside the confinement root must be refused: {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_a_no_write_descriptor_is_accepted_as_replacement_evidence() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let p = d.path().join("held");
+        std::fs::write(&p, b"safe").expect("write");
+        let held = open_path_for_delegation(&p).expect("no-access open");
+        assert_eq!(refuse_write_access(held.as_fd(), &p), Ok(()));
+        for (read, write) in [(false, true), (true, true)] {
+            let fd: OwnedFd = std::fs::OpenOptions::new()
+                .read(read)
+                .write(write)
+                .open(&p)
+                .expect("writable open")
+                .into();
+            assert_eq!(
+                refuse_write_access(fd.as_fd(), &p),
+                Err(IoError::AccessBearingDescriptor { path: p.clone() })
+            );
+        }
+        assert_eq!(std::fs::read(&p).expect("read"), b"safe");
     }
 }

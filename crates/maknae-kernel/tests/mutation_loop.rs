@@ -111,6 +111,22 @@ async fn replace_start(
     maknae_proto::write_frame(&mut client, &body).await.unwrap();
     (client, task, held)
 }
+fn assert_undelivered_grant_is_incomplete(records: &[AuditRecord]) {
+    assert_eq!(records.len(), 3, "an undelivered grant closes its intent");
+    let intent = records[1].mutation.as_ref().unwrap();
+    assert_eq!(intent.phase, maknae_audit_append::MutationPhase::Intent);
+    let closed = records[2].mutation.as_ref().unwrap();
+    assert_eq!(closed.phase, maknae_audit_append::MutationPhase::Completion);
+    assert_eq!(
+        closed.status,
+        maknae_audit_append::MutationStatus::Incomplete
+    );
+    assert_eq!(closed.intent_seq, records[1].seq);
+    assert_eq!(
+        records[2].outcome.reason,
+        "attempt grant not delivered; no effect authorized"
+    );
+}
 async fn granted(client: &mut tokio::io::DuplexStream) -> maknae_proto::MutationGrant {
     match next_response(client).await.unwrap().result {
         RespResult::Ok(Payload::MutationAttempt(grant)) => grant,
@@ -269,6 +285,49 @@ async fn missing_write_descriptor_preserves_preparation_failure_in_audit() {
         "audit must distinguish absent evidence from worker/policy failure: {refusal:?}"
     );
     assert!(refusal.mutation.is_none());
+}
+
+#[tokio::test]
+async fn a_replacement_delegating_a_writable_descriptor_is_refused_before_intent() {
+    let fx = Fixture::new("writable_descriptor", "Write");
+    let target = fx.root.join("unique-existing-write-sentinel");
+    std::fs::write(&target, b"writable-descriptor-must-preserve-me").unwrap();
+    let records = Records::new(0);
+    let writable: std::os::fd::OwnedFd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .into();
+    let (mut client, task, body) = fx.start(
+        write_verb(&target, b"forbidden-replacement", None),
+        Some(writable),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let response = next_response(&mut client).await.unwrap();
+    drop(client);
+    task.await.unwrap();
+    assert!(matches!(response.result, RespResult::Err(_)));
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"writable-descriptor-must-preserve-me"
+    );
+    let records = records.snapshot();
+    assert_eq!(
+        records.len(),
+        2,
+        "no mutation intent follows writable evidence"
+    );
+    assert_eq!(records[1].outcome.result, "deny");
+    assert_eq!(
+        records[1].outcome.reason,
+        format!(
+            "replacement evidence refused: descriptor confers access beyond location: {}",
+            target.display()
+        )
+    );
+    assert!(records[1].mutation.is_none());
 }
 
 #[tokio::test]
@@ -1002,10 +1061,7 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
     assert!(next_response(&mut client).await.is_none());
     task.await.unwrap();
     let records = records.snapshot();
-    assert_eq!(
-        records[1].mutation.as_ref().unwrap().phase,
-        maknae_audit_append::MutationPhase::Intent
-    );
+    assert_undelivered_grant_is_incomplete(&records);
     assert_eq!(
         records[1].mutation.as_ref().unwrap().authorized_paths.len(),
         64
@@ -1092,12 +1148,7 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
             assert!(next_response(&mut client).await.is_none());
             task.await.unwrap();
             assert!(!target.exists());
-            let records = records.snapshot();
-            assert_eq!(records.len(), 2, "withheld grant must not accept effects");
-            assert_eq!(
-                records[1].mutation.as_ref().unwrap().phase,
-                maknae_audit_append::MutationPhase::Intent
-            );
+            assert_undelivered_grant_is_incomplete(&records.snapshot());
         }
     }
 }
@@ -1270,11 +1321,15 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
         send_report(&mut client, &finish).await;
         task.await.unwrap();
         assert!(ack(&mut client).await.is_none());
-        assert_eq!(
-            records.snapshot().len(),
-            if fail_grant { 2 } else { 3 },
-            "a failed outbound grant/ack must stop the exchange"
-        );
+        if fail_grant {
+            assert_undelivered_grant_is_incomplete(&records.snapshot());
+        } else {
+            assert_eq!(
+                records.snapshot().len(),
+                3,
+                "a failed outbound ack must stop the exchange"
+            );
+        }
         assert!(!fx.root.join("unique-created-client-sentinel").exists());
     }
 }

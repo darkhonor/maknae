@@ -66,8 +66,8 @@ pub use audit_append::open_audit_append;
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
     open_directory_for_delegation, open_for_delegation, open_path_for_delegation, read_delegated,
-    recv_delegated, send_delegated, verify_delegated, Delegated, DelegatedFds, DelegatedRequired,
-    Received, DELEGATED_FDS_PER_CONNECTION,
+    recv_delegated, refuse_write_access, send_delegated, verify_delegated, Delegated, DelegatedFds,
+    DelegatedRequired, Received, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use mutation::{

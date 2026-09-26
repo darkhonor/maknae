@@ -754,9 +754,6 @@ mod tests {
         assert!(empty.unwrap().0.is_empty());
     }
 
-    /// The in-memory write lane's own budget check, direct — `request_from_input`'s
-    /// stdin test above cannot reach it, and the agent loop (#241) is the only
-    /// caller.
     #[test]
     fn write_request_carries_the_conversation_it_is_given() {
         let (v, _) = write_request(
