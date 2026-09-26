@@ -2,9 +2,7 @@
 //! PDP at boot or refuses to start. T1 — a wrong arm here is a daemon that
 //! serves without a decider.
 //!
-//! Two refusal triggers, and only two (the home-anchor probe is deliberately
-//! NOT one — spec D1: a removed ACL must degrade the read verb, never
-//! crash-loop the trust plane):
+//! Three refusal triggers, and only three:
 //!   1. the `principal` section is absent — the PDP's default role resolution
 //!      keys on the enrolled uid, so a daemon with no principal can authorize
 //!      no one: "boot anyway, deny everything, look healthy" would hide a
@@ -17,6 +15,7 @@
 //!      two-role now), or (added 2026-09-09, #172) `destinations:` role-key
 //!      semantics. Still ONE trigger, not four: `finish_new` validates all of
 //!      them eagerly and refuses construction, which is what this gate observes.
+//!   3. `principal.home` cannot be resolved to its kernel-reported form (#216).
 
 use maknae_authz_basic::{AuthzBasicError, BasicAuthorizer};
 use maknae_config::Principal;
@@ -79,11 +78,10 @@ fn authz_boot_gate_with(
     let principal = principal.ok_or(AuthzBootRefusal::MissingPrincipal)?;
     // #216 -- THE ONE PLACE THE CANONICAL FORM OF `principal.home` IS ESTABLISHED.
     // It must land here, at or above `Principal`, and never at a call site: the
-    // value feeds FOUR consumers -- `handler::delegated_plan`'s confinement root
-    // (reached at attempt preparation), the `~`
-    // expansion every allow/deny glob is parsed against, and the boot anchor
-    // probe. Canonicalizing only some of them permits at decision and then dies
-    // in the PEP with a different record shape.
+    // value feeds TWO consumers -- `handler::delegated_plan`'s confinement root
+    // (reached at attempt preparation) and the `~` expansion every allow/deny
+    // glob is parsed against. Canonicalizing only one of them permits at
+    // decision and then dies in the PEP with a different record shape.
     //
     // Maintainer ruling 2026-09-12 (option B): BOOT canonicalizes, not enroll.
     // `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so the
@@ -546,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             returned.home, resolved,
-            "the returned principal feeds delegated_plan and the anchor probe"
+            "the returned principal feeds delegated_plan"
         );
     }
 
