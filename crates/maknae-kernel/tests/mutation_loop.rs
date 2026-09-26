@@ -1297,3 +1297,87 @@ async fn single_mkdir_grants_exact_created_directory_and_success_requires_one_ef
         assert_eq!(target.exists(), report_effect);
     }
 }
+
+#[tokio::test]
+#[ignore = "#365 reproduce-first: red until the replace lane moves to the client"]
+async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes() {
+    use maknae_audit_append::{MutationOperation, MutationOrigin, MutationPhase, MutationStatus};
+    use maknae_proto::{
+        EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
+    };
+    let fx = Fixture::new("replace_client_reported", "Write");
+    let target = fx.root.join("unique-replace-attempt-sentinel");
+    std::fs::write(&target, b"original-longer-sentinel").unwrap();
+    let delegated: std::os::fd::OwnedFd = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .into();
+    let records = Records::new(0);
+    let (mut client, task, body) = fx.start(
+        Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content: Bytes::new(b"replaced".to_vec().into()),
+            mode: WriteMode::Existing,
+            conversation: None,
+        },
+        Some(delegated),
+        records.clone(),
+    );
+    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    let response = next_response(&mut client).await.expect("a response frame");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"original-longer-sentinel",
+        "the daemon wrote the subject's file: {:?}",
+        response.result
+    );
+    let RespResult::Ok(Payload::MutationAttempt(grant)) = response.result else {
+        panic!(
+            "expected a subject-side attempt grant, got {:?}",
+            response.result
+        )
+    };
+    assert_eq!(
+        grant.scope,
+        MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: ReportedEffect::ReplacedFile
+        }
+    );
+    std::fs::write(&target, b"replaced").unwrap();
+    send_report(
+        &mut client,
+        &MutationReport::Batch {
+            id: grant.id,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: target.to_str().unwrap().into(),
+                effect: ReportedEffect::ReplacedFile,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(ack(&mut client).await.unwrap().next_index, 1);
+    send_report(
+        &mut client,
+        &MutationReport::Finished {
+            id: grant.id,
+            next_index: 1,
+            outcome: ReportedFinish::Success,
+            stopped_at: None,
+        },
+    )
+    .await;
+    assert_eq!(ack(&mut client).await.unwrap().next_index, 1);
+    task.await.unwrap();
+    let records = records.snapshot();
+    let intent = records[1].mutation.as_ref().unwrap();
+    assert_eq!(intent.operation, Some(MutationOperation::WriteExisting));
+    assert_eq!(intent.content_length, Some(8));
+    assert_eq!(intent.origin, MutationOrigin::KernelObserved);
+    let completion = records.last().unwrap().mutation.as_ref().unwrap();
+    assert_eq!(completion.phase, MutationPhase::Completion);
+    assert_eq!(completion.origin, MutationOrigin::ClientReported);
+    assert_eq!(completion.status, MutationStatus::ReportedSuccess);
+}
