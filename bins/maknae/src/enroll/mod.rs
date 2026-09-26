@@ -214,9 +214,9 @@ pub struct RealPasswd;
 /// `authz_boot_gate`, and never depends on this — `bins/maknae` is the untrusted
 /// binary (AGENTS.md core principle 1), so the trust plane resolving its own
 /// confinement root is the control. What this buys is agreement: enroll consumes
-/// the same value for its OWN writes — the `<home>/.maknae` CLI directory and
-/// `grant_read_path_access`'s `_maknae` read ACL / AppArmor local include — and
-/// resolving here keeps those grants on the same form the daemon will confine to.
+/// the same value for its OWN work — the `<home>/.maknae` CLI directory and
+/// `revoke_legacy_home_access` — and resolving here keeps that work on the same
+/// form the daemon will confine to.
 ///
 /// The fallback is intentional. An unresolvable home is not enroll's to refuse:
 /// it writes what passwd said, and the daemon refuses at boot with
@@ -1190,8 +1190,7 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
 /// The directory is `root:_maknae 0750`, the deputy is in neither, and the
 /// config loader refuses any world bit on that directory — so a mode change is
 /// not available, and a group change would put the daemon's group on the
-/// deputy or vice versa. `r` AND `x`, for the same reason the home grant below
-/// is `rx`: the anchored reader (`maknae-io`) opens the directory
+/// deputy or vice versa. `r` AND `x`: the anchored reader (`maknae-io`) opens the directory
 /// `O_RDONLY|O_DIRECTORY`, so a search-only `--x` entry fails the open with
 /// EACCES — corrected 2026-09-14 in self-review, where this constant was `x`
 /// and would have left the deputy exactly as unable to open its bounds file as
@@ -1215,7 +1214,7 @@ fn egress_traversal_acl_readback() -> String {
 }
 
 /// Apply [`EGRESS_TRAVERSAL_ACL`] to `/etc/maknae` (Linux, root context). Warn
-/// on failure, as `grant_read_path_access` does: enrollment establishes
+/// on failure: enrollment establishes
 /// identity; without the entry the deputy refuses to start, naming its bounds
 /// file, until the operator grants it by hand. The package scriptlets set the
 /// same entry at install; this re-asserts it on every enroll.
@@ -1261,83 +1260,27 @@ fn grant_egress_traversal(verbose: bool) {
     }
 }
 
-/// #77 read-path access grants (spec D5a), Linux, root context:
-///  1. a SINGLE, NON-RECURSIVE ACL on the enrolled home — `u:_maknae:rx`
-///     (`r` because the anchored reader opens the home O_RDONLY|O_DIRECTORY
-///     per ADR-0021 D3; `x` for traversal). Deliberately NOT recursive and NO
-///     default ACL: the recursive form would hand the daemon DAC read over
-///     the very secrets the deny list protects AND, via the POSIX ACL mask's
-///     st_mode effect, make OpenSSH refuse the operator's own 0600 keys.
-///     Removable with one `setfacl -x u:_maknae ~` (reads degrade, daemon
-///     unaffected).
-///  2. the AppArmor local include narrowing the profile's home read to THIS
-///     home, plus `apparmor_parser -r` (Debian-family; both no-ops where
-///     AppArmor is absent). SELinux needs no per-home step (type-based
-///     vectors ship in the .te).
-///
-/// Side effect, recorded: a POSIX ACL raises the st_mode GROUP bits to the
-/// ACL mask, so a 0700 home stats ~0750 afterward — still within the
-/// anchor's `0o022` no-write mask (group READ is fine); noted so the mode
-/// change is never mistaken for drift.
-///
-/// Direct fs write + Command usage below carry std-fs-allowlist entries.
-fn grant_read_path_access(home: &Path, verbose: bool) {
-    // 1. DAC ACL (needs the `acl` package — a warn, not a failure, without it).
-    let acl = std::process::Command::new("setfacl")
-        .args(["-m", "u:_maknae:rx"])
-        .arg(home)
-        .output();
-    match acl {
-        Ok(o) if o.status.success() => {
-            if verbose {
-                eprintln!("exec: setfacl -m u:_maknae:rx {}", home.display());
-            }
-        }
-        Ok(o) => eprintln!(
-            "maknae enroll: setfacl failed ({}); reads will be unavailable until the home grants _maknae r-x: {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => eprintln!(
-            "maknae enroll: setfacl unavailable ({e}); install the `acl` package or grant _maknae r-x on {} — reads fail closed until then",
-            home.display()
-        ),
-    }
+const LEGACY_HOME_ACL_USER: &str = "_maknae";
+const LEGACY_INCLUDE: &str = "/etc/apparmor.d/local/usr.bin.maknaed";
+const LEGACY_INCLUDE_SIGNATURE: &str =
+    "# Written by `maknae enroll` (#77): narrow the daemon's home read to the";
 
-    // 2. AppArmor local include (Debian-family only; /etc/apparmor.d absent
-    // means AppArmor isn't managing this host — skip; the local/ SUBDIR is
-    // created if missing, root context). The home path is interpolated into
-    // profile syntax: refuse metacharacters outright (fail closed to
-    // reads-unavailable) rather than risk a silently WIDENED rule.
-    let home_str = home.display().to_string();
-    let home_is_profile_safe = home_str
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
-    let local_dir = Path::new("/etc/apparmor.d/local");
-    if Path::new("/etc/apparmor.d").is_dir() && !home_is_profile_safe {
-        eprintln!(
-            "maknae enroll: home path {home_str:?} contains AppArmor metacharacters; refusing to write the local include — reads fail closed under AppArmor"
-        );
-    } else if Path::new("/etc/apparmor.d").is_dir() {
-        if !local_dir.is_dir() {
-            let _ = std::fs::create_dir_all(local_dir);
-        }
-        let snippet = format!(
-            "# Written by `maknae enroll` (#77): narrow the daemon's home read to the
-# ENROLLED home only. Read-only; regenerate by re-running enroll.
-{}/ r,
-{}/** r,
-",
-            home.display(),
-            home.display()
-        );
-        let inc = local_dir.join("usr.bin.maknaed");
-        if let Err(e) = std::fs::write(&inc, snippet) {
-            eprintln!(
-                "maknae enroll: cannot write {} ({e}); reads fail closed under AppArmor until it exists",
-                inc.display()
-            );
-        } else {
+/// Remove the home access an earlier enroll granted the daemon: the
+/// `u:_maknae:rx` home ACL and enroll's AppArmor local include. The daemon
+/// needs neither (#365). Linux, root context; warn-only, like every enroll grant.
+fn revoke_legacy_home_access(home: &Path, verbose: bool) {
+    if let Ok(Some(user)) = nix::unistd::User::from_name(LEGACY_HOME_ACL_USER) {
+        revoke_home_acl(home, user.uid.as_raw(), verbose);
+    }
+    if !Path::new("/etc/apparmor.d").is_dir() {
+        return;
+    }
+    let inc = Path::new(LEGACY_INCLUDE);
+    match remove_legacy_include(inc) {
+        Ok(true) => {
+            if verbose {
+                eprintln!("exec: rm {LEGACY_INCLUDE}");
+            }
             let reload = std::process::Command::new("apparmor_parser")
                 .args(["-r", "/etc/apparmor.d/usr.bin.maknaed"])
                 .output();
@@ -1348,13 +1291,90 @@ fn grant_read_path_access(home: &Path, verbose: bool) {
                     }
                 }
                 Ok(o) => eprintln!(
-                    "maknae enroll: apparmor_parser reload failed ({}); reads fail closed until the profile reloads",
+                    "maknae enroll: apparmor_parser reload failed ({}); the loaded profile keeps the old home rules until it reloads",
                     o.status
                 ),
-                Err(e) => eprintln!("maknae enroll: apparmor_parser unavailable ({e}); skipping (non-AppArmor host?)"),
+                Err(e) => eprintln!(
+                    "maknae enroll: apparmor_parser unavailable ({e}); the loaded profile keeps the old home rules until it reloads"
+                ),
             }
         }
+        Ok(false) if inc.exists() => eprintln!(
+            "maknae enroll: {LEGACY_INCLUDE} was not written by enroll and is kept; the daemon needs no home rule in it"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("maknae enroll: cannot remove {LEGACY_INCLUDE} ({e}); the daemon needs no home rule in it"),
     }
+}
+
+/// Whether `getfacl -n` output carries an access entry for `who`. Matched as a
+/// whole entry, so `user:9910:` and `default:user:991:` never match `991`.
+fn names_acl_entry(getfacl_output: &str, who: &str) -> bool {
+    let entry = format!("user:{who}:");
+    getfacl_output.lines().any(|l| l.starts_with(&entry))
+}
+
+fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
+    let who = uid.to_string();
+    let present = || {
+        std::process::Command::new("getfacl")
+            .args(["-p", "-n", "--omit-header"])
+            .arg(home)
+            .output()
+            .map(|o| names_acl_entry(&String::from_utf8_lossy(&o.stdout), &who))
+    };
+    if !matches!(present(), Ok(true)) {
+        return;
+    }
+    let spec = format!("u:{uid}");
+    match std::process::Command::new("setfacl")
+        .args(["-x", &spec])
+        .arg(home)
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            if verbose {
+                eprintln!("exec: setfacl -x {spec} {}", home.display());
+            }
+        }
+        Ok(o) => {
+            eprintln!(
+                "maknae enroll: setfacl -x {spec} failed ({}); the daemon needs no ACL on {}, remove it by hand: {}",
+                o.status,
+                home.display(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "maknae enroll: setfacl unavailable ({e}); the daemon needs no ACL on {}, remove `u:{LEGACY_HOME_ACL_USER}` by hand",
+                home.display()
+            );
+            return;
+        }
+    }
+    if !matches!(present(), Ok(false)) {
+        eprintln!(
+            "maknae enroll: the `{LEGACY_HOME_ACL_USER}` ACL entry is still on {}; remove it with `setfacl -x u:{LEGACY_HOME_ACL_USER}`",
+            home.display()
+        );
+    }
+}
+
+/// Remove `path` only if its first line is enroll's signature, so an operator's
+/// own override file is kept. Returns whether it removed.
+fn remove_legacy_include(path: &Path) -> std::io::Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if text.lines().next() != Some(LEGACY_INCLUDE_SIGNATURE) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
 }
 
 fn env_u32(name: &str) -> Option<u32> {
@@ -1720,13 +1740,12 @@ async fn finish_enrollment(
             detail: e.to_string(),
         })?;
 
-    // ---- Step 7b: read-path access (#77, spec D5a; Linux only, root context —
-    // enroll IS root under sudo) --------------------------------------------
-    // Both steps are WARN-on-failure: enrollment establishes identity and must
-    // not hinge on the optional read feature; absent either grant, reads fail
-    // closed (read-verb-unavailable) and ping/whoami are unaffected.
+    // ---- Step 7b: Linux only, root context — enroll IS root under sudo -------
+    // Enroll grants the daemon nothing on the home and removes what an earlier
+    // enroll granted; the deputy gets its /etc/maknae traversal entry. Both are
+    // WARN-on-failure: enrollment establishes identity and must not hinge on them.
     if !macos {
-        grant_read_path_access(&operator.home, args.verbose);
+        revoke_legacy_home_access(&operator.home, args.verbose);
         grant_egress_traversal(args.verbose);
     }
 
@@ -1902,10 +1921,10 @@ mod tests {
 
     /// #216, the ENROLL half of the 2026-09-12 ruling. The daemon canonicalises
     /// `principal.home` itself and never depends on this — `bins/maknae` is the
-    /// untrusted binary. But enroll consumes the same value for its OWN writes
-    /// (the `<home>/.maknae` CLI dir and the `_maknae` read-ACL / AppArmor
-    /// grant), so resolving here keeps those grants on the same form the daemon
-    /// will confine to, instead of one the passwd entry merely spelled.
+    /// untrusted binary. But enroll consumes the same value for its OWN work
+    /// (the `<home>/.maknae` CLI dir and the legacy home-access revoke), so
+    /// resolving here keeps it on the same form the daemon will confine to,
+    /// instead of one the passwd entry merely spelled.
     #[test]
     fn canonical_home_resolves_a_symlinked_passwd_dir() {
         let base = std::env::temp_dir().join(format!("ch_link_{}", std::process::id()));
@@ -1927,6 +1946,74 @@ mod tests {
     /// said, and the DAEMON refuses at boot with `UnresolvableHome`, which is the
     /// enforcement point and says so in one auditable place. Falling back here
     /// keeps enroll's existing behaviour for a home that does not exist yet.
+    #[test]
+    fn names_acl_entry_matches_only_the_exact_principal() {
+        let out = "user::rwx\nuser:991:r-x\t\t#effective:r-x\nuser:9910:r-x\ngroup::---\nmask::r-x\nother::---\n";
+        assert!(names_acl_entry(out, "991"));
+        let others = "user::rwx\nuser:9910:r-x\nuser:_maknae-egress:r-x\ngroup::---\n";
+        assert!(!names_acl_entry(others, "991"));
+        assert!(!names_acl_entry(others, "_maknae"));
+        assert!(!names_acl_entry("default:user:991:r-x\n", "991"));
+        assert!(!names_acl_entry(
+            "user::rwx\ngroup::---\nother::---\n",
+            "991"
+        ));
+    }
+
+    #[test]
+    fn remove_legacy_include_removes_only_enrolls_own_file() {
+        let d = std::env::temp_dir().join(format!("legacy_inc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let inc = d.join("usr.bin.maknaed");
+        let absent = remove_legacy_include(&inc).expect("absent is not an error");
+        std::fs::write(&inc, "# operator override\n/srv/data/ r,\n").unwrap();
+        let operator = remove_legacy_include(&inc).expect("an operator file is read");
+        let operator_kept = inc.exists();
+        std::fs::write(
+            &inc,
+            format!("{LEGACY_INCLUDE_SIGNATURE}\n/home/alex/ r,\n"),
+        )
+        .unwrap();
+        let enrolls = remove_legacy_include(&inc).expect("enroll's file is removed");
+        let enrolls_gone = !inc.exists();
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(!absent);
+        assert!(!operator && operator_kept, "an operator's override is kept");
+        assert!(enrolls && enrolls_gone, "enroll's own include is removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn revoke_home_acl_removes_the_named_entry_and_keeps_others() {
+        let d = std::env::temp_dir().join(format!("revoke_acl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let uid = nix::unistd::getuid().as_raw();
+        let set = |spec: &str| {
+            std::process::Command::new("setfacl")
+                .args(["-m", spec])
+                .arg(&d)
+                .status()
+                .expect("setfacl is installed")
+                .success()
+        };
+        assert!(set(&format!("u:{uid}:rx")));
+        assert!(set("g:0:x"));
+        revoke_home_acl(&d, uid, false);
+        let out = std::process::Command::new("getfacl")
+            .args(["-p", "-n", "--omit-header"])
+            .arg(&d)
+            .output()
+            .expect("getfacl is installed");
+        let out = String::from_utf8_lossy(&out.stdout).into_owned();
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(!names_acl_entry(&out, &uid.to_string()), "{out}");
+        assert!(out.lines().any(|l| l.starts_with("group:0:")), "{out}");
+    }
+
     #[test]
     fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
         let missing = std::env::temp_dir().join(format!("ch_missing_{}", std::process::id()));
