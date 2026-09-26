@@ -123,7 +123,7 @@ crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
 # #158 delegated directories prove location; subject namespace syscalls decide OS permission.
 crates/maknae-io/src/mutation.rs|owner: None,
 crates/maknae-io/src/mutation.rs|mode_mask: None,
-# #365 the subject's re-open is where the OS decides the write; the held object need only be regular and single-link.
+# #365 the subject's re-open is where the OS decides the read or write; the held object need only be regular and single-link.
 crates/maknae-io/src/mutation.rs|..TargetRequired::OS_DAC_REGULAR
 
 # #158: CLI verifies the granted parent location; OS checks namespace access at
