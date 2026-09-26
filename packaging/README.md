@@ -157,7 +157,7 @@ key; see `sign.sh --help`.
 `maknae enroll` cannot complete.** The operator CLI seal uses `systemd-creds --user`,
 which requires systemd ≥ 256; RHEL 9 ships systemd 252. RHEL 9 is therefore
 **packaging + daemon-seal only this release — operator enroll is deferred to #73.**
-The rpm installs cleanly, the SELinux policy loads and runs enforce-clean (re-validation after #77's home-read vectors: operator pre-merge checklist), and the
+The rpm installs cleanly, the SELinux policy loads and runs enforce-clean (the #365 home-access policy is measured on el10), and the
 daemon's own TPM2 seal works; what is *not* available on el9 is the operator
 enroll → serve round-trip. **RHEL 10 supports the full enroll flow (proven live,
 enforcing).** Debian 13's `--user` CLI seal works (systemd 257), but its full

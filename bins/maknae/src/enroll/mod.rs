@@ -1354,11 +1354,16 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
             return;
         }
     }
-    if !matches!(present(), Ok(false)) {
-        eprintln!(
+    match present() {
+        Ok(false) => {}
+        Ok(true) => eprintln!(
             "maknae enroll: the `{LEGACY_HOME_ACL_USER}` ACL entry is still on {}; remove it with `setfacl -x u:{LEGACY_HOME_ACL_USER}`",
             home.display()
-        );
+        ),
+        Err(e) => eprintln!(
+            "maknae enroll: cannot confirm the `{LEGACY_HOME_ACL_USER}` ACL entry is gone from {} (getfacl: {e})",
+            home.display()
+        ),
     }
 }
 
@@ -1947,6 +1952,13 @@ mod tests {
     /// enforcement point and says so in one auditable place. Falling back here
     /// keeps enroll's existing behaviour for a home that does not exist yet.
     #[test]
+    fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
+        let missing = std::env::temp_dir().join(format!("ch_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert_eq!(canonical_home(missing.clone()), missing);
+    }
+
+    #[test]
     fn names_acl_entry_matches_only_the_exact_principal() {
         let out = "user::rwx\nuser:991:r-x\t\t#effective:r-x\nuser:9910:r-x\ngroup::---\nmask::r-x\nother::---\n";
         assert!(names_acl_entry(out, "991"));
@@ -2012,13 +2024,6 @@ mod tests {
 
         assert!(!names_acl_entry(&out, &uid.to_string()), "{out}");
         assert!(out.lines().any(|l| l.starts_with("group:0:")), "{out}");
-    }
-
-    #[test]
-    fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
-        let missing = std::env::temp_dir().join(format!("ch_missing_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&missing);
-        assert_eq!(canonical_home(missing.clone()), missing);
     }
 
     // ---- preflight_check (Step 2 TDD) --------------------------------------

@@ -172,9 +172,11 @@ allow maknaed_t maknae_private_t:file { read open getattr };
 # #365: the daemon stats the enrolled home by path and receives the subject's
 # no-access (O_PATH) descriptors; it opens and reads nothing in a home. Receipt is
 # checked as ioctl; the xperm rules allow only command 0x0000, which no filesystem
-# implements. Receipt covers every home content type so the PDP decides, and the
-# trail records, every object the subject names, denied ones included. Search on
-# /home and reading a symlinked home path come from the base policy.
+# implements. Receipt covers files and directories of every home content type, so
+# the PDP decides, and the trail records, each of them, denied ones included. A
+# socket, a FIFO, or an object of another type is refused at receipt instead.
+# Search on /home and following a symlinked home under /home come from the base
+# policy.
 gen_require(`
     attribute user_home_type;
     type user_home_dir_t;

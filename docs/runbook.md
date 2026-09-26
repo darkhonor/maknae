@@ -550,7 +550,7 @@ sudo maknae enroll \
   - **Rewrites `/etc/maknae/maknae.yaml`** with four sections: `core`, `vault`, `audit`, `principal`.
 - **Anything else you put in `maknae.yaml` is lost on the next enroll.** That is why the provider goes in `config.d/` (step 5).
 - **A host enrolled before the deputy existed must re-enroll**, so that the `maknae-egress` plane gets its SecretID.
-- **A host enrolled before #365 should re-enroll** to remove the `_maknae` ACL entry from your home and enroll's AppArmor include. The daemon needs neither; enroll keeps an include file it did not write.
+- **A host enrolled before #365 should re-enroll** to remove the `_maknae` ACL entry from your home and enroll's AppArmor include. The daemon needs neither; enroll keeps an include file it did not write. Afterwards `ls -ld ~` may still show `+`: an empty `mask::---` entry remains and grants nothing. Enroll touches only the home it is enrolling; on a home enrolled earlier by another operator, run `sudo setfacl -x u:_maknae <that home>`.
 
 Log out and back in (or `newgrp maknae`) so your shell carries the group.
 

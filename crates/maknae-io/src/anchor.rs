@@ -711,10 +711,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
+        let readable_open = crate::syscall::open_parent_by_path(&dir);
         let search_only = super::resolve_dir(&dir);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(&base);
 
+        assert!(
+            readable_open.is_err(),
+            "the directory must refuse a read open, which a root run cannot show"
+        );
         assert_eq!(search_only.expect("a search-only dir resolves"), readable);
     }
 
