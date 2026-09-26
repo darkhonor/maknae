@@ -27,18 +27,21 @@ class PlatformSelection(unittest.TestCase):
 
     def test_linux(self):
         selected = self.selected("Linux")
-        for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve", "linux_mutation_directory_flags"):
+        for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve", "linux_mutation_directory_flags",
+                       "linux_path_delegation_flags"):
             self.assertIn(active, selected)
-        for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path", "macos_mutation_directory_flags"):
+        for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path", "macos_mutation_directory_flags",
+                       "macos_path_delegation_flags"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
     def test_macos(self):
         selected = self.selected("Darwin")
-        for active in ("macos_fd_path", "portable_probe_openat2", "macos_mutation_directory_flags"):
+        for active in ("macos_fd_path", "portable_probe_openat2", "macos_mutation_directory_flags",
+                       "macos_path_delegation_flags"):
             self.assertIn(active, selected)
         for absent in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve",
-                       "unsupported_fd_path", "linux_mutation_directory_flags"):
+                       "unsupported_fd_path", "linux_mutation_directory_flags", "linux_path_delegation_flags"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
@@ -50,7 +53,7 @@ class PlatformSelection(unittest.TestCase):
             for mutant in excluded:
                 self.assertIsNone(re.search(regex, mutant.replace("syscall.rs:", "other.rs:")))
                 # A similarly named future function is not covered by this rule.
-                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags)( ->|$)",
+                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags|path_delegation_flags)( ->|$)",
                                  r"\1_extra\2", mutant)
                 self.assertNotEqual(altered, mutant)
                 self.assertIsNone(re.search(regex, altered))
@@ -69,9 +72,9 @@ class PlatformSelection(unittest.TestCase):
         reviewed = {"open_parent_by_path", "open_dir_at", "open_read_target",
                     "openat2_resolve", "open_temp_excl", "open_append",
                     "macos_mutation_directory_flags", "linux_mutation_directory_flags", "open_mutation_directory_at",
-                    "open_writable_delegation"}
+                    "open_writable_delegation", "linux_path_delegation_flags", "macos_path_delegation_flags"}
         equivalent = {m for m in xor_mutants if m.rsplit(" in ", 1)[1] in reviewed}
-        self.assertEqual(len(equivalent), 28, "review the disjoint-union inventory when it changes")
+        self.assertEqual(len(equivalent), 31, "review the disjoint-union inventory when it changes")
         # Both production platforms have native evidence plus executable bit proofs.
         self.assertEqual(xor_mutants - equivalent, set())
         self.assertEqual(set(configured), set(INVENTORY) - equivalent)

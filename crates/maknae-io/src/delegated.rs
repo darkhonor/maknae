@@ -175,6 +175,10 @@ pub struct Received {
 ///
 /// Returns `std::io::Result` because the OS's refusal is the meaningful outcome and
 /// this function applies no requirement of its own to fail.
+pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
+    crate::syscall::open_path_delegation(path).map_err(Into::into)
+}
+
 pub fn open_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     use std::os::unix::fs::OpenOptionsExt;
     Ok(OwnedFd::from(
@@ -878,6 +882,45 @@ mod tests {
     /// open either answers within the budget or it does not — so `recv_timeout` turns
     /// the hang into a RED assertion instead of a stalled worker. The spawned thread
     /// is left blocked on a RED run and reaped at process exit.
+    #[test]
+    fn open_path_for_delegation_does_not_block_on_a_writerless_fifo() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipe = root.path().join("waiting");
+        nix::unistd::mkfifo(
+            &pipe,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = pipe.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_path_for_delegation(&probe).map(|_| ()));
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn a_no_access_descriptor_is_enough_to_verify_location_and_kind() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = confinement_root(root.path());
+        let p = home.join("held");
+        std::fs::write(&p, b"x").expect("write");
+        let fd = open_path_for_delegation(&p).expect("no-access open");
+        let verified = verify_delegated(
+            fd.as_fd(),
+            DelegatedRequired {
+                confined_beneath: home,
+                root_required: maknae_io_root_req(),
+                target: TargetRequired {
+                    max_bytes: None,
+                    ..target()
+                },
+            },
+        )
+        .expect("location and kind verify through a no-access descriptor");
+        assert_eq!(verified.path, p);
+    }
+
     #[test]
     fn open_for_delegation_does_not_block_on_a_writerless_fifo() {
         let root = tempfile::tempdir().expect("tempdir");

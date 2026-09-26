@@ -127,6 +127,25 @@ pub(crate) fn open_mutation_directory(path: &Path) -> nix::Result<OwnedFd> {
     nix::fcntl::open(path, mutation_directory_flags(), NixMode::empty())
 }
 
+#[cfg(target_os = "linux")]
+use linux_path_delegation_flags as path_delegation_flags;
+#[cfg(target_os = "macos")]
+use macos_path_delegation_flags as path_delegation_flags;
+
+#[cfg(target_os = "linux")]
+fn linux_path_delegation_flags() -> OFlag {
+    OFlag::O_PATH | OFlag::O_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_delegation_flags() -> OFlag {
+    OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
+}
+
+pub(crate) fn open_path_delegation(path: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(path, path_delegation_flags(), NixMode::empty())
+}
+
 /// Mutation descent needs search/path access; only directory enumeration needs read.
 pub(crate) fn open_mutation_directory_at<F: AsFd>(fd: &F, leaf: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
@@ -461,6 +480,30 @@ mod tests {
     }
 
     #[test]
+    fn path_delegation_open_sets_cloexec_confers_no_write_and_never_creates() {
+        let d = tmp();
+        let p = d.path().join("held");
+        std::fs::write(&p, b"safe").unwrap();
+        let fd = open_path_delegation(&p).unwrap();
+        assert!(is_cloexec(&fd));
+        assert_eq!(nix::unistd::write(&fd, b"x"), Err(nix::errno::Errno::EBADF));
+        assert_eq!(std::fs::read(&p).unwrap(), b"safe");
+        assert!(open_path_delegation(&d.path().join("absent")).is_err());
+        assert!(!d.path().join("absent").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_path_delegation_needs_no_access_to_the_object() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp();
+        let p = d.path().join("no-access");
+        std::fs::write(&p, b"safe").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(open_path_delegation(&p).is_ok());
+    }
+
+    #[test]
     fn mutation_xor_equivalence_requires_disjoint_platform_flag_bits() {
         // This is the executable algebra supporting the narrowly named XOR
         // exemptions; the descriptor tests separately hold actual behavior.
@@ -472,6 +515,10 @@ mod tests {
         groups.push(vec![OFlag::O_SEARCH, OFlag::O_CLOEXEC]);
         #[cfg(target_os = "linux")]
         groups.push(vec![OFlag::O_PATH, OFlag::O_DIRECTORY, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "macos")]
+        groups.push(vec![OFlag::O_RDONLY, OFlag::O_NONBLOCK, OFlag::O_CLOEXEC]);
+        #[cfg(target_os = "linux")]
+        groups.push(vec![OFlag::O_PATH, OFlag::O_CLOEXEC]);
         for group in groups {
             let mut bits = OFlag::empty();
             for flag in group {

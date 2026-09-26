@@ -110,7 +110,7 @@ exclude_re = [
   # `unavailable_is_the_no_provider_backend_and_neither_readies_nor_sends`;
   # every other mutant of the file stays tested.
   "maknae-kernel/src/egress\\.rs:[0-9]+:[0-9]+: replace <impl Egress for Unavailable>::deadline -> std::time::Duration with Default::default\\(\\)$",
-  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_writable_delegation)$",
+  "^crates/maknae-io/src/syscall\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in (open_parent_by_path|open_dir_at|open_read_target|openat2_resolve|open_temp_excl|open_append|macos_mutation_directory_flags|linux_mutation_directory_flags|open_mutation_directory_at|open_writable_delegation|linux_path_delegation_flags|macos_path_delegation_flags)$",
   "^crates/maknae-io/src/audit_append\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in flags$",
   "maknae-plane.*::poll_flush",
   # NARROWED to the one replacement the argument covers. The broad form also
