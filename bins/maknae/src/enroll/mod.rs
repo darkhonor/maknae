@@ -1140,6 +1140,8 @@ async fn destroy_and_report(
 /// anything new or overwriting `enroll-state.yaml`, so the old accessors
 /// stay recorded in the untouched state file rather than being silently
 /// orphaned.
+const ROTATE_CLEANUP_DONE: MsgId = MsgId::EnrollRotatePreviousDestroyed;
+
 async fn destroy_previous_accessors_or_abort(
     client: &maknae_vault::OperatorClient,
     mount: &str,
@@ -1151,7 +1153,7 @@ async fn destroy_previous_accessors_or_abort(
     }
     let failures = vault_ops::destroy_all(client, mount, records).await;
     if failures.is_empty() {
-        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
+        eprintln!("{}", msg(locale, ROTATE_CLEANUP_DONE));
         return Ok(());
     }
     let detail = failures
@@ -2501,6 +2503,17 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         .expect("OperatorClient::new performs no network I/O — settings-only");
         let _ = std::fs::remove_file(&ca_path);
         client
+    }
+
+    #[test]
+    fn rotate_cleanup_reports_the_previous_enrollment_not_a_failure() {
+        assert_ne!(ROTATE_CLEANUP_DONE, MsgId::EnrollRollbackDestroyed);
+        for locale in [Locale::EnUs, Locale::KoKr] {
+            let rotate = msg(locale, ROTATE_CLEANUP_DONE);
+            let rollback = msg(locale, MsgId::EnrollRollbackDestroyed);
+            let failed = rollback.split(" — ").next().unwrap();
+            assert!(!rotate.contains(failed), "{locale:?}: {rotate}");
+        }
     }
 
     #[tokio::test]

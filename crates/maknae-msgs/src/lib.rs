@@ -70,6 +70,8 @@ pub enum MsgId {
     /// A pre-existing `enroll-state.yaml` was found — rotating (spec §4.1,
     /// unconditional-rotate semantics on re-enroll).
     EnrollRotating,
+    /// Re-enroll destroyed the previous enrollment's accessors before minting.
+    EnrollRotatePreviousDestroyed,
     /// A failure after minting destroyed the just-minted accessors (rollback).
     EnrollRollbackDestroyed,
     /// The post-mint rollback destroy (`destroy_and_report`) was attempted
@@ -115,6 +117,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollEgressBoundsHint,
     MsgId::EnrollEnableDaemonHint,
     MsgId::EnrollRotating,
+    MsgId::EnrollRotatePreviousDestroyed,
     MsgId::EnrollRollbackDestroyed,
     MsgId::EnrollRollbackDestroyPartial,
     MsgId::HelperContextMismatch,
@@ -283,13 +286,14 @@ mod tests {
                 | MsgId::EnrollEgressBoundsHint
                 | MsgId::EnrollEnableDaemonHint
                 | MsgId::EnrollRotating
+                | MsgId::EnrollRotatePreviousDestroyed
                 | MsgId::EnrollRollbackDestroyed
                 | MsgId::EnrollRollbackDestroyPartial
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 30;
+        const VARIANT_COUNT: usize = 31;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);
