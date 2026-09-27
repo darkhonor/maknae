@@ -52,12 +52,40 @@ pub(crate) fn read_plane_secret(
     ))
 }
 
+/// #76: `dir` is anchored without following a symlink at it; only `NotFound` is absence.
 #[cfg(target_os = "macos")]
 pub(crate) fn observe_pointer(
     dir: &Path,
     plane: KeychainPlane,
 ) -> Result<Option<PathBuf>, VaultError> {
-    observe_pointer_at(&dir.join(plane.pointer_file()))
+    use maknae_io::{IoError, IoKind};
+    let dir = &std::path::absolute(dir)
+        .map_err(|e| VaultError::KeychainPointer(format!("{}: {e}", dir.display())))?;
+    let refuse = |e: IoError| VaultError::KeychainPointer(format!("{}: {e}", dir.display()));
+    let anchor = match maknae_io::open_anchor(
+        dir,
+        maknae_io::AnchorRequired::OS_DAC,
+        maknae_io::StrategyPref::Auto,
+    ) {
+        Ok(a) => a,
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            ..
+        }) => return Ok(None),
+        Err(e) => return Err(refuse(e)),
+    };
+    match anchor.read(
+        Path::new(plane.pointer_file()),
+        None,
+        maknae_io::TargetRequired::OS_DAC_REGULAR,
+    ) {
+        Ok(_) => Ok(Some(dir.join(plane.pointer_file()))),
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            ..
+        }) => Ok(None),
+        Err(e) => Err(refuse(e)),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -65,32 +93,6 @@ pub(crate) fn observe_pointer(
     _dir: &Path,
     _plane: KeychainPlane,
 ) -> Result<Option<PathBuf>, VaultError> {
-    Ok(None)
-}
-
-/// #76: same observation as [`observe_pointer`], for an already-computed pointer path
-/// (the daemon's, via [`crate::daemon_keychain_pointer`]). Only `NotFound` is absence.
-#[cfg(target_os = "macos")]
-pub(crate) fn observe_pointer_at(path: &Path) -> Result<Option<PathBuf>, VaultError> {
-    match maknae_io::read_absolute(
-        path,
-        maknae_io::TargetRequired::OS_DAC_REGULAR,
-        maknae_io::StrategyPref::Auto,
-    ) {
-        Ok(_) => Ok(Some(path.to_path_buf())),
-        Err(maknae_io::IoError::Io {
-            kind: maknae_io::IoKind::NotFound,
-            ..
-        }) => Ok(None),
-        Err(e) => Err(VaultError::KeychainPointer(format!(
-            "{}: {e}",
-            path.display()
-        ))),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn observe_pointer_at(_path: &Path) -> Result<Option<PathBuf>, VaultError> {
     Ok(None)
 }
 
@@ -188,7 +190,7 @@ mod tests {
         let p = pointer_in(&dir);
         std::os::unix::fs::symlink(&real, &p).unwrap();
         assert!(matches!(
-            observe_pointer_at(&p),
+            observe_pointer(dir.path(), KeychainPlane::Daemon),
             Err(VaultError::KeychainPointer(_))
         ));
     }
@@ -200,7 +202,7 @@ mod tests {
         let p = pointer_in(&dir);
         std::os::unix::fs::symlink(dir.path().join("gone"), &p).unwrap();
         assert!(matches!(
-            observe_pointer_at(&p),
+            observe_pointer(dir.path(), KeychainPlane::Daemon),
             Err(VaultError::KeychainPointer(_))
         ));
     }
@@ -212,7 +214,7 @@ mod tests {
         let p = pointer_in(&dir);
         std::fs::create_dir(&p).unwrap();
         assert!(matches!(
-            observe_pointer_at(&p),
+            observe_pointer(dir.path(), KeychainPlane::Daemon),
             Err(VaultError::KeychainPointer(_))
         ));
     }
@@ -227,7 +229,7 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
         assert!(matches!(
-            observe_pointer_at(&p),
+            observe_pointer(dir.path(), KeychainPlane::Daemon),
             Err(VaultError::KeychainPointer(_))
         ));
     }
@@ -236,7 +238,10 @@ mod tests {
     #[test]
     fn an_absent_pointer_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(observe_pointer_at(&pointer_in(&dir)), Ok(None)));
+        assert!(matches!(
+            observe_pointer(dir.path(), KeychainPlane::Daemon),
+            Ok(None)
+        ));
     }
 
     /// #76: a regular pointer file is observed at its own path.
@@ -245,7 +250,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = pointer_in(&dir);
         std::fs::write(&p, "").unwrap();
-        assert_eq!(observe_pointer_at(&p).unwrap(), Some(p.clone()));
         assert_eq!(
             observe_pointer(dir.path(), KeychainPlane::Daemon).unwrap(),
             Some(p)

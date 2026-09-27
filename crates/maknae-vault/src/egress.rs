@@ -58,10 +58,11 @@ pub fn load_egress_auth(
     approle_mount: String,
     credentials_dir_env: Option<&str>,
 ) -> Result<AppRoleAuth, VaultError> {
-    let source = resolve_egress_secret_source(
-        credentials_dir_env,
-        crate::keychain::observe_pointer(egress_dir, crate::KeychainPlane::Egress)?.as_deref(),
-    )?;
+    let pointer = match credentials_dir_env {
+        None => crate::keychain::observe_pointer(egress_dir, crate::KeychainPlane::Egress)?,
+        Some(_) => None,
+    };
+    let source = resolve_egress_secret_source(credentials_dir_env, pointer.as_deref())?;
     let role_id = crate::client::read_trimmed(&egress_dir.join(EGRESS_ROLE_ID_FILE))?;
     let secret_id = crate::secret_io::read_egress_secret(&source)?;
     Ok(AppRoleAuth {
@@ -316,5 +317,38 @@ mod tests {
             load_egress_auth(&etc, "maknae-approle".into(), None),
             Err(VaultError::KeychainPointer(_))
         ));
+    }
+
+    /// #76: a dangling symlink at the egress directory refuses; it never reads as absent.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn load_egress_auth_refuses_a_dangling_egress_dir_symlink() {
+        let base = tmp("egress-dangling");
+        let egress = base.join("egress");
+        std::os::unix::fs::symlink(base.join("gone"), &egress).unwrap();
+        match load_egress_auth(&egress, "maknae-approle".into(), None) {
+            Err(VaultError::KeychainPointer(_)) => {}
+            Err(e) => panic!("expected KeychainPointer, got {e}"),
+            Ok(_) => panic!("a dangling egress dir must refuse"),
+        }
+    }
+
+    /// #76: a set `$CREDENTIALS_DIRECTORY` wins over a broken egress pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn load_egress_auth_credentials_directory_wins_over_a_broken_pointer() {
+        let etc = tmp("egress-creds-wins");
+        let creds = tmp("egress-creds-wins-cd");
+        std::fs::write(etc.join(EGRESS_ROLE_ID_FILE), "rid-abc\n").unwrap();
+        std::fs::create_dir(etc.join(crate::KeychainPlane::Egress.pointer_file())).unwrap();
+        std::fs::write(
+            creds.join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME),
+            "sid-123\n",
+        )
+        .unwrap();
+        match load_egress_auth(&etc, "maknae-approle".into(), creds.to_str()) {
+            Ok(a) => assert_eq!(a.secret_id.as_str(), "sid-123"),
+            Err(e) => panic!("the credentials directory must win, got {e}"),
+        }
     }
 }

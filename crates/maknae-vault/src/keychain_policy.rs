@@ -34,11 +34,13 @@ impl KeychainPlane {
     }
 }
 
-/// #76: the one place that names the daemon's keychain pointer path.
+/// #76: the one place that names the daemon's keychain pointer directory.
+pub fn daemon_keychain_dir(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir.join("private")
+}
+
 pub fn daemon_keychain_pointer(config_dir: &std::path::Path) -> std::path::PathBuf {
-    config_dir
-        .join("private")
-        .join(KeychainPlane::Daemon.pointer_file())
+    daemon_keychain_dir(config_dir).join(KeychainPlane::Daemon.pointer_file())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

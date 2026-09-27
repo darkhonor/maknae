@@ -53,9 +53,10 @@ crates/maknae-io/src/anchor.rs|let anchor = open_anchor_resolved(parent, AnchorR
 # permission gate applies it separately (client::read_secret_credential's 0o077 mask).
 crates/maknae-vault/src/lib.rs|let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
 
-# #76: observe_pointer_at only classifies the keychain pointer (absent / regular file /
-# refused); the bytes are dropped. The root-owned read happens later in
+# #76: observe_pointer only classifies the keychain pointer's directory and file (absent /
+# regular / refused); the bytes are dropped. The root-owned read happens later in
 # read_plane_secret via maknae_config::load_root_file.
+crates/maknae-vault/src/keychain.rs|maknae_io::AnchorRequired::OS_DAC,
 crates/maknae-vault/src/keychain.rs|maknae_io::TargetRequired::OS_DAC_REGULAR,
 
 # owner: None means OS DAC is sufficient for OWNERSHIP at that scope; the mode

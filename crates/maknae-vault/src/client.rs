@@ -349,10 +349,17 @@ impl PlaneClient {
         let cfg = vault_config_from_document(doc)?;
         let (secret_id, kind) = match plane {
             Plane::Kernel => {
+                let creds = std::env::var("CREDENTIALS_DIRECTORY").ok();
+                let pointer = match creds {
+                    None => crate::keychain::observe_pointer(
+                        &crate::keychain_policy::daemon_keychain_dir(dir),
+                        crate::KeychainPlane::Daemon,
+                    )?,
+                    Some(_) => None,
+                };
                 let src = resolve_daemon_secret_source(
-                    std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-                    crate::keychain::observe_pointer_at(&crate::daemon_keychain_pointer(dir))?
-                        .as_deref(),
+                    creds.as_deref(),
+                    pointer.as_deref(),
                     cfg.insecure_plaintext_secret_path.as_deref(),
                 )?;
                 let secret = read_daemon_secret(&src)?;
@@ -1224,5 +1231,114 @@ mod tests {
             Err(e) => panic!("expected KeychainPointer, got {e}"),
             Ok(c) => panic!("downgraded to {:?}", c.secret_source()),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kernel_outcome_with_private(
+        tag: &str,
+        creds: Option<&str>,
+        wire_private: impl FnOnce(&Path),
+    ) -> Result<CredentialSourceKind, VaultError> {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-{tag}-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let fx = DispatchFixture::new(
+            tag,
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        wire_private(&fx.0);
+        match creds {
+            Some(c) => std::env::set_var("CREDENTIALS_DIRECTORY", c),
+            None => std::env::remove_var("CREDENTIALS_DIRECTORY"),
+        }
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let _ = std::fs::remove_file(&plain);
+        result.map(|c| c.secret_source())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn valid_pointer_in(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(crate::KeychainPlane::Daemon.pointer_file()), "").unwrap();
+    }
+
+    /// #76: a dangling `private` symlink refuses; it never downgrades to plaintext.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_dangling_private_symlink() {
+        let got = kernel_outcome_with_private("kc-private-dangling", None, |cfg| {
+            std::os::unix::fs::symlink(cfg.join("gone"), cfg.join("private")).unwrap();
+        });
+        assert!(
+            matches!(got, Err(VaultError::KeychainPointer(_))),
+            "{got:?}"
+        );
+    }
+
+    /// #76: a `private` symlink to a real directory is refused, not followed.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_private_symlink_to_a_real_dir() {
+        let got = kernel_outcome_with_private("kc-private-linked", None, |cfg| {
+            valid_pointer_in(&cfg.join("elsewhere"));
+            std::os::unix::fs::symlink(cfg.join("elsewhere"), cfg.join("private")).unwrap();
+        });
+        assert!(
+            matches!(got, Err(VaultError::KeychainPointer(_))),
+            "{got:?}"
+        );
+    }
+
+    /// #76: with `private/` absent the plaintext arm is reached.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_without_private_reaches_plaintext() {
+        let got = kernel_outcome_with_private("kc-private-absent", None, |_| {});
+        assert!(
+            matches!(got, Ok(CredentialSourceKind::PlaintextPath)),
+            "{got:?}"
+        );
+    }
+
+    /// #76: a set `$CREDENTIALS_DIRECTORY` wins over a broken pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_credentials_directory_wins_over_a_broken_pointer() {
+        let creds =
+            std::env::temp_dir().join(format!("mv-dispatch-kc-creds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&creds);
+        std::fs::create_dir_all(&creds).unwrap();
+        std::fs::write(creds.join("maknaed-secret-id"), "kernel-secret-value").unwrap();
+        let got = kernel_outcome_with_private("kc-creds-wins", creds.to_str(), |cfg| {
+            std::fs::create_dir_all(
+                cfg.join("private")
+                    .join(crate::KeychainPlane::Daemon.pointer_file()),
+            )
+            .unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&creds);
+        assert!(
+            matches!(got, Ok(CredentialSourceKind::CredentialsDirectory)),
+            "{got:?}"
+        );
+    }
+
+    /// #76: an exported-but-empty `$CREDENTIALS_DIRECTORY` refuses even beside a valid pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_empty_credentials_directory_still_refuses() {
+        let got = kernel_outcome_with_private("kc-creds-empty", Some(""), |cfg| {
+            valid_pointer_in(&cfg.join("private"));
+        });
+        assert!(
+            matches!(got, Err(VaultError::CredentialSource(_))),
+            "{got:?}"
+        );
     }
 }
