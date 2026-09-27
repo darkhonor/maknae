@@ -1314,17 +1314,21 @@ fn grant_egress_traversal_macos(verbose: bool) {
     if verbose {
         eprintln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
     }
-    let seen = std::process::Command::new("/bin/ls")
+    match std::process::Command::new("/bin/ls")
         .args(["-led", "/etc/maknae"])
         .output()
-        .map(|o| ace_present(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or(false);
-    if !seen {
-        let why = match set {
-            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            Err(e) => e.to_string(),
-        };
-        eprintln!("maknae enroll: /etc/maknae does not carry `{EGRESS_TRAVERSAL_ACE}` ({why}); the egress deputy cannot open its bounds file until it does");
+    {
+        Ok(o) if o.status.success() => {
+            if !ace_present(&String::from_utf8_lossy(&o.stdout)) {
+                let why = match set {
+                    Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                    Err(e) => e.to_string(),
+                };
+                eprintln!("maknae enroll: /etc/maknae does not carry `{EGRESS_TRAVERSAL_ACE}` ({why}); the egress deputy cannot open its bounds file until it does");
+            }
+        }
+        Ok(o) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it", o.status),
+        Err(e) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({e}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it"),
     }
 }
 
@@ -2556,15 +2560,8 @@ mod tests {
     }
 
     #[test]
-    fn build_posture_yaml_mechanism_literal_matches_daemon_constants() {
-        // `bins/maknae` cannot depend on `maknae-kernel` (bin/lib layering),
-        // so the two literals this crate's call site passes ("tpm2" for the
-        // Linux CredentialsDirectory source, "keychain" for the macOS
-        // Keychain source) are pinned here directly against
-        // `maknae_kernel::posture::MECHANISM_TPM2`/`MECHANISM_KEYCHAIN`'s
-        // exact values (asserted by name, not by import) — a drift in either
-        // literal silently downgrades every healthy sealed boot to
-        // `Unverified`.
+    fn posture_yaml_serializes_the_mechanism_token() {
+        // Checks serialization only; bins/maknae cannot depend on maknae-kernel, so it cannot test the reader.
         assert!(build_posture_yaml("tpm2", "t").contains("mechanism: tpm2"));
         assert!(build_posture_yaml("keychain", "t").contains("mechanism: keychain"));
     }

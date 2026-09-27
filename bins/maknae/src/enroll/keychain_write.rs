@@ -560,6 +560,7 @@ mod tests {
 mod darwin_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     #[test]
     fn a_hard_link_does_not_disqualify_an_installed_binary() {
@@ -591,12 +592,30 @@ mod darwin_tests {
     }
 
     #[test]
-    fn a_missing_binary_is_reported_as_not_installed() {
-        let e = EnrollError::NotInstalled {
-            path: DAEMON_BINARY.to_string(),
-        };
-        let text = e.to_string();
+    fn a_nonexistent_binary_maps_to_not_installed() {
+        let path = Path::new("/usr/bin/maknae-76-nonexistent");
+        let err = check_install_path(path).expect_err("must refuse a missing binary");
+        assert!(matches!(err, EnrollError::NotInstalled { .. }), "{err:?}");
+        let text = err.to_string();
         assert!(!text.contains("replaced"), "{text}");
         assert!(text.contains("is not installed"), "{text}");
+    }
+
+    #[test]
+    fn a_user_owned_binary_maps_to_not_root_installed() {
+        let dir = std::env::temp_dir().join(format!("maknae-install-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let bin = dir.join("maknaed");
+        std::fs::write(&bin, b"binary").unwrap();
+
+        let err = check_install_path(&bin);
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = err.expect_err("must refuse a non-root-owned install path");
+        assert!(
+            matches!(err, EnrollError::NotRootInstalled { .. }),
+            "{err:?}"
+        );
+        assert!(!matches!(err, EnrollError::NotInstalled { .. }), "{err:?}");
     }
 }

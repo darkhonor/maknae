@@ -600,7 +600,7 @@ why = "the operator-context helper — self-verification + systemd-creds/Keychai
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
-why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS a darwin test proves the installed-binary target requirement accepts a hard-linked file and that a missing binary reads as not installed. The macOS runners (the codesign and security subprocesses, the root-owned install-path walk, the System-keychain add) are operator-verified, not unit-tested"
+why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +
