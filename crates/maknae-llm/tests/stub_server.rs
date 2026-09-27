@@ -62,6 +62,8 @@ fn req<'a>(model: &'a str) -> ChatRequest<'a> {
         tools: vec![],
         tool_choice: None,
         reasoning_effort: None,
+        max_completion_tokens: None,
+        max_tokens: None,
         stream: false,
     }
 }
@@ -131,7 +133,7 @@ async fn a_401_is_refused_and_its_body_is_not_echoed() {
     )
     .await;
     match call(&url, &[]).await {
-        Err(e @ CallError::Status(401)) => assert!(
+        Err(e @ CallError::Status { code: 401, .. }) => assert!(
             !e.to_string().contains("SECRET-LOOKING-DIAGNOSTIC"),
             "the provider's error body reached the rendered error: {e}"
         ),
@@ -227,7 +229,14 @@ fn every_call_refusal_renders_actionably() {
             CallError::Transport("connect refused".into()),
             "provider call failed",
         ),
-        (CallError::Status(401), "401"),
+        (
+            CallError::Status {
+                code: 401,
+                body: Zeroizing::new(Vec::new()),
+                truncated: false,
+            },
+            "401",
+        ),
         (CallError::Reply(ReplyError::NoChoices), "no choices"),
     ];
     for (e, needle) in cases {
@@ -310,5 +319,49 @@ async fn an_unreachable_endpoint_is_a_transport_refusal() {
     {
         Err(CallError::Transport(_)) => {}
         other => panic!("expected a transport refusal, got {other:?}"),
+    }
+}
+
+/// An error body is read only as far as the journal needs: a provider that
+/// declares a megabyte, sends 8 KiB and then stalls costs the deputy 4 KiB and
+/// no wait.
+#[tokio::test]
+async fn a_megabyte_error_body_is_read_at_most_4_kib() {
+    fips();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let _ = s.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            1 << 20
+        );
+        let _ = s.write_all(head.as_bytes()).await;
+        let _ = s.write_all(&[b'e'; 8192]).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let started = std::time::Instant::now();
+    let got = call(&format!("http://{addr}/v1/chat/completions"), &[]).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the deputy waited for the rest of an error body it had already cut"
+    );
+    match got {
+        Err(
+            e @ CallError::Status {
+                code: 500,
+                truncated: true,
+                ..
+            },
+        ) => {
+            let CallError::Status { body, .. } = &e else {
+                unreachable!()
+            };
+            assert_eq!(body.len(), 4096);
+            assert_eq!(e.to_string(), "provider answered 500");
+        }
+        other => panic!("expected a truncated 500, got {other:?}"),
     }
 }

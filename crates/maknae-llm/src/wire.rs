@@ -26,6 +26,12 @@ pub struct ChatRequest<'a> {
     /// (#242).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<&'a str>,
+    /// The reply cap, under whichever name the provider is registered with;
+    /// at most one of the two is set (#372).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
     /// Non-streaming only (#240 scope). Sent explicitly rather than relying on
     /// a provider default.
     pub stream: bool,
@@ -137,6 +143,10 @@ pub struct ToolFn {
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
+    /// Informational, so parsed leniently: a malformed usage is `None`, never
+    /// a refused reply (#372).
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +216,12 @@ pub fn to_prompt_reply(
     resp: ChatResponse,
     offered: &[String],
 ) -> Result<maknae_proto::PromptReply, ReplyError> {
+    let usage = resp.usage.as_ref().and_then(|v| {
+        Some(maknae_proto::Usage {
+            prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
+            completion_tokens: v.get("completion_tokens").and_then(|c| c.as_u64()),
+        })
+    });
     let choice = resp
         .choices
         .into_iter()
@@ -248,8 +264,80 @@ pub fn to_prompt_reply(
     Ok(maknae_proto::PromptReply {
         blocks,
         tool_calls,
-        usage: None,
+        usage,
     })
+}
+
+/// A provider's error body as one journal line (#372): every byte outside
+/// printable ASCII is escaped, so the body cannot start a line of its own or
+/// steer a terminal. Sized once for the worst case, so it never reallocates.
+pub fn journal_line(
+    status: u16,
+    conversation: &str,
+    body: &[u8],
+    truncated: bool,
+) -> zeroize::Zeroizing<String> {
+    use std::fmt::Write;
+    let mut line = zeroize::Zeroizing::new(String::with_capacity(
+        96 + conversation.len() + body.len() * 10,
+    ));
+    let _ = write!(
+        line,
+        "maknae-egress: provider answered {status} (conversation {conversation}): "
+    );
+    for chunk in body.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\\' => line.push_str("\\\\"),
+                '\n' => line.push_str("\\n"),
+                '\r' => line.push_str("\\r"),
+                '\t' => line.push_str("\\t"),
+                ' '..='~' => line.push(c),
+                c => {
+                    let _ = write!(line, "\\u{{{:04x}}}", c as u32);
+                }
+            }
+        }
+        if !chunk.invalid().is_empty() {
+            line.push_str("\\u{fffd}");
+        }
+    }
+    if truncated {
+        line.push_str("…[truncated]");
+    }
+    line
+}
+
+/// Append at most `cap - buf.len()` bytes of `chunk`; `true` once anything was
+/// dropped. `buf` is pre-sized to `cap`, so it never grows.
+pub fn take_capped(buf: &mut zeroize::Zeroizing<Vec<u8>>, chunk: &[u8], cap: usize) -> bool {
+    let n = chunk.len().min(cap.saturating_sub(buf.len()));
+    buf.extend_from_slice(&chunk[..n]);
+    n < chunk.len()
+}
+
+/// Overwrite every echo of `secret` in `body` with `*`, in place, including a
+/// partial echo the 4 KiB cut left at the very end.
+pub fn redact(body: &mut zeroize::Zeroizing<Vec<u8>>, secret: &[u8]) {
+    if secret.is_empty() {
+        return;
+    }
+    let mut i = 0;
+    while i + secret.len() <= body.len() {
+        if &body[i..i + secret.len()] == secret {
+            body[i..i + secret.len()].fill(b'*');
+            i += secret.len();
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(k) = (1..secret.len())
+        .rev()
+        .find(|&k| body.ends_with(&secret[..k]))
+    {
+        let n = body.len();
+        body[n - k..].fill(b'*');
+    }
 }
 
 // ---- #264: the trusted preamble and the baseline tool definitions ----
@@ -515,6 +603,8 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             reasoning_effort: None,
+            max_completion_tokens: None,
+            max_tokens: None,
             stream: false,
         };
         let v: serde_json::Value =
@@ -538,6 +628,8 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             reasoning_effort: Some("none"),
+            max_completion_tokens: None,
+            max_tokens: None,
             stream: false,
         };
         let v: serde_json::Value =
@@ -619,6 +711,8 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             reasoning_effort: None,
+            max_completion_tokens: None,
+            max_tokens: None,
             stream: false,
         };
         for d in [
@@ -827,6 +921,8 @@ mod tests {
             tools: advertised,
             tool_choice: None,
             reasoning_effort: None,
+            max_completion_tokens: None,
+            max_tokens: None,
             stream: false,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
@@ -994,5 +1090,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_reply_cap_is_sent_under_exactly_one_chosen_name() {
+        let base = |mc: Option<u64>, mt: Option<u64>| {
+            serde_json::to_value(ChatRequest {
+                model: "m",
+                messages: vec![],
+                tools: vec![],
+                tool_choice: None,
+                reasoning_effort: None,
+                max_completion_tokens: mc,
+                max_tokens: mt,
+                stream: false,
+            })
+            .unwrap()
+        };
+        let v = base(Some(4096), None);
+        assert_eq!(v["max_completion_tokens"], 4096);
+        assert!(v.get("max_tokens").is_none());
+        let v = base(None, Some(512));
+        assert_eq!(v["max_tokens"], 512);
+        assert!(v.get("max_completion_tokens").is_none());
+        let v = base(None, None);
+        assert!(v.get("max_tokens").is_none() && v.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn usage_is_parsed_leniently_when_present_and_none_when_absent() {
+        let reply = |usage: &str| {
+            to_prompt_reply(
+                serde_json::from_str(&format!(
+                    r#"{{"choices":[{{"message":{{"content":"hi"}}}}]{usage}}}"#
+                ))
+                .unwrap(),
+                &[],
+            )
+            .unwrap()
+            .usage
+        };
+        assert_eq!(
+            reply(r#","usage":{"prompt_tokens":12,"completion_tokens":3}"#),
+            Some(maknae_proto::Usage {
+                prompt_tokens: 12,
+                completion_tokens: Some(3)
+            })
+        );
+        assert_eq!(
+            reply(r#","usage":{"prompt_tokens":12}"#),
+            Some(maknae_proto::Usage {
+                prompt_tokens: 12,
+                completion_tokens: None
+            })
+        );
+        assert_eq!(reply(""), None);
+        assert_eq!(reply(r#","usage":{"completion_tokens":3}"#), None);
+        assert_eq!(reply(r#","usage":{"prompt_tokens":-4}"#), None);
+        assert_eq!(reply(r#","usage":{"prompt_tokens":1.5}"#), None);
+        assert_eq!(reply(r#","usage":"weird""#), None);
+    }
+
+    #[test]
+    fn a_provider_error_body_cannot_forge_a_journal_line() {
+        let body = "bad\nmaknae-egress: forged\r\t\x1b[31m\u{2028}\u{202e}é\\end".as_bytes();
+        let line = journal_line(400, "c1", body, false);
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(
+            line.as_str(),
+            "maknae-egress: provider answered 400 (conversation c1): bad\\nmaknae-egress: forged\\r\\t\\u{001b}[31m\\u{2028}\\u{202e}\\u{00e9}\\\\end"
+        );
+        assert_eq!(
+            journal_line(500, "c1", b"a\xffb", false).as_str(),
+            "maknae-egress: provider answered 500 (conversation c1): a\\u{fffd}b"
+        );
+        let worst = journal_line(500, "c1", &[0x01; 4096], true);
+        assert!(worst.ends_with("…[truncated]"));
+        assert_eq!(worst.capacity(), 96 + 2 + 4096 * 10, "the line grew");
+    }
+
+    #[test]
+    fn an_error_body_is_capped_at_4_kib() {
+        let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(4096));
+        assert!(!take_capped(&mut buf, &[b'a'; 4000], 4096));
+        assert_eq!(buf.len(), 4000);
+        assert!(take_capped(&mut buf, &[b'b'; 200], 4096));
+        assert_eq!((buf.len(), buf.capacity()), (4096, 4096));
+        assert!(take_capped(&mut buf, b"more", 4096));
+        assert_eq!(buf.len(), 4096);
+    }
+
+    #[test]
+    fn a_key_echoed_in_an_error_body_is_redacted() {
+        let mut body =
+            zeroize::Zeroizing::new(b"bad key sk-SECRET-123 and again sk-SECRET-123.".to_vec());
+        redact(&mut body, b"sk-SECRET-123");
+        assert_eq!(&body[..], b"bad key ************* and again *************.");
+        let mut untouched = zeroize::Zeroizing::new(b"abc".to_vec());
+        redact(&mut untouched, b"");
+        assert_eq!(&untouched[..], b"abc");
+    }
+
+    /// The 4 KiB cut can fall inside an echoed key; what survives of it is a
+    /// prefix of the key at the very end of the body.
+    #[test]
+    fn a_key_cut_by_the_cap_is_still_redacted() {
+        let mut body = zeroize::Zeroizing::new(b"echo: sk-SECR".to_vec());
+        redact(&mut body, b"sk-SECRET-123");
+        assert_eq!(&body[..], b"echo: *******");
+        let mut clean = zeroize::Zeroizing::new(b"echo: done".to_vec());
+        redact(&mut clean, b"sk-SECRET-123");
+        assert_eq!(&clean[..], b"echo: done");
+    }
+
+    #[test]
+    fn the_preamble_allowance_covers_the_preamble() {
+        let bytes = (CORE_PROMPT.len() + BASELINE_TOOLS_JSON.len()) as u64;
+        assert!(
+            maknae_proto::PREAMBLE_ALLOWANCE_TOKENS >= bytes / 3,
+            "{bytes} bytes need a larger allowance"
+        );
     }
 }
