@@ -709,7 +709,6 @@ There is **one `session.prompt` intent-and-outcome pair per model turn that is s
 
 - **An oversize read.** Ask the agent to read a file larger than the read grant's byte limit (`transport.frame_max_bytes` − 512 = 65024 bytes by default), e.g. `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`. The CLI refuses the read against the grant's byte limit and reports it: `fs.read` completion `status:"ReportedLimitReached"`, with no `ReadFile` effect. The model is told the read was unavailable and usually answers anyway, with exit `0`.
 - **Over the conversation cap.** Two files, each inside the read budget, that together exceed the frame: `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the frame, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
-- **Marked content above the system level** (#242, the diagnostic-artifact case). **Not runnable yet.** Nothing stamps a marking on content until #229, so there is nothing to refuse.
 
 ### 13. Custody check (manual)
 
