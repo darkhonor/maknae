@@ -3,13 +3,28 @@
     "type": "function",
     "function": {
       "name": "read_file",
-      "description": "Returns the full contents of one existing file. One file per call. No globs, no directories, no recursion. May be refused.",
+      "description": "Returns one page of one existing file as JSON. The page starts at line `offset` (1-based), `column` bytes into that line, and holds up to `limit` lines; a long line continues on the next page. The file's text is in `content` (null for bytes that are not text, with their count in `binary`; a smaller `limit` may isolate them). To continue, call again with `next.line` as `offset` and `next.column` as `column`; `eof` is true at the end of the file, and `changed` is true when the file changed since your last page of it, so read it again from the start. One file per call. No globs, no directories, no recursion. May be refused.",
       "parameters": {
         "type": "object",
         "properties": {
           "path": {
             "type": "string",
             "description": "Absolute path to the file to read."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "First line to read, 1-based. Default 1."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Most lines to return. Default 2000."
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Byte offset into the first line, from a previous page's next.column. Default 0."
           }
         },
         "required": ["path"],

@@ -9,6 +9,7 @@ pub enum ToolRequest {
     Read {
         call_id: String,
         path: String,
+        page: maknae_proto::PageRequest,
     },
     Write {
         call_id: String,
@@ -24,10 +25,15 @@ pub enum ToolRequest {
 impl std::fmt::Debug for ToolRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ToolRequest::Read { call_id, path } => f
+            ToolRequest::Read {
+                call_id,
+                path,
+                page,
+            } => f
                 .debug_struct("Read")
                 .field("call_id", call_id)
                 .field("path", path)
+                .field("page", page)
                 .finish(),
             ToolRequest::Write {
                 call_id,
@@ -70,6 +76,20 @@ pub enum RouteError {
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
     path: String,
+    #[serde(default = "first_line")]
+    offset: u64,
+    #[serde(default = "default_limit")]
+    limit: u32,
+    #[serde(default)]
+    column: u64,
+}
+
+fn first_line() -> u64 {
+    1
+}
+
+fn default_limit() -> u32 {
+    2000
 }
 
 /// The model's write bytes, owned by a zeroizing allocation from the moment
@@ -245,9 +265,20 @@ pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
             require_object(args)?;
             let a: ReadArgs =
                 serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
+            let page = maknae_proto::PageRequest {
+                offset_line: a.offset,
+                limit_lines: a.limit,
+                column: a.column,
+            };
+            if !maknae_proto::page_request_is_acceptable(&page) {
+                return Err(RouteError::BadArguments(
+                    "offset and limit must be at least 1".into(),
+                ));
+            }
             Ok(ToolRequest::Read {
                 call_id: call.call_id.clone(),
                 path: checked_path(a.path)?,
+                page,
             })
         }
         "write_file" => {
@@ -288,11 +319,48 @@ mod tests {
     #[test]
     fn read_file_routes_to_a_read_of_the_named_path() {
         match route(&call("read_file", r#"{"path":"/home/u/notes.txt"}"#)).unwrap() {
-            ToolRequest::Read { call_id, path } => {
+            ToolRequest::Read { call_id, path, .. } => {
                 assert_eq!(call_id, "c1");
                 assert_eq!(path, "/home/u/notes.txt");
             }
             other => panic!("{other:?}"),
+        }
+    }
+    #[test]
+    fn read_paging_arguments_default_and_are_checked() {
+        let page_of = |args: &str| match route(&call("read_file", args)) {
+            Ok(ToolRequest::Read { page, .. }) => page,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            page_of(r#"{"path":"/h/f"}"#),
+            maknae_proto::PageRequest {
+                offset_line: 1,
+                limit_lines: 2000,
+                column: 0
+            }
+        );
+        assert_eq!(
+            page_of(r#"{"path":"/h/f","offset":42,"limit":5,"column":65536}"#),
+            maknae_proto::PageRequest {
+                offset_line: 42,
+                limit_lines: 5,
+                column: 65536
+            }
+        );
+        for bad in [
+            r#"{"path":"/h/f","offset":0}"#,
+            r#"{"path":"/h/f","limit":0}"#,
+            r#"{"path":"/h/f","offset":"2"}"#,
+            r#"{"path":"/h/f","limit":-1}"#,
+        ] {
+            assert!(
+                matches!(
+                    route(&call("read_file", bad)),
+                    Err(RouteError::BadArguments(_))
+                ),
+                "{bad}"
+            );
         }
     }
     #[test]

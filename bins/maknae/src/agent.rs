@@ -3,7 +3,7 @@
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use crate::cli::{send_verb, write_request, SentOutcome};
 use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadOutcome, WriteOutcome};
+use maknae_agent::plane::{Plane, PlaneError, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_agent::transcript::Transcript;
 use maknae_config::Value;
 use maknae_proto::{Payload, Turn, Verb};
@@ -74,7 +74,16 @@ pub fn mint_conversation_id() -> String {
 /// ack): a fact about the attempt, not a verdict.
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
-        Ok(SentOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(r.content),
+        Ok(SentOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(ReadPage {
+            content: r.content,
+            level: r.label.level,
+            lines: r.page.lines,
+            complete_line: r.page.complete_last,
+            next: r.page.next,
+            eof: r.page.eof,
+            version: r.page.version.key(),
+            changed: false,
+        }),
         Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
         Ok(SentOutcome::Refused {
             code: maknae_proto::ProtoErrCode::Unauthorized,
@@ -167,13 +176,18 @@ impl Plane for RealPlane<'_> {
         }
         prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
     }
-    async fn read(&mut self, conversation: &str, path: &str) -> ReadOutcome {
+    async fn read(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        page: maknae_proto::PageRequest,
+    ) -> ReadOutcome {
         read_outcome(
             send_verb(
                 Verb::Read {
                     path: path.to_string(),
                     conversation: Some(conversation.to_string()),
-                    page: None,
+                    page: Some(page),
                 },
                 None,
                 self.transport,
@@ -439,7 +453,16 @@ mod tests {
         };
         assert_eq!(
             read_outcome(Ok(SentOutcome::ReadDone { read: Some(read) })),
-            ReadOutcome::Content(zeroize::Zeroizing::new(b"x".to_vec()))
+            ReadOutcome::Content(ReadPage {
+                content: zeroize::Zeroizing::new(b"x".to_vec()),
+                level: "UNCLASSIFIED".into(),
+                lines: Some((1, 1)),
+                complete_line: true,
+                next: None,
+                eof: true,
+                version: maknae_io::FileVersion::default().key(),
+                changed: false,
+            })
         );
         assert_eq!(
             read_outcome(Ok(SentOutcome::ReadDone { read: None })),

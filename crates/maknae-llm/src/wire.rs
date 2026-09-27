@@ -752,7 +752,11 @@ mod tests {
         // test green while the model lost the signal that a whole-file
         // replacement needs its bytes.
         let want: &[(&str, &[&str], &[&str])] = &[
-            ("read_file", &["path"], &["path"]),
+            (
+                "read_file",
+                &["column", "limit", "offset", "path"],
+                &["path"],
+            ),
             ("write_file", &["content", "path"], &["path", "content"]),
         ];
         for (t, (name, props, required)) in catalog.iter().zip(want) {
