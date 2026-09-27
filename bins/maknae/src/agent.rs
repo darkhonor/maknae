@@ -2,6 +2,7 @@
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use crate::cli::{send_verb, write_request, SentOutcome};
+use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
 use maknae_agent::plane::{Plane, PlaneError, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_agent::transcript::Transcript;
@@ -52,6 +53,66 @@ fn bounded_u32(
             "{AGENT_SECTION}.{key}: must be an integer in 1..={max}"
         )),
     }
+}
+
+pub const USER_PROVIDER_SECTION: &str = "provider";
+const USER_PROVIDER_KEYS: [&str; 2] = ["context_tokens", "output_tokens"];
+
+/// The subject's own declaration of the model's window (#372). Advisory like
+/// the `agent` bounds: it paces the loop, and the kernel bounds the reply cap.
+pub fn user_budget_from_section(v: Option<&Value>) -> Result<ContextBudget, String> {
+    let entries = match v {
+        None => &[][..],
+        Some(Value::Map(entries)) => entries.as_slice(),
+        Some(_) => return Err(format!("{USER_PROVIDER_SECTION}: section must be a map")),
+    };
+    maknae_config::reject_unknown_keys(USER_PROVIDER_SECTION, entries, &USER_PROVIDER_KEYS)
+        .map_err(|e| e.to_string())?;
+    let tokens = |key: &str| -> Result<Option<u64>, String> {
+        match entries.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+            None => Ok(None),
+            Some(Value::Int(n)) => u64::try_from(*n)
+                .map(Some)
+                .map_err(|_| format!("{USER_PROVIDER_SECTION}.{key}: must not be negative")),
+            Some(_) => Err(format!("{USER_PROVIDER_SECTION}.{key}: must be an integer")),
+        }
+    };
+    let context = tokens("context_tokens")?.ok_or_else(|| {
+        format!("{USER_PROVIDER_SECTION}.context_tokens is required by maknae agent: declare the model's context window in tokens")
+    })?;
+    ContextBudget::new(context, tokens("output_tokens")?)
+        .map_err(|e| format!("{USER_PROVIDER_SECTION}: {e}"))
+}
+
+pub fn loop_prompt_cap(context_tokens: u64, explicit: Option<usize>) -> usize {
+    let derived = prompt_cap(context_tokens);
+    explicit.map_or(derived, |e| derived.min(e))
+}
+
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+pub fn warning_line(n: &Notice) -> String {
+    format!(
+        "warning: this conversation is at {}% of the declared context budget ({} of {} tokens){}",
+        n.percent,
+        thousands(n.tokens),
+        thousands(n.budget),
+        if n.estimated {
+            " — estimated from bytes; the provider has not reported usage"
+        } else {
+            ""
+        }
+    )
 }
 
 /// ≤32 chars, no whitespace — `conversation_id_is_acceptable`'s bound.
@@ -149,6 +210,8 @@ pub struct RealPlane<'a> {
     pub transport: &'a maknae_config::TransportConfig,
     pub client: &'a PlaneClient,
     pub ca: &'a maknae_vault::CaBundle,
+    pub output_tokens: Option<u64>,
+    pub write_max: usize,
 }
 
 impl Plane for RealPlane<'_> {
@@ -160,7 +223,7 @@ impl Plane for RealPlane<'_> {
         let verb = Verb::SessionPrompt {
             conversation: conversation.to_string(),
             turns: turns.to_vec(),
-            output_tokens: None,
+            output_tokens: self.output_tokens,
         };
         // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
         // encodes once here and once inside send_verb; accepted for Cooky.
@@ -205,7 +268,7 @@ impl Plane for RealPlane<'_> {
             path.to_string(),
             zeroize::Zeroizing::new(content.to_vec()),
             Some(conversation.to_string()),
-            self.transport.prompt_max_bytes,
+            self.write_max,
         ) else {
             return WriteOutcome::NotSent;
         };
@@ -213,48 +276,8 @@ impl Plane for RealPlane<'_> {
     }
 }
 
-/// Mirrors `execute()`'s setup exactly (FIPS provider, config, mint, revoke).
-pub async fn run(prompt: String) -> Result<u8, String> {
-    maknae_vault::install_default_crypto_provider();
-    let dir = crate::cli::resolve_config_dir();
-    let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
-        .map_err(|e| e.to_string())?;
-    let transport =
-        maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
-            .map_err(|e| e.to_string())?;
-    let agent = agent_from_section(document.section(AGENT_SECTION))?;
-    let client = PlaneClient::from_document(&document, &dir, maknae_vault::Plane::Cli)
-        .map_err(|e| e.to_string())?;
-    let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
-    client.mint().await.map_err(|e| e.to_string())?;
-    let mut plane = RealPlane {
-        transport: &transport,
-        client: &client,
-        ca: &ca,
-    };
-    let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
-    let budget = Budget {
-        max_steps: agent.max_steps,
-        max_tool_calls_per_step: agent.max_tool_calls_per_step,
-    };
-    let mut meter = maknae_agent::budget::Meter::new(maknae_agent::budget::ContextBudget::new(
-        maknae_proto::MAX_CONTEXT_TOKENS,
-        None,
-    )?);
-    let outcome = drive(
-        &mut plane,
-        &mut transcript,
-        &budget,
-        &mut meter,
-        &mut |_| {},
-    )
-    .await;
-    client.shutdown().await; // revoke on EVERY path, as execute() does
-    if let Some(answer) = outcome.answer {
-        println!("{answer}");
-        return Ok(0);
-    }
-    let why = match outcome.stopped {
+pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
+    match r {
         Some(StopReason::StepBudget) => format!(
             "stopped: the step budget ({}) was spent without an answer",
             budget.max_steps
@@ -299,8 +322,62 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
         None => "stopped".into(),
+    }
+}
+
+/// Mirrors `execute()`'s setup exactly (FIPS provider, config, mint, revoke).
+pub async fn run(prompt: String) -> Result<u8, String> {
+    maknae_vault::install_default_crypto_provider();
+    let dir = crate::cli::resolve_config_dir();
+    let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
+        .map_err(|e| e.to_string())?;
+    let transport =
+        maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
+            .map_err(|e| e.to_string())?;
+    let agent = agent_from_section(document.section(AGENT_SECTION))?;
+    let context = user_budget_from_section(document.section(USER_PROVIDER_SECTION))?;
+    let explicit = match document.section(maknae_config::TRANSPORT_SECTION) {
+        Some(Value::Map(entries)) if entries.iter().any(|(k, _)| k == "prompt_max_bytes") => {
+            Some(transport.prompt_max_bytes)
+        }
+        _ => None,
     };
-    eprintln!("maknae agent: {why}");
+    let write_max = transport.prompt_max_bytes;
+    let mut transport = transport;
+    transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
+    let client = PlaneClient::from_document(&document, &dir, maknae_vault::Plane::Cli)
+        .map_err(|e| e.to_string())?;
+    let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
+    client.mint().await.map_err(|e| e.to_string())?;
+    let mut plane = RealPlane {
+        transport: &transport,
+        client: &client,
+        ca: &ca,
+        output_tokens: context.output_tokens(),
+        write_max,
+    };
+    let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
+    let budget = Budget {
+        max_steps: agent.max_steps,
+        max_tool_calls_per_step: agent.max_tool_calls_per_step,
+    };
+    let outcome = drive(
+        &mut plane,
+        &mut transcript,
+        &budget,
+        &mut Meter::new(context),
+        &mut |n| eprintln!("{}", warning_line(n)),
+    )
+    .await;
+    client.shutdown().await; // revoke on EVERY path, as execute() does
+    if let Some(answer) = outcome.answer {
+        println!("{answer}");
+        return Ok(0);
+    }
+    eprintln!(
+        "maknae agent: {}",
+        stop_line(outcome.stopped.as_ref(), &budget)
+    );
     Ok(2)
 }
 
@@ -309,6 +386,84 @@ mod tests {
     use super::*;
     fn yaml(s: &str) -> maknae_config::Value {
         maknae_config::load_str(s).unwrap()
+    }
+    #[test]
+    fn the_user_provider_block_is_bounded_and_closed() {
+        let p = |s: &str| user_budget_from_section(Some(&yaml(s)));
+        let ok = p("context_tokens: 128000\noutput_tokens: 16000\n").unwrap();
+        assert_eq!(
+            (ok.context_tokens(), ok.prompt_budget(), ok.output_tokens()),
+            (128_000, 112_000, Some(16_000))
+        );
+        let bare = p("context_tokens: 1537\n").unwrap();
+        assert_eq!((bare.context_tokens(), bare.output_tokens()), (1_537, None));
+        assert!(user_budget_from_section(None)
+            .unwrap_err()
+            .contains("context_tokens is required"));
+        assert!(p("output_tokens: 10\n")
+            .unwrap_err()
+            .contains("context_tokens is required"));
+        assert!(p("context_tokens: -1\n").unwrap_err().contains("negative"));
+        for bad in [
+            "context_tokens: 1536\n",
+            "context_tokens: 16777217\n",
+            "context_tokens: 4096\noutput_tokens: 4096\n",
+            "context_tokens: 4096\noutput_tokens: -5\n",
+            "context_tokens: lots\n",
+            "context_tokens: 4096\noutput_tokens: many\n",
+            "- 1\n",
+        ] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
+        assert!(p("context_tokens: 4096\nendpoint: https://x\n")
+            .unwrap_err()
+            .contains("endpoint"));
+    }
+    #[test]
+    fn the_loops_cap_is_the_smaller_of_explicit_and_derived() {
+        assert_eq!(loop_prompt_cap(128_000, None), 768_000);
+        assert_eq!(loop_prompt_cap(128_000, Some(65_536)), 65_536);
+        assert_eq!(loop_prompt_cap(1_537, Some(1_048_576)), 65_536);
+    }
+    #[test]
+    fn the_warning_and_stop_lines_are_exact() {
+        assert_eq!(
+            warning_line(&Notice {
+                percent: 82,
+                tokens: 104_960,
+                budget: 128_000,
+                estimated: false
+            }),
+            "warning: this conversation is at 82% of the declared context budget (104,960 of 128,000 tokens)"
+        );
+        assert_eq!(
+            warning_line(&Notice {
+                percent: 80,
+                tokens: 800,
+                budget: 1_000,
+                estimated: true
+            }),
+            "warning: this conversation is at 80% of the declared context budget (800 of 1,000 tokens) — estimated from bytes; the provider has not reported usage"
+        );
+        assert_eq!(thousands(16_777_216), "16,777,216");
+        assert_eq!(thousands(999), "999");
+        let b = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 4,
+        };
+        assert_eq!(
+            stop_line(Some(&StopReason::ContextBudget), &b),
+            "stopped: the conversation has reached the declared context budget; compaction arrives with #171"
+        );
+        assert_eq!(
+            stop_line(Some(&StopReason::StepBudget), &b),
+            "stopped: the step budget (8) was spent without an answer"
+        );
+        assert_eq!(
+            stop_line(Some(&StopReason::TooManyToolCalls(5)), &b),
+            "stopped: the model asked for 5 tools in one step (cap 4)"
+        );
+        assert_eq!(stop_line(None, &b), "stopped");
     }
     #[test]
     fn agent_section_defaults_and_bounds() {
