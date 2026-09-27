@@ -3144,9 +3144,9 @@ async fn boot_after_sink(
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
             config_dir.join("private").join("maknaed-secret-id.cred")
         }
-        maknae_vault::CredentialSourceKind::Keychain => config_dir
-            .join("private")
-            .join(maknae_vault::KeychainPlane::Daemon.pointer_file()),
+        maknae_vault::CredentialSourceKind::Keychain => {
+            maknae_vault::daemon_keychain_pointer(config_dir)
+        }
         // Unused by `determine` for the plaintext branch (it ignores both the
         // marker and the target unconditionally) — an empty path is fine.
         maknae_vault::CredentialSourceKind::PlaintextPath => PathBuf::new(),

@@ -281,14 +281,7 @@ mod tests {
         assert!(EgressVault::new("https://127.0.0.1:1", &d.join("absent.crt"), auth()).is_err());
     }
 
-    /// I1(b): pins WHERE `load_egress_auth` looks for the deputy's keychain
-    /// pointer (#76 final review) — directly under `egress_dir`, unlike the
-    /// daemon's `private/` subdirectory. The RoleID file must exist first
-    /// (`load_egress_auth` reads it before resolving the secret), so it's
-    /// written here too. `WrongAccount` proves the pointer was found and the
-    /// keychain arm was chosen over a `CredentialSource` refusal. Goes red if
-    /// the call site's directory argument changes (no pointer found there →
-    /// `CredentialSource`, not `WrongAccount`) or if the plane is swapped.
+    /// #76: the deputy's keychain pointer is found in its egress directory.
     #[test]
     #[cfg(target_os = "macos")]
     fn load_egress_auth_finds_the_pointer_under_egress_dir() {

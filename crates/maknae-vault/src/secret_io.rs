@@ -9,7 +9,7 @@
 //! **Permission-gating split (LOAD BEARING):** the PLAINTEXT branches
 //! (`DaemonSecretSource::PlaintextPath`, `CliSecretSource::ResidualFile`) route
 //! through `client::read_secret_credential`'s `mode & 0o077` gate — a plaintext file
-//! must be owner-only. The SEALED branches (`CredentialsDirectory`, `Keychain`,
+//! must be owner-only. The non-plaintext branches (`CredentialsDirectory`, `Keychain`,
 //! `UserCreds`) do NOT go through that gate: systemd `LoadCredential`/
 //! `SetCredentialEncrypted` produce their own `0400`-or-stricter, already-trusted
 //! artifacts, and the keychain arm reads no file as the secret, so re-applying the

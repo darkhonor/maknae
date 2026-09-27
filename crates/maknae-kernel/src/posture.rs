@@ -83,7 +83,7 @@ impl Posture {
 ///   config implies — computed by the caller, `run.rs`) → [`Posture::HrotSealed`].
 /// - The keychain source with a matching marker → [`Posture::CodeBound`] (#76:
 ///   bound to the signed binary, not to hardware).
-/// - A sealed source with a MISSING marker, one whose `mechanism` does not match,
+/// - The tpm2 or keychain source with a MISSING marker, one whose `mechanism` does not match,
 ///   OR one whose `target` does not match `expected_target` →
 ///   [`Posture::Unverified`] (covers a missing attestation, a contradicting
 ///   mechanism, AND a stale/foreign target — e.g. a marker copied from another

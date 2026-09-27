@@ -50,12 +50,23 @@ pub(crate) fn read_plane_secret(
 
 #[cfg(target_os = "macos")]
 pub(crate) fn observe_pointer(dir: &Path, plane: KeychainPlane) -> Option<PathBuf> {
-    let p = dir.join(plane.pointer_file());
-    p.is_file().then_some(p)
+    observe_pointer_at(&dir.join(plane.pointer_file()))
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn observe_pointer(_dir: &Path, _plane: KeychainPlane) -> Option<PathBuf> {
+    None
+}
+
+/// #76: same observation as [`observe_pointer`], for an already-computed pointer path
+/// (the daemon's, via [`crate::daemon_keychain_pointer`]).
+#[cfg(target_os = "macos")]
+pub(crate) fn observe_pointer_at(path: &Path) -> Option<PathBuf> {
+    path.is_file().then(|| path.to_path_buf())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn observe_pointer_at(_path: &Path) -> Option<PathBuf> {
     None
 }
 

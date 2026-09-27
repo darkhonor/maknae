@@ -248,12 +248,6 @@ mod tests {
         ));
     }
 
-    /// Precedence, not fallthrough: when BOTH CredentialsDirectory and Keychain are
-    /// available, CredentialsDirectory wins — Keychain is never consulted (renamed
-    /// from `daemon_sealed_never_falls_through`, round-1 SF7: that name implied a
-    /// fallthrough-on-failure guarantee this test doesn't make; it only proves
-    /// ordering among available sources. The real no-fallthrough control lives in
-    /// `secret_io.rs`'s `read_daemon_secret` tests.)
     #[test]
     fn daemon_precedence_credentials_over_keychain() {
         let s = resolve_daemon_secret_source(

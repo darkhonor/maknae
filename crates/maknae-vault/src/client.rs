@@ -351,11 +351,8 @@ impl PlaneClient {
             Plane::Kernel => {
                 let src = resolve_daemon_secret_source(
                     std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-                    crate::keychain::observe_pointer(
-                        &dir.join("private"),
-                        crate::KeychainPlane::Daemon,
-                    )
-                    .as_deref(),
+                    crate::keychain::observe_pointer_at(&crate::daemon_keychain_pointer(dir))
+                        .as_deref(),
                     cfg.insecure_plaintext_secret_path.as_deref(),
                 )?;
                 let secret = read_daemon_secret(&src)?;
@@ -1148,17 +1145,7 @@ mod tests {
         }
     }
 
-    /// I1(a): pins WHERE `from_document` looks for the daemon's keychain pointer
-    /// (#76 final review). `daemon_sep_blob_path` once looked in `config_dir/`
-    /// while `run.rs` expected `config_dir/private/` — a real, silent mismatch
-    /// this branch fixed with no test. A pointer file under `private/`, plus a
-    /// configured plaintext fallback, proves the pointer is found at `private/`
-    /// AND that it wins over the weaker plaintext arm: the account gate runs
-    /// before the pointer's own content is even parsed, so a non-`_maknae`
-    /// test process reaching `WrongAccount` proves the keychain arm was chosen.
-    /// Goes red if the call site's `dir.join("private")` is changed to `dir`
-    /// (no pointer found there → falls through to `PlaintextPath`, `Ok`, not
-    /// `WrongAccount`) or if the plane is swapped (`expected` would differ).
+    /// #76: the daemon's keychain pointer is found under private/ and wins over the plaintext arm.
     #[test]
     #[cfg(target_os = "macos")]
     fn kernel_dispatch_finds_the_pointer_under_private_and_prefers_it() {

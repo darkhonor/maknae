@@ -34,6 +34,13 @@ impl KeychainPlane {
     }
 }
 
+/// #76: the one place that names the daemon's keychain pointer path.
+pub fn daemon_keychain_pointer(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir
+        .join("private")
+        .join(KeychainPlane::Daemon.pointer_file())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeychainItem {
     pub service: &'static str,
@@ -117,6 +124,14 @@ mod tests {
 
     fn never_item(_: &KeychainItem) -> Result<Zeroizing<String>, VaultError> {
         panic!("the keychain must not be touched")
+    }
+
+    #[test]
+    fn daemon_keychain_pointer_is_under_private() {
+        assert_eq!(
+            daemon_keychain_pointer(std::path::Path::new("/etc/maknae")),
+            std::path::PathBuf::from("/etc/maknae/private/maknaed-secret-id.keychain")
+        );
     }
 
     #[test]
