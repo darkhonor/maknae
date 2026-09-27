@@ -237,7 +237,18 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let outcome = drive(&mut plane, &mut transcript, &budget).await;
+    let mut meter = maknae_agent::budget::Meter::new(maknae_agent::budget::ContextBudget::new(
+        maknae_proto::MAX_CONTEXT_TOKENS,
+        None,
+    )?);
+    let outcome = drive(
+        &mut plane,
+        &mut transcript,
+        &budget,
+        &mut meter,
+        &mut |_| {},
+    )
+    .await;
     client.shutdown().await; // revoke on EVERY path, as execute() does
     if let Some(answer) = outcome.answer {
         println!("{answer}");
@@ -286,6 +297,7 @@ pub async fn run(prompt: String) -> Result<u8, String> {
                 .into()
         }
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
+        Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
         None => "stopped".into(),
     };
     eprintln!("maknae agent: {why}");

@@ -3,6 +3,7 @@
 //! ADVISORY by construction (ADR-0023 d7): a well-behaved loop stops early;
 //! nothing here fails closed against a hostile loop, and nothing here claims
 //! to. The kernel decides every verb this asks for.
+use crate::budget::{Gate, Meter, Notice};
 use crate::plane::{Plane, PlaneError, ReadOutcome, WriteOutcome};
 use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
@@ -22,6 +23,7 @@ pub enum StopReason {
     PromptRefused,
     PromptMalformed,
     Transport(String),
+    ContextBudget,
 }
 
 #[derive(Debug)]
@@ -82,6 +84,8 @@ pub async fn drive<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
     budget: &Budget,
+    meter: &mut Meter,
+    notify: &mut impl FnMut(&Notice),
 ) -> Outcome {
     let mut steps_used = 0u32;
     let mut seen: std::collections::HashMap<String, [i64; 7]> = std::collections::HashMap::new();
@@ -93,11 +97,26 @@ pub async fn drive<P: Plane>(
                 steps_used,
             };
         }
+        let bytes = transcript.bytes();
+        match meter.gate(bytes) {
+            Gate::Stop => {
+                return Outcome {
+                    answer: None,
+                    stopped: Some(StopReason::ContextBudget),
+                    steps_used,
+                }
+            }
+            Gate::Send(Some(n)) => notify(&n),
+            Gate::Send(None) => {}
+        }
         let reply = match plane
             .prompt(transcript.conversation(), transcript.turns())
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                meter.record(bytes, r.usage);
+                r
+            }
             Err(PlaneError::FrameTooLarge) => {
                 return Outcome {
                     answer: None,
@@ -199,6 +218,7 @@ pub async fn drive<P: Plane>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::ContextBudget;
     use crate::plane::*;
     use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText, Turn};
     use std::collections::VecDeque;
@@ -214,6 +234,10 @@ mod tests {
             call_id: id.into(),
             arguments: SecretText(Zeroizing::new(args.into())),
         }
+    }
+    async fn drive_unmetered<P: Plane>(p: &mut P, t: &mut Transcript, b: &Budget) -> Outcome {
+        let mut m = Meter::new(ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap());
+        drive(p, t, b, &mut m, &mut |_: &Notice| {}).await
     }
     fn budget() -> Budget {
         Budget {
@@ -370,7 +394,7 @@ mod tests {
             max_steps: 8,
             max_tool_calls_per_step: 2,
         };
-        drive(&mut p, &mut t, &budget).await;
+        drive_unmetered(&mut p, &mut t, &budget).await;
         let changed: Vec<bool> = [2, 4, 6, 10]
             .iter()
             .map(|&i| {
@@ -421,7 +445,7 @@ mod tests {
                 max_steps: 8,
                 max_tool_calls_per_step: 2,
             };
-            drive(&mut p, &mut t, &budget).await;
+            drive_unmetered(&mut p, &mut t, &budget).await;
             let text = tool_text(&t.turns()[6]);
             let json = text
                 .split_once("\n\nsteps remaining: ")
@@ -458,7 +482,7 @@ mod tests {
             },
         ]);
         let mut t = Transcript::new("conv", "edit a.txt");
-        let out = drive(&mut p, &mut t, &budget()).await;
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(out.answer.as_deref(), Some("all done"));
         assert!(out.stopped.is_none());
         assert_eq!(out.steps_used, 3);
@@ -494,7 +518,7 @@ mod tests {
             },
         ]);
         let mut t = Transcript::new("conv", "read both");
-        let out = drive(&mut p, &mut t, &budget()).await;
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(out.answer.as_deref(), Some("both read"));
         assert_eq!(p.reads, vec!["/w/a", "/w/b"], "executed in call order");
         assert_eq!(t.turns().len(), 5, "user, asst, tool c1, tool c2, asst");
@@ -528,7 +552,7 @@ mod tests {
         ]);
         p.read_outcome = ReadOutcome::Refused;
         let mut t = Transcript::new("conv", "q");
-        let out = drive(&mut p, &mut t, &budget()).await;
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(out.answer.as_deref(), Some("I could not read that"));
         assert!(tool_text(&t.turns()[2]).starts_with("Not authorized"));
     }
@@ -552,7 +576,7 @@ mod tests {
             ]);
             p.write_outcome = outcome;
             let mut t = Transcript::new("conv", "q");
-            drive(&mut p, &mut t, &budget()).await;
+            drive_unmetered(&mut p, &mut t, &budget()).await;
             assert_eq!(p.writes.len(), 1, "exactly one attempt, never a retry");
             assert!(tool_text(&t.turns()[2]).starts_with(want), "{want}");
         }
@@ -572,7 +596,7 @@ mod tests {
             looping,
         ]);
         let mut t = Transcript::new("conv", "q");
-        let out = drive(
+        let out = drive_unmetered(
             &mut p,
             &mut t,
             &Budget {
@@ -627,7 +651,7 @@ mod tests {
                 },
             ]);
             let mut t = Transcript::new("conv", "q");
-            drive(&mut p, &mut t, &budget()).await;
+            drive_unmetered(&mut p, &mut t, &budget()).await;
             assert!(p.reads.is_empty() && p.writes.is_empty(), "{name} {bad}");
             assert!(
                 tool_text(&t.turns()[2]).starts_with("tool error:"),
@@ -662,7 +686,7 @@ mod tests {
                 },
             ]);
             let mut t = Transcript::new("conv", "q");
-            drive(&mut p, &mut t, &budget()).await;
+            drive_unmetered(&mut p, &mut t, &budget()).await;
             let got = tool_text(&t.turns()[2]);
             assert!(got.starts_with("tool error: path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most 4096 bytes and no NUL byte"), "{got}");
         }
@@ -699,7 +723,7 @@ mod tests {
             usage: None,
         }]);
         let mut t = Transcript::new("conv", "q");
-        let out = drive(
+        let out = drive_unmetered(
             &mut p,
             &mut t,
             &Budget {
@@ -727,7 +751,7 @@ mod tests {
         ]);
         p.read_outcome = ReadOutcome::Unavailable;
         let mut t = Transcript::new("conv", "q");
-        drive(&mut p, &mut t, &budget()).await;
+        drive_unmetered(&mut p, &mut t, &budget()).await;
         assert!(tool_text(&t.turns()[2]).starts_with("read unavailable"));
     }
     #[tokio::test]
@@ -747,9 +771,83 @@ mod tests {
             let mut p = scripted(vec![]);
             p.replies.push_back(Err(err));
             let mut t = Transcript::new("conv", "q");
-            let out = drive(&mut p, &mut t, &budget()).await;
+            let out = drive_unmetered(&mut p, &mut t, &budget()).await;
             assert_eq!(out.stopped, Some(want));
             assert_eq!(out.steps_used, 0);
         }
+    }
+
+    fn answer() -> PromptReply {
+        PromptReply {
+            blocks: vec![text("done")],
+            tool_calls: vec![],
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_loop_stops_before_sending_a_turn_past_the_budget() {
+        let mut notices = vec![];
+        let mut p = scripted(vec![answer()]);
+        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut t = Transcript::new("c", &"q".repeat(100));
+        let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
+            notices.push(*n)
+        })
+        .await;
+        assert_eq!((out.answer.as_deref(), p.prompts), (Some("done"), 1));
+
+        let mut p = scripted(vec![answer()]);
+        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut t = Transcript::new("c", &"q".repeat(5_000));
+        let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
+            notices.push(*n)
+        })
+        .await;
+        assert_eq!(out.stopped, Some(StopReason::ContextBudget));
+        assert_eq!((p.prompts, out.steps_used), (0, 0));
+        assert!(notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_turn_near_the_budget_is_sent_with_a_notice() {
+        let mut notices = vec![];
+        let mut p = scripted(vec![answer()]);
+        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut t = Transcript::new("c", &"q".repeat(1_800));
+        let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |n: &Notice| {
+            notices.push(*n)
+        })
+        .await;
+        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(
+            notices,
+            vec![Notice {
+                percent: 99,
+                tokens: 1_986,
+                budget: 2_000,
+                estimated: true
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_providers_usage_meters_the_next_turn() {
+        let mut p = scripted(vec![
+            PromptReply {
+                blocks: vec![],
+                tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
+                usage: Some(maknae_proto::Usage {
+                    prompt_tokens: 1_990,
+                    completion_tokens: None,
+                }),
+            },
+            answer(),
+        ]);
+        let mut m = Meter::new(ContextBudget::new(2_000, None).unwrap());
+        let mut t = Transcript::new("c", "q");
+        let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |_: &Notice| {}).await;
+        assert_eq!(out.stopped, Some(StopReason::ContextBudget));
+        assert_eq!(p.prompts, 1);
     }
 }
