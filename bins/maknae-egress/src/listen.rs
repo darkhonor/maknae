@@ -75,10 +75,15 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        let egid = nix::unistd::getegid();
+        match bind_gated(&rt, &d.path().join("nope").join("egress.sock"), egid) {
+            Err(ListenError::Bind(m)) => assert!(m.contains("cannot stat"), "{m}"),
+            other => panic!("expected a parent-directory refusal, got {other:?}"),
+        }
         // A group the socket is NOT born with (egid on Linux, the dir's on
         // macOS), so the gid assertion fails if the chown is dropped.
         let born = [
-            nix::unistd::getegid().as_raw(),
+            egid.as_raw(),
             std::os::unix::fs::MetadataExt::gid(&std::fs::metadata(d.path()).unwrap()),
         ];
         // `id -G`: nix's `getgroups` is configured out on Apple targets.
@@ -98,10 +103,6 @@ mod tests {
         let meta = std::fs::metadata(&p).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o660);
         assert_eq!(std::os::unix::fs::MetadataExt::gid(&meta), gid.as_raw());
-        match bind_gated(&rt, &d.path().join("nope").join("egress.sock"), gid) {
-            Err(ListenError::Bind(m)) => assert!(m.contains("cannot stat"), "{m}"),
-            other => panic!("expected a parent-directory refusal, got {other:?}"),
-        }
     }
 
     #[test]

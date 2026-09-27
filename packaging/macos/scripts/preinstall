@@ -118,6 +118,13 @@ ensure_service_user() {
     echo "$uid"
 }
 
+for d in /usr/local/var /usr/local/var/run /usr/local/var/log /usr/local/lib \
+         /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
+         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" \
+         /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+    [ ! -L "$d" ] || { echo "maknae: $d is a symlink — refusing to install through it" >&2; exit 1; }
+done
+
 # CREATED_* is set inside the helpers, so a helper must run in THIS shell — a $( )
 # subshell would discard the flag. Capture through mktemp, NOT a predictable /tmp
 # path: this runs as ROOT under `installer` and `>` follows symlinks, so a guessable
@@ -169,11 +176,6 @@ check_distinct OPERATOR_GID "$OPERATOR_GID" EGRESS_GID "$EGRESS_GID"
 check_distinct MAKNAE_GID   "$MAKNAE_GID"   EGRESS_GID "$EGRESS_GID"
 
 # --- directories (spec D9) --------------------------------------------------
-for d in /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
-         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" \
-         /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
-    [ ! -L "$d" ] || { echo "maknae: $d is a symlink — refusing to install through it" >&2; exit 1; }
-done
 # NUMERIC ids, not names. `install(1)` resolves names through getpwnam/getgrnam via
 # opendirectoryd seconds after `dscl -create` — the same settling window alloc_id
 # guards. A miss is `install: unknown group maknae`, which exits 1 under `set -e`.

@@ -74,9 +74,9 @@ phase1() {
     esac
     elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
     case "$elog_line" in
-        *'-o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress" ;;
+        *'-m 0750 -o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress 0750" ;;
         '')  fail "no deputy log-dir install line found in preinstall" ;;
-        *)   fail "deputy log dir not -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
+        *)   fail "deputy log dir not -m 0750 -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
     esac
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
@@ -202,12 +202,8 @@ phase1() {
                 # the Team ID assertion above under a false name. That is the same defect
                 # class this block exists to close, so it is recorded rather than quietly
                 # corrected.
-                local cdflags
-                cdflags="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/.*flags=\([^ ]*\).*/\1/p' | head -1)"
-                case "$cdflags" in
-                    *runtime*) ok "the packaged FIPS dylib carries Hardened Runtime ($cdflags)" ;;
-                    *) fail "the packaged FIPS dylib is NOT hardened ($cdflags) — library validation is not enforced on it" ;;
-                esac
+                signed_hardened_runtime "$dylib" && ok "the packaged FIPS dylib carries Hardened Runtime" \
+                    || fail "the packaged FIPS dylib is NOT hardened, or its signature could not be read — library validation is not enforced on it"
             else
                 fail "no libaws_lc_fips_*_crypto.dylib in the package payload — the FIPS module is not shipped"
             fi
@@ -374,9 +370,19 @@ REFUSE
         *) fail "the deputy job is NOT disabled after an ordinary upgrade" ;;
     esac
     launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *'"io.maknae.maknae-egress" => enabled'*) ok "the deputy job was enabled before the no-deputy upgrade" ;;
+        *) fail "launchctl enable did not take — the no-deputy upgrade leg cannot prove its disable" ;;
+    esac
     rm -f /Library/LaunchDaemons/io.maknae.maknae-egress.plist
+    [ ! -e /Library/LaunchDaemons/io.maknae.maknae-egress.plist ] \
+        && ok "the deputy plist is absent before the no-deputy upgrade" \
+        || fail "the deputy plist is still present — the no-deputy upgrade leg is not exercised"
     installer -pkg "$PKG" -target / >/dev/null && ok "upgrade from a package without the deputy succeeded" \
                                                || fail "upgrade from a package without the deputy failed"
+    [ -e /Library/LaunchDaemons/io.maknae.maknae-egress.plist ] \
+        && ok "the no-deputy upgrade installed the deputy plist" \
+        || fail "the no-deputy upgrade did not install the deputy plist"
     case "$(launchctl print-disabled system 2>/dev/null)" in
         *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade from a package without the deputy disabled it" ;;
         *) fail "upgrade from a package without the deputy left it enabled — it would start unenrolled at boot" ;;

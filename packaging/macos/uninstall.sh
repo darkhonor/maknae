@@ -35,6 +35,8 @@ if [ -e /etc/maknae ]; then
         ace_left=true
     elif grep -Eqx ' *[0-9]+: user:_maknae-egress allow list,search' <<<"$led"; then
         ace_left=true
+    elif grep -Eq '^ *[0-9]+: user:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12} ' <<<"$led"; then
+        ace_left=true
     fi
 fi
 
@@ -101,7 +103,7 @@ done
 chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
-[ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE" >&2
+[ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE or an orphaned user:<UUID> ACE" >&2
 [ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
 if [ -n "$kc_left" ] || [ "$ace_left" != false ]; then
     exit 1
