@@ -74,7 +74,7 @@ pub fn mint_conversation_id() -> String {
 /// ack): a fact about the attempt, not a verdict.
 pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
     match sent {
-        Ok(SentOutcome::ReadDone { content: Some(b) }) => ReadOutcome::Content(b.0),
+        Ok(SentOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(r.content),
         Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
         Ok(SentOutcome::Refused {
             code: maknae_proto::ProtoErrCode::Unauthorized,
@@ -422,15 +422,27 @@ mod tests {
         // (`/a/../b`), a protocol error, or a transport error is
         // "unavailable".
         use maknae_proto::{Payload, ProtoErrCode};
-        let content = maknae_proto::Bytes::new(zeroize::Zeroizing::new(b"x".to_vec()));
+        let read = crate::mutation::ReadResult {
+            content: zeroize::Zeroizing::new(b"x".to_vec()),
+            label: maknae_proto::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: vec![],
+            },
+            page: crate::mutation::PageMeta {
+                start: 0,
+                lines: Some((1, 1)),
+                complete_last: true,
+                next: None,
+                eof: true,
+                version: maknae_io::FileVersion::default(),
+            },
+        };
         assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone {
-                content: Some(content)
-            })),
+            read_outcome(Ok(SentOutcome::ReadDone { read: Some(read) })),
             ReadOutcome::Content(zeroize::Zeroizing::new(b"x".to_vec()))
         );
         assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone { content: None })),
+            read_outcome(Ok(SentOutcome::ReadDone { read: None })),
             ReadOutcome::Unavailable
         );
         assert_eq!(

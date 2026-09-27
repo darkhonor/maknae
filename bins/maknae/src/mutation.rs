@@ -240,10 +240,69 @@ struct WalkFrame {
     leaf: String,
     depth: usize,
 }
+const CLIENT_PAGE_MAX: u64 = 1 << 20;
+
+pub struct ReadResult {
+    pub content: maknae_io::Zeroizing<Vec<u8>>,
+    pub label: proto::ObjectLabel,
+    pub page: PageMeta,
+}
+
+impl std::fmt::Debug for ReadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadResult")
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("label", &self.label)
+            .field("page", &self.page)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageMeta {
+    pub start: u64,
+    pub lines: Option<(u64, u64)>,
+    pub complete_last: bool,
+    pub next: Option<(u64, u64)>,
+    pub eof: bool,
+    pub version: maknae_io::FileVersion,
+}
+
+pub async fn stream_pages<F, Fut, W>(mut fetch: F, out: &mut W) -> Result<bool, String>
+where
+    F: FnMut(proto::PageRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<ReadResult>, String>>,
+    W: std::io::Write,
+{
+    let mut at = (1u64, 0u64);
+    let mut version: Option<maknae_io::FileVersion> = None;
+    loop {
+        let request = proto::PageRequest {
+            offset_line: at.0,
+            limit_lines: u32::MAX,
+            column: at.1,
+        };
+        let Some(read) = fetch(request).await? else {
+            return Ok(false);
+        };
+        if *version.get_or_insert(read.page.version) != read.page.version {
+            return Err("file changed during the read; stopped".into());
+        }
+        out.write_all(&read.content)
+            .map_err(|e| format!("writing content to stdout: {e}"))?;
+        match read.page.next {
+            None => return Ok(true),
+            Some(next) if next <= at => return Err("read did not advance; stopped".into()),
+            Some(next) => at = next,
+        }
+    }
+}
+
 enum Work {
     Read {
         held: OwnedFd,
         path: PathBuf,
+        page: proto::PageRequest,
     },
     Replace {
         held: OwnedFd,
@@ -277,6 +336,7 @@ struct Worker {
     next_index: u32,
     seen: HashSet<String>,
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
+    page: Option<PageMeta>,
 }
 struct Step {
     effect: Option<EffectEntry>,
@@ -369,8 +429,15 @@ impl Worker {
             path: path.into(),
             effect,
             length: (effect == ReportedEffect::ReadFile).then_some(u64::MAX),
-            range: None,
-            lines: None,
+            range: (effect == ReportedEffect::ReadFile).then_some(proto::ByteRange {
+                start: u64::MAX,
+                end: u64::MAX,
+            }),
+            lines: (effect == ReportedEffect::ReadFile).then_some(proto::LineSpan {
+                first: u64::MAX,
+                last: u64::MAX,
+                complete_last: false,
+            }),
         };
         if !fits(
             &batch(self.grant.id, self.next_index, entry),
@@ -402,27 +469,45 @@ impl Worker {
         let work = std::mem::replace(&mut self.work, Work::Done);
         match work {
             Work::Done => Step::stop(ReportedFinish::Success, None),
-            Work::Read { held, path } => {
+            Work::Read { held, path, page } => {
                 let path = match self.reserve(&path, ReportedEffect::ReadFile, 1) {
                     Ok(p) => p,
                     Err(s) => return *s,
                 };
-                match maknae_io::read_held_file(
-                    held.as_fd(),
-                    Path::new(&path),
-                    self.grant.limits.max_bytes,
-                ) {
-                    Ok(bytes) => {
-                        let length = Some(bytes.len() as u64);
-                        self.content = Some(bytes);
-                        Step {
-                            effect: Some(EffectEntry {
-                                path,
-                                effect: ReportedEffect::ReadFile,
-                                length,
-                                range: None,
-                                lines: None,
+                let window = maknae_io::PageWindow {
+                    offset_line: page.offset_line,
+                    limit_lines: page.limit_lines,
+                    column: page.column,
+                };
+                let cap = self.grant.limits.max_bytes.min(CLIENT_PAGE_MAX);
+                match maknae_io::read_held_page(held.as_fd(), Path::new(&path), window, cap) {
+                    Ok(pg) => {
+                        let len = pg.content.len() as u64;
+                        let effect = EffectEntry {
+                            path,
+                            effect: ReportedEffect::ReadFile,
+                            length: Some(len),
+                            range: Some(proto::ByteRange {
+                                start: pg.start,
+                                end: pg.start + len,
                             }),
+                            lines: pg.lines.map(|(first, last)| proto::LineSpan {
+                                first,
+                                last,
+                                complete_last: pg.complete_last,
+                            }),
+                        };
+                        self.page = Some(PageMeta {
+                            start: pg.start,
+                            lines: pg.lines,
+                            complete_last: pg.complete_last,
+                            next: pg.next.map(|n| (n.line, n.column)),
+                            eof: pg.eof,
+                            version: pg.version,
+                        });
+                        self.content = Some(pg.content);
+                        Step {
+                            effect: Some(effect),
                             finish: Some((ReportedFinish::Success, None)),
                         }
                     }
@@ -708,7 +793,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
         request_started,
     )
     .await
-    .map(|(success, _)| success)
+    .map(|(success, _, _)| success)
 }
 pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepared: PreparedMutation,
@@ -716,7 +801,8 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: &mut S,
     cfg: &TransportConfig,
     request_started: Instant,
-) -> Result<Option<maknae_io::Zeroizing<Vec<u8>>>, String> {
+) -> Result<Option<ReadResult>, String> {
+    let label = grant.label.clone();
     run_attempt(
         prepared,
         grant,
@@ -726,9 +812,20 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         request_started,
     )
     .await
-    .map(|(success, content)| content.filter(|_| success))
+    .map(|(success, content, page)| match (success, content, page) {
+        (true, Some(content), Some(page)) => Some(ReadResult {
+            content,
+            label,
+            page,
+        }),
+        _ => None,
+    })
 }
-type Attempted = (bool, Option<maknae_io::Zeroizing<Vec<u8>>>);
+type Attempted = (
+    bool,
+    Option<maknae_io::Zeroizing<Vec<u8>>>,
+    Option<PageMeta>,
+);
 async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepared: PreparedMutation,
     grant: MutationGrant,
@@ -776,9 +873,10 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .ok_or("mutation grant without prepared evidence")?;
         let work = match granted {
             Granted::Object(path) => match prepared.request {
-                proto::Verb::Read { .. } => Work::Read {
+                proto::Verb::Read { page, .. } => Work::Read {
                     held: evidence,
                     path,
+                    page: page.unwrap_or(proto::WHOLE_FILE),
                 },
                 proto::Verb::FsWrite { .. } => Work::Replace {
                     held: evidence,
@@ -838,6 +936,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             next_index: 0,
             seen: HashSet::new(),
             content: None,
+            page: None,
         })
     });
     let mut worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
@@ -883,7 +982,11 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     next.next_index
                 );
             }
-            return Ok((outcome == ReportedFinish::Success, next.content.take()));
+            return Ok((
+                outcome == ReportedFinish::Success,
+                next.content.take(),
+                next.page.take(),
+            ));
         }
         worker = next;
     }
@@ -1014,7 +1117,7 @@ mod tests {
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
         let result = run_attempt(prepared, grant, &mut client, &cfg, cap, Instant::now())
             .await
-            .map(|(success, _)| success);
+            .map(|(success, _, _)| success);
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1082,15 +1185,274 @@ mod tests {
         prepared: PreparedMutation,
         grant: MutationGrant,
         cfg: TransportConfig,
-    ) -> (Result<Option<Vec<u8>>, String>, Vec<MutationReport>) {
+    ) -> (Result<Option<ReadResult>, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
         let result = execute_read(prepared, grant, &mut client, &cfg, Instant::now()).await;
         drop(client);
-        (
-            result.map(|content| content.map(|c| c.to_vec())),
-            receiver.await.unwrap(),
+        (result, receiver.await.unwrap())
+    }
+    fn paged(path: String, page: proto::PageRequest) -> Option<PreparedMutation> {
+        prepare(
+            proto::Verb::Read {
+                path,
+                conversation: None,
+                page: Some(page),
+            },
+            None,
         )
+    }
+    async fn fetch_page(p: String, page: proto::PageRequest) -> Result<Option<ReadResult>, String> {
+        acknowledged_read(
+            paged(p.clone(), page).unwrap(),
+            read_grant(&p, 65536),
+            TransportConfig::default(),
+        )
+        .await
+        .0
+    }
+    #[tokio::test]
+    async fn a_paged_read_releases_the_page_with_its_range_lines_and_label() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        std::fs::write(&path, b"one\ntwo\nthree\n").unwrap();
+        let p = path.clone();
+        let page = proto::PageRequest {
+            offset_line: 2,
+            limit_lines: 1,
+            column: 0,
+        };
+        let (result, reports) = acknowledged_read(
+            paged(p.clone(), page).unwrap(),
+            read_grant(&p, 65536),
+            TransportConfig::default(),
+        )
+        .await;
+        let read = result.unwrap().unwrap();
+        assert_eq!(&read.content[..], b"two\n");
+        assert_eq!(read.label.level, "UNCLASSIFIED");
+        assert_eq!(
+            (
+                read.page.start,
+                read.page.lines,
+                read.page.next,
+                read.page.eof
+            ),
+            (4, Some((2, 2)), Some((3, 0)), false)
+        );
+        let MutationReport::Batch { effects, .. } = &reports[0] else {
+            panic!("{reports:?}")
+        };
+        assert_eq!(
+            effects[0].range,
+            Some(proto::ByteRange { start: 4, end: 8 })
+        );
+        assert_eq!(
+            effects[0].lines,
+            Some(proto::LineSpan {
+                first: 2,
+                last: 2,
+                complete_last: true
+            })
+        );
+    }
+    #[tokio::test]
+    async fn an_unpaged_read_is_the_first_page_of_the_whole_file() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        std::fs::write(&path, vec![b'w'; 100]).unwrap();
+        let p = path.clone();
+        let (result, _) = acknowledged_read(
+            read(p.clone()).unwrap(),
+            read_grant(&p, 64),
+            TransportConfig::default(),
+        )
+        .await;
+        let read = result.unwrap().unwrap();
+        assert_eq!(
+            (read.content.len(), read.page.next, read.page.eof),
+            (64, Some((1, 64)), false)
+        );
+    }
+    #[tokio::test]
+    async fn streaming_two_megabytes_releases_every_page_after_its_ack() {
+        let d = Fixture::new();
+        let path = d.path("big");
+        let text: Vec<u8> = (0..2 * 1024 * 1024)
+            .map(|i| {
+                if i % 97 == 96 {
+                    b'\n'
+                } else {
+                    b'a' + (i % 26) as u8
+                }
+            })
+            .collect();
+        std::fs::write(&path, &text).unwrap();
+        let p = path.clone();
+        let (mut out, mut fetched) = (Vec::new(), 0usize);
+        let ok = stream_pages(
+            |page| {
+                fetched += 1;
+                fetch_page(p.clone(), page)
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert_eq!(out, text);
+        assert!(fetched >= text.len() / 65536);
+    }
+    #[tokio::test]
+    async fn an_unacknowledged_page_stops_the_stream_with_only_earlier_pages_written() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        let text = vec![b'q'; 3 * 65536];
+        std::fs::write(&path, &text).unwrap();
+        let p = path.clone();
+        let (mut out, mut n) = (Vec::new(), 0);
+        let r = stream_pages(
+            |page| {
+                n += 1;
+                let (p, fail) = (p.clone(), n == 2);
+                async move {
+                    if fail {
+                        Err("mutation ack missing".to_string())
+                    } else {
+                        fetch_page(p, page).await
+                    }
+                }
+            },
+            &mut out,
+        )
+        .await;
+        assert!(r.is_err());
+        assert_eq!(out, text[..65536]);
+    }
+    #[tokio::test]
+    async fn a_stream_over_a_file_truncated_between_pages_stops() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        std::fs::write(&path, vec![b't'; 3 * 65536]).unwrap();
+        let p = path.clone();
+        let (mut out, mut n) = (Vec::new(), 0);
+        let r = stream_pages(
+            |page| {
+                n += 1;
+                if n == 2 {
+                    std::fs::write(&path, b"short").unwrap();
+                }
+                fetch_page(p.clone(), page)
+            },
+            &mut out,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("changed"));
+        assert_eq!(out.len(), 65536);
+    }
+    #[tokio::test]
+    async fn a_stream_stops_when_the_file_is_replaced_between_pages() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        let other = d.path("g");
+        std::fs::write(&path, vec![b'a'; 3 * 65536]).unwrap();
+        std::fs::write(&other, vec![b'b'; 3 * 65536]).unwrap();
+        let p = path.clone();
+        let (mut out, mut n) = (Vec::new(), 0);
+        let r = stream_pages(
+            |page| {
+                n += 1;
+                if n == 2 {
+                    std::fs::rename(&other, &path).unwrap();
+                }
+                fetch_page(p.clone(), page)
+            },
+            &mut out,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("changed"));
+        assert_eq!(out, vec![b'a'; 65536]);
+    }
+    #[tokio::test]
+    async fn a_stream_stops_when_the_file_changes_in_place_between_pages() {
+        let d = Fixture::new();
+        let path = d.path("f");
+        std::fs::write(&path, vec![b'a'; 3 * 65536]).unwrap();
+        let p = path.clone();
+        let (mut out, mut n) = (Vec::new(), 0);
+        let r = stream_pages(
+            |page| {
+                n += 1;
+                if n == 2 {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(b"more")
+                        .unwrap();
+                }
+                fetch_page(p.clone(), page)
+            },
+            &mut out,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("changed"));
+        assert_eq!(out, vec![b'a'; 65536]);
+    }
+    #[test]
+    fn a_read_result_debug_names_its_length_and_never_its_bytes() {
+        let r = ReadResult {
+            content: maknae_io::Zeroizing::new(b"RESULT-DEBUG-SENTINEL".to_vec()),
+            label: proto::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: vec![],
+            },
+            page: PageMeta {
+                start: 0,
+                lines: None,
+                complete_last: true,
+                next: None,
+                eof: true,
+                version: maknae_io::FileVersion::default(),
+            },
+        };
+        let shown = format!("{r:?}");
+        assert!(shown.contains("<21 bytes>"), "{shown}");
+        assert!(!shown.contains("SENTINEL"), "{shown}");
+        assert!(!shown.contains("Zeroizing"), "{shown}");
+    }
+    #[tokio::test]
+    async fn a_stream_stops_when_a_page_does_not_advance() {
+        let label = proto::ObjectLabel {
+            level: "UNCLASSIFIED".into(),
+            categories: vec![],
+        };
+        let (mut out, mut calls) = (Vec::new(), 0);
+        let r = stream_pages(
+            |_| {
+                calls += 1;
+                assert!(calls < 10, "the stream did not stop");
+                let label = label.clone();
+                async move {
+                    Ok(Some(ReadResult {
+                        content: maknae_io::Zeroizing::new(b"x".to_vec()),
+                        label,
+                        page: PageMeta {
+                            start: 0,
+                            lines: Some((1, 1)),
+                            complete_last: false,
+                            next: Some((1, 0)),
+                            eof: false,
+                            version: maknae_io::FileVersion::default(),
+                        },
+                    }))
+                }
+            },
+            &mut out,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("did not advance"));
     }
     #[tokio::test]
     async fn read_reports_its_length_then_success_and_returns_the_bytes() {
@@ -1101,7 +1463,10 @@ mod tests {
         let id = g.id;
         let (result, reports) =
             acknowledged_read(read(path.clone()).unwrap(), g, TransportConfig::default()).await;
-        assert_eq!(result, Ok(Some(b"read sentinel bytes".to_vec())));
+        assert_eq!(
+            &result.unwrap().unwrap().content[..],
+            b"read sentinel bytes"
+        );
         assert_eq!(
             reports,
             vec![
@@ -1112,8 +1477,12 @@ mod tests {
                         path: path.clone(),
                         effect: ReportedEffect::ReadFile,
                         length: Some(19),
-                        range: None,
-                        lines: None,
+                        range: Some(proto::ByteRange { start: 0, end: 19 }),
+                        lines: Some(proto::LineSpan {
+                            first: 1,
+                            last: 1,
+                            complete_last: true,
+                        }),
                     }],
                 },
                 MutationReport::Finished {
@@ -1127,23 +1496,22 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"read sentinel bytes");
     }
     #[tokio::test]
-    async fn a_read_over_the_grant_limit_reports_limit_reached_and_returns_nothing() {
+    async fn a_read_over_the_grant_limit_releases_the_first_page_with_next() {
         let d = Fixture::new();
         let path = d.path("read-limit-sentinel");
         std::fs::write(&path, b"read sentinel bytes").unwrap();
         let g = read_grant(&path, 18);
-        let id = g.id;
         let (result, reports) =
             acknowledged_read(read(path.clone()).unwrap(), g, TransportConfig::default()).await;
-        assert_eq!(result, Ok(None));
+        let read = result.unwrap().unwrap();
+        assert_eq!(&read.content[..], b"read sentinel byte");
+        assert_eq!(read.page.next, Some((1, 18)));
+        let MutationReport::Batch { effects, .. } = &reports[0] else {
+            panic!("{reports:?}")
+        };
         assert_eq!(
-            reports,
-            vec![MutationReport::Finished {
-                id,
-                next_index: 0,
-                outcome: ReportedFinish::LimitReached,
-                stopped_at: Some(path),
-            }]
+            effects[0].range,
+            Some(proto::ByteRange { start: 0, end: 18 })
         );
     }
     #[tokio::test]
@@ -1159,7 +1527,7 @@ mod tests {
             TransportConfig::default(),
         )
         .await;
-        assert_eq!(result, Ok(None));
+        assert!(matches!(result, Ok(None)));
         assert!(matches!(
             &reports[..],
             [MutationReport::Finished {
@@ -2159,6 +2527,7 @@ mod tests {
             next_index: 0,
             seen: HashSet::new(),
             content: None,
+            page: None,
         }
     }
     #[test]

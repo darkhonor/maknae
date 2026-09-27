@@ -107,6 +107,15 @@ enum Command {
     Read {
         /// File to read (absolute, or relative to the current directory).
         path: std::path::PathBuf,
+        /// Read one page starting at this line (1-based) instead of the whole file.
+        #[arg(long)]
+        offset: Option<u64>,
+        /// Read one page of at most this many lines (default 2000).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Read one page starting this many bytes into its first line.
+        #[arg(long)]
+        column: Option<u64>,
     },
     /// Write raw stdin bytes to a file. Replaces existing content, or creates
     /// an absent file exclusively. Requires Write authority and OS permission.
@@ -154,10 +163,21 @@ enum Command {
 enum Verb {
     Ping,
     Whoami,
-    Read { path: String },
-    Write { path: String },
-    Delete { path: String, recursive: bool },
-    Mkdir { path: String, parents: bool },
+    Read {
+        path: String,
+        page: Option<maknae_proto::PageRequest>,
+    },
+    Write {
+        path: String,
+    },
+    Delete {
+        path: String,
+        recursive: bool,
+    },
+    Mkdir {
+        path: String,
+        parents: bool,
+    },
     AdminStatus,
     AdminConfigShow,
     AdminSubjectList,
@@ -168,10 +188,10 @@ impl From<Verb> for maknae_proto::Verb {
         match v {
             Verb::Ping => maknae_proto::Verb::Ping,
             Verb::Whoami => maknae_proto::Verb::Whoami,
-            Verb::Read { path } => maknae_proto::Verb::Read {
+            Verb::Read { path, page } => maknae_proto::Verb::Read {
                 path,
                 conversation: None,
-                page: None,
+                page,
             },
             Verb::Write { path } => maknae_proto::Verb::FsWrite {
                 path,
@@ -311,6 +331,30 @@ async fn round_trip(
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
 ) -> Result<bool, String> {
+    if let Verb::Read { path, page: None } = &verb {
+        let mut stdout = std::io::stdout().lock();
+        return crate::mutation::stream_pages(
+            |p| {
+                let v = maknae_proto::Verb::Read {
+                    path: path.clone(),
+                    conversation: None,
+                    page: Some(p),
+                };
+                async move {
+                    match send_verb(v, None, transport, client, ca).await? {
+                        SentOutcome::ReadDone { read } => Ok(read),
+                        SentOutcome::Refused { code, message, .. } => {
+                            eprintln!("maknae: daemon refused: {code:?}: {message}");
+                            Ok(None)
+                        }
+                        _ => Err("protocol error: a read answered with something else".into()),
+                    }
+                }
+            },
+            &mut stdout,
+        )
+        .await;
+    }
     match send_verb(request_verb, content, transport, client, ca).await? {
         SentOutcome::Payload(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
@@ -321,16 +365,20 @@ async fn round_trip(
             Ok(true)
         }
         SentOutcome::WriteDone { applied } => Ok(applied),
-        SentOutcome::ReadDone { content: Some(c) } => {
+        SentOutcome::ReadDone { read: Some(r) } => {
             // Raw bytes, no trailing newline, no lossy conversion — a
             // non-UTF-8 file is legal content.
             use std::io::Write;
             std::io::stdout()
-                .write_all(&c.0)
+                .write_all(&r.content)
                 .map_err(|e| format!("writing content to stdout: {e}"))?;
+            match r.page.next {
+                Some((line, column)) => eprintln!("next: line {line} column {column}"),
+                None => eprintln!("eof"),
+            }
             Ok(true)
         }
-        SentOutcome::ReadDone { content: None } => Ok(false),
+        SentOutcome::ReadDone { read: None } => Ok(false),
         SentOutcome::Refused { code, message, .. } => {
             eprintln!("maknae: daemon refused: {code:?}: {message}");
             Ok(false)
@@ -353,9 +401,9 @@ pub(crate) enum SentOutcome {
     /// A mutation reached a terminal state. `applied` is true ONLY for a client-reported
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
     WriteDone { applied: bool },
-    /// A read attempt ended; `content` is `Some` only after an acknowledged client-reported `Success`.
+    /// A read attempt ended; `read` is `Some` only after an acknowledged client-reported `Success`.
     ReadDone {
-        content: Option<maknae_proto::Bytes>,
+        read: Option<crate::mutation::ReadResult>,
     },
     /// The daemon refused, with the wire's own code and message (ADR-0019). `armed` is false, on a filesystem verb, iff the CLI delegated no descriptor, so no decision was made about the object.
     Refused {
@@ -475,7 +523,7 @@ pub(crate) async fn send_verb(
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
             if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
-                let content = crate::mutation::execute_read(
+                let read = crate::mutation::execute_read(
                     prepared,
                     grant,
                     &mut stream,
@@ -483,9 +531,7 @@ pub(crate) async fn send_verb(
                     request_started,
                 )
                 .await?;
-                return Ok(SentOutcome::ReadDone {
-                    content: content.map(maknae_proto::Bytes::new),
-                });
+                return Ok(SentOutcome::ReadDone { read });
             }
             let applied =
                 crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
@@ -608,13 +654,25 @@ pub async fn run_cli() -> ExitCode {
             Ok(path) => execute(Verb::Mkdir { path, parents }).await,
             Err(e) => Err(e),
         }),
-        Command::Read { path } => {
+        Command::Read {
+            path,
+            offset,
+            limit,
+            column,
+        } => {
+            let page = (offset.is_some() || limit.is_some() || column.is_some()).then(|| {
+                maknae_proto::PageRequest {
+                    offset_line: offset.unwrap_or(1),
+                    limit_lines: limit.unwrap_or(2000),
+                    column: column.unwrap_or(0),
+                }
+            });
             // Lexically absolutize client-side (std::path::absolute keeps `..`
             // on Unix — the daemon's canonical pre-gate refuses those as
             // BadRequest, a stated consequence); `~` is the shell's business.
             match std::path::absolute(&path) {
                 Ok(abs) => match abs.into_os_string().into_string() {
-                    Ok(p) => wire_exit_code(execute(Verb::Read { path: p }).await),
+                    Ok(p) => wire_exit_code(execute(Verb::Read { path: p, page }).await),
                     Err(_) => {
                         eprintln!("maknae: path is not valid UTF-8 (recorded v1 limit)");
                         ExitCode::FAILURE
@@ -1143,6 +1201,7 @@ mod tests {
     fn read_verb_converts_to_proto_with_its_path() {
         let v: maknae_proto::Verb = Verb::Read {
             path: "/a/b".into(),
+            page: None,
         }
         .into();
         assert_eq!(
@@ -1157,7 +1216,13 @@ mod tests {
 
     #[test]
     fn a_read_accepts_no_plain_payload() {
-        let mismatch = print_payload_for_verb(Verb::Read { path: "/a".into() }, Payload::Pong);
+        let mismatch = print_payload_for_verb(
+            Verb::Read {
+                path: "/a".into(),
+                page: None,
+            },
+            Payload::Pong,
+        );
         assert!(mismatch.is_err(), "a Pong for a read is a protocol error");
     }
 
