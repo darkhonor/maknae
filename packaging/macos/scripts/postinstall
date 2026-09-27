@@ -145,10 +145,16 @@ if [ "$DISABLE_MAKNAED" = false ] && [ "$WAS_LOADED" = "true" ]; then
     # Upgrade of a running daemon: the payload replaced the file but the live
     # process still holds the old inode. Restart it onto the new binary, exactly as
     # the deb's `systemctl try-restart` does.
-    launchctl kickstart -k "system/$LABEL" 2>/dev/null || :
+    launchctl kickstart -k "system/$LABEL" || {
+        echo "maknae: could not restart $LABEL onto the new binary — the old process may still be running" >&2
+        exit 1
+    }
 fi
 if [ "$DISABLE_EGRESS" = false ] && [ "$EGRESS_WAS_LOADED" = "true" ]; then
-    launchctl kickstart -k "system/$EGRESS_LABEL" 2>/dev/null || :
+    launchctl kickstart -k "system/$EGRESS_LABEL" || {
+        echo "maknae: could not restart $EGRESS_LABEL onto the new binary — the old process may still be running" >&2
+        exit 1
+    }
 fi
 
 exit 0

@@ -11,13 +11,31 @@ set -euo pipefail
 
 RECEIPT="/usr/local/var/db/maknae/install-receipt.plist"
 
+print_rc() { local rc=0; launchctl print "system/$1" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+for LABEL in io.maknae.maknaed io.maknae.maknae-egress; do
+    rc="$(print_rc "$LABEL")"
+    case "$rc" in
+        113) continue ;;
+        0) : ;;
+        *) echo "maknae: cannot tell whether $LABEL is loaded (launchctl print exit $rc) — refusing to uninstall" >&2
+           exit 1 ;;
+    esac
+    launchctl bootout "system/${LABEL}" || :
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        rc="$(print_rc "$LABEL")"
+        [ "$rc" != 113 ] || break
+        sleep 0.5
+    done
+    [ "$rc" = 113 ] || {
+        echo "maknae: $LABEL is still loaded after bootout (launchctl print exit $rc) — refusing to uninstall" >&2
+        exit 1
+    }
+done
+
 # Clear our own `launchctl disable` so the external disabled database is not left
 # holding an entry for a label we removed — it survives reboots and would silently
 # suppress a later reinstall.
 for LABEL in io.maknae.maknaed io.maknae.maknae-egress; do
-    if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-        launchctl bootout "system/${LABEL}" || :
-    fi
     launchctl enable "system/${LABEL}" 2>/dev/null || :
     rm -f "/Library/LaunchDaemons/${LABEL}.plist"
 done
