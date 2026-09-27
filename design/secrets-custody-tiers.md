@@ -35,6 +35,7 @@ Vault provides all five. **Properties 1 and 2 are the model; 3 to 5 are the ente
 |---|---|---|---|---|---|---|
 | **systemd credentials** (`LoadCredentialEncrypted`, TPM-bound, per-unit `$CREDENTIALS_DIRECTORY`) | yes | yes, by service unit | no | re-encrypt and restart | no | Linux only. Delivered as a file only that service can read, never in the environment: the stub-file injection NanoClaw bought a commercial gateway to obtain. Maknae already reads it. |
 | **macOS Keychain + Secure Enclave** | yes | partial: per-account keychain and per-binary ACL, not a service account | no | manual | no | macOS is a production target, so this must be first-class. The `_maknae-egress` account (#227) gets its own keychain. |
+| *(2026-09-27, [ADR-0018](adr/ADR-0018-local-plane-authorization-deployment-model.md) decision 6: the Secure Enclave is out for a launchd daemon — TN3137 — so the macOS plane store is the System keychain, per-item ACL on the signed binary; the row above is superseded for the daemon and deputy planes.)* | | | | | | |
 | **OpenBao** (Linux Foundation fork of Vault's last MPL release; MPL-2.0; v2.6.2, 2026-08-18) | yes | yes, by auth method and policy | yes | yes | yes | Same API, auth methods, PKI and KV engines as Vault; single binary with file storage. Nothing in `deploy/vault-pki` or `maknae-vault` depends on an Enterprise-only endpoint (to be confirmed by test, not by reading). |
 | **Vault** (HashiCorp; Business Source License since 2023; the validated pattern's tier is Enterprise or HCP) | yes | yes | yes | yes | yes | Functionally the same as OpenBao at the open tier. The license is not OSI open source, which matters for what the project recommends and for what a government adopter may deploy. |
 | **Bitwarden / Vaultwarden, 1Password Connect** | no | **no**: they authenticate a user, not a service, and have no principal-reads-path policy | partial | yes | no | The HomeLab and SMB favourites, and what Hermes and ZeroClaw integrate. Fine as where the operator keeps master material; wrong as the store the egress process reads. |
@@ -48,7 +49,7 @@ One contract, three tiers, the store declared by the operator in root-owned conf
 
 | Tier (ADR-0022 names) | Store | Bootstrap | Given up, stated plainly |
 |---|---|---|---|
-| **HomeLab**, single host | systemd credentials on Linux; Keychain with Secure Enclave on macOS | the same mechanism; no SecretID exists because there is no server to reach | external audit, dynamic secrets, rotation without touching the host |
+| **HomeLab**, single host | systemd credentials on Linux; Keychain with Secure Enclave on macOS *(2026-09-27: the System keychain, not the Secure Enclave — ADR-0018 decision 6)* | the same mechanism; no SecretID exists because there is no server to reach | external audit, dynamic secrets, rotation without touching the host |
 | **Small business**, a few hosts | OpenBao, single node, file storage, PKI and KV exactly as today | systemd credentials or Keychain holding the OpenBao credential | nothing an SMB needs; Enterprise features |
 | **Enterprise** | Vault Enterprise or HCP; the validated pattern: JWT auth against kernel-issued tokens, dynamic secrets, correlation into Vault's audit | as today, plus the JWT path | nothing |
 
@@ -73,7 +74,7 @@ The pattern's contribution is identity chaining, not custody mechanics. Mapped o
 
 - Whether the store contract lives in `maknae-vault` (renamed, since one implementation would not be Vault) or in a new crate behind the existing `maknae-io`-style rule that I/O has one home.
 - Whether OpenBao is a tested target in CI (a container in the Linux lane) or a documented one. The license finding argues for tested.
-- What the macOS tier's principal boundary really is when the store is a keychain and not a service account, and whether the `_maknae-egress` keychain ACL is enough for property 2 or whether it needs the Secure Enclave key to be non-exportable per binary.
+- What the macOS tier's principal boundary really is when the store is a keychain and not a service account, and whether the `_maknae-egress` keychain ACL is enough for property 2 or whether it needs the Secure Enclave key to be non-exportable per binary. *(Partly answered 2026-09-27 by ADR-0018 decision 6, for the bootstrap SecretID only: a launchd daemon cannot use a Secure Enclave key; the per-binary ACL plus each process's account check is the boundary against a non-administrator. An administrator can approve a read, and the boundary depends on signing discipline and artifact custody. Whether the same mechanism fits provider-key custody stays open here.)*
 - Whether the enterprise tier's JWT path replaces AppRole entirely or sits beside it for the CLI, given ADR-0006's direction that clients never reach Vault at all.
 - How the boot evidence names the tier and the source kind, and whether `admin.status` (#214) reports it.
 
