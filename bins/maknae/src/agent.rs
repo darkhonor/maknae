@@ -84,6 +84,17 @@ pub fn user_budget_from_section(v: Option<&Value>) -> Result<ContextBudget, Stri
         .map_err(|e| format!("{USER_PROVIDER_SECTION}: {e}"))
 }
 
+/// `Some(parsed)` only when the subject's `transport` section sets the key;
+/// a default must not cap the loop below its window.
+pub fn explicit_prompt_cap(transport: Option<&Value>, parsed: usize) -> Option<usize> {
+    match transport {
+        Some(Value::Map(entries)) if entries.iter().any(|(k, _)| k == "prompt_max_bytes") => {
+            Some(parsed)
+        }
+        _ => None,
+    }
+}
+
 pub fn loop_prompt_cap(context_tokens: u64, explicit: Option<usize>) -> usize {
     let derived = prompt_cap(context_tokens);
     explicit.map_or(derived, |e| derived.min(e))
@@ -336,12 +347,10 @@ pub async fn run(prompt: String) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
     let agent = agent_from_section(document.section(AGENT_SECTION))?;
     let context = user_budget_from_section(document.section(USER_PROVIDER_SECTION))?;
-    let explicit = match document.section(maknae_config::TRANSPORT_SECTION) {
-        Some(Value::Map(entries)) if entries.iter().any(|(k, _)| k == "prompt_max_bytes") => {
-            Some(transport.prompt_max_bytes)
-        }
-        _ => None,
-    };
+    let explicit = explicit_prompt_cap(
+        document.section(maknae_config::TRANSPORT_SECTION),
+        transport.prompt_max_bytes,
+    );
     let write_max = transport.prompt_max_bytes;
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
@@ -418,6 +427,14 @@ mod tests {
         assert!(p("context_tokens: 4096\nendpoint: https://x\n")
             .unwrap_err()
             .contains("endpoint"));
+    }
+    #[test]
+    fn only_a_set_prompt_max_bytes_is_explicit() {
+        let set = yaml("prompt_max_bytes: 65536\n");
+        assert_eq!(explicit_prompt_cap(Some(&set), 65_536), Some(65_536));
+        let other = yaml("read_timeout_ms: 5000\n");
+        assert_eq!(explicit_prompt_cap(Some(&other), 1_048_576), None);
+        assert_eq!(explicit_prompt_cap(None, 1_048_576), None);
     }
     #[test]
     fn the_loops_cap_is_the_smaller_of_explicit_and_derived() {

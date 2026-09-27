@@ -361,6 +361,7 @@ async fn a_megabyte_error_body_is_read_at_most_4_kib() {
             };
             assert_eq!(body.len(), 4096);
             assert_eq!(e.to_string(), "provider answered 500");
+            assert_eq!(format!("{e:?}"), "Status { 500, <4096 bytes> }");
         }
         other => panic!("expected a truncated 500, got {other:?}"),
     }

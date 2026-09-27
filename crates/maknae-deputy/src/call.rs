@@ -808,6 +808,13 @@ mod tests {
         assert!(!j.contains("sk-SECRET-VALUE"), "{}", j.as_str());
         let dbg = format!("{e:?}");
         assert!(!dbg.contains("SECRET"), "{dbg}");
+        assert_eq!(
+            dbg,
+            format!(
+                "Provider {{ \"provider answered 401\", <{}-byte journal line> }}",
+                j.len()
+            )
+        );
     }
 
     #[tokio::test]
