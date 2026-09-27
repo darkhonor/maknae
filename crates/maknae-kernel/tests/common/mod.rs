@@ -343,8 +343,6 @@ impl Fixture {
             egress,
         )
     }
-    /// The starter with the PDP supplied by the caller (a wrapper around the
-    /// real composition, for tests that must OBSERVE whether it was consulted).
     #[allow(clippy::too_many_arguments)]
     pub fn start_with_authorizer<P>(
         &self,
@@ -363,13 +361,67 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + Send + Sync + 'static,
     {
+        self.start_with_authorizer_and_caps(
+            authz,
+            verb,
+            fd,
+            records,
+            config,
+            provider,
+            egress,
+            maknae_kernel::AttemptCaps::default(),
+        )
+    }
+    pub fn start_with_attempt_caps(
+        &self,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        self.start_with_authorizer_and_caps(
+            self.authorizer(),
+            verb,
+            fd,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            None,
+            maknae_kernel::unavailable_egress(),
+            attempt_caps,
+        )
+    }
+    /// The starter with the PDP supplied by the caller (a wrapper around the
+    /// real composition, for tests that must OBSERVE whether it was consulted).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_authorizer_and_caps<P>(
+        &self,
+        authz: Arc<P>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        provider: Option<&str>,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
             fds.push(fd);
         }
         let principal = Arc::new(self.principal.clone());
-        let task = tokio::spawn(maknae_kernel::handle(
+        let task = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
             server,
             "maknae://d/plane/cli".into(),
             0,
@@ -397,6 +449,7 @@ impl Fixture {
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,
+            attempt_caps,
         ));
         let body = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
@@ -488,7 +541,7 @@ impl Fixture {
         body: &[u8],
     ) -> Option<Response> {
         use tokio::io::AsyncReadExt;
-        maknae_proto::write_frame(&mut client, body).await.unwrap();
+        write_frame(&mut client, body).await.unwrap();
         let mut received = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut received))
             .await
@@ -502,7 +555,7 @@ impl Fixture {
             return None;
         }
         let mut cursor = &received[..];
-        let frame = maknae_proto::read_frame(&mut cursor, 65536)
+        let frame = read_frame(&mut cursor, 65536)
             .await
             .expect("bytes on the wire must be one complete frame, never a partial one");
         assert!(cursor.is_empty(), "exactly one frame, nothing after it");
@@ -525,20 +578,17 @@ async fn report_acked(
     client: &mut tokio::io::DuplexStream,
     report: maknae_proto::MutationReport,
 ) -> Option<maknae_proto::MutationAck> {
-    maknae_proto::write_frame(
+    write_frame(
         client,
         &maknae_proto::encode_mutation_report(&report).unwrap(),
     )
     .await
     .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        maknae_proto::read_frame(client, 65536),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .and_then(|b| maknae_proto::decode_mutation_ack(&b).ok())
+    tokio::time::timeout(Duration::from_secs(2), read_frame(client, 65536))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|b| maknae_proto::decode_mutation_ack(&b).ok())
 }
 pub async fn read_as_subject(
     client: &mut tokio::io::DuplexStream,
@@ -548,13 +598,10 @@ pub async fn read_as_subject(
         EffectEntry, MutationReport, MutationScope, Payload, ReportedEffect, ReportedFinish,
         RespResult,
     };
-    let first = tokio::time::timeout(
-        Duration::from_secs(2),
-        maknae_proto::read_frame(client, 1 << 20),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok);
+    let first = tokio::time::timeout(Duration::from_secs(2), read_frame(client, 1 << 20))
+        .await
+        .ok()
+        .and_then(Result::ok);
     let grant = first
         .as_deref()
         .and_then(|b| maknae_proto::decode_response(b).ok())
@@ -633,4 +680,28 @@ pub async fn read_as_subject(
             }
         }
     }
+}
+
+pub async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
+    body: &[u8],
+) -> Result<(), maknae_proto::ProtoFrameError> {
+    let class = match maknae_proto::decode_request(body) {
+        Ok(r) => maknae_proto::class_of(&r.verb),
+        Err(_) => maknae_proto::FrameClass::Attempt,
+    };
+    maknae_proto::write_frame(w, class, body).await
+}
+
+pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> Result<Vec<u8>, maknae_proto::ProtoFrameError> {
+    let caps = maknae_proto::FrameCaps {
+        control: max,
+        attempt: max,
+        prompt: max,
+    };
+    let (_, mut body) = maknae_proto::read_frame_zeroizing(r, &caps).await?;
+    Ok(std::mem::take(&mut *body))
 }

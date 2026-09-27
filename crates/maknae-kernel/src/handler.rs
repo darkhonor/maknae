@@ -235,8 +235,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
 /// same rationale family as GROUP_LOOKUP_TIMEOUT). Elapse → Deny (fail
 /// closed). 5s: §10.5's orphan-accumulation arithmetic assumes this value;
 /// the VALUE is pinned by a T1 test here because the binding site in run.rs
-/// is mutation-excluded orchestration. Degenerate configs that shrink the
-/// frame budget to 0 are fail-closed by design, not a bug.
+/// is mutation-excluded orchestration.
 pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 
 /// The bound on `subject.user`, re-exported for the identity suite.
@@ -340,17 +339,9 @@ pub fn lexical_pregate(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// CBOR + response-envelope headroom subtracted from the daemon's own frame
-/// budget before a read is sized (spec D5). Degenerate-but-legal configs
-/// (frame_max_bytes as low as 1) make the budget 0 and every non-empty read
-/// is refused — fail-closed by design, not a bug. T1-pinned here; the
-/// binding in mutation.rs is thin orchestration.
 pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
 
-/// The content bound for one read grant (and the reply frame's envelope margin).
-pub fn read_budget(frame_max_bytes: usize) -> u64 {
-    (frame_max_bytes as u64).saturating_sub(FRAME_ENVELOPE_MARGIN)
-}
+pub const READ_GRANT_MAX_BYTES: u64 = 65_024;
 
 /// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009).
 ///
@@ -859,18 +850,9 @@ mod tests {
             "~ is client-side only, never wire"
         );
     }
-    // ---- delegated_plan / read_budget (T1: the decision
-    //      logic — the alias boundary, the named requirements, the bound) ----
-
     #[test]
-    fn read_budget_subtracts_the_margin_and_saturates() {
-        assert_eq!(read_budget(65536), 65536 - 512);
-        assert_eq!(read_budget(512), 0);
-        assert_eq!(
-            read_budget(1),
-            0,
-            "degenerate config is fail-closed, not a bug"
-        );
+    fn the_read_grant_bound_and_envelope_margin_by_value() {
+        assert_eq!((READ_GRANT_MAX_BYTES, FRAME_ENVELOPE_MARGIN), (65_024, 512));
     }
 
     #[test]

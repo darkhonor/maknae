@@ -40,8 +40,9 @@ use maknae_audit_append::{
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
-    decode_request, encode_response, read_frame_zeroizing, write_frame, Payload, RespResult,
-    Response, Verb, PROTOCOL_VERSION,
+    admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
+    FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
+    PROTOCOL_VERSION,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -116,7 +117,7 @@ pub struct WhereCtx {
 /// **That is the whole of the claim, and it is narrower than it looks.**
 /// `handle` still holds raw configuration in the same scope as the arm that
 /// answers `admin.config.show`: `cfg` (the whole `transport` section --
-/// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
+/// `socket_path`, `prompt_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
 /// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). That debt has since been
 /// PAID once: the `admin.status` arm wanting "which socket am I on?" found
 /// `cfg.socket_path` sitting right there, and `listener` is disclosed under
@@ -392,6 +393,57 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
 // Layer 1: serve one connection.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
+pub async fn handle<S, E, P>(
+    stream: S,
+    peer_uri: String,
+    peer_uid: u32,
+    in_group: bool,
+    peer_user: Option<String>,
+    emit: Arc<E>,
+    session_id: u64,
+    cfg: TransportConfig,
+    au3_1: serde_json::Value,
+    authorizer: Arc<P>,
+    principal: Arc<Principal>,
+    config_view: Arc<ConfigView>,
+    authz_backend_name: Arc<String>,
+    classification_policy_name: Arc<String>,
+    provider: Arc<Option<maknae_config::ProviderConfig>>,
+    egress: Arc<dyn crate::egress::Egress>,
+    authz_decide_timeout: Duration,
+    lane: maknae_security::Lane,
+    delegated: maknae_io::DelegatedFds,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    handle_with_attempt_caps(
+        stream,
+        peer_uri,
+        peer_uid,
+        in_group,
+        peer_user,
+        emit,
+        session_id,
+        cfg,
+        au3_1,
+        authorizer,
+        principal,
+        config_view,
+        authz_backend_name,
+        classification_policy_name,
+        provider,
+        egress,
+        authz_decide_timeout,
+        lane,
+        delegated,
+        crate::mutation::AttemptCaps::default(),
+    )
+    .await
+}
+
 /// Serve exactly ONE request on an already-authenticated `stream`, then close
 /// (one-request-per-connection is an anti-DoS cap, spec §6a). Owned arguments so a
 /// `tokio::spawn`ed call is `'static`.
@@ -413,7 +465,7 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
 ///    admission record (step 2) and the request record (step 4) must be durably
 ///    appended before any response frame is written.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle<S, E, P>(
+pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
     peer_uri: String,
     peer_uid: u32,
@@ -454,6 +506,7 @@ pub async fn handle<S, E, P>(
     // request per connection, which is what today's per-invocation CLI sends;
     // pipelining on macOS is uncharacterised (ADR-0009).
     delegated: maknae_io::DelegatedFds,
+    attempt_caps: crate::mutation::AttemptCaps,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -542,7 +595,7 @@ pub async fn handle<S, E, P>(
     // 2. Read exactly one request frame, bounded by read_timeout + the frame cap.
     let read = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        read_frame_zeroizing(&mut stream, cfg.frame_max_bytes),
+        read_frame_zeroizing(&mut stream, &request_caps(&cfg, attempt_caps)),
     )
     .await;
     let body = match read {
@@ -584,8 +637,9 @@ pub async fn handle<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Ok(Ok(b)) => b,
+        Ok(Ok(frame)) => frame,
     };
+    let (class, body) = body;
 
     let request = match decode_request(&body) {
         Ok(r) => r,
@@ -612,6 +666,29 @@ pub async fn handle<S, E, P>(
             return;
         }
     };
+    if !admits(class, &request.verb) {
+        emit_request_deny(
+            &emit,
+            &host,
+            &socket,
+            peer_uid,
+            &peer_uri,
+            peer_user.as_deref(),
+            None,
+            session_id,
+            seq.next(),
+            "decode",
+            &format!(
+                "frame class mismatch: declared {class:?}, {} is {:?}",
+                verb_to_action(&request.verb),
+                class_of(&request.verb)
+            ),
+            &au3_1,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
 
     // 2½. THE PDP (spec D2, #77): every request is decided through the seam
     // before the audit-then-respond step. For a Read, the lexical pre-gate
@@ -643,6 +720,7 @@ pub async fn handle<S, E, P>(
                 write_error_bounded(
                     &mut stream,
                     &cfg,
+                    class,
                     ProtoErrCode::BadRequest,
                     "malformed path",
                 )
@@ -707,6 +785,7 @@ pub async fn handle<S, E, P>(
             write_error_bounded(
                 &mut stream,
                 &cfg,
+                class,
                 ProtoErrCode::BadRequest,
                 "invalid request",
             )
@@ -756,6 +835,7 @@ pub async fn handle<S, E, P>(
             &seq,
             record,
             authz_decide_timeout,
+            attempt_caps,
         )
         .await;
         close_bounded(&mut stream).await;
@@ -861,6 +941,7 @@ pub async fn handle<S, E, P>(
                 write_error_bounded(
                     &mut stream,
                     &cfg,
+                    class,
                     ProtoErrCode::Unauthorized,
                     "not authorized",
                 )
@@ -899,6 +980,7 @@ pub async fn handle<S, E, P>(
             write_error_bounded(
                 &mut stream,
                 &cfg,
+                class,
                 ProtoErrCode::Unauthorized,
                 "not authorized",
             )
@@ -936,6 +1018,7 @@ pub async fn handle<S, E, P>(
                 write_error_bounded(
                     &mut stream,
                     &cfg,
+                    class,
                     ProtoErrCode::Unauthorized,
                     "not authorized",
                 )
@@ -982,6 +1065,7 @@ pub async fn handle<S, E, P>(
                 write_error_bounded(
                     &mut stream,
                     &cfg,
+                    class,
                     ProtoErrCode::Unauthorized,
                     "not authorized",
                 )
@@ -1171,6 +1255,7 @@ pub async fn handle<S, E, P>(
                                 write_error_bounded(
                                     &mut stream,
                                     &cfg,
+                                    class,
                                     ProtoErrCode::Internal,
                                     "binding enumeration unavailable",
                                 )
@@ -1199,6 +1284,7 @@ pub async fn handle<S, E, P>(
                     write_frame_bounded(
                         &mut stream,
                         &cfg,
+                        class,
                         &bytes,
                         &emit,
                         &host,
@@ -1218,6 +1304,7 @@ pub async fn handle<S, E, P>(
                     refuse_unencodable_bounded(
                         &mut stream,
                         &cfg,
+                        class,
                         &emit,
                         &host,
                         &socket,
@@ -1270,6 +1357,7 @@ pub async fn handle<S, E, P>(
                     write_error_bounded(
                         &mut stream,
                         &cfg,
+                        class,
                         ProtoErrCode::Unauthorized,
                         "not authorized",
                     )
@@ -1320,6 +1408,7 @@ pub async fn handle<S, E, P>(
                     write_error_bounded(
                         &mut stream,
                         &cfg,
+                        class,
                         ProtoErrCode::Unauthorized,
                         "not authorized",
                     )
@@ -1474,7 +1563,9 @@ pub async fn handle<S, E, P>(
                             },
                             None,
                         ),
-                        Ok(()) if crate::egress::reply_capacity(&r.reply) > cfg.frame_max_bytes => {
+                        Ok(())
+                            if crate::egress::reply_capacity(&r.reply) > cfg.prompt_max_bytes =>
+                        {
                             (
                                 crate::egress::SendOutcome::LandedUndelivered {
                                     reply_length: n,
@@ -1545,6 +1636,7 @@ pub async fn handle<S, E, P>(
                                 write_frame_bounded(
                                     &mut stream,
                                     &cfg,
+                                    class,
                                     &bytes,
                                     &emit,
                                     &host,
@@ -1564,6 +1656,7 @@ pub async fn handle<S, E, P>(
                                 refuse_unencodable_bounded(
                                     &mut stream,
                                     &cfg,
+                                    class,
                                     &emit,
                                     &host,
                                     &socket,
@@ -1592,6 +1685,7 @@ pub async fn handle<S, E, P>(
                         write_error_bounded(
                             &mut stream,
                             &cfg,
+                            class,
                             ProtoErrCode::TooLarge,
                             "response exceeds the configured frame limit",
                         )
@@ -1602,6 +1696,7 @@ pub async fn handle<S, E, P>(
                         write_error_bounded(
                             &mut stream,
                             &cfg,
+                            class,
                             ProtoErrCode::Unauthorized,
                             "not authorized",
                         )
@@ -1645,6 +1740,7 @@ async fn emit_or_report<E: AuditEmit + Send + Sync>(
 async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
     cfg: &TransportConfig,
+    class: FrameClass,
     emit: &Arc<E>,
     host: &str,
     socket: &str,
@@ -1688,6 +1784,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
         write_error_bounded(
             stream,
             cfg,
+            class,
             ProtoErrCode::TooLarge,
             "response exceeds the configured frame limit",
         )
@@ -1702,6 +1799,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
 async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
     cfg: &TransportConfig,
+    class: FrameClass,
     emit: &Arc<E>,
     host: &str,
     socket: &str,
@@ -1740,6 +1838,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
         write_error_bounded(
             stream,
             cfg,
+            class,
             ProtoErrCode::Internal,
             "response encoding failed",
         )
@@ -1758,6 +1857,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
 async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
     cfg: &TransportConfig,
+    class: FrameClass,
     bytes: &[u8],
     emit: &Arc<E>,
     host: &str,
@@ -1773,17 +1873,17 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if bytes.len() > cfg.frame_max_bytes {
+    if bytes.len() > FrameCaps::responses(cfg.prompt_max_bytes).cap(class) {
         refuse_oversize_bounded(
-            stream, cfg, emit, host, socket, peer_uid, peer_uri, peer_user, role, session_id, seq,
-            action, au3_1,
+            stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role,
+            session_id, seq, action, au3_1,
         )
         .await;
         return;
     }
     let _ = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        write_frame(stream, bytes),
+        write_frame(stream, class, bytes),
     )
     .await;
 }
@@ -1793,6 +1893,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 async fn write_error_bounded<S>(
     stream: &mut S,
     cfg: &TransportConfig,
+    class: FrameClass,
     code: ProtoErrCode,
     msg: &str,
 ) where
@@ -1808,9 +1909,17 @@ async fn write_error_bounded<S>(
     if let Ok(bytes) = encode_response(&response) {
         let _ = tokio::time::timeout(
             Duration::from_millis(cfg.read_timeout_ms),
-            write_frame(stream, &bytes),
+            write_frame(stream, class, &bytes),
         )
         .await;
+    }
+}
+
+fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCaps) -> FrameCaps {
+    FrameCaps {
+        control: CONTROL_REQUEST_MAX,
+        attempt: attempt_caps.request,
+        prompt: cfg.prompt_max_bytes,
     }
 }
 

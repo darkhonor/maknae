@@ -26,11 +26,12 @@ Every buffer **Maknae owns** that holds secret-class bytes — in `maknaed`, `ma
 
 **Amended 2026-09-26 (#365):** the `read_frame` and `encode_response_zeroizing` rows.
 
+**Amended 2026-09-27 (#372):** the `read_frame` row is removed; `read_frame_zeroizing` is the only frame reader and hands its caller the body zeroizing.
+
 | site | what it holds | shape today |
 |---|---|---|
 | `crates/maknae-llm/src/client.rs`, the reply body | the whole provider reply (write content; served content the model quoted back) | plain `Vec<u8>`, `extend_from_slice` per chunk — grows, freed unwiped |
 | `crates/maknae-llm/src/wire.rs`, the response DTOs (`RespMessage.content`, `RespToolFn.arguments`) | reply text and tool arguments | plain `String`s filled by serde_json before `to_prompt_reply` wraps them; dropped plain on an error; `#[derive(Debug)]` |
-| `crates/maknae-proto/src/frame.rs`, `read_frame` | any frame body, including the prompt reply on the client leg (`bins/maknae/src/cli.rs`, `decode_response`) | `std::mem::take` out of the `Zeroizing` wrapper — the caller gets a plain `Vec` |
 | `crates/maknae-proto/src/wire.rs`, `encode_response_zeroizing` | responses, including the prompt reply | `Zeroizing<Vec>` over `with_capacity`; callers pre-size it (`reply_capacity`) but a mis-sized cap grows silently instead of erroring — `encode_egress_frame_request`'s doc calls it the weaker discipline |
 | `crates/maknae-agent/src/drive.rs`, `text_of` | the model's reply text, bound for the subject's own terminal (may echo served content) | plain `String`, `push_str` per block — grows; the code calls the asymmetry deliberate, this ADR grants no exemption |
 | `bins/maknae/src/cli.rs`, `Agent { prompt: String }` | the subject's initial prompt, from the command line | plain `String` owned by clap and `agent::run`; `Transcript::new` makes a zeroizing copy and the original is dropped unwiped |
@@ -80,6 +81,6 @@ Option B (own the codec and the body) and Option C (B for the kernel↔deputy CB
 ## References
 
 - #342 (this decision), #241 / PR #341 (the egress request leg), #172 / #240 / #264 (the prompt leg's history), #227 / #242 (custody's platform preconditions)
-- `crates/maknae-proto/src/wire.rs` — `SecretText`, `decode_request` / `decode_response` callers, `encode_response_zeroizing`; `crates/maknae-proto/src/bytes.rs` — `Bytes`; `crates/maknae-proto/src/frame.rs` — `read_frame`
+- `crates/maknae-proto/src/wire.rs` — `SecretText`, `decode_request` / `decode_response` callers, `encode_response_zeroizing`; `crates/maknae-proto/src/bytes.rs` — `Bytes`; `crates/maknae-proto/src/frame.rs` — `read_frame_zeroizing`
 - `crates/maknae-llm/src/client.rs` — `chat_completion`, the reply body; `crates/maknae-llm/src/wire.rs` — the response DTOs; `crates/maknae-deputy/src/call.rs` — `text_of`; `crates/maknae-agent/src/drive.rs` — `text_of`; `crates/maknae-agent/src/route.rs` — tool-argument parsing; `crates/maknae-vault/src/kv_io.rs` — the KV read
 - ciborium 0.2.2, `src/de/mod.rs` — `from_reader`, `from_reader_with_buffer`, `deserialize_string`, `deserialize_byte_buf`; reqwest 0.13, `src/async_impl/request.rs` — `bearer_auth`

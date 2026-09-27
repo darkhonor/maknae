@@ -40,7 +40,7 @@ disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
 disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
 disclose	transport.socket_path	the socket the daemon is listening on
 disclose	transport.max_connections	transport shape
-disclose	transport.frame_max_bytes	transport shape
+disclose	transport.prompt_max_bytes	transport shape
 disclose	transport.handshake_timeout_ms	transport shape
 disclose	transport.read_timeout_ms	transport shape
 omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRole SecretID in plaintext on disk

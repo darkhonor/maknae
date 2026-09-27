@@ -60,7 +60,7 @@ fn io(e: impl std::fmt::Display) -> ServeError {
 /// without ever touching this original serialized copy. Wrapping at allocation
 /// — rather than after a successful decode — is what covers the error paths: a
 /// truncated read, an over-cap declaration, or a failed decode all drop it the
-/// same way. Matches `maknae_proto::read_frame_zeroizing`.
+/// same way.
 ///
 /// The length is checked BEFORE the allocation: a four-byte prefix must not be
 /// able to make the deputy reserve four gigabytes.

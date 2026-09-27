@@ -1,5 +1,6 @@
 //! Versioned CBOR request/response contract (spec §3).
 use crate::error::ProtoCodecError;
+use crate::frame::FrameClass;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/
@@ -612,6 +613,72 @@ pub struct ProtoError {
 pub enum RespResult {
     Ok(Payload),
     Err(ProtoError),
+}
+
+pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
+    class_of(verb) == declared
+}
+
+pub fn class_of(verb: &Verb) -> FrameClass {
+    match verb {
+        Verb::SessionPrompt { .. } => FrameClass::Prompt,
+        Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove
+        | Verb::FsList
+        | Verb::FsStat
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown => FrameClass::Attempt,
+        Verb::Ping
+        | Verb::Whoami
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain
+        | Verb::AdminRelease
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminCredentialBroker
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew
+        | Verb::SessionResume
+        | Verb::SessionClose
+        | Verb::SessionDelete
+        | Verb::SessionList
+        | Verb::SessionFork
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => FrameClass::Control,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1451,5 +1518,215 @@ mod tests {
             call_id: "c".repeat(MAX_TOOL_CALL_ID_BYTES + 1),
             content: vec![text("r")]
         }));
+    }
+
+    mod class_tests {
+        use super::*;
+        use crate::frame::{ATTEMPT_REQUEST_MAX, ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX};
+        use crate::mutation::{
+            MutationGrant, MutationId, MutationLimits, MutationScope, WriteMode,
+            MAX_MUTATION_DEPTH, MAX_MUTATION_PATH_BYTES,
+        };
+
+        fn every_verb() -> Vec<(Verb, FrameClass)> {
+            vec![
+                (Verb::Ping, FrameClass::Control),
+                (Verb::Whoami, FrameClass::Control),
+                (Verb::AdminStatus, FrameClass::Control),
+                (Verb::AdminConfigShow, FrameClass::Control),
+                (Verb::AdminAuditTail, FrameClass::Control),
+                (Verb::AdminPolicyReload, FrameClass::Control),
+                (Verb::AdminSubjectList, FrameClass::Control),
+                (Verb::AdminSubjectBind, FrameClass::Control),
+                (Verb::AdminSubjectUnbind, FrameClass::Control),
+                (Verb::AdminContain, FrameClass::Control),
+                (Verb::AdminRelease, FrameClass::Control),
+                (Verb::AdminCredentialRotate, FrameClass::Control),
+                (Verb::AdminProviderList, FrameClass::Control),
+                (Verb::AdminProviderSet, FrameClass::Control),
+                (Verb::AdminProviderDisable, FrameClass::Control),
+                (Verb::AdminCredentialBroker, FrameClass::Control),
+                (Verb::AdminSessionList, FrameClass::Control),
+                (Verb::AdminSessionTerminate, FrameClass::Control),
+                (Verb::SessionNew, FrameClass::Control),
+                (Verb::SessionResume, FrameClass::Control),
+                (Verb::SessionClose, FrameClass::Control),
+                (Verb::SessionDelete, FrameClass::Control),
+                (Verb::SessionList, FrameClass::Control),
+                (Verb::SessionFork, FrameClass::Control),
+                (
+                    Verb::SessionPrompt {
+                        conversation: "c".into(),
+                        turns: vec![],
+                    },
+                    FrameClass::Prompt,
+                ),
+                (Verb::SessionCancel, FrameClass::Control),
+                (Verb::SessionSetconfigoption, FrameClass::Control),
+                (Verb::SessionSetmode, FrameClass::Control),
+                (Verb::SessionLoad, FrameClass::Control),
+                (Verb::SessionUpdate, FrameClass::Control),
+                (Verb::SessionRequestpermission, FrameClass::Control),
+                (Verb::SessionElicitCreate, FrameClass::Control),
+                (Verb::SessionElicitComplete, FrameClass::Control),
+                (Verb::SessionCompact, FrameClass::Control),
+                (
+                    Verb::Read {
+                        path: "/p".into(),
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
+                (
+                    Verb::FsWrite {
+                        path: "/p".into(),
+                        content_length: 0,
+                        mode: WriteMode::Existing,
+                        conversation: None,
+                    },
+                    FrameClass::Attempt,
+                ),
+                (
+                    Verb::FsDelete {
+                        path: "/p".into(),
+                        recursive: false,
+                    },
+                    FrameClass::Attempt,
+                ),
+                (Verb::FsMove, FrameClass::Attempt),
+                (Verb::FsList, FrameClass::Attempt),
+                (Verb::FsStat, FrameClass::Attempt),
+                (
+                    Verb::FsMkdir {
+                        path: "/p".into(),
+                        parents: false,
+                        components: vec![],
+                    },
+                    FrameClass::Attempt,
+                ),
+                (Verb::FsLink, FrameClass::Attempt),
+                (Verb::FsChmod, FrameClass::Attempt),
+                (Verb::FsChown, FrameClass::Attempt),
+                (Verb::TerminalCreate, FrameClass::Control),
+                (Verb::TerminalOutput, FrameClass::Control),
+                (Verb::TerminalWaitforexit, FrameClass::Control),
+                (Verb::TerminalKill, FrameClass::Control),
+                (Verb::TerminalRelease, FrameClass::Control),
+                (Verb::TerminalInput, FrameClass::Control),
+                (Verb::McpConnect, FrameClass::Control),
+                (Verb::McpDisconnect, FrameClass::Control),
+                (Verb::McpMessage, FrameClass::Control),
+                (Verb::McpToolCall, FrameClass::Control),
+                (Verb::McpResourceRead, FrameClass::Control),
+                (Verb::McpPromptGet, FrameClass::Control),
+                (Verb::McpSamplingCreate, FrameClass::Control),
+            ]
+        }
+
+        #[test]
+        fn class_of_pins_every_verb() {
+            let all = every_verb();
+            assert_eq!(all.len(), 57);
+            for (verb, class) in all {
+                assert_eq!(class_of(&verb), class, "{verb:?}");
+            }
+        }
+
+        #[test]
+        fn every_control_verb_encodes_under_the_control_request_cap() {
+            for (verb, class) in every_verb() {
+                if class == FrameClass::Control {
+                    let bytes = encode_request(&Request {
+                        protocol_version: PROTOCOL_VERSION,
+                        verb,
+                    })
+                    .unwrap();
+                    assert!(bytes.len() <= CONTROL_REQUEST_MAX);
+                }
+            }
+        }
+
+        fn deepest_path() -> (String, Vec<String>) {
+            let depth = MAX_MUTATION_DEPTH as usize;
+            let ancestor = format!("/{}", "a".repeat(MAX_MUTATION_PATH_BYTES - 1 - 2 * depth));
+            let components: Vec<String> = (0..depth).map(|_| "b".to_string()).collect();
+            let path = format!("{ancestor}/{}", components.join("/"));
+            assert_eq!(path.len(), MAX_MUTATION_PATH_BYTES);
+            (ancestor, components)
+        }
+
+        #[test]
+        fn an_attempt_request_at_the_path_limit_fits_the_attempt_request_cap() {
+            let (ancestor, components) = deepest_path();
+            let path = format!("{ancestor}/{}", components.join("/"));
+            for verb in [
+                Verb::FsMkdir {
+                    path: path.clone(),
+                    parents: true,
+                    components,
+                },
+                Verb::FsWrite {
+                    path,
+                    content_length: u64::MAX,
+                    mode: WriteMode::CreateExclusive,
+                    conversation: Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
+                },
+            ] {
+                let bytes = encode_request(&Request {
+                    protocol_version: PROTOCOL_VERSION,
+                    verb,
+                })
+                .unwrap();
+                assert!(bytes.len() <= ATTEMPT_REQUEST_MAX, "{}", bytes.len());
+            }
+        }
+
+        #[test]
+        fn the_worst_case_grant_fits_the_attempt_response_cap() {
+            let (ancestor, components) = deepest_path();
+            let mut paths = Vec::new();
+            let mut prefix = ancestor;
+            for c in &components {
+                prefix = format!("{prefix}/{c}");
+                paths.push(prefix.clone());
+            }
+            let grant = MutationGrant {
+                id: MutationId {
+                    session_id: u64::MAX,
+                    intent_seq: u64::MAX,
+                },
+                scope: MutationScope::Directories { paths },
+                limits: MutationLimits {
+                    max_effects: u32::MAX,
+                    max_depth: u16::MAX,
+                    deadline_ms: u64::MAX,
+                    max_bytes: u64::MAX,
+                },
+            };
+            let bytes = encode_response(&Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(Payload::MutationAttempt(grant)),
+            })
+            .unwrap();
+            assert!(bytes.len() <= ATTEMPT_RESPONSE_MAX);
+        }
+
+        #[test]
+        fn the_attempt_response_cap_by_value() {
+            assert_eq!(ATTEMPT_RESPONSE_MAX, 524_288);
+        }
+
+        #[test]
+        fn admits_only_the_verbs_own_class() {
+            for (verb, class) in every_verb() {
+                for declared in [FrameClass::Control, FrameClass::Attempt, FrameClass::Prompt] {
+                    assert_eq!(
+                        admits(declared, &verb),
+                        declared == class,
+                        "{verb:?} as {declared:?}"
+                    );
+                }
+            }
+        }
     }
 }

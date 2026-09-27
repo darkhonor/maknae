@@ -329,7 +329,7 @@ const DISCLOSABLE: &[&str] = &[
     "egress.deadline_ms",
     "transport.socket_path",
     "transport.max_connections",
-    "transport.frame_max_bytes",
+    "transport.prompt_max_bytes",
     "transport.handshake_timeout_ms",
     "transport.read_timeout_ms",
     // NOT classified, deliberately. Each carries its reason, because "absent
@@ -609,8 +609,8 @@ pub fn effective_view(
                 Some(r.transport.max_connections.to_string()),
             ),
             (
-                "frame_max_bytes",
-                Some(r.transport.frame_max_bytes.to_string()),
+                "prompt_max_bytes",
+                Some(r.transport.prompt_max_bytes.to_string()),
             ),
             (
                 "handshake_timeout_ms",
@@ -1016,7 +1016,7 @@ mod tests {
                 egress: &crate::EgressConfig::default(),
             },
         );
-        assert_eq!(v["transport"]["frame_max_bytes"], "65536");
+        assert_eq!(v["transport"]["prompt_max_bytes"], "65536");
         assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");

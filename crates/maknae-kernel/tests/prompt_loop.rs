@@ -694,7 +694,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
         // #241: a client-supplied tool call over its argument bound is
         // refused by SHAPE admission at the pre-gate — before any intent
         // record, before the PDP. The payload is well under the default
-        // `frame_max_bytes`, so the frame itself is accepted and the pre-gate
+        // `prompt_max_bytes`, so the frame itself is accepted and the pre-gate
         // is what refuses.
         (
             Verb::SessionPrompt {

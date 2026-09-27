@@ -159,7 +159,7 @@ impl Plane for RealPlane<'_> {
                 protocol_version: maknae_proto::PROTOCOL_VERSION,
                 verb: verb.clone(),
             },
-            self.transport.frame_max_bytes,
+            self.transport.prompt_max_bytes,
         )
         .is_err()
         {
@@ -183,13 +183,13 @@ impl Plane for RealPlane<'_> {
         )
     }
     async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
-        // The frame-budget refusal is LOCAL and pre-send — nothing left
+        // The prompt-budget refusal is LOCAL and pre-send — nothing left
         // the process, nothing is on the trail, the file is untouched.
         let Ok((verb, content)) = write_request(
             path.to_string(),
             zeroize::Zeroizing::new(content.to_vec()),
             Some(conversation.to_string()),
-            self.transport.frame_max_bytes,
+            self.transport.prompt_max_bytes,
         ) else {
             return WriteOutcome::NotSent;
         };

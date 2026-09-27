@@ -231,7 +231,7 @@ Additional file rules:
 > |---|---|
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
 > | `core.handling` *(already closed; listed for completeness)* | `ceiling`, `accreditation_ref`, `policy` |
-> | `transport` | `socket_path`, `max_connections`, `frame_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
+> | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
 > | `audit` | `jsonl_path`, `siem`, `au3_1` |
 > | `principal` | `name`, `uid`, `home` |
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path` |
@@ -557,7 +557,7 @@ egress:
   handlers, the audit drain, the plane client's bounded lock wait and token revoke, and the
   runtime teardown — and a kernel test holds the unit values to that chain, two-sided. At
   the defaults the chain is 396 s; a stop with nothing in flight exits in milliseconds. One
-  more bound at the ceiling: a prompt that fills `transport.frame_max_bytes` at its own
+  more bound at the ceiling: a prompt that fills `transport.prompt_max_bytes` at its own
   1 MiB maximum re-wraps into an egress frame larger than the deputy's 1 MiB request cap
   and is refused before it is sent (`send failed` in the trail, nothing left the host).
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
@@ -631,6 +631,7 @@ One name below, `UnknownRole`, is `maknae-authz-basic`'s rather than the config 
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
 | **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, `provider`, `egress` and `vault`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block; and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
+| `transport.prompt_max_bytes` outside 65536..=1048576 (default 65536; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
 
 ---
 

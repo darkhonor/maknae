@@ -955,7 +955,7 @@ FIX
 pub struct TransportConfig {
     pub socket_path: PathBuf,
     pub max_connections: u32,
-    pub frame_max_bytes: usize,
+    pub prompt_max_bytes: usize,
     pub handshake_timeout_ms: u64,
     pub read_timeout_ms: ${5:-u64},
     ${2:-}
@@ -1071,7 +1071,7 @@ expect_reject_because "config-disclosure-drift/config-struct-field-changes-the-c
 # config surface, while the harness printed neg-ok. Bump the SURFACE count so
 # the field is legitimately counted, and decide the transport fields
 # INDIVIDUALLY (as the real manifest does) so the new one is genuinely undecided.
-fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.frame_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
+fx="$(cfg_fixture "$(printf '%s' "$CFG_OK" | sed "s|^disclose${TABCH}transport${TABCH}.*|disclose${TABCH}transport.socket_path${TABCH}shape\ndisclose${TABCH}transport.max_connections${TABCH}shape\ndisclose${TABCH}transport.prompt_max_bytes${TABCH}shape\ndisclose${TABCH}transport.handshake_timeout_ms${TABCH}shape\ndisclose${TABCH}transport.read_timeout_ms${TABCH}shape|")" \
   'pub debug_core_dump_path: PathBuf,')"
 python3 - "$fx" <<'PY'
 import pathlib, sys
@@ -1088,7 +1088,7 @@ t = d.read_text()
 assert t.count('    "transport",\n') == 1, "fixture DISCLOSABLE anchor moved"
 d.write_text(t.replace('    "transport",\n', "".join(
     '    "transport.%s",\n' % f for f in
-    ("socket_path", "max_connections", "frame_max_bytes",
+    ("socket_path", "max_connections", "prompt_max_bytes",
      "handshake_timeout_ms", "read_timeout_ms"))))
 PY
 expect_reject_because "config-disclosure-drift/struct-field-with-no-decision" \

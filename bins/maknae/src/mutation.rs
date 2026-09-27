@@ -636,23 +636,31 @@ impl Worker {
 
 async fn report<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
-    cfg: &TransportConfig,
+    cap: usize,
     deadline: Instant,
     message: MutationReport,
     id: proto::MutationId,
     index: u32,
 ) -> Result<(), String> {
     let body = proto::encode_mutation_report(&message).map_err(|e| e.to_string())?;
-    if body.len() > cfg.frame_max_bytes {
+    if body.len() > cap {
         return Err("mutation report exceeds frame limit; no automatic retry".into());
     }
     let exchange = async {
-        proto::write_frame(stream, &body)
+        proto::write_frame(stream, proto::FrameClass::Attempt, &body)
             .await
             .map_err(|e| e.to_string())?;
-        let bytes = proto::read_frame(stream, cfg.frame_max_bytes)
-            .await
-            .map_err(|e| e.to_string())?;
+        let bytes = proto::read_frame_of_class(
+            stream,
+            proto::FrameClass::Attempt,
+            &proto::FrameCaps {
+                control: 0,
+                attempt: proto::ATTEMPT_RESPONSE_MAX,
+                prompt: 0,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         let ack = proto::decode_mutation_ack(&bytes).map_err(|e| e.to_string())?;
         if ack.id != id || ack.next_index != index {
             return Err("mutation acknowledgment correlation mismatch".into());
@@ -669,9 +677,16 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     cfg: &TransportConfig,
     request_started: Instant,
 ) -> Result<bool, String> {
-    run_attempt(prepared, grant, stream, cfg, request_started)
-        .await
-        .map(|(success, _)| success)
+    run_attempt(
+        prepared,
+        grant,
+        stream,
+        cfg,
+        proto::ATTEMPT_REQUEST_MAX,
+        request_started,
+    )
+    .await
+    .map(|(success, _)| success)
 }
 pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepared: PreparedMutation,
@@ -680,9 +695,16 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     cfg: &TransportConfig,
     request_started: Instant,
 ) -> Result<Option<maknae_io::Zeroizing<Vec<u8>>>, String> {
-    run_attempt(prepared, grant, stream, cfg, request_started)
-        .await
-        .map(|(success, content)| content.filter(|_| success))
+    run_attempt(
+        prepared,
+        grant,
+        stream,
+        cfg,
+        proto::ATTEMPT_REQUEST_MAX,
+        request_started,
+    )
+    .await
+    .map(|(success, content)| content.filter(|_| success))
 }
 type Attempted = (bool, Option<maknae_io::Zeroizing<Vec<u8>>>);
 async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -690,6 +712,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     grant: MutationGrant,
     stream: &mut S,
     cfg: &TransportConfig,
+    cap: usize,
     request_started: Instant,
 ) -> Result<Attempted, String> {
     let reading = matches!(prepared.request, proto::Verb::Read { .. });
@@ -722,7 +745,6 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
         );
     }
     let id = grant.id;
-    let cap = cfg.frame_max_bytes;
     if !fits(&finished(id, 0, ReportedFinish::LimitReached, None), cap) {
         return Err("frame limit cannot hold mutation completion; no effect attempted".into());
     }
@@ -814,7 +836,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             let message = batch(id, next.next_index, entry.clone());
             next.next_index += 1;
             next.seen.insert(entry.path);
-            report(stream, cfg, deadline, message, id, next.next_index).await?;
+            report(stream, cap, deadline, message, id, next.next_index).await?;
         }
         if let Some((outcome, at)) = step.finish {
             let outcome = if outcome == ReportedFinish::OsRefused && next.next_index > 0 {
@@ -824,7 +846,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             };
             report(
                 stream,
-                cfg,
+                cap,
                 deadline,
                 finished(id, next.next_index, outcome, at),
                 id,
@@ -931,12 +953,44 @@ mod tests {
     fn delete(path: String, recursive: bool) -> proto::Verb {
         proto::Verb::FsDelete { path, recursive }
     }
+    async fn read_frame<R: AsyncRead + Unpin>(
+        r: &mut R,
+        max: usize,
+    ) -> Result<Vec<u8>, proto::ProtoFrameError> {
+        let caps = proto::FrameCaps {
+            control: max,
+            attempt: max,
+            prompt: max,
+        };
+        let (_, mut body) = proto::read_frame_zeroizing(r, &caps).await?;
+        Ok(std::mem::take(&mut *body))
+    }
+    async fn write_frame<W: AsyncWrite + Unpin>(
+        w: &mut W,
+        body: &[u8],
+    ) -> Result<(), proto::ProtoFrameError> {
+        proto::write_frame(w, proto::FrameClass::Attempt, body).await
+    }
     async fn acknowledged(
         prepared: PreparedMutation,
         grant: MutationGrant,
         cfg: TransportConfig,
     ) -> (Result<bool, String>, Vec<MutationReport>) {
         acknowledged_from(prepared, grant, cfg, Instant::now()).await
+    }
+    async fn acknowledged_with_cap(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+        cap: usize,
+    ) -> (Result<bool, String>, Vec<MutationReport>) {
+        let cfg = TransportConfig::default();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
+        let result = run_attempt(prepared, grant, &mut client, &cfg, cap, Instant::now())
+            .await
+            .map(|(success, _)| success);
+        drop(client);
+        (result, receiver.await.unwrap())
     }
     async fn acknowledged_from(
         prepared: PreparedMutation,
@@ -945,7 +999,7 @@ mod tests {
         request_started: Instant,
     ) -> (Result<bool, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
-        let receiver = acknowledge_all(server, cfg.frame_max_bytes);
+        let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
         let result = execute(prepared, grant, &mut client, &cfg, request_started).await;
         drop(client);
         (result, receiver.await.unwrap())
@@ -956,7 +1010,7 @@ mod tests {
     ) -> tokio::task::JoinHandle<Vec<MutationReport>> {
         tokio::spawn(async move {
             let mut reports = vec![];
-            while let Ok(bytes) = proto::read_frame(&mut server, cap).await {
+            while let Ok(bytes) = read_frame(&mut server, cap).await {
                 let report = proto::decode_mutation_report(&bytes).unwrap();
                 let (id, next_index, terminal) = match &report {
                     MutationReport::Batch {
@@ -967,7 +1021,7 @@ mod tests {
                     MutationReport::Finished { id, next_index, .. } => (*id, *next_index, true),
                 };
                 reports.push(report);
-                proto::write_frame(
+                write_frame(
                     &mut server,
                     &proto::encode_mutation_ack(&proto::MutationAck { id, next_index }).unwrap(),
                 )
@@ -1003,7 +1057,7 @@ mod tests {
         cfg: TransportConfig,
     ) -> (Result<Option<Vec<u8>>, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
-        let receiver = acknowledge_all(server, cfg.frame_max_bytes);
+        let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
         let result = execute_read(prepared, grant, &mut client, &cfg, Instant::now()).await;
         drop(client);
         (
@@ -1093,18 +1147,18 @@ mod tests {
         std::fs::write(&path, b"withheld bytes").unwrap();
         let (mut client, mut server) = tokio::io::duplex(65536);
         let receiver = tokio::spawn(async move {
-            let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+            let bytes = read_frame(&mut server, 65536).await.unwrap();
             let report = proto::decode_mutation_report(&bytes).unwrap();
             let MutationReport::Batch { id, .. } = report else {
                 panic!("expected the read batch first: {report:?}")
             };
-            proto::write_frame(
+            write_frame(
                 &mut server,
                 &proto::encode_mutation_ack(&proto::MutationAck { id, next_index: 1 }).unwrap(),
             )
             .await
             .unwrap();
-            let _finished = proto::read_frame(&mut server, 65536).await;
+            let _finished = read_frame(&mut server, 65536).await;
         });
         let result = execute_read(
             read(path.clone()).unwrap(),
@@ -1303,17 +1357,13 @@ mod tests {
     async fn tiny_frame_and_wrong_grant_have_no_effect() {
         let d = Fixture::new();
         let path = d.path("no-effect-sentinel");
-        let cfg = TransportConfig {
-            frame_max_bytes: 1,
-            ..TransportConfig::default()
-        };
-        let (result, _) = acknowledged(
+        let (result, _) = acknowledged_with_cap(
             prepare_write(path.clone()).unwrap(),
             grant(MutationScope::Exact {
                 path: path.clone(),
                 effect: ReportedEffect::CreatedFile,
             }),
-            cfg,
+            1,
         )
         .await;
         assert!(result.is_err());
@@ -1351,7 +1401,7 @@ mod tests {
             )
             .await
         });
-        let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+        let bytes = read_frame(&mut server, 65536).await.unwrap();
         assert!(matches!(
             proto::decode_mutation_report(&bytes).unwrap(),
             MutationReport::Batch { first_index: 0, .. }
@@ -1374,11 +1424,8 @@ mod tests {
             proto::encode_mutation_report(&finished(g.id, 0, ReportedFinish::LimitReached, None))
                 .unwrap()
                 .len();
-        let cfg = TransportConfig {
-            frame_max_bytes: base_size,
-            ..TransportConfig::default()
-        };
-        let (result, reports) = acknowledged(prepare_write(path.clone()).unwrap(), g, cfg).await;
+        let (result, reports) =
+            acknowledged_with_cap(prepare_write(path.clone()).unwrap(), g, base_size).await;
         assert_eq!(result, Ok(false));
         assert!(!Path::new(&path).exists());
         assert!(matches!(
@@ -1439,8 +1486,8 @@ mod tests {
             )
             .await
         });
-        proto::read_frame(&mut server, 65536).await.unwrap();
-        proto::write_frame(
+        read_frame(&mut server, 65536).await.unwrap();
+        write_frame(
             &mut server,
             &proto::encode_mutation_ack(&proto::MutationAck { id, next_index: 2 }).unwrap(),
         )
@@ -1490,7 +1537,7 @@ mod tests {
             )
             .await
         });
-        let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+        let bytes = read_frame(&mut server, 65536).await.unwrap();
         let MutationReport::Batch {
             id, first_index: 0, ..
         } = proto::decode_mutation_report(&bytes).unwrap()
@@ -1499,10 +1546,10 @@ mod tests {
         };
         std::fs::write(&paths[1], b"intervening preserved").unwrap();
         let ack = proto::encode_mutation_ack(&proto::MutationAck { id, next_index: 1 }).unwrap();
-        proto::write_frame(&mut server, &ack).await.unwrap();
-        let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+        write_frame(&mut server, &ack).await.unwrap();
+        let bytes = read_frame(&mut server, 65536).await.unwrap();
         let terminal = proto::decode_mutation_report(&bytes).unwrap();
-        proto::write_frame(&mut server, &ack).await.unwrap();
+        write_frame(&mut server, &ack).await.unwrap();
         assert_eq!(task.await.unwrap(), Ok(false));
         assert_eq!(std::fs::read(&paths[1]).unwrap(), b"intervening preserved");
         assert!(matches!(
@@ -1532,7 +1579,7 @@ mod tests {
             tokio::spawn(
                 async move { execute(prepared, g, &mut client, &cfg, Instant::now()).await },
             );
-        proto::read_frame(&mut server, 65536).await.unwrap();
+        read_frame(&mut server, 65536).await.unwrap();
         assert!(task.await.unwrap().unwrap_err().contains("timed out"));
         assert!(d.0.join("deadline-parent").is_dir());
         assert!(!d.0.join("deadline-parent/untouched-sentinel").exists());
@@ -1981,12 +2028,12 @@ mod tests {
         for bytes in [vec![0xff], proto::encode_mutation_ack(&bad_ack).unwrap()] {
             let (mut client, mut server) = tokio::io::duplex(65536);
             let peer = tokio::spawn(async move {
-                proto::read_frame(&mut server, 65536).await.unwrap();
-                proto::write_frame(&mut server, &bytes).await.unwrap();
+                read_frame(&mut server, 65536).await.unwrap();
+                write_frame(&mut server, &bytes).await.unwrap();
             });
             assert!(report(
                 &mut client,
-                &TransportConfig::default(),
+                proto::ATTEMPT_REQUEST_MAX,
                 Instant::now() + Duration::from_secs(1),
                 message.clone(),
                 g.id,
@@ -1996,14 +2043,29 @@ mod tests {
             .is_err());
             peer.await.unwrap();
         }
-        let (mut client, server) = tokio::io::duplex(65536);
-        let cfg = TransportConfig {
-            frame_max_bytes: 1,
-            ..TransportConfig::default()
-        };
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let peer = tokio::spawn(async move {
+            read_frame(&mut server, 65536).await.unwrap();
+            proto::write_frame(&mut server, proto::FrameClass::Control, b"")
+                .await
+                .unwrap();
+        });
         assert!(report(
             &mut client,
-            &cfg,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now() + Duration::from_secs(1),
+            message.clone(),
+            g.id,
+            0
+        )
+        .await
+        .unwrap_err()
+        .contains("frame class unexpected"));
+        peer.await.unwrap();
+        let (mut client, server) = tokio::io::duplex(65536);
+        assert!(report(
+            &mut client,
+            1,
             Instant::now() + Duration::from_secs(1),
             message.clone(),
             g.id,
@@ -2015,7 +2077,7 @@ mod tests {
         drop(server);
         assert!(report(
             &mut client,
-            &TransportConfig::default(),
+            proto::ATTEMPT_REQUEST_MAX,
             Instant::now() + Duration::from_secs(1),
             message,
             g.id,
@@ -2254,7 +2316,7 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(65536);
         let task =
             tokio::spawn(async move { execute(prepared, g, &mut client, &cfg, started).await });
-        let bytes = proto::read_frame(&mut server, 65536).await.unwrap();
+        let bytes = read_frame(&mut server, 65536).await.unwrap();
         let MutationReport::Batch {
             id, first_index: 0, ..
         } = proto::decode_mutation_report(&bytes).unwrap()
@@ -2263,7 +2325,7 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(700)).await;
         let ack = proto::encode_mutation_ack(&proto::MutationAck { id, next_index: 1 }).unwrap();
-        let _ = proto::write_frame(&mut server, &ack).await;
+        let _ = write_frame(&mut server, &ack).await;
         assert!(task.await.unwrap().is_err());
         assert!(d.0.join("elapsed-parent").is_dir());
         assert!(!d.0.join("elapsed-parent/untouched-sentinel").exists());

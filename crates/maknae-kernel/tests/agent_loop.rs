@@ -177,7 +177,7 @@ impl Plane for FixturePlane {
             Some("openai"),
             self.egress.clone(),
         );
-        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        common::write_frame(&mut client, &body).await.unwrap();
         let run = common::read_as_subject(&mut client, held.as_ref()).await;
         drop(client);
         task.await.unwrap();
@@ -216,8 +216,8 @@ impl Plane for FixturePlane {
             Some("openai"),
             self.egress.clone(),
         );
-        maknae_proto::write_frame(&mut client, &body).await.unwrap();
-        let response = maknae_proto::read_frame(&mut client, 65536)
+        common::write_frame(&mut client, &body).await.unwrap();
+        let response = common::read_frame(&mut client, 65536)
             .await
             .ok()
             .and_then(|b| maknae_proto::decode_response(&b).ok());
@@ -279,11 +279,11 @@ async fn acked(
     let Ok(body) = maknae_proto::encode_mutation_report(&report) else {
         return false;
     };
-    if maknae_proto::write_frame(client, &body).await.is_err() {
+    if common::write_frame(client, &body).await.is_err() {
         return false;
     }
     matches!(
-        maknae_proto::read_frame(client, 65536).await.ok().and_then(|b| maknae_proto::decode_mutation_ack(&b).ok()),
+        common::read_frame(client, 65536).await.ok().and_then(|b| maknae_proto::decode_mutation_ack(&b).ok()),
         Some(ack) if ack.next_index == next_index
     )
 }

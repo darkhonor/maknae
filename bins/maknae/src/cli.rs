@@ -22,9 +22,11 @@
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
 use maknae_proto::{
+    class_of, read_frame_of_class, write_frame, FrameCaps, ATTEMPT_REQUEST_MAX, CONTROL_REQUEST_MAX,
+};
+use maknae_proto::{
     decode_response, encode_request_zeroizing, Payload, Request, RespResult, PROTOCOL_VERSION,
 };
-use maknae_proto::{read_frame, write_frame};
 use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector, VAULT_SECTION};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -189,16 +191,30 @@ impl From<Verb> for maknae_proto::Verb {
     }
 }
 
+fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
+    FrameCaps::responses(transport.prompt_max_bytes)
+}
+
+async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    class: maknae_proto::FrameClass,
+    caps: &FrameCaps,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    read_frame_of_class(stream, class, caps)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn request_from_input(
     verb: Verb,
-    frame_max: usize,
+    content_max: usize,
     input: &mut impl std::io::Read,
 ) -> Result<(maknae_proto::Verb, Option<maknae_proto::Bytes>), String> {
     let mut request: maknae_proto::Verb = verb.into();
     let maknae_proto::Verb::FsWrite { content_length, .. } = &mut request else {
         return Ok((request, None));
     };
-    let cap = frame_max.checked_add(1).ok_or("invalid frame budget")?;
+    let cap = content_max.checked_add(1).ok_or("invalid prompt budget")?;
     let mut bytes = zeroize::Zeroizing::new(vec![0; cap]);
     let mut used = 0;
     loop {
@@ -206,8 +222,8 @@ fn request_from_input(
             Ok(0) => break,
             Ok(n) => {
                 used += n;
-                if used > frame_max {
-                    return Err("stdin content exceeds the configured frame budget".into());
+                if used > content_max {
+                    return Err("stdin content exceeds the configured prompt budget".into());
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -256,7 +272,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 
     let (request, content) = request_from_input(
         verb.clone(),
-        transport.frame_max_bytes,
+        transport.prompt_max_bytes,
         &mut std::io::stdin().lock(),
     )?;
 
@@ -407,15 +423,21 @@ pub(crate) async fn send_verb(
             .map(|p| p.request().clone())
             .unwrap_or(request_verb),
     };
+    let class = class_of(&request.verb);
+    let request_caps = FrameCaps {
+        control: CONTROL_REQUEST_MAX,
+        attempt: ATTEMPT_REQUEST_MAX,
+        prompt: transport.prompt_max_bytes,
+    };
     let body =
-        encode_request_zeroizing(&request, transport.frame_max_bytes).map_err(|e| e.to_string())?;
+        encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
     // Bound the request write like the handshake and read: a daemon that accepted but
     // stopped consuming must not hang the CLI on a full socket buffer (the frame can
     // exceed the UDS buffer). `read_timeout_ms` doubles as the write bound.
     let request_started = std::time::Instant::now();
     match tokio::time::timeout(
         std::time::Duration::from_millis(transport.read_timeout_ms),
-        write_frame(&mut stream, &body),
+        write_frame(&mut stream, class, &body),
     )
     .await
     {
@@ -433,7 +455,7 @@ pub(crate) async fn send_verb(
     // non-zero, and `execute` still revokes the token).
     let read = tokio::time::timeout(
         std::time::Duration::from_millis(transport.read_timeout_ms),
-        read_frame(&mut stream, transport.frame_max_bytes),
+        read_reply(&mut stream, class, &response_caps(transport)),
     )
     .await;
     let resp_body = match read {
@@ -443,7 +465,7 @@ pub(crate) async fn send_verb(
                 transport.read_timeout_ms
             ))
         }
-        Ok(r) => r.map_err(|e| e.to_string())?,
+        Ok(r) => r?,
     };
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
@@ -479,7 +501,7 @@ pub(crate) async fn send_verb(
 }
 
 /// Build an `FsWrite` for `content` the caller already holds in memory, bounded by the
-/// frame budget [`request_from_input`] applies to stdin; the request carries only the length.
+/// prompt budget [`request_from_input`] applies to stdin; the request carries only the length.
 ///
 /// The mode is `Existing` — what `maknae write` sends too — because
 /// [`crate::mutation::prepare`] overrides it at open time (`CreateExclusive` on a
@@ -488,10 +510,10 @@ pub(crate) fn write_request(
     path: String,
     content: zeroize::Zeroizing<Vec<u8>>,
     conversation: Option<String>,
-    frame_max: usize,
+    content_max: usize,
 ) -> Result<(maknae_proto::Verb, maknae_proto::Bytes), String> {
-    if content.len() > frame_max {
-        return Err("content exceeds the configured frame budget".to_string());
+    if content.len() > content_max {
+        return Err("content exceeds the configured prompt budget".to_string());
     }
     let request = maknae_proto::Verb::FsWrite {
         conversation,
@@ -631,6 +653,55 @@ fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_prompt_reply_over_the_control_cap_is_read_with_the_prompt_cap() {
+        let reply = maknae_proto::Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+                blocks: vec![maknae_proto::ContentBlock::Text {
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
+                }],
+                tool_calls: vec![],
+            })),
+        };
+        let body = maknae_proto::encode_response(&reply).unwrap();
+        assert!(body.len() > maknae_proto::CONTROL_RESPONSE_MAX);
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: 1 << 20,
+            ..Default::default()
+        };
+        async fn framed(class: maknae_proto::FrameClass, body: &[u8]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, class, body).await.unwrap();
+            buf
+        }
+        let prompt = maknae_proto::FrameClass::Prompt;
+        let bytes = framed(prompt, &body).await;
+        let got = read_reply(&mut &bytes[..], prompt, &response_caps(&transport))
+            .await
+            .unwrap();
+        assert_eq!(got.len(), body.len());
+        let narrow = FrameCaps {
+            prompt: maknae_proto::CONTROL_RESPONSE_MAX,
+            ..response_caps(&transport)
+        };
+        assert!(read_reply(&mut &bytes[..], prompt, &narrow)
+            .await
+            .unwrap_err()
+            .contains("oversize"));
+        let control = framed(maknae_proto::FrameClass::Control, &body).await;
+        let wide = FrameCaps {
+            control: 1 << 20,
+            ..response_caps(&transport)
+        };
+        assert_eq!(
+            read_reply(&mut &control[..], prompt, &wide)
+                .await
+                .unwrap_err(),
+            "frame class unexpected: Control, expected Prompt"
+        );
+    }
+
     #[test]
     fn mutation_commands_preserve_options() {
         assert!(matches!(
@@ -706,7 +777,7 @@ mod tests {
         )
         .expect_err("over-budget content must not encode");
         assert!(
-            e.contains("exceeds the configured frame budget"),
+            e.contains("exceeds the configured prompt budget"),
             "unexpected message: {e}"
         );
     }
