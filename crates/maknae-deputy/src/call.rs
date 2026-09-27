@@ -564,20 +564,6 @@ mod tests {
         }
     }
 
-    /// #264: every digested block must ride the wire. (Not "trail == wire" —
-    /// the digest covers the `Text` bytes and the tool-call `arguments` bytes,
-    /// not the names and ids that ride with them; the kernel's
-    /// `content_measure` states the scope, and this test's name predates that
-    /// narrowing.)
-    ///
-    /// The kernel's `content_measure` digests EVERY `Text` block into the
-    /// write-ahead intent record. Round 2 skipped blank blocks in the deputy,
-    /// so `[Text("  "), Text("real")]` was measured as 6 bytes and sent as 4 —
-    /// the trail attested bytes that never left. Both blocks must ride.
-    ///
-    /// (The "nothing to send" shapes are refused by `handle::decide` before an
-    /// `Admitted` exists, so they cannot reach `fulfil` at all; that class is
-    /// tested in `handle.rs`, where the judgement lives.)
     #[tokio::test]
     async fn the_registered_reasoning_effort_rides_only_when_set() {
         fips();
@@ -601,6 +587,20 @@ mod tests {
         }
     }
 
+    /// #264: every digested block must ride the wire. (Not "trail == wire" —
+    /// the digest covers the `Text` bytes and the tool-call `arguments` bytes,
+    /// not the names and ids that ride with them; the kernel's
+    /// `content_measure` states the scope, and this test's name predates that
+    /// narrowing.)
+    ///
+    /// The kernel's `content_measure` digests EVERY `Text` block into the
+    /// write-ahead intent record. Round 2 skipped blank blocks in the deputy,
+    /// so `[Text("  "), Text("real")]` was measured as 6 bytes and sent as 4 —
+    /// the trail attested bytes that never left. Both blocks must ride.
+    ///
+    /// (The "nothing to send" shapes are refused by `handle::decide` before an
+    /// `Admitted` exists, so they cannot reach `fulfil` at all; that class is
+    /// tested in `handle.rs`, where the judgement lives.)
     #[tokio::test]
     async fn every_text_block_rides_verbatim_so_the_trail_matches_the_wire() {
         fips();

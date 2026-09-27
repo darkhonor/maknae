@@ -869,7 +869,7 @@ refuses with `unknown key '<name>' in 'provider'` *(the message changed with #21
   verbatim as `reasoning_effort` on every request when present, and not sent at all when
   absent. Not checked against a provider's list of levels.
 
-Values are trimmed, and an empty-after-trim value is refused as missing.
+The five required values are trimmed, and an empty-after-trim value is refused as missing. `reasoning_effort` is taken as written: an empty value, or a YAML `null`, is refused by its shape rule rather than treated as absent. To send no level, leave the key out.
 
 #### The key must not be in the file
 
