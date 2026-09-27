@@ -1,6 +1,7 @@
 //! Boot credential-posture determination (spec §5.2) — PURE decision logic, no
 //! I/O. `maknaed` emits an AU-3 record at every boot stating whether the SecretID
-//! credential it just used was HRoT-sealed, degraded plaintext, or unverifiable.
+//! credential it just used was HRoT-sealed, code-bound, degraded plaintext, or
+//! unverifiable.
 //! This module owns ONLY the closed `(source, marker) -> posture` map; reading the
 //! marker file (`<config_dir>/private/posture.yaml`) and building/emitting the
 //! AU-3 record are `run.rs`'s job (T3, I/O).
@@ -76,11 +77,10 @@ impl Posture {
 ///   regardless of any marker (the plaintext branch is loud by construction — a
 ///   marker that happens to look valid must never launder a plaintext secret into
 ///   a sealed posture).
-/// - A sealed source ([`CredentialSource::CredentialsDirectory`] /
-///   [`CredentialSource::Keychain`]) with a marker whose `mechanism` matches the
-///   sealed kind AND whose `target` matches `expected_target` (the deterministic
-///   sealed-credential path this boot's config implies — computed by the caller,
-///   `run.rs`) → [`Posture::HrotSealed`].
+/// - A sealed source ([`CredentialSource::CredentialsDirectory`]) with a marker
+///   whose `mechanism` matches the sealed kind AND whose `target` matches
+///   `expected_target` (the deterministic sealed-credential path this boot's
+///   config implies — computed by the caller, `run.rs`) → [`Posture::HrotSealed`].
 /// - The keychain source with a matching marker → [`Posture::CodeBound`] (#76:
 ///   bound to the signed binary, not to hardware).
 /// - A sealed source with a MISSING marker, one whose `mechanism` does not match,

@@ -50,9 +50,9 @@ const VAULT_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 
 /// Read the deputy's AppRole halves: the RoleID from
 /// `<egress_dir>/maknae-egress-approle-id`, the SecretID from
-/// `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`. The source decision is
-/// resolved FIRST so an absent credentials directory is refused before any
-/// file is opened.
+/// `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id` or, on macOS, the System
+/// keychain pointer under `egress_dir` (#76). The source is resolved FIRST,
+/// so a refused source is refused before any secret file is opened.
 pub fn load_egress_auth(
     egress_dir: &Path,
     approle_mount: String,
@@ -279,5 +279,36 @@ mod tests {
             Err(VaultError::InvalidAddr(_))
         ));
         assert!(EgressVault::new("https://127.0.0.1:1", &d.join("absent.crt"), auth()).is_err());
+    }
+
+    /// I1(b): pins WHERE `load_egress_auth` looks for the deputy's keychain
+    /// pointer (#76 final review) — directly under `egress_dir`, unlike the
+    /// daemon's `private/` subdirectory. The RoleID file must exist first
+    /// (`load_egress_auth` reads it before resolving the secret), so it's
+    /// written here too. `WrongAccount` proves the pointer was found and the
+    /// keychain arm was chosen over a `CredentialSource` refusal. Goes red if
+    /// the call site's directory argument changes (no pointer found there →
+    /// `CredentialSource`, not `WrongAccount`) or if the plane is swapped.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn load_egress_auth_finds_the_pointer_under_egress_dir() {
+        let etc = tmp("keychain-pointer");
+        std::fs::write(etc.join(EGRESS_ROLE_ID_FILE), "rid-abc\n").unwrap();
+        std::fs::write(etc.join(crate::KeychainPlane::Egress.pointer_file()), "").unwrap();
+
+        match load_egress_auth(&etc, "maknae-approle".into(), None) {
+            Err(VaultError::WrongAccount {
+                expected: "_maknae-egress",
+                ..
+            }) => {}
+            Err(e) => panic!(
+                "expected WrongAccount(_maknae-egress) proving the pointer was found \
+                 under egress_dir, got a different error: {e}"
+            ),
+            Ok(_) => panic!(
+                "expected WrongAccount(_maknae-egress); got Ok — the pointer under \
+                 egress_dir was not found"
+            ),
+        }
     }
 }

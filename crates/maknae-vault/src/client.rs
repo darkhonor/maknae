@@ -135,8 +135,8 @@ pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// group/other access BEFORE reading — the SecretID must never be world-readable
 /// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
 /// `pub(crate)`: `secret_io.rs`'s PLAINTEXT read branches route through this SAME
-/// gate (the sealed branches — `$CREDENTIALS_DIRECTORY`, SEP — do not, since
-/// systemd/SEP produce their own `0400` artifacts).
+/// gate (the sealed `$CREDENTIALS_DIRECTORY` branch does not, since systemd
+/// produces its own `0400` artifacts).
 pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
@@ -445,7 +445,7 @@ impl PlaneClient {
 
     /// This client's resolved SecretID credential-source posture (Task 7's audit
     /// seam, round-1 C2). Reflects whichever source [`Self::from_document`] actually
-    /// used — `CredentialsDirectory`/`Keychain` are the sealed postures,
+    /// used — `CredentialsDirectory` is the sealed posture, `Keychain` is code-bound,
     /// `PlaintextPath` the weakest (also the default for a client built directly via
     /// [`Self::from_document_with_secret`], which has no resolution info to report).
     pub fn secret_source(&self) -> CredentialSourceKind {
@@ -1145,6 +1145,61 @@ mod tests {
                 // read $CREDENTIALS_DIRECTORY (which would have succeeded).
             }
             Err(e) => panic!("unexpected error proving the CLI plane uses its own order: {e:?}"),
+        }
+    }
+
+    /// I1(a): pins WHERE `from_document` looks for the daemon's keychain pointer
+    /// (#76 final review). `daemon_sep_blob_path` once looked in `config_dir/`
+    /// while `run.rs` expected `config_dir/private/` — a real, silent mismatch
+    /// this branch fixed with no test. A pointer file under `private/`, plus a
+    /// configured plaintext fallback, proves the pointer is found at `private/`
+    /// AND that it wins over the weaker plaintext arm: the account gate runs
+    /// before the pointer's own content is even parsed, so a non-`_maknae`
+    /// test process reaching `WrongAccount` proves the keychain arm was chosen.
+    /// Goes red if the call site's `dir.join("private")` is changed to `dir`
+    /// (no pointer found there → falls through to `PlaintextPath`, `Ok`, not
+    /// `WrongAccount`) or if the plane is swapped (`expected` would differ).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_finds_the_pointer_under_private_and_prefers_it() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-kcpriv-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fx = DispatchFixture::new(
+            "kernel-keychain-private",
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        std::fs::create_dir_all(fx.0.join("private")).unwrap();
+        std::fs::write(
+            fx.0.join("private")
+                .join(crate::KeychainPlane::Daemon.pointer_file()),
+            "",
+        )
+        .unwrap();
+
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        let _ = std::fs::remove_file(&plain);
+
+        match result {
+            Err(VaultError::WrongAccount {
+                expected: "_maknae",
+                ..
+            }) => {}
+            Err(e) => panic!(
+                "expected WrongAccount(_maknae) proving the pointer was found under \
+                 private/ and beat the plaintext arm, got a different error: {e}"
+            ),
+            Ok(_) => panic!(
+                "expected WrongAccount(_maknae); got Ok — the pointer under private/ \
+                 was not found (or lost to the plaintext arm)"
+            ),
         }
     }
 }

@@ -62,8 +62,8 @@ pub enum CliSecretSource {
 /// A small `Copy` classifier mirroring the three DAEMON source kinds — the posture
 /// record `PlaneClient::secret_source()` exposes for Task 7's audit. Both
 /// [`DaemonSecretSource`] and [`CliSecretSource`] map onto it (the CLI's three
-/// branches are the same POSTURE shape: OS-credential-store-sealed, hardware/OS
-/// enclave-sealed, or plaintext-on-disk) so the audit can reason about "is this
+/// branches are the same POSTURE shape: OS-credential-store-sealed, code-bound
+/// keychain, or plaintext-on-disk) so the audit can reason about "is this
 /// plane's SecretID sealed or plaintext" uniformly across planes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSourceKind {

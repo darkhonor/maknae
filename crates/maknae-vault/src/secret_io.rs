@@ -38,9 +38,8 @@ fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
     Ok(Zeroizing::new(text.trim().to_string()))
 }
 
-/// macOS Keychain SecretID lookup. Same rationale as `read_sep_sealed`: real
-/// Keychain access needs Security-framework FFI, stubbed to fail closed rather than
-/// faked. TODO(PR-J2 spec §6.3): real Keychain read.
+/// macOS Keychain SecretID lookup for the CLI (not yet implemented).
+/// TODO(PR-J2 spec §6.3): real Keychain read.
 fn read_keychain_secret() -> Result<Zeroizing<String>, VaultError> {
     Err(VaultError::CredentialSource(
         "macOS Keychain SecretID lookup is not yet implemented (PR-J2 spec §6.3)".to_string(),

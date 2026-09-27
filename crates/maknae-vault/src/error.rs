@@ -94,8 +94,8 @@ pub enum VaultError {
     Operator(String),
     /// A per-plane SecretID credential SOURCE (spec §5.1) could not be resolved (no
     /// source configured — fail-closed default) or a resolved source could not be
-    /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
-    /// or is not yet implemented on this platform/build).
+    /// read (an external unseal helper — `systemd-creds`, Keychain — failed, or is
+    /// not yet implemented on this platform/build).
     CredentialSource(String),
     WrongAccount {
         expected: &'static str,
