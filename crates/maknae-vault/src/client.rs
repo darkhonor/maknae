@@ -349,7 +349,7 @@ impl PlaneClient {
         let cfg = vault_config_from_document(doc)?;
         let (secret_id, kind) = match plane {
             Plane::Kernel => {
-                let creds = std::env::var("CREDENTIALS_DIRECTORY").ok();
+                let creds = crate::secret_source::credentials_directory_env()?;
                 let pointer = match creds {
                     None => crate::keychain::observe_pointer(
                         &crate::keychain_policy::daemon_keychain_dir(dir),

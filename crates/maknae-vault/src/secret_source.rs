@@ -5,6 +5,7 @@
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::VaultError;
+use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 /// The credential name `$CREDENTIALS_DIRECTORY` always carries for the daemon
@@ -189,9 +190,49 @@ pub fn resolve_cli_secret_source(
     ))
 }
 
+/// `$CREDENTIALS_DIRECTORY`: unset is `None`; set but not UTF-8 refuses rather
+/// than reading as unset (#76 codex r3).
+pub fn credentials_directory_env() -> Result<Option<String>, VaultError> {
+    classify(std::env::var("CREDENTIALS_DIRECTORY"))
+}
+
+fn classify(r: Result<String, VarError>) -> Result<Option<String>, VaultError> {
+    match r {
+        Ok(s) => Ok(Some(s)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(VaultError::CredentialSource(
+            "$CREDENTIALS_DIRECTORY is set but not UTF-8 — refusing".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn classify_ok_is_some() {
+        assert_eq!(
+            classify(Ok("/run/creds".to_string())).unwrap(),
+            Some("/run/creds".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_not_present_is_none() {
+        assert_eq!(classify(Err(VarError::NotPresent)).unwrap(), None);
+    }
+
+    #[test]
+    fn classify_not_unicode_refuses() {
+        let bytes = OsString::from_vec(vec![0xff]);
+        assert!(matches!(
+            classify(Err(VarError::NotUnicode(bytes))),
+            Err(VaultError::CredentialSource(_))
+        ));
+    }
 
     // ---- egress resolution (#240b) -------------------------------------------
 

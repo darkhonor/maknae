@@ -103,10 +103,14 @@ fn main() {
         .approle_mount
         .clone()
         .unwrap_or_else(|| maknae_vault::DEFAULT_APPROLE_MOUNT.to_string());
+    let credentials_dir = match maknae_vault::credentials_directory_env() {
+        Ok(c) => c,
+        Err(e) => fail(format!("egress credential: {e}")),
+    };
     let auth = match maknae_vault::load_egress_auth(
         &egress_dir,
         approle_mount,
-        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+        credentials_dir.as_deref(),
     ) {
         Ok(a) => a,
         Err(e) => fail(format!("egress credential: {e}")),

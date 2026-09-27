@@ -70,9 +70,10 @@ pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use secret_source::{
-    resolve_cli_secret_source, resolve_daemon_secret_source, resolve_egress_secret_source,
-    CliSecretSource, CredentialSourceKind, DaemonSecretSource, EgressSecretSource,
-    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
+    resolve_egress_secret_source, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
+    EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
 };
 #[cfg(unix)]
 pub use stream::{
