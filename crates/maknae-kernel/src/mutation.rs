@@ -761,6 +761,7 @@ mod tests {
         let read = || Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
         let prepared = prepare(read(), held(), &fx.principal, Lane::Local).unwrap();

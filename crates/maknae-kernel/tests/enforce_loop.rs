@@ -572,6 +572,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -664,6 +665,7 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
         maknae_proto::Verb::Read {
             path: real_target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&real_target),
@@ -735,6 +737,7 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -785,6 +788,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         &target,
@@ -832,6 +836,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         &target,
@@ -875,6 +880,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
             maknae_proto::Verb::Read {
                 path: target.to_str().unwrap().into(),
                 conversation: None,
+                page: None,
             },
             Duration::from_secs(5),
             &target,
@@ -907,6 +913,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
             maknae_proto::Verb::Read {
                 path: fx.dir.join("allowed.txt").to_str().unwrap().into(),
                 conversation: None,
+                page: None,
             },
             Duration::from_secs(5),
         )
@@ -937,6 +944,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
             maknae_proto::Verb::Read {
                 path: allowed.to_str().unwrap().into(),
                 conversation: None,
+                page: None,
             },
             Duration::from_secs(5),
             &allowed,
@@ -992,6 +1000,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -1058,6 +1067,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -1143,6 +1153,7 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -1187,6 +1198,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -1242,6 +1254,7 @@ async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permi
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -1455,6 +1468,7 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
         maknae_proto::Verb::Read {
             path: outside.to_string_lossy().into_owned(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         &outside,
@@ -1537,6 +1551,7 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
         maknae_proto::Verb::Read {
             path: evasive,
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
     )
@@ -2384,6 +2399,7 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -2492,6 +2508,7 @@ async fn under_a_secret_ceiling_unmarked_content_is_served_as_unclassified() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -2532,6 +2549,7 @@ async fn at_baseline_the_composition_permits_what_the_baseline_permits() {
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
+            page: None,
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
@@ -2552,6 +2570,7 @@ async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Some(held.try_clone().unwrap()),
         records.clone(),
@@ -2629,6 +2648,7 @@ async fn a_readable_descriptor_is_refused_before_intent() {
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Some(std::fs::File::open(&target).unwrap().into()),
         records.clone(),
@@ -2664,6 +2684,7 @@ async fn a_read_whose_report_cannot_be_recorded_is_not_acknowledged_and_ends_inc
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Some(held.try_clone().unwrap()),
         records.clone(),
@@ -2689,6 +2710,7 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
         maknae_proto::Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         },
         Some(maknae_io::open_path_for_delegation(&target).unwrap()),
         records.clone(),
@@ -2713,6 +2735,8 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
             path: target.to_str().unwrap().into(),
             effect: maknae_proto::ReportedEffect::ReadFile,
             length: Some(grant.limits.max_bytes + 1),
+            range: None,
+            lines: None,
         }],
     };
     common::write_frame(

@@ -636,6 +636,8 @@ pub async fn read_as_subject(
                     path: path.clone(),
                     effect: ReportedEffect::ReadFile,
                     length: Some(bytes.len() as u64),
+                    range: None,
+                    lines: None,
                 }],
             };
             let acked = report_acked(client, batch).await.map(|a| a.next_index) == Some(1)

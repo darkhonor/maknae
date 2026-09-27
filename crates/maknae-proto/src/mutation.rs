@@ -80,6 +80,23 @@ pub struct EffectEntry {
     pub effect: ReportedEffect,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<ByteRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineSpan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineSpan {
+    pub first: u64,
+    pub last: u64,
+    pub complete_last: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +123,47 @@ pub struct MutationAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_effect_carries_its_range_and_lines_and_other_effects_omit_them() {
+        let id = MutationId {
+            session_id: 1,
+            intent_seq: 2,
+        };
+        let read = EffectEntry {
+            path: "/h/f".into(),
+            effect: ReportedEffect::ReadFile,
+            length: Some(3),
+            range: Some(ByteRange { start: 10, end: 13 }),
+            lines: Some(LineSpan {
+                first: 2,
+                last: 2,
+                complete_last: false,
+            }),
+        };
+        let report = MutationReport::Batch {
+            id,
+            first_index: 0,
+            effects: vec![read],
+        };
+        let bytes = crate::encode_mutation_report(&report).unwrap();
+        assert_eq!(crate::decode_mutation_report(&bytes).unwrap(), report);
+        let dir = EffectEntry {
+            path: "/h/d".into(),
+            effect: ReportedEffect::CreatedDirectory,
+            length: None,
+            range: None,
+            lines: None,
+        };
+        let bytes = crate::encode_mutation_report(&MutationReport::Batch {
+            id,
+            first_index: 0,
+            effects: vec![dir],
+        })
+        .unwrap();
+        assert!(!bytes.windows(5).any(|w| w == b"range"));
+        assert!(!bytes.windows(5).any(|w| w == b"lines"));
+    }
 
     fn roundtrip<T>(value: T)
     where
@@ -176,6 +234,8 @@ mod tests {
                     path: "/sentinel/effect".into(),
                     effect,
                     length: None,
+                    range: None,
+                    lines: None,
                 }],
             });
         }
@@ -186,6 +246,8 @@ mod tests {
                 path: "/sentinel/read".into(),
                 effect: ReportedEffect::ReadFile,
                 length: Some(u64::MAX),
+                range: None,
+                lines: None,
             }],
         });
         for outcome in [
@@ -217,6 +279,8 @@ mod tests {
                 path: "/sentinel/read".into(),
                 effect: ReportedEffect::ReadFile,
                 length,
+                range: None,
+                lines: None,
             };
             ciborium::into_writer(&entry, &mut bytes).unwrap();
             let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();

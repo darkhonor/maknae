@@ -312,6 +312,8 @@ fn error_step(e: MutationFailure, effect: ReportedEffect, path: String) -> Step 
             path: path.clone(),
             effect,
             length: None,
+            range: None,
+            lines: None,
         }),
         finish: Some((outcome, Some(path))),
     }
@@ -359,6 +361,8 @@ impl Worker {
             path: path.into(),
             effect,
             length: (effect == ReportedEffect::ReadFile).then_some(u64::MAX),
+            range: None,
+            lines: None,
         };
         if !fits(
             &batch(self.grant.id, self.next_index, entry),
@@ -408,6 +412,8 @@ impl Worker {
                                 path,
                                 effect: ReportedEffect::ReadFile,
                                 length,
+                                range: None,
+                                lines: None,
                             }),
                             finish: Some((ReportedFinish::Success, None)),
                         }
@@ -426,6 +432,8 @@ impl Worker {
                             path,
                             effect: ReportedEffect::ReplacedFile,
                             length: None,
+                            range: None,
+                            lines: None,
                         }),
                         finish: Some((ReportedFinish::Success, None)),
                     },
@@ -451,6 +459,8 @@ impl Worker {
                             path,
                             effect: ReportedEffect::CreatedFile,
                             length: None,
+                            range: None,
+                            lines: None,
                         }),
                         finish: Some((ReportedFinish::Success, None)),
                     },
@@ -483,6 +493,8 @@ impl Worker {
                             path: path.clone(),
                             effect: ReportedEffect::CreatedDirectory,
                             length: None,
+                            range: None,
+                            lines: None,
                         });
                         if components.is_empty() {
                             return Step {
@@ -595,6 +607,8 @@ impl Worker {
                                     path,
                                     effect: ReportedEffect::DeletedEntry,
                                     length: None,
+                                    range: None,
+                                    lines: None,
                                 }),
                                 finish: done.then_some((ReportedFinish::Success, None)),
                             };
@@ -1039,6 +1053,7 @@ mod tests {
             proto::Verb::Read {
                 path,
                 conversation: None,
+                page: None,
             },
             None,
         )
@@ -1085,6 +1100,8 @@ mod tests {
                         path: path.clone(),
                         effect: ReportedEffect::ReadFile,
                         length: Some(19),
+                        range: None,
+                        lines: None,
                     }],
                 },
                 MutationReport::Finished {
@@ -1644,6 +1661,8 @@ mod tests {
                         path: path.clone(),
                         effect: ReportedEffect::ReplacedFile,
                         length: None,
+                        range: None,
+                        lines: None,
                     }],
                 },
                 MutationReport::Finished {
@@ -1971,6 +1990,8 @@ mod tests {
                     path,
                     effect: ReportedEffect::CreatedFile,
                     length: None,
+                    range: None,
+                    lines: None,
                 })
             );
         }
@@ -2213,6 +2234,8 @@ mod tests {
                 path: path.into(),
                 effect: ReportedEffect::DeletedEntry,
                 length: None,
+                range: None,
+                lines: None,
             },
         ))
         .unwrap()

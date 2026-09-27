@@ -171,6 +171,7 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::Read { path } => maknae_proto::Verb::Read {
                 path,
                 conversation: None,
+                page: None,
             },
             Verb::Write { path } => maknae_proto::Verb::FsWrite {
                 path,
@@ -1149,6 +1150,7 @@ mod tests {
             maknae_proto::Verb::Read {
                 path: "/a/b".into(),
                 conversation: None,
+                page: None,
             }
         );
     }

@@ -324,6 +324,8 @@ mod tests {
                 path: "/sentinel/read".into(),
                 effect: ReportedEffect::ReadFile,
                 length,
+                range: None,
+                lines: None,
             }],
         }
     }
@@ -347,6 +349,8 @@ mod tests {
                     path: (*p).into(),
                     effect,
                     length: None,
+                    range: None,
+                    lines: None,
                 })
                 .collect(),
         }
@@ -1138,6 +1142,8 @@ mod tests {
                 path: "/sentinel/c".into(),
                 effect: ReportedEffect::CreatedFile,
                 length: Some(0),
+                range: None,
+                lines: None,
             }],
         };
         assert_eq!(

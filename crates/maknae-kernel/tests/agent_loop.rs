@@ -170,6 +170,7 @@ impl Plane for FixturePlane {
             Verb::Read {
                 path: path.into(),
                 conversation: Some(conversation.into()),
+                page: None,
             },
             held.as_ref().map(|fd| fd.try_clone().unwrap()),
             Arc::clone(&self.records),
@@ -240,6 +241,8 @@ impl Plane for FixturePlane {
                                     path: path.clone(),
                                     effect: ReportedEffect::ReplacedFile,
                                     length: None,
+                                    range: None,
+                                    lines: None,
                                 }],
                             },
                             1,
