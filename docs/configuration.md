@@ -231,7 +231,7 @@ Additional file rules:
 > |---|---|
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
 > | `core.handling` *(already closed; listed for completeness)* | `ceiling`, `accreditation_ref`, `policy` |
-> | `transport` | `socket_path`, `max_connections`, `frame_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
+> | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
 > | `audit` | `jsonl_path`, `siem`, `au3_1` |
 > | `principal` | `name`, `uid`, `home` |
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path` |
@@ -557,7 +557,7 @@ egress:
   handlers, the audit drain, the plane client's bounded lock wait and token revoke, and the
   runtime teardown — and a kernel test holds the unit values to that chain, two-sided. At
   the defaults the chain is 396 s; a stop with nothing in flight exits in milliseconds. One
-  more bound at the ceiling: a prompt that fills `transport.frame_max_bytes` at its own
+  more bound at the ceiling: a prompt that fills `transport.prompt_max_bytes` at its own
   1 MiB maximum re-wraps into an egress frame larger than the deputy's 1 MiB request cap
   and is refused before it is sent (`send failed` in the trail, nothing left the host).
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves

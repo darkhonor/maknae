@@ -1223,7 +1223,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
 async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permit() {
     let fx = Fixture::new("oversize");
     fx.write_policy(SHIPPED_POLICY);
-    // Default frame_max_bytes 65536; budget = 65536-512. 70000 > budget.
+    // READ_GRANT_MAX_BYTES is 65024; 70000 exceeds it.
     std::fs::write(fx.dir.join("big.bin"), vec![0u8; 70_000]).unwrap();
     std::fs::set_permissions(
         fx.dir.join("big.bin"),

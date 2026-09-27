@@ -117,7 +117,7 @@ pub struct WhereCtx {
 /// **That is the whole of the claim, and it is narrower than it looks.**
 /// `handle` still holds raw configuration in the same scope as the arm that
 /// answers `admin.config.show`: `cfg` (the whole `transport` section --
-/// `socket_path`, `frame_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
+/// `socket_path`, `prompt_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
 /// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). That debt has since been
 /// PAID once: the `admin.status` arm wanting "which socket am I on?" found
 /// `cfg.socket_path` sitting right there, and `listener` is disclosed under

@@ -69,7 +69,7 @@ pub enum WriteOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaneError {
-    /// The encoded request would exceed `transport.frame_max_bytes` (ADR-0023 d7).
+    /// The encoded request would exceed `transport.prompt_max_bytes` (ADR-0023 d7).
     FrameTooLarge,
     Transport(String),
     /// The kernel refused `session.prompt` itself.

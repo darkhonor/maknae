@@ -153,7 +153,7 @@ const BACKEND_NAME_MAX: usize = 128;
 /// client, and printed by the CLI. Left unbounded and unfiltered it is a
 /// terminal-injection vector (ANSI escapes, embedded newlines forging a second
 /// line of output) and a way for a third-party backend to push a permitted
-/// `admin.status` response past `frame_max_bytes` — turning it into a
+/// `admin.status` response past the control reply cap — turning it into a
 /// `refused-oversize` the operator has no way to explain. Truncation is on a
 /// CHARACTER boundary: slicing a `String` by bytes panics mid-codepoint, which
 /// would defeat the panic boundary this same function exists to provide.
@@ -491,7 +491,7 @@ mod tests {
     /// the CLI. An unbounded `String` from a third-party backend is a terminal
     /// injection vector (control bytes, ANSI escapes, embedded newlines that
     /// forge a second line of output) and a way to push the response over
-    /// `frame_max_bytes`, turning a permitted `admin.status` into a
+    /// the control reply cap, turning a permitted `admin.status` into a
     /// `refused-oversize` the operator cannot explain. Nothing about a backend
     /// IDENTIFIER needs those bytes.
     #[test]

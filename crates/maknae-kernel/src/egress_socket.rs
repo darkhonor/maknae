@@ -336,8 +336,7 @@ impl Egress for SocketEgress {
         // fields wipe their OWN allocations; they do not touch this original
         // serialized copy, which holds the provider's reply in plaintext. The
         // wrapper covers the error paths too — a truncated read or a failed
-        // decode drops this buffer just the same. Matches
-        // `maknae_proto::read_frame_zeroizing`.
+        // decode drops this buffer just the same.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
         Self::read_exact_by(&mut s, &mut body, deadline_at).map_err(Self::after_send)?;
         let reply = decode_egress_frame_reply(&body)

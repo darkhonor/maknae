@@ -164,7 +164,7 @@ impl Egress for Unavailable {
 pub const EGRESS_USER: &str = "_maknae-egress";
 /// The largest reply frame the kernel accepts from the deputy — mirrors the
 /// deputy's own request cap (`serve.rs`). A DoS bound on allocation only: the
-/// delivered reply is bounded again by `transport.frame_max_bytes`.
+/// delivered reply is bounded again by `transport.prompt_max_bytes`.
 ///
 /// The VALUE is `maknae-proto`'s, shared with the deputy so the two ends
 /// cannot drift (corrected 2026-09-22, #241 item B: this was its own
@@ -176,7 +176,7 @@ pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = maknae_proto::EGRESS_REPLY_FRAME
 
 /// The largest request frame the kernel will WRITE to the deputy — the
 /// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte
-/// leaves. Without it a prompt that fills `transport.frame_max_bytes` at its
+/// leaves. Without it a prompt that fills `transport.prompt_max_bytes` at its
 /// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
 /// as oversize after reading it, and the trail says "outcome unknown" for a
 /// prompt that provably never reached a provider (review round 3). Refused
@@ -628,10 +628,10 @@ pub fn reply_text_length(reply: &PromptReply) -> u64 {
 
 /// The zeroizing encode buffer's capacity for a TEXT-ONLY reply (the kernel
 /// refuses any other before consulting this): an upper bound, so
-/// `encode_response_zeroizing` never reallocates. Compared against `frame_max_bytes`
+/// `encode_response_zeroizing` never reallocates. Compared against `prompt_max_bytes`
 /// BEFORE encoding: an over-cap reply is refused without ever being copied.
 /// The bound is padded, so the effective ceiling is
-/// `frame_max_bytes - 512 - 32*blocks` of text: fail-closed by a margin,
+/// `prompt_max_bytes - 512 - 32*blocks` of text: fail-closed by a margin,
 /// deliberately (#240 inherits this boundary; `write_frame_bounded` re-checks
 /// the encoded length as defence in depth).
 pub fn reply_capacity(reply: &PromptReply) -> usize {

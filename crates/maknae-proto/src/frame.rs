@@ -102,7 +102,7 @@ mod tests {
 
     /// Bound an awaited future so a mutant that silently drops I/O (e.g.
     /// `write_frame` becoming a no-op, or the oversize check becoming a
-    /// no-op so `read_frame` blocks on bytes that will never arrive) fails
+    /// no-op so `read_frame_zeroizing` blocks on bytes that will never arrive) fails
     /// the test promptly instead of hanging until cargo-mutants' own
     /// (much longer) watchdog timeout fires.
     async fn bounded<T>(fut: impl std::future::Future<Output = T>) -> T {
