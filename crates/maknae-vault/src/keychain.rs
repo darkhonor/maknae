@@ -24,10 +24,14 @@ pub(crate) fn read_plane_secret(
 }
 
 #[cfg(target_os = "macos")]
+static KEYCHAIN_READ: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "macos")]
 fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<String>, VaultError> {
     use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::os::macos::passwords::find_generic_password;
     let status = |e: security_framework::base::Error| VaultError::Keychain { status: e.code() };
+    let _serial = KEYCHAIN_READ.lock().unwrap_or_else(|e| e.into_inner());
     let _no_ui = SecKeychain::disable_user_interaction().map_err(status)?;
     let kc = SecKeychain::open(keychain).map_err(status)?;
     let (password, _) =
@@ -49,25 +53,45 @@ pub(crate) fn read_plane_secret(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn observe_pointer(dir: &Path, plane: KeychainPlane) -> Option<PathBuf> {
+pub(crate) fn observe_pointer(
+    dir: &Path,
+    plane: KeychainPlane,
+) -> Result<Option<PathBuf>, VaultError> {
     observe_pointer_at(&dir.join(plane.pointer_file()))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn observe_pointer(_dir: &Path, _plane: KeychainPlane) -> Option<PathBuf> {
-    None
+pub(crate) fn observe_pointer(
+    _dir: &Path,
+    _plane: KeychainPlane,
+) -> Result<Option<PathBuf>, VaultError> {
+    Ok(None)
 }
 
 /// #76: same observation as [`observe_pointer`], for an already-computed pointer path
-/// (the daemon's, via [`crate::daemon_keychain_pointer`]).
+/// (the daemon's, via [`crate::daemon_keychain_pointer`]). Only `NotFound` is absence.
 #[cfg(target_os = "macos")]
-pub(crate) fn observe_pointer_at(path: &Path) -> Option<PathBuf> {
-    path.is_file().then(|| path.to_path_buf())
+pub(crate) fn observe_pointer_at(path: &Path) -> Result<Option<PathBuf>, VaultError> {
+    match maknae_io::read_absolute(
+        path,
+        maknae_io::TargetRequired::OS_DAC_REGULAR,
+        maknae_io::StrategyPref::Auto,
+    ) {
+        Ok(_) => Ok(Some(path.to_path_buf())),
+        Err(maknae_io::IoError::Io {
+            kind: maknae_io::IoKind::NotFound,
+            ..
+        }) => Ok(None),
+        Err(e) => Err(VaultError::KeychainPointer(format!(
+            "{}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn observe_pointer_at(_path: &Path) -> Option<PathBuf> {
-    None
+pub(crate) fn observe_pointer_at(_path: &Path) -> Result<Option<PathBuf>, VaultError> {
+    Ok(None)
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -149,6 +173,83 @@ mod tests {
             read_item_from(&kc.path, &item),
             Err(VaultError::Keychain { status: -25300 })
         ));
+    }
+
+    fn pointer_in(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join(KeychainPlane::Daemon.pointer_file())
+    }
+
+    /// #76: a symlinked pointer is refused, not followed.
+    #[test]
+    fn a_symlinked_pointer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, "").unwrap();
+        let p = pointer_in(&dir);
+        std::os::unix::fs::symlink(&real, &p).unwrap();
+        assert!(matches!(
+            observe_pointer_at(&p),
+            Err(VaultError::KeychainPointer(_))
+        ));
+    }
+
+    /// #76: a dangling symlinked pointer is refused, not read as absent.
+    #[test]
+    fn a_dangling_symlinked_pointer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = pointer_in(&dir);
+        std::os::unix::fs::symlink(dir.path().join("gone"), &p).unwrap();
+        assert!(matches!(
+            observe_pointer_at(&p),
+            Err(VaultError::KeychainPointer(_))
+        ));
+    }
+
+    /// #76: a directory at the pointer path is refused.
+    #[test]
+    fn a_directory_pointer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = pointer_in(&dir);
+        std::fs::create_dir(&p).unwrap();
+        assert!(matches!(
+            observe_pointer_at(&p),
+            Err(VaultError::KeychainPointer(_))
+        ));
+    }
+
+    /// #76: an unopenable pointer is refused, not read as absent.
+    #[test]
+    fn an_unreadable_pointer_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(!nix::unistd::geteuid().is_root(), "root opens mode 000");
+        let dir = tempfile::tempdir().unwrap();
+        let p = pointer_in(&dir);
+        std::fs::write(&p, "").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(matches!(
+            observe_pointer_at(&p),
+            Err(VaultError::KeychainPointer(_))
+        ));
+    }
+
+    /// #76: only a missing pointer reads as absent.
+    #[test]
+    fn an_absent_pointer_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(observe_pointer_at(&pointer_in(&dir)), Ok(None)));
+    }
+
+    /// #76: a regular pointer file is observed at its own path.
+    #[test]
+    fn a_regular_pointer_is_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = pointer_in(&dir);
+        std::fs::write(&p, "").unwrap();
+        assert_eq!(observe_pointer_at(&p).unwrap(), Some(p.clone()));
+        assert_eq!(
+            observe_pointer(dir.path(), KeychainPlane::Daemon).unwrap(),
+            Some(p)
+        );
     }
 
     #[test]

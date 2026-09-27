@@ -60,7 +60,7 @@ pub fn load_egress_auth(
 ) -> Result<AppRoleAuth, VaultError> {
     let source = resolve_egress_secret_source(
         credentials_dir_env,
-        crate::keychain::observe_pointer(egress_dir, crate::KeychainPlane::Egress).as_deref(),
+        crate::keychain::observe_pointer(egress_dir, crate::KeychainPlane::Egress)?.as_deref(),
     )?;
     let role_id = crate::client::read_trimmed(&egress_dir.join(EGRESS_ROLE_ID_FILE))?;
     let secret_id = crate::secret_io::read_egress_secret(&source)?;
@@ -303,5 +303,18 @@ mod tests {
                  egress_dir was not found"
             ),
         }
+    }
+
+    /// #76: a pointer that is not a regular file refuses, not reads as absent.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn load_egress_auth_refuses_a_directory_pointer() {
+        let etc = tmp("keychain-pointer-dir");
+        std::fs::write(etc.join(EGRESS_ROLE_ID_FILE), "rid-abc\n").unwrap();
+        std::fs::create_dir(etc.join(crate::KeychainPlane::Egress.pointer_file())).unwrap();
+        assert!(matches!(
+            load_egress_auth(&etc, "maknae-approle".into(), None),
+            Err(VaultError::KeychainPointer(_))
+        ));
     }
 }

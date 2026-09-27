@@ -351,7 +351,7 @@ impl PlaneClient {
             Plane::Kernel => {
                 let src = resolve_daemon_secret_source(
                     std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-                    crate::keychain::observe_pointer_at(&crate::daemon_keychain_pointer(dir))
+                    crate::keychain::observe_pointer_at(&crate::daemon_keychain_pointer(dir))?
                         .as_deref(),
                     cfg.insecure_plaintext_secret_path.as_deref(),
                 )?;
@@ -1187,6 +1187,42 @@ mod tests {
                 "expected WrongAccount(_maknae); got Ok — the pointer under private/ \
                  was not found (or lost to the plaintext arm)"
             ),
+        }
+    }
+
+    /// #76: a broken keychain pointer refuses; it never downgrades to the plaintext arm.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_symlinked_pointer_over_plaintext() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-kclink-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fx = DispatchFixture::new(
+            "kernel-keychain-symlink",
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        std::fs::create_dir_all(fx.0.join("private")).unwrap();
+        std::os::unix::fs::symlink(
+            fx.0.join("private").join("gone"),
+            fx.0.join("private")
+                .join(crate::KeychainPlane::Daemon.pointer_file()),
+        )
+        .unwrap();
+
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        let _ = std::fs::remove_file(&plain);
+
+        match result {
+            Err(VaultError::KeychainPointer(_)) => {}
+            Err(e) => panic!("expected KeychainPointer, got {e}"),
+            Ok(c) => panic!("downgraded to {:?}", c.secret_source()),
         }
     }
 }

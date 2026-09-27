@@ -3131,14 +3131,8 @@ async fn boot_after_sink(
     // plane client resolved which SecretID source it actually used. An append
     // failure refuses boot (#265 C2).
     //
-    // `expected_target` is the deterministic sealed-credential path THIS boot's
-    // config implies — `<config_dir>/private/maknaed-secret-id.{cred,keychain}`, the
-    // SAME path enroll's `artifact_table` writes to (bins/maknae's
-    // `artifact_table.rs`) and the systemd unit's `LoadCredentialEncrypted=`
-    // pins (spec §9.6) — computed here from the same `config_dir` base every
-    // other boot artifact resolves against. `posture::determine` requires the
-    // marker's `target` to match this, closing the "marker's mechanism is
-    // right but its target is a stale/foreign path" gap (spec §5.2).
+    // `expected_target` is `<config_dir>/private/maknaed-secret-id.{cred,keychain}`;
+    // `posture::determine` requires the marker's `target` to match it (spec §5.2).
     let secret_source_kind = client.secret_source();
     let expected_target = match secret_source_kind {
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
@@ -4318,7 +4312,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn enroll_writer_keychain_fixture_determines_code_bound() {
+    fn keychain_marker_fixture_determines_code_bound() {
         let fixture = "---\nmechanism: keychain\ntarget: /etc/maknae/private/maknaed-secret-id.keychain\ntimestamp: \"1786563711\"\n";
         let value = maknae_config::load_str(fixture).unwrap();
         let marker = parse_posture_marker(&value);
