@@ -3,27 +3,41 @@
 # part of the product.
 #
 # RETAINS /var/log/maknae and /etc/maknae. The audit trail is not the installer's to
-# destroy — an uninstall that erases it erases the evidence of everything that ran —
-# and the config holds an enrollment the operator may be re-using.
+# destroy — an uninstall that erases it erases the evidence of everything that ran.
+# The enrollment is NOT reusable: its System-keychain items are deleted, so a
+# reinstall needs `sudo maknae enroll`.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (sudo)" >&2; exit 1; }
 
-LABEL="io.maknae.maknaed"
-PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 RECEIPT="/usr/local/var/db/maknae/install-receipt.plist"
 
-if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-    launchctl bootout "system/${LABEL}" || :
-fi
 # Clear our own `launchctl disable` so the external disabled database is not left
 # holding an entry for a label we removed — it survives reboots and would silently
 # suppress a later reinstall.
-launchctl enable "system/${LABEL}" 2>/dev/null || :
-rm -f "$PLIST"
+for LABEL in io.maknae.maknaed io.maknae.maknae-egress; do
+    if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
+        launchctl bootout "system/${LABEL}" || :
+    fi
+    launchctl enable "system/${LABEL}" 2>/dev/null || :
+    rm -f "/Library/LaunchDaemons/${LABEL}.plist"
+done
 
-rm -f /usr/local/bin/maknaed /usr/local/bin/maknae
+rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
+rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
 rm -rf /usr/local/lib/maknae
+
+# Before the accounts go: the ACE names _maknae-egress and must still resolve.
+chmod -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
+
+for s in io.maknae.maknaed io.maknae.maknae-egress; do
+    rc=0
+    security delete-generic-password -a secret-id -s "$s" /Library/Keychains/System.keychain >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0|44) : ;;
+        *) echo "WARNING: could not delete the $s keychain item (exit $rc)" >&2 ;;
+    esac
+done
 
 # --- accounts: only the ones WE created ------------------------------------
 # TWO conditions, not one. An id match alone is NOT proof the account is ours:
@@ -75,6 +89,6 @@ done
 # Clear append-only so the operator CAN remove the trail if they choose to.
 chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 
-echo "Removed. RETAINED: /var/log/maknae (audit trail) and /etc/maknae (config)."
+echo "Removed. RETAINED: /var/log/maknae (audit trail) and /etc/maknae (config, not reusable: reinstall needs \`sudo maknae enroll\`)."
 echo "Remove them by hand if you intend a full teardown."
 exit 0

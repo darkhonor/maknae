@@ -118,6 +118,8 @@ esac
 KIND_FILE="/usr/local/var/db/maknae/.install-kind"
 KIND="$(sed -n 1p "$KIND_FILE" 2>/dev/null || echo fresh)"
 WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
+EGRESS_WAS_LOADED="$(sed -n 3p "$KIND_FILE" 2>/dev/null || echo false)"
+EGRESS_PLIST_EXISTED="$(sed -n 4p "$KIND_FILE" 2>/dev/null || echo false)"
 rm -f "$KIND_FILE"
 if [ "$KIND" = "fresh" ]; then
     launchctl disable "system/$LABEL" 2>/dev/null || :
@@ -126,6 +128,17 @@ elif [ "$WAS_LOADED" = "true" ]; then
     # process still holds the old inode. Restart it onto the new binary, exactly as
     # the deb's `systemctl try-restart` does.
     launchctl kickstart -k "system/$LABEL" 2>/dev/null || :
+fi
+
+# The deputy follows the same rule, and is also disabled on an upgrade from a
+# package that did not ship it: its plist is new in /Library/LaunchDaemons and
+# would otherwise start, unenrolled, at the next boot.
+EGRESS_LABEL="io.maknae.maknae-egress"
+if [ "$KIND" = "fresh" ] || [ "$EGRESS_PLIST_EXISTED" != "true" ]; then
+    launchctl disable "system/$EGRESS_LABEL" 2>/dev/null || :
+fi
+if [ "$EGRESS_WAS_LOADED" = "true" ]; then
+    launchctl kickstart -k "system/$EGRESS_LABEL" 2>/dev/null || :
 fi
 
 exit 0

@@ -60,18 +60,22 @@ command -v rust-audit-info >/dev/null 2>&1 || {
 # each binary needs its OWN Info.plist. It lives HERE and not in a
 # .cargo/config.toml: whether this repo should have one at all is a deliberately
 # held open question (UNFORMALIZED.md, 2026-09-12). COST, accepted knowingly:
-# RUSTFLAGS is a whole-graph fingerprint input, so the two builds do not share a
-# cache and aws-lc-fips-sys compiles twice.
+# RUSTFLAGS is a whole-graph fingerprint input, so the builds do not share a
+# cache and aws-lc-fips-sys compiles once per binary.
 build_one() {
     local pkg="$1" info="$2"
     ( cd "$REPO" && RUSTFLAGS="-C link-arg=-Wl,-sectcreate,__TEXT,__info_plist,$HERE/$info" \
         cargo auditable build --release --locked --target "$TARGET" -p "$pkg" )
 }
-build_one maknaed Info.maknaed.plist
-build_one maknae  Info.maknae.plist
+. "$REPO/ci/gates/packaged-binaries.sh"
+. "$HERE/signing-lib.sh"
+BINS="$(packaged_binaries "$REPO")"
+for b in $BINS; do
+    build_one "$b" "Info.${b}.plist"
+done
 
 BIN="$REPO/target/$TARGET/release"
-for b in maknaed maknae; do
+for b in $BINS; do
     [ -x "$BIN/$b" ] || { echo "ERROR: missing binary $BIN/$b" >&2; exit 1; }
 done
 
@@ -101,13 +105,13 @@ cp "$FIPS_DYLIB" "$STAGE/$FIPS_BASE"
 chmod u+w "$STAGE/$FIPS_BASE"
 
 install_name_tool -id "$FIPS_LIBDIR/$FIPS_BASE" "$STAGE/$FIPS_BASE"
-for b in maknaed maknae; do
+for b in $BINS; do
     install_name_tool -change "@rpath/$FIPS_BASE" "$FIPS_LIBDIR/$FIPS_BASE" "$BIN/$b"
 done
 
 # REFUSE to package a binary that still carries an unresolved @rpath. This gate is
 # what keeps the fail-open hazard out of a shipped artifact.
-for b in maknaed maknae; do
+for b in $BINS; do
     if otool -L "$BIN/$b" | grep -q '@rpath/'; then
         echo "ERROR: $b still references an @rpath dylib after install_name_tool:" >&2
         otool -L "$BIN/$b" | grep '@rpath/' >&2
@@ -142,18 +146,30 @@ if [ -n "$SIGN_ID" ]; then
            echo "  A named-but-absent identity must never fall back to ad-hoc." >&2
            exit 2 ;;
     esac
+    "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements || {
+        echo "REFUSED: a Developer ID signature must carry no entitlements (ADR-0018 decision 6)" >&2
+        exit 2
+    }
     CODESIGN_ARGS=(--sign "$SIGN_ID" --options runtime --timestamp)
 else
     CODESIGN_ARGS=(--sign - --options runtime --timestamp=none)
 fi
 
 codesign --force "${CODESIGN_ARGS[@]}" "$STAGE/$FIPS_BASE"
-for b in maknaed maknae; do
+for b in $BINS; do
     codesign --force "${CODESIGN_ARGS[@]}" \
         --entitlements "$HERE/${b}.entitlements" "$BIN/$b"
     codesign --verify --strict --verbose=2 "$BIN/$b"
 done
-for b in maknaed maknae; do
+refuse_entitled() {
+    echo "REFUSED: $1 was signed with entitlements, or its signature cannot be read (ADR-0018 decision 6)" >&2
+    exit 2
+}
+signed_entitlements_empty "$STAGE/$FIPS_BASE" || refuse_entitled "$STAGE/$FIPS_BASE"
+for b in $BINS; do
+    signed_entitlements_empty "$BIN/$b" || refuse_entitled "$BIN/$b"
+done
+for b in $BINS; do
     rust-audit-info "$BIN/$b" >/dev/null || { echo "ERROR: no embedded SBOM in $b" >&2; exit 1; }
 done
 
@@ -168,11 +184,14 @@ D="$STAGE/daemon"
 install -d "$D/usr/local/bin" "$D/Library/LaunchDaemons" \
            "$D/usr/local/share/maknae/defaults" "$D$FIPS_LIBDIR"
 install -m 0755 "$BIN/maknaed" "$D/usr/local/bin/maknaed"
+install -m 0755 "$BIN/maknae-egress" "$D/usr/local/bin/maknae-egress"
 install -m 0755 "$STAGE/$FIPS_BASE" "$D$FIPS_LIBDIR/$FIPS_BASE"
-install -m 0644 "$HERE/io.maknae.maknaed.plist" "$D/Library/LaunchDaemons/io.maknae.maknaed.plist"
 # Apple ships plists in binary1. Convert the INSTALLED copy; the repo keeps XML so
 # the unit stays reviewable in a diff.
-plutil -convert binary1 "$D/Library/LaunchDaemons/io.maknae.maknaed.plist"
+for job in io.maknae.maknaed io.maknae.maknae-egress; do
+    install -m 0644 "$HERE/$job.plist" "$D/Library/LaunchDaemons/$job.plist"
+    plutil -convert binary1 "$D/Library/LaunchDaemons/$job.plist"
+done
 install -m 0644 "$REPO/packaging/common/authz.yaml"  "$D/usr/local/share/maknae/defaults/authz.yaml"
 install -m 0644 "$REPO/packaging/common/maknae.yaml" "$D/usr/local/share/maknae/defaults/maknae.yaml"
 # The shipped skeleton is LINUX-SHAPED and would be wrong here if left alone:
@@ -243,6 +262,15 @@ install -d "$C/usr/local/bin"
 install -m 0755 "$BIN/maknae" "$C/usr/local/bin/maknae"
 xattr -rc "$C" 2>/dev/null || true
 "$REPO/ci/gates/payload-xattr-clean.sh" "$C"
+
+landed="$( { ls -1 "$D/usr/local/bin"; ls -1 "$C/usr/local/bin"; } | sort)"
+declared="$(printf '%s\n' $BINS | sort)"
+[ "$landed" = "$declared" ] || {
+    echo "ERROR: payload usr/local/bin does not match the packaged-binaries manifest" >&2
+    echo "  declared: $(echo $declared)" >&2
+    echo "  landed:   $(echo $landed)" >&2
+    exit 1
+}
 pkgbuild --root "$C" --identifier io.maknae.cli --version "$VERSION" \
          --install-location / "$STAGE/maknae-cli.pkg"
 

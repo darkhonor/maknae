@@ -28,6 +28,13 @@ phase1() {
             || { echo "REFUSED: $t not installed; phase 1 cannot attest its checks." >&2; exit 2; }
     done
 
+    # packaged-binaries.sh sets -e; this script counts failures instead.
+    . "$REPO/ci/gates/packaged-binaries.sh"; set +e
+    . "$HERE/signing-lib.sh"
+    local BINS
+    BINS="$(packaged_binaries "$REPO")" && [ -n "$BINS" ] \
+        || { echo "REFUSED: the packaged-binaries manifest could not be read." >&2; exit 2; }
+
     for f in "$HERE"/*.plist "$HERE"/*.entitlements; do
         plutil -lint "$f" >/dev/null 2>&1 && ok "plutil -lint $(basename "$f")" \
                                           || fail "plutil -lint $(basename "$f")"
@@ -41,7 +48,8 @@ phase1() {
         && ok "macOS 26 floor" || fail "macOS 26 floor MISSING"
 
     for s in "$HERE/scripts/preinstall" "$HERE/scripts/postinstall" \
-             "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh"; do
+             "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh" \
+             "$HERE/signing-lib.sh"; do
         bash -n "$s" 2>/dev/null && ok "bash -n $(basename "$s")" || fail "bash -n $(basename "$s")"
         shellcheck -S warning "$s" >/dev/null 2>&1 && ok "shellcheck $(basename "$s")" \
                                                    || fail "shellcheck $(basename "$s")"
@@ -58,6 +66,17 @@ phase1() {
         '')  fail "no runtime-dir install line found in preinstall" ;;
         *)   fail "runtime dir not -g \"\$OPERATOR_GID\" — D1's premise is broken: $rt_line" ;;
     esac
+    # The deputy's socket is born with its parent's group, and maknaed must reach it.
+    ert_line="$(grep -E '^install -d .*/usr/local/var/run/maknae-egress$' "$HERE/scripts/preinstall" || true)"
+    case "$ert_line" in
+        *'-o "$EGRESS_UID" -g "$MAKNAE_GID"'*) ok "deputy runtime dir is _maknae-egress:_maknae" ;;
+        '')  fail "no deputy runtime-dir install line found in preinstall" ;;
+        *)   fail "deputy runtime dir not -o \"\$EGRESS_UID\" -g \"\$MAKNAE_GID\": $ert_line" ;;
+    esac
+
+    "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
+        && ok "every entitlements file is empty" \
+        || fail "an entitlements file declares entitlements (ADR-0018 decision 6)"
 
     grep -q 'launchctl disable' "$HERE/scripts/postinstall" \
         && ok "postinstall disables the job by default" \
@@ -70,7 +89,7 @@ phase1() {
         || fail "no install_name_tool — an unresolved @rpath can load SOME OTHER libcrypto"
 
     local B="$REPO/target/aarch64-apple-darwin/release"
-    for b in maknaed maknae; do
+    for b in $BINS; do
         if [ ! -x "$B/$b" ]; then fail "no built $b to inspect"; continue; fi
         # CAPTURE, then match — never `cmd | grep -q` under `set -o pipefail`.
         # `grep -q` exits on the FIRST match and SIGPIPEs the writer, so pipefail
@@ -91,6 +110,8 @@ phase1() {
                                                        || fail "codesign --verify $b"
         codesign -d --entitlements - "$B/$b" >/dev/null 2>&1 && ok "entitlements readable on $b" \
                                                              || fail "entitlements unreadable on $b"
+        signed_entitlements_empty "$B/$b" && ok "$b was signed with no entitlements" \
+                                          || fail "$b carries signed entitlements, or none could be read"
         local cs; cs="$(codesign -dv "$B/$b" 2>&1)"
         case "$cs" in
             *"Identifier=io.maknae.$b"*) ok "$b carries Identifier=io.maknae.$b" ;;
@@ -121,10 +142,10 @@ phase1() {
         && ok "build-pkg.sh can productsign the distribution" \
         || fail "no productsign — the .pkg cannot carry a Developer ID Installer signature"
 
-    # Team ID CONSISTENCY across ALL THREE loaded objects, including the DYLIB.
+    # Team ID CONSISTENCY across EVERY loaded object, including the DYLIB.
     #
     # The executables alone are not enough, and this is the whole failure mode: if the
-    # dylib-signing line in build-pkg.sh is deleted or regresses while both executables
+    # dylib-signing line in build-pkg.sh is deleted or regresses while the executables
     # stay Developer ID signed, every static assertion above still passes and the
     # installed binaries die at launch with the measured "different Team IDs" (rc 134).
     # install_name_tool has already invalidated the dylib's signature by that point, so
@@ -136,14 +157,14 @@ phase1() {
     #
     # Holds in BOTH modes, so it never passes on nothing: codesign reports the literal
     # "not set" for ad-hoc, a real identity reports the Team ID, and a MIX is the defect.
-    local tid_d tid_c tid_l
+    local tid_d tid_b tid_l tids=""
     tid_d="$(codesign -dv --verbose=4 "$B/maknaed" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-    tid_c="$(codesign -dv --verbose=4 "$B/maknae"  2>&1 | sed -n 's/^TeamIdentifier=//p')"
-    if [ "$tid_d" = "$tid_c" ]; then
-        ok "maknaed and maknae agree on Team ID ($tid_d)"
-    else
-        fail "Team ID MISMATCH between executables: maknaed='$tid_d' maknae='$tid_c'"
-    fi
+    for b in $BINS; do
+        tid_b="$(codesign -dv --verbose=4 "$B/$b" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+        tids="$tids $b='$tid_b'"
+        [ "$tid_b" = "$tid_d" ] && ok "$b agrees with maknaed on Team ID ($tid_b)" \
+                                || fail "Team ID MISMATCH between executables: maknaed='$tid_d' $b='$tid_b'"
+    done
 
     if [ -n "$PKG" ]; then
         local xf dylib
@@ -152,11 +173,13 @@ phase1() {
             dylib="$(find "$xf/full" -name 'libaws_lc_fips_*_crypto.dylib' -type f 2>/dev/null | head -1)"
             if [ -n "$dylib" ]; then
                 tid_l="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-                if [ "$tid_l" = "$tid_d" ] && [ "$tid_l" = "$tid_c" ]; then
-                    ok "the PACKAGED FIPS dylib carries the same Team ID as both executables ($tid_l)"
+                if [ "$tid_l" = "$tid_d" ]; then
+                    ok "the PACKAGED FIPS dylib carries the same Team ID as every executable ($tid_l)"
                 else
-                    fail "Team ID MISMATCH — library validation WILL fail at launch (rc 134): dylib='$tid_l' maknaed='$tid_d' maknae='$tid_c'"
+                    fail "Team ID MISMATCH — library validation WILL fail at launch (rc 134): dylib='$tid_l'$tids"
                 fi
+                signed_entitlements_empty "$dylib" && ok "the packaged FIPS dylib was signed with no entitlements" \
+                    || fail "the packaged FIPS dylib carries signed entitlements, or none could be read"
                 # Hardened Runtime on the dylib too: library validation is what makes the
                 # Team ID load-bearing, and it is the runtime flag that enables it.
                 #
@@ -221,7 +244,9 @@ phase1() {
             printf '%s\n' \
                 "./Library" "./Library/LaunchDaemons" \
                 "./Library/LaunchDaemons/${LABEL}.plist" \
+                "./Library/LaunchDaemons/io.maknae.maknae-egress.plist" \
                 "./usr" "./usr/local" "./usr/local/bin" "./usr/local/bin/maknaed" \
+                "./usr/local/bin/maknae-egress" \
                 "./usr/local/lib" "./usr/local/lib/maknae" \
                 "./usr/local/lib/maknae/FIPSDYLIB" \
                 "./usr/local/share" "./usr/local/share/maknae" \
@@ -365,6 +390,8 @@ REFUSE
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
+    check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
+    check_mode "drwxr-x--- root _maknae-egress"    /usr/local/var/log/maknae-egress
 
     # The INSTALLED binary must actually run — the property no build-host check can
     # establish, because cargo injects DYLD_* and the installer does not.

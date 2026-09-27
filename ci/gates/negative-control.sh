@@ -4012,7 +4012,7 @@ fi
 ee="$here/entitlements-empty.sh"
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "neg-skip: [entitlements-empty/*] not Darwin; plutil(1) is a macOS tool"
-  skipped=$((skipped+4))
+  skipped=$((skipped+5))
 else
   ee_entitled="$(mktemp "$NC_TMP/XXXXXX")"
   cat > "$ee_entitled" <<'EOF'
@@ -4057,6 +4057,9 @@ EOF
 EOF
   expect_accept "entitlements-empty/an-empty-set-passes" "entitlements-empty: ok" \
     "$ee" "$ee_empty"
+
+  expect_accept "entitlements-empty/the-shipped-files-pass" "entitlements-empty: ok" \
+    "$ee" "$repo_root/packaging/macos/"*.entitlements
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
