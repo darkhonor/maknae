@@ -42,6 +42,8 @@ impl FrameCaps {
 pub const CONTROL_REQUEST_MAX: usize = 1024;
 pub const CONTROL_RESPONSE_MAX: usize = 65536;
 pub const ATTEMPT_REQUEST_MAX: usize = 65536;
+pub const ATTEMPT_RESPONSE_MAX: usize =
+    crate::mutation::MAX_MUTATION_DEPTH as usize * crate::mutation::MAX_MUTATION_PATH_BYTES;
 
 fn frame_len(body: &[u8]) -> Result<u32, ProtoFrameError> {
     u32::try_from(body.len()).map_err(|_| ProtoFrameError::Oversize {
