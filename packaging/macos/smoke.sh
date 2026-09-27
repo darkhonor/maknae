@@ -367,7 +367,7 @@ REFUSE
     dis2="$(launchctl print-disabled system 2>/dev/null)"
     case "$dis2" in
         *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled" ;;
-        *) ok "upgrade did not force-disable the job" ;;
+        *) fail "the job is NOT disabled after an ordinary upgrade" ;;
     esac
     case "$dis2" in
         *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade left the deputy job disabled" ;;
