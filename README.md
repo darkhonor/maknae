@@ -67,10 +67,11 @@ Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` dae
 1. **Governance baseline** — Knowledge Lifecycle Contract review; authority basis aligned to the Knowledge Lake's authority-line model; the open questions resolved with rationale.
 2. **Authorization seam & default backend** — build the bundled RBAC default (`maknae-authz-basic`) behind the versioned, policy-agnostic `maknae-security` seam and wire per-request evaluation ([ADR-0004](design/adr/ADR-0004-modular-authorization-architecture.md)). Optional `maknae-authz-*` backends — classification via the external DCS library, or Cedar — are scoped as follow-on, not the core engine decision.
 3. **Trust-plane kernel** — the reference monitor (`maknaed` as the sole PDP) composing the authorization backends deny-overrides, and audit events *(underway)*.
-4. **Lake integration** — a portable lake instance, authority map v0.1 (egress allowlist plus authority basis), and the quarantine ingest path.
-5. **Learning loop MVP** — gap detection → authorized fetch → quarantine → out-of-band consolidation ("dreaming") → gated promotion.
-6. **Gateway and web UI** — an onboarding wizard (CLI and web) for authority configuration, and the scheduler with scoped task identities.
-7. **Persona layer** — the hyungs move in.
+4. **Runtime loop** — Maknae acts as an agent. One registered OpenAI-compatible provider, its key in Vault and reached only through the egress deputy; `read_file` and `write_file` performed by your own client, each decided and recorded by the kernel before it happens. *(Accepted on Rocky 10, 2026-09-27; macOS in progress, #242. Set it up: [docs/first-provider.md](docs/first-provider.md).)*
+5. **Lake integration** — a portable lake instance, authority map v0.1 (egress allowlist plus authority basis), and the quarantine ingest path.
+6. **Learning loop MVP** — gap detection → authorized fetch → quarantine → out-of-band consolidation ("dreaming") → gated promotion.
+7. **Gateway and web UI** — an onboarding wizard (CLI and web) for authority configuration, and the scheduler with scoped task identities.
+8. **Persona layer** — the hyungs move in.
 
 Two capabilities are first-class *by design* from the start (design intent, not yet shipped). **Model-layer registration is dual-mode**: OAuth subscription authentication *and* OpenAI-compatible endpoint registration (including self-hosted and air-gapped inference), with provider endpoints as kernel-allowlisted egress destinations and credentials delivered via Vault, never plaintext. **Task-class model routing** is a policy decision that weighs task cost, content sensitivity (in classified deployments, no-egress or classified context may reach only endpoints authorized for it), and subject attributes — the model endpoint is itself an attribute-gated resource carrying operator-signed labels (jurisdiction, sanctioning authority, handling ceiling), so an operator's attributes constrain which models may serve them and data sovereignty holds even for unattended, scheduled work. One persona per instance is the proven deployment pattern (multi-persona is deferred behind a feature gate), while a single agent serving **multiple operators** — each with their own attribute set — is designed in from the start.
 
@@ -87,7 +88,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 ├── ci/gates/                # fail-closed CI gates (coverage, negative-control, isolation-contract)
 ├── packaging/               # STIG-baselined deb / rpm / macos / oci packaging
 ├── deploy/                  # deployment assets (Vault PKI, …)
-├── docs/                    # configuration and operator runbook
+├── docs/                    # configuration, operator runbook, first-provider walkthrough
 └── design/
     ├── knowledge-lifecycle-contract.md   # the governance spec — read first
     ├── container-architecture.md         # container decomposition + language choices
