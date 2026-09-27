@@ -19,7 +19,10 @@ pub enum VaultError {
     InvalidKeyVaultPath(String),
     /// The KV secret exists but carries no such field. Names the FIELD, never
     /// the secret's contents.
-    MissingKvField { path: String, field: String },
+    MissingKvField {
+        path: String,
+        field: String,
+    },
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
@@ -36,7 +39,10 @@ pub enum VaultError {
     },
     /// A sensitive credential file has unsafe permissions (group/other access) or is a
     /// symlink — refused before reading (fail-closed).
-    InsecureCredential { path: PathBuf, detail: String },
+    InsecureCredential {
+        path: PathBuf,
+        detail: String,
+    },
     /// `maknae-io`'s anchor-relative, symlink-checked read is unavailable on this
     /// (non-Unix) target — a sensitive credential file's owner-only permissions
     /// cannot be verified, AND a plain storage read (CA pins, sealed-source
@@ -65,7 +71,10 @@ pub enum VaultError {
     /// carries the underlying detail for logging).
     Renew(String),
     /// The UDS parent directory has unsafe ownership/permissions — refused before bind.
-    InsecureSocketDir { path: PathBuf, detail: String },
+    InsecureSocketDir {
+        path: PathBuf,
+        detail: String,
+    },
     /// Binding/listening on the UDS failed (incl. a live socket already present).
     SocketBind(String),
     /// Setting the bound UDS's group ownership failed (codex round-7 P1) — the 0660
@@ -88,9 +97,14 @@ pub enum VaultError {
     /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
     /// or is not yet implemented on this platform/build).
     CredentialSource(String),
-    WrongAccount { expected: &'static str, euid: u32 },
+    WrongAccount {
+        expected: &'static str,
+        euid: u32,
+    },
     KeychainPointer(String),
-    Keychain { status: i32 },
+    Keychain {
+        status: i32,
+    },
 }
 
 impl std::fmt::Display for VaultError {
@@ -185,7 +199,10 @@ mod tests {
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
             VaultError::Operator("issuer/default/json: connection refused".into()),
             VaultError::CredentialSource("no daemon SecretID source configured".into()),
-            VaultError::WrongAccount { expected: "_maknae", euid: 501 },
+            VaultError::WrongAccount {
+                expected: "_maknae",
+                euid: 501,
+            },
             VaultError::KeychainPointer("names /tmp/x.keychain".into()),
             VaultError::Keychain { status: -25308 },
         ];

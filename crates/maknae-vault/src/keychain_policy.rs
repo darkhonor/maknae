@@ -42,10 +42,13 @@ pub struct KeychainItem {
 
 fn field<'a>(doc: &'a Value, key: &str) -> Option<&'a str> {
     match doc {
-        Value::Map(entries) => entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-            Value::Str(s) => Some(s.as_str()),
-            _ => None,
-        }),
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                Value::Str(s) => Some(s.as_str()),
+                _ => None,
+            }),
         _ => None,
     }
 }
@@ -53,7 +56,9 @@ fn field<'a>(doc: &'a Value, key: &str) -> Option<&'a str> {
 pub fn parse_pointer(doc: &Value, plane: KeychainPlane) -> Result<KeychainItem, VaultError> {
     let expect = |key: &str, want: &str| match field(doc, key) {
         Some(got) if got == want => Ok(()),
-        Some(got) => Err(VaultError::KeychainPointer(format!("{key} is {got:?}, expected {want:?}"))),
+        Some(got) => Err(VaultError::KeychainPointer(format!(
+            "{key} is {got:?}, expected {want:?}"
+        ))),
         None => Err(VaultError::KeychainPointer(format!("{key} is missing"))),
     };
     expect("keychain", SYSTEM_KEYCHAIN)?;
@@ -120,8 +125,14 @@ mod tests {
         assert_eq!(KeychainPlane::Egress.service(), "io.maknae.maknae-egress");
         assert_eq!(KeychainPlane::Daemon.account_name(), "_maknae");
         assert_eq!(KeychainPlane::Egress.account_name(), "_maknae-egress");
-        assert_eq!(KeychainPlane::Daemon.pointer_file(), "maknaed-secret-id.keychain");
-        assert_eq!(KeychainPlane::Egress.pointer_file(), "maknae-egress-secret-id.keychain");
+        assert_eq!(
+            KeychainPlane::Daemon.pointer_file(),
+            "maknaed-secret-id.keychain"
+        );
+        assert_eq!(
+            KeychainPlane::Egress.pointer_file(),
+            "maknae-egress-secret-id.keychain"
+        );
     }
 
     #[test]
@@ -129,7 +140,10 @@ mod tests {
         for plane in [KeychainPlane::Daemon, KeychainPlane::Egress] {
             assert_eq!(
                 parse_pointer(&good(plane), plane).unwrap(),
-                KeychainItem { service: plane.service(), account: KEYCHAIN_ACCOUNT }
+                KeychainItem {
+                    service: plane.service(),
+                    account: KEYCHAIN_ACCOUNT
+                }
             );
         }
     }
@@ -143,10 +157,21 @@ mod tests {
         let other_account = doc(&format!(
             "keychain: {SYSTEM_KEYCHAIN}\nservice: io.maknae.maknaed\naccount: root\n"
         ));
-        let missing = doc(&format!("keychain: {SYSTEM_KEYCHAIN}\nservice: io.maknae.maknaed\n"));
+        let missing = doc(&format!(
+            "keychain: {SYSTEM_KEYCHAIN}\nservice: io.maknae.maknaed\n"
+        ));
         let not_a_map = doc("- a\n- b\n");
-        let not_a_string = doc(&format!("keychain: {SYSTEM_KEYCHAIN}\nservice: 5\naccount: secret-id\n"));
-        for d in [foreign_keychain, other_plane, other_account, missing, not_a_map, not_a_string] {
+        let not_a_string = doc(&format!(
+            "keychain: {SYSTEM_KEYCHAIN}\nservice: 5\naccount: secret-id\n"
+        ));
+        for d in [
+            foreign_keychain,
+            other_plane,
+            other_account,
+            missing,
+            not_a_map,
+            not_a_string,
+        ] {
             assert!(matches!(
                 parse_pointer(&d, KeychainPlane::Daemon),
                 Err(VaultError::KeychainPointer(_))
@@ -159,7 +184,10 @@ mod tests {
         assert!(gate(992, Some(992), KeychainPlane::Daemon).is_ok());
         assert!(matches!(
             gate(501, Some(992), KeychainPlane::Daemon),
-            Err(VaultError::WrongAccount { expected: "_maknae", euid: 501 })
+            Err(VaultError::WrongAccount {
+                expected: "_maknae",
+                euid: 501
+            })
         ));
         assert!(matches!(
             gate(0, Some(992), KeychainPlane::Daemon),
@@ -167,14 +195,23 @@ mod tests {
         ));
         assert!(matches!(
             gate(991, None, KeychainPlane::Egress),
-            Err(VaultError::WrongAccount { expected: "_maknae-egress", .. })
+            Err(VaultError::WrongAccount {
+                expected: "_maknae-egress",
+                ..
+            })
         ));
     }
 
     #[test]
     fn a_wrong_account_reads_nothing() {
         assert!(matches!(
-            read_gated(KeychainPlane::Daemon, 501, Some(992), never_pointer, never_item),
+            read_gated(
+                KeychainPlane::Daemon,
+                501,
+                Some(992),
+                never_pointer,
+                never_item
+            ),
             Err(VaultError::WrongAccount { .. })
         ));
         assert!(matches!(
@@ -192,7 +229,13 @@ mod tests {
         ));
         let unreadable = || Err(VaultError::CredentialSource("pointer unreadable".into()));
         assert!(matches!(
-            read_gated(KeychainPlane::Daemon, 992, Some(992), unreadable, never_item),
+            read_gated(
+                KeychainPlane::Daemon,
+                992,
+                Some(992),
+                unreadable,
+                never_item
+            ),
             Err(VaultError::CredentialSource(_))
         ));
     }

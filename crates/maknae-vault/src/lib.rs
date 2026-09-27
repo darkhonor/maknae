@@ -17,10 +17,10 @@ mod egress;
 mod egress_session;
 mod env;
 mod error;
-mod keychain_policy;
 mod fips;
 mod fips_glue;
 mod http;
+mod keychain_policy;
 mod operator;
 mod plane;
 mod plane_verify;
@@ -56,8 +56,10 @@ pub use egress::{
 };
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
-pub use keychain_policy::{gate, parse_pointer, read_gated, KeychainItem, KeychainPlane, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN};
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+pub use keychain_policy::{
+    gate, parse_pointer, read_gated, KeychainItem, KeychainPlane, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+};
 #[cfg(unix)]
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
