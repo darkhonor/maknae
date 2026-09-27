@@ -496,7 +496,7 @@ PROBE
     # Planted: phase 2 never enrolls, so an absence check would pass on nothing.
     local svc
     for svc in io.maknae.maknaed io.maknae.maknae-egress; do
-        security add-generic-password -a secret-id -s "$svc" -w smoke-sentinel \
+        security add-generic-password -U -a secret-id -s "$svc" -w smoke-sentinel \
             /Library/Keychains/System.keychain \
             && ok "planted $svc keychain item" || fail "could not plant $svc keychain item"
     done
