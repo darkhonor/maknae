@@ -22,9 +22,9 @@ for LABEL in io.maknae.maknaed io.maknae.maknae-egress; do
     esac
     launchctl bootout "system/${LABEL}" || :
     for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
         rc="$(print_rc "$LABEL")"
         [ "$rc" != 113 ] || break
-        sleep 0.5
     done
     [ "$rc" = 113 ] || {
         echo "maknae: $LABEL is still loaded after bootout (launchctl print exit $rc) — refusing to uninstall" >&2
