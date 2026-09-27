@@ -136,8 +136,7 @@ fi
 EGRESS_LABEL="io.maknae.maknae-egress"
 if [ "$KIND" = "fresh" ] || [ "$EGRESS_PLIST_EXISTED" != "true" ]; then
     launchctl disable "system/$EGRESS_LABEL" 2>/dev/null || :
-fi
-if [ "$EGRESS_WAS_LOADED" = "true" ]; then
+elif [ "$EGRESS_WAS_LOADED" = "true" ]; then
     launchctl kickstart -k "system/$EGRESS_LABEL" 2>/dev/null || :
 fi
 

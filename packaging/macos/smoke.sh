@@ -81,6 +81,10 @@ phase1() {
     grep -q 'launchctl disable' "$HERE/scripts/postinstall" \
         && ok "postinstall disables the job by default" \
         || fail "postinstall does NOT disable — an unenrolled install will respawn-loop"
+    grep -qxF 'EGRESS_LABEL="io.maknae.maknae-egress"' "$HERE/scripts/postinstall" \
+        && grep -qF 'launchctl disable "system/$EGRESS_LABEL"' "$HERE/scripts/postinstall" \
+        && ok "postinstall disables the deputy job by default" \
+        || fail "postinstall does NOT disable the deputy — an unenrolled install will respawn-loop it"
     grep -q 'usr/local/share/maknae/defaults' "$HERE/build-pkg.sh" \
         && ok "config defaults staged outside /etc" \
         || fail "config staged into /etc — upgrades would clobber enrollment"
@@ -358,6 +362,10 @@ REFUSE
         *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled" ;;
         *) ok "upgrade did not force-disable the job" ;;
     esac
+    case "$dis2" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade left the deputy job disabled" ;;
+        *) ok "upgrade did not force-disable the deputy job" ;;
+    esac
 
     # REPLACEMENT: delete the installer-created _maknae-egress and recreate it under
     # the same name with a DIFFERENT uid, exactly as an administrator might. The
@@ -404,6 +412,10 @@ REFUSE
     case "$dis" in
         *"\"$LABEL\" => disabled"*) ok "job is disabled by default" ;;
         *) fail "job is NOT disabled — boot would respawn-loop it" ;;
+    esac
+    case "$dis" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "deputy job is disabled by default" ;;
+        *) fail "deputy job is NOT disabled — boot would respawn-loop it" ;;
     esac
 
     echo "  -- chflags: uappnd is set; probing whether sappnd is survivable --"
