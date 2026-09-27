@@ -224,7 +224,7 @@ mod tests {
                     path: "/sentinel/read".into(),
                     effect: ReportedEffect::ReadFile,
                 },
-                65024,
+                65536,
             ),
             (
                 MutationScope::RecursiveDelete {

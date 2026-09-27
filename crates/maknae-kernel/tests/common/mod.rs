@@ -573,6 +573,8 @@ pub struct ReadRun {
     pub first: Option<Vec<u8>>,
     pub content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     pub finish: Option<maknae_proto::ReportedFinish>,
+    pub page: Option<maknae_io::Page>,
+    pub label: Option<maknae_proto::ObjectLabel>,
 }
 async fn report_acked(
     client: &mut tokio::io::DuplexStream,
@@ -594,9 +596,23 @@ pub async fn read_as_subject(
     client: &mut tokio::io::DuplexStream,
     held: Option<&OwnedFd>,
 ) -> ReadRun {
+    read_with(client, held, None).await
+}
+pub async fn read_page_as_subject(
+    client: &mut tokio::io::DuplexStream,
+    held: Option<&OwnedFd>,
+    window: maknae_io::PageWindow,
+) -> ReadRun {
+    read_with(client, held, Some(window)).await
+}
+async fn read_with(
+    client: &mut tokio::io::DuplexStream,
+    held: Option<&OwnedFd>,
+    window: Option<maknae_io::PageWindow>,
+) -> ReadRun {
     use maknae_proto::{
-        EffectEntry, MutationReport, MutationScope, Payload, ReportedEffect, ReportedFinish,
-        RespResult,
+        ByteRange, EffectEntry, LineSpan, MutationReport, MutationScope, Payload, ReportedEffect,
+        ReportedFinish, RespResult,
     };
     let first = tokio::time::timeout(Duration::from_secs(2), read_frame(client, 1 << 20))
         .await
@@ -614,8 +630,11 @@ pub async fn read_as_subject(
             first,
             content: None,
             finish: None,
+            page: None,
+            label: None,
         };
     };
+    let label = Some(grant.label.clone());
     let MutationScope::Exact {
         path,
         effect: ReportedEffect::ReadFile,
@@ -623,21 +642,37 @@ pub async fn read_as_subject(
     else {
         panic!("a read must be granted Exact ReadFile: {:?}", grant.scope)
     };
-    match maknae_io::read_held_file(
-        std::os::fd::AsFd::as_fd(held),
-        std::path::Path::new(path),
-        grant.limits.max_bytes,
-    ) {
-        Ok(bytes) => {
+    let fd = std::os::fd::AsFd::as_fd(held);
+    let target = std::path::Path::new(path);
+    let read = match window {
+        None => maknae_io::read_held_file(fd, target, grant.limits.max_bytes).map(|b| (b, None)),
+        Some(w) => maknae_io::read_held_page(fd, target, w, grant.limits.max_bytes).map(|mut p| {
+            let bytes = std::mem::take(&mut p.content);
+            (bytes, Some(p))
+        }),
+    };
+    match read {
+        Ok((bytes, page)) => {
+            let len = bytes.len() as u64;
+            let start = page.as_ref().map_or(0, |p| p.start);
             let batch = MutationReport::Batch {
                 id: grant.id,
                 first_index: 0,
                 effects: vec![EffectEntry {
                     path: path.clone(),
                     effect: ReportedEffect::ReadFile,
-                    length: Some(bytes.len() as u64),
-                    range: None,
-                    lines: None,
+                    length: Some(len),
+                    range: Some(ByteRange {
+                        start,
+                        end: start + len,
+                    }),
+                    lines: page.as_ref().and_then(|p| {
+                        p.lines.map(|(first, last)| LineSpan {
+                            first,
+                            last,
+                            complete_last: p.complete_last,
+                        })
+                    }),
                 }],
             };
             let acked = report_acked(client, batch).await.map(|a| a.next_index) == Some(1)
@@ -656,6 +691,8 @@ pub async fn read_as_subject(
                 first,
                 content: acked.then_some(bytes),
                 finish: Some(ReportedFinish::Success),
+                page,
+                label,
             }
         }
         Err(e) => {
@@ -679,6 +716,8 @@ pub async fn read_as_subject(
                 first,
                 content: None,
                 finish: Some(outcome),
+                page: None,
+                label,
             }
         }
     }

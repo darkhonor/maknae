@@ -300,6 +300,7 @@ fn mutation_meta(
         effects: Vec::new(),
         stopped_at: None,
         label: None,
+        requested_page: None,
     }
 }
 pub(crate) fn object_label(
@@ -327,6 +328,7 @@ async fn commit_intent<E: AuditEmit>(
     kind: FsOperation,
     paths: Vec<String>,
     label: &maknae_proto::ObjectLabel,
+    requested: Option<maknae_proto::PageRequest>,
 ) -> Result<DurableIntent, ()> {
     record.outcome.result = "permit".into();
     record.outcome.reason = "authorized; intent alone does not establish execution".into();
@@ -348,6 +350,11 @@ async fn commit_intent<E: AuditEmit>(
     });
     meta.authorized_paths = paths;
     meta.label = Some(label_audit(label));
+    meta.requested_page = requested.map(|p| maknae_audit_append::PageAudit {
+        offset_line: p.offset_line,
+        limit_lines: p.limit_lines,
+        column: p.column,
+    });
     record.mutation = Some(meta);
     emit.emit(&record).await.map_err(|_| ())?;
     Ok(DurableIntent { record })
@@ -515,6 +522,14 @@ where
             return true;
         }
     };
+    let requested = match verb {
+        Verb::Read { page, .. } => *page,
+        _ => None,
+    };
+    let read_page = match verb {
+        Verb::Read { page, .. } => Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
+        _ => None,
+    };
     let length = if let Verb::FsWrite { content_length, .. } = verb {
         Some(*content_length)
     } else {
@@ -529,6 +544,7 @@ where
             prepared.kind,
             prepared.paths,
             &label,
+            requested,
         ),
     )
     .await
@@ -541,6 +557,7 @@ where
             intent,
             prepared.scope,
             label,
+            read_page,
             seq,
         )
         .await;
@@ -550,6 +567,7 @@ where
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
@@ -558,6 +576,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     intent: DurableIntent,
     scope: MutationScope,
     label: maknae_proto::ObjectLabel,
+    read_page: Option<maknae_proto::PageRequest>,
     seq: &Seq,
 ) {
     let id = MutationId {
@@ -575,13 +594,17 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                 ..
             }
         ) {
-            crate::handler::READ_GRANT_MAX_BYTES
+            crate::handler::READ_PAGE_MAX_BYTES
         } else {
             0
         },
     };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
-    let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();
+    let exchange = match read_page {
+        Some(page) => MutationExchange::begin_paged(id, scope.clone(), limits, page),
+        None => MutationExchange::begin(id, scope.clone(), limits),
+    }
+    .ok();
     let bytes = maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
@@ -681,6 +704,15 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                             ReportedEffect::ReadFile => MutationEffectKind::ReadFile,
                         },
                         length: e.length,
+                        range: e.range.map(|r| maknae_audit_append::ByteRangeAudit {
+                            start: r.start,
+                            end: r.end,
+                        }),
+                        lines: e.lines.map(|l| maknae_audit_append::LineSpanAudit {
+                            first: l.first,
+                            last: l.last,
+                            complete_last: l.complete_last,
+                        }),
                     })
                     .collect();
                 false

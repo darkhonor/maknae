@@ -172,6 +172,35 @@ where
         verb,
         timeout,
         delegate,
+        None,
+        || {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_page_attempt<P>(
+    fx_principal: &maknae_config::Principal,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegate: &std::path::Path,
+    window: maknae_io::PageWindow,
+) -> common::ReadRun
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    read_attempt_with(
+        fx_principal,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        delegate,
+        Some(window),
         || {},
     )
     .await
@@ -188,6 +217,7 @@ async fn read_attempt_with<P>(
     verb: maknae_proto::Verb,
     timeout: Duration,
     delegate: &std::path::Path,
+    window: Option<maknae_io::PageWindow>,
     before_read: impl FnOnce(),
 ) -> common::ReadRun
 where
@@ -225,7 +255,10 @@ where
         .await
         .unwrap();
     before_read();
-    let run = common::read_as_subject(&mut client, held.as_ref()).await;
+    let run = match window {
+        None => common::read_as_subject(&mut client, held.as_ref()).await,
+        Some(w) => common::read_page_as_subject(&mut client, held.as_ref(), w).await,
+    };
     drop(client);
     tokio::time::timeout(Duration::from_secs(5), task)
         .await
@@ -948,6 +981,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
             },
             Duration::from_secs(5),
             &allowed,
+            None,
             || {
                 std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o000)).unwrap();
                 if std::fs::read(&allowed).is_ok() {
@@ -1031,6 +1065,11 @@ async fn a_permitted_read_returns_the_file_bytes() {
             path: target.clone(),
             effect: maknae_audit_append::MutationEffectKind::ReadFile,
             length: Some(content.len() as u64),
+            range: Some(maknae_audit_append::ByteRangeAudit {
+                start: 0,
+                end: content.len() as u64
+            }),
+            lines: None,
         }]
     );
     let last = mutation_of(records.last().unwrap());
@@ -1232,10 +1271,9 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
 }
 
 #[tokio::test]
-async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permit() {
+async fn an_unpaged_read_of_a_large_file_releases_the_first_page_after_a_real_permit() {
     let fx = Fixture::new("oversize");
     fx.write_policy(SHIPPED_POLICY);
-    // READ_GRANT_MAX_BYTES is 65024; 70000 exceeds it.
     std::fs::write(fx.dir.join("big.bin"), vec![0u8; 70_000]).unwrap();
     std::fs::set_permissions(
         fx.dir.join("big.bin"),
@@ -1246,7 +1284,7 @@ async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permi
 
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
-    let run = read_attempt(
+    let run = read_page_attempt(
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
@@ -1258,25 +1296,43 @@ async fn an_oversize_file_is_refused_by_the_grants_byte_limit_after_a_real_permi
         },
         Duration::from_secs(5),
         std::path::Path::new(&target),
+        maknae_io::PageWindow {
+            offset_line: 1,
+            limit_lines: u32::MAX,
+            column: 0,
+        },
     )
     .await;
     let first = run.first.as_deref().expect("a grant frame");
     match maknae_proto::decode_response(first).unwrap().result {
         RespResult::Ok(Payload::MutationAttempt(grant)) => {
-            assert_eq!(grant.limits.max_bytes, 65024)
+            assert_eq!(grant.limits.max_bytes, 65536)
         }
-        other => panic!("oversize is a permitted attempt with a byte limit: {other:?}"),
+        other => panic!("a read is a permitted attempt with a byte limit: {other:?}"),
     }
-    assert_eq!(run.finish, Some(maknae_proto::ReportedFinish::LimitReached));
-    assert_eq!(read_content(&run), None);
+    assert_eq!(run.finish, Some(maknae_proto::ReportedFinish::Success));
+    assert_eq!(read_content(&run).map(<[u8]>::len), Some(65536));
+    assert!(run.page.as_ref().unwrap().next.is_some());
     let records = emit.records();
     assert_eq!(request_record(&records).outcome.result, "permit");
-    let last = mutation_of(records.last().unwrap());
+    let progress = records
+        .iter()
+        .filter_map(|r| r.mutation.as_ref())
+        .find(|m| m.phase == maknae_audit_append::MutationPhase::Progress)
+        .expect("a progress record");
     assert_eq!(
-        last.status,
-        maknae_audit_append::MutationStatus::ReportedLimitReached
+        progress.effects[0].range,
+        Some(maknae_audit_append::ByteRangeAudit {
+            start: 0,
+            end: 65536
+        })
     );
-    assert_eq!(last.stopped_at.as_deref(), Some(target.as_str()));
+    let intent = records
+        .iter()
+        .filter_map(|r| r.mutation.as_ref())
+        .find(|m| m.phase == maknae_audit_append::MutationPhase::Intent)
+        .expect("an intent record");
+    assert_eq!(intent.requested_page, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -2600,7 +2656,7 @@ async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
             effect: maknae_proto::ReportedEffect::ReadFile,
         }
     );
-    assert_eq!(grant.limits.max_bytes, 65024);
+    assert_eq!(grant.limits.max_bytes, 65536);
     assert_eq!(read_content(&run), Some(&needle[..]));
     let records = records.snapshot();
     let phase = |phase| {
@@ -2770,5 +2826,172 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
     assert_eq!(
         mutation_of(records.snapshot().last().unwrap()).status,
         maknae_audit_append::MutationStatus::Incomplete
+    );
+}
+
+#[tokio::test]
+async fn a_paged_read_records_the_request_label_and_released_range() {
+    let fx = common::Fixture::new("read_paged", "Read");
+    let target = fx.root.join("paged-read-sentinel");
+    std::fs::write(&target, b"l1\nl2\nl3\n").unwrap();
+    let records = common::Records::new(0);
+    let held = maknae_io::open_path_for_delegation(&target).unwrap();
+    let page = maknae_proto::PageRequest {
+        offset_line: 2,
+        limit_lines: 1,
+        column: 0,
+    };
+    let (mut client, task, body) = fx.start(
+        maknae_proto::Verb::Read {
+            path: target.to_str().unwrap().into(),
+            conversation: None,
+            page: Some(page),
+        },
+        Some(held.try_clone().unwrap()),
+        records.clone(),
+    );
+    common::write_frame(&mut client, &body).await.unwrap();
+    let run = common::read_page_as_subject(
+        &mut client,
+        Some(&held),
+        maknae_io::PageWindow {
+            offset_line: 2,
+            limit_lines: 1,
+            column: 0,
+        },
+    )
+    .await;
+    drop(client);
+    task.await.unwrap();
+    let response = maknae_proto::decode_response(run.first.as_deref().unwrap()).unwrap();
+    let RespResult::Ok(Payload::MutationAttempt(grant)) = &response.result else {
+        panic!("expected a read grant, got {:?}", response.result)
+    };
+    assert_eq!(grant.limits.max_bytes, 65536);
+    assert_eq!(read_content(&run), Some(&b"l2\n"[..]));
+    let records = records.snapshot();
+    let phase = |phase| {
+        records
+            .iter()
+            .filter_map(|r| r.mutation.as_ref())
+            .find(|m| m.phase == phase)
+            .unwrap_or_else(|| panic!("a {phase:?} record"))
+    };
+    let intent = phase(maknae_audit_append::MutationPhase::Intent);
+    assert_eq!(
+        intent.requested_page,
+        Some(maknae_audit_append::PageAudit {
+            offset_line: 2,
+            limit_lines: 1,
+            column: 0
+        })
+    );
+    assert_eq!(intent.label.as_ref().unwrap().level, "UNCLASSIFIED");
+    let progress = phase(maknae_audit_append::MutationPhase::Progress);
+    assert_eq!(
+        progress.effects[0].range,
+        Some(maknae_audit_append::ByteRangeAudit { start: 3, end: 6 })
+    );
+    assert_eq!(
+        progress.effects[0].lines,
+        Some(maknae_audit_append::LineSpanAudit {
+            first: 2,
+            last: 2,
+            complete_last: true
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_zero_page_request_is_bad_request_before_the_pdp() {
+    let fx = Fixture::new("zeropage");
+    fx.write_policy(SHIPPED_POLICY);
+    let emit = RecEmit::new();
+    let me = nix::unistd::geteuid().as_raw();
+    let target = format!("{}/notes.txt", fx.dir.display());
+    let frame = drive(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target,
+            conversation: None,
+            page: Some(maknae_proto::PageRequest {
+                offset_line: 0,
+                limit_lines: 1,
+                column: 0,
+            }),
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("BadRequest frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::BadRequest),
+        other => panic!("a zero page is the malformed-request class: {other:?}"),
+    }
+    let records = emit.records();
+    let req = request_record(&records).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome.reason.contains("page request not acceptable"),
+        "{}",
+        req.outcome.reason
+    );
+    assert!(records.iter().all(|r| r.mutation.is_none()));
+}
+
+#[tokio::test]
+async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
+    let fx = Fixture::new("denylist-paged");
+    fx.write_policy(SHIPPED_POLICY);
+    std::fs::create_dir_all(fx.dir.join(".ssh")).unwrap();
+    std::fs::write(fx.dir.join(".ssh/id_rsa"), b"SECRETKEYMATERIAL").unwrap();
+    let target = fx.dir.join(".ssh/id_rsa").to_string_lossy().into_owned();
+    let emit = RecEmit::new();
+    let me = nix::unistd::geteuid().as_raw();
+    let run = read_page_attempt(
+        &fx.principal,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::Read {
+            path: target.clone(),
+            conversation: None,
+            page: Some(maknae_proto::PageRequest {
+                offset_line: 1,
+                limit_lines: 2000,
+                column: 0,
+            }),
+        },
+        Duration::from_secs(5),
+        std::path::Path::new(&target),
+        maknae_io::PageWindow {
+            offset_line: 1,
+            limit_lines: 2000,
+            column: 0,
+        },
+    )
+    .await;
+    assert_eq!(run.finish, None);
+    let frame = run.first.expect("deny frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => {
+            assert_eq!(e.code, ProtoErrCode::Unauthorized);
+            assert_eq!(e.message, "not authorized");
+        }
+        other => panic!("the deny list MUST deny a paged read: {other:?}"),
+    }
+    assert!(!frame
+        .windows(b"SECRETKEYMATERIAL".len())
+        .any(|w| w == b"SECRETKEYMATERIAL"));
+    let req = request_record(&emit.records()).clone();
+    assert!(
+        req.outcome
+            .reason
+            .contains("denied by policy entry Read(~/.ssh/**)"),
+        "{}",
+        req.outcome.reason
     );
 }

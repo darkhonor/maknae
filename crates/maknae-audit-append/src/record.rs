@@ -193,9 +193,33 @@ pub struct MutationEffectRecord {
     pub effect: MutationEffectKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<ByteRangeAudit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineSpanAudit>,
 }
 /// Trusted schema outside the deployer's free-form AU-3(1) extension. Session ID
 /// lives on AuditRecord; intent_seq correlates every phase within that session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageAudit {
+    pub offset_line: u64,
+    pub limit_lines: u32,
+    pub column: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteRangeAudit {
+    pub start: u64,
+    pub end: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineSpanAudit {
+    pub first: u64,
+    pub last: u64,
+    pub complete_last: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelAudit {
     pub level: String,
@@ -230,6 +254,8 @@ pub struct MutationAudit {
     pub authorized_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<LabelAudit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_page: Option<PageAudit>,
     pub intent_seq: u64,
     pub phase: MutationPhase,
     pub origin: MutationOrigin,
@@ -419,9 +445,12 @@ mod tests {
                 path: "/sentinel".into(),
                 effect: MutationEffectKind::CreatedFile,
                 length: None,
+                range: None,
+                lines: None,
             }],
             stopped_at: None,
             label: None,
+            requested_page: None,
         });
         let encoded = canonical_json(&rec).unwrap();
         let decoded: AuditRecord = serde_json::from_str(&encoded).unwrap();
@@ -448,6 +477,7 @@ mod tests {
             first_index: None,
             effects: vec![],
             stopped_at: None,
+            requested_page: None,
         };
         m.label = Some(LabelAudit {
             level: "UNCLASSIFIED".into(),
@@ -478,15 +508,20 @@ mod tests {
                     path: "/sentinel/read".into(),
                     effect: MutationEffectKind::ReadFile,
                     length: Some(25),
+                    range: None,
+                    lines: None,
                 },
                 MutationEffectRecord {
                     path: "/sentinel/created".into(),
                     effect: MutationEffectKind::CreatedFile,
                     length: None,
+                    range: None,
+                    lines: None,
                 },
             ],
             stopped_at: None,
             label: None,
+            requested_page: None,
         };
         let json = serde_json::to_string(&audit).unwrap();
         assert!(

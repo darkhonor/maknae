@@ -343,19 +343,27 @@ fn fits(report: &MutationReport, cap: usize) -> bool {
 }
 impl Worker {
     /// Reserve both effect and every terminal form before entering the syscall.
-    fn reserve(&self, path: &Path, effect: ReportedEffect, depth: usize) -> Result<String, Step> {
+    fn reserve(
+        &self,
+        path: &Path,
+        effect: ReportedEffect,
+        depth: usize,
+    ) -> Result<String, Box<Step>> {
         let Some(path) = path.to_str() else {
-            return Err(Step::stop(ReportedFinish::UnsupportedName, None));
+            return Err(Box::new(Step::stop(ReportedFinish::UnsupportedName, None)));
         };
         if path.len() > proto::MAX_MUTATION_PATH_BYTES
             || depth > usize::from(self.grant.limits.max_depth)
             || self.next_index >= self.grant.limits.max_effects
             || Instant::now() >= self.deadline
         {
-            return Err(Step::stop(ReportedFinish::LimitReached, None));
+            return Err(Box::new(Step::stop(ReportedFinish::LimitReached, None)));
         }
         if self.seen.contains(path) {
-            return Err(Step::stop(ReportedFinish::PathChanged, Some(path.into())));
+            return Err(Box::new(Step::stop(
+                ReportedFinish::PathChanged,
+                Some(path.into()),
+            )));
         }
         let entry = EffectEntry {
             path: path.into(),
@@ -368,7 +376,7 @@ impl Worker {
             &batch(self.grant.id, self.next_index, entry),
             self.frame_cap,
         ) {
-            return Err(Step::stop(ReportedFinish::LimitReached, None));
+            return Err(Box::new(Step::stop(ReportedFinish::LimitReached, None)));
         }
         for outcome in [
             ReportedFinish::Success,
@@ -384,7 +392,7 @@ impl Worker {
                     &finished(self.grant.id, index, outcome, Some(path.into())),
                     self.frame_cap,
                 ) {
-                    return Err(Step::stop(ReportedFinish::LimitReached, None));
+                    return Err(Box::new(Step::stop(ReportedFinish::LimitReached, None)));
                 }
             }
         }
@@ -397,7 +405,7 @@ impl Worker {
             Work::Read { held, path } => {
                 let path = match self.reserve(&path, ReportedEffect::ReadFile, 1) {
                     Ok(p) => p,
-                    Err(s) => return s,
+                    Err(s) => return *s,
                 };
                 match maknae_io::read_held_file(
                     held.as_fd(),
@@ -424,7 +432,7 @@ impl Worker {
             Work::Replace { held, path, bytes } => {
                 let path = match self.reserve(&path, ReportedEffect::ReplacedFile, 1) {
                     Ok(p) => p,
-                    Err(s) => return s,
+                    Err(s) => return *s,
                 };
                 match maknae_io::replace_held_file(held.as_fd(), Path::new(&path), &bytes.0) {
                     Ok(()) => Step {
@@ -451,7 +459,7 @@ impl Worker {
                     1,
                 ) {
                     Ok(p) => p,
-                    Err(s) => return s,
+                    Err(s) => return *s,
                 };
                 match parent.create_exclusive(&leaf, &bytes.0) {
                     Ok(_) => Step {
@@ -485,7 +493,7 @@ impl Worker {
                     depth,
                 ) {
                     Ok(p) => p,
-                    Err(s) => return s,
+                    Err(s) => return *s,
                 };
                 match parent.mkdir_one(&leaf) {
                     Ok(_) => {
@@ -585,7 +593,7 @@ impl Worker {
                         depth,
                     ) {
                         Ok(p) => p,
-                        Err(s) => return s,
+                        Err(s) => return *s,
                     };
                     match target_parent.remove_entry(&target_leaf) {
                         Ok(_) => {
@@ -1089,7 +1097,7 @@ mod tests {
         let d = Fixture::new();
         let path = d.path("read-sentinel");
         std::fs::write(&path, b"read sentinel bytes").unwrap();
-        let g = read_grant(&path, 65024);
+        let g = read_grant(&path, 65536);
         let id = g.id;
         let (result, reports) =
             acknowledged_read(read(path.clone()).unwrap(), g, TransportConfig::default()).await;
@@ -1147,7 +1155,7 @@ mod tests {
         std::fs::rename(&path, d.path("read-moved-sentinel")).unwrap();
         let (result, reports) = acknowledged_read(
             prepared,
-            read_grant(&path, 65024),
+            read_grant(&path, 65536),
             TransportConfig::default(),
         )
         .await;
@@ -1183,7 +1191,7 @@ mod tests {
         });
         let result = execute_read(
             read(path.clone()).unwrap(),
-            read_grant(&path, 65024),
+            read_grant(&path, 65536),
             &mut client,
             &TransportConfig::default(),
             Instant::now(),
@@ -1736,7 +1744,7 @@ mod tests {
         assert_eq!(grant_object(&prepared, &valid), Ok(PathBuf::from(&path)));
         let read_prepared = read(path.clone()).unwrap();
         assert!(grant_object(&read_prepared, &valid).is_err());
-        let read_valid = read_grant(&path, 65024);
+        let read_valid = read_grant(&path, 65536);
         assert!(grant_object(&prepared, &read_valid).is_err());
         assert_eq!(
             grant_object(&read_prepared, &read_valid),

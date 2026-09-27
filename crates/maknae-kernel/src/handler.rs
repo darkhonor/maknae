@@ -341,7 +341,7 @@ pub fn lexical_pregate(path: &str) -> Result<(), &'static str> {
 
 pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
 
-pub const READ_GRANT_MAX_BYTES: u64 = 65_024;
+pub const READ_PAGE_MAX_BYTES: u64 = 65_536;
 
 /// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009).
 ///
@@ -859,7 +859,7 @@ mod tests {
     }
     #[test]
     fn the_read_grant_bound_and_envelope_margin_by_value() {
-        assert_eq!((READ_GRANT_MAX_BYTES, FRAME_ENVELOPE_MARGIN), (65_024, 512));
+        assert_eq!((READ_PAGE_MAX_BYTES, FRAME_ENVELOPE_MARGIN), (65_536, 512));
     }
 
     #[test]

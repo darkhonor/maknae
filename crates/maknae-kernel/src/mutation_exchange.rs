@@ -38,6 +38,7 @@ pub struct MutationExchange {
     id: MutationId,
     scope: MutationScope,
     limits: MutationLimits,
+    read_page: Option<maknae_proto::PageRequest>,
     owner: std::sync::Arc<()>,
     next_index: u32,
     outstanding: bool,
@@ -50,6 +51,28 @@ impl MutationExchange {
         id: MutationId,
         scope: MutationScope,
         limits: MutationLimits,
+    ) -> Result<Self, ReportError> {
+        let read_page = is_read(&scope).then_some(maknae_proto::WHOLE_FILE);
+        Self::open(id, scope, limits, read_page)
+    }
+
+    pub fn begin_paged(
+        id: MutationId,
+        scope: MutationScope,
+        limits: MutationLimits,
+        page: maknae_proto::PageRequest,
+    ) -> Result<Self, ReportError> {
+        if !is_read(&scope) {
+            return Err(ReportError::Limit);
+        }
+        Self::open(id, scope, limits, Some(page))
+    }
+
+    fn open(
+        id: MutationId,
+        scope: MutationScope,
+        limits: MutationLimits,
+        read_page: Option<maknae_proto::PageRequest>,
     ) -> Result<Self, ReportError> {
         if limits.max_effects == 0
             || limits.max_effects > MAX_MUTATION_EFFECTS
@@ -105,6 +128,7 @@ impl MutationExchange {
             id,
             scope,
             limits,
+            read_page,
             owner: std::sync::Arc::new(()),
             next_index: 0,
             outstanding: false,
@@ -167,7 +191,14 @@ impl MutationExchange {
                         if n > self.limits.max_bytes {
                             return Err(ReportError::Limit);
                         }
-                    } else if entry.length.is_some() {
+                        let page = self.read_page.ok_or(ReportError::InconsistentClaim)?;
+                        if !read_claim_is_consistent(page, n, entry.range, entry.lines) {
+                            return Err(ReportError::InconsistentClaim);
+                        }
+                    } else if entry.length.is_some()
+                        || entry.range.is_some()
+                        || entry.lines.is_some()
+                    {
                         return Err(ReportError::InconsistentClaim);
                     }
                 }
@@ -294,6 +325,35 @@ fn canonical_path(path: &str) -> Result<(), ReportError> {
     Ok(())
 }
 
+fn is_read(scope: &MutationScope) -> bool {
+    matches!(
+        scope,
+        MutationScope::Exact {
+            effect: ReportedEffect::ReadFile,
+            ..
+        }
+    )
+}
+
+fn read_claim_is_consistent(
+    page: maknae_proto::PageRequest,
+    length: u64,
+    range: Option<maknae_proto::ByteRange>,
+    lines: Option<maknae_proto::LineSpan>,
+) -> bool {
+    let Some(r) = range else {
+        return false;
+    };
+    let range_ok = r.start <= r.end && r.end - r.start == length;
+    let lines_ok = lines.is_none_or(|l| {
+        length > 0
+            && l.first == page.offset_line
+            && l.first <= l.last
+            && l.last - l.first < u64::from(page.limit_lines)
+    });
+    range_ok && lines_ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,10 +384,118 @@ mod tests {
                 path: "/sentinel/read".into(),
                 effect: ReportedEffect::ReadFile,
                 length,
-                range: None,
+                range: Some(maknae_proto::ByteRange {
+                    start: 0,
+                    end: length.unwrap_or(0),
+                }),
                 lines: None,
             }],
         }
+    }
+    fn read_claim(
+        page: maknae_proto::PageRequest,
+        length: u64,
+        range: Option<maknae_proto::ByteRange>,
+        lines: Option<maknae_proto::LineSpan>,
+    ) -> Result<(), ReportError> {
+        let scope = MutationScope::Exact {
+            path: "/sentinel/read".into(),
+            effect: ReportedEffect::ReadFile,
+        };
+        let mut x = MutationExchange::begin_paged(ID, scope, read_limits(65536), page).unwrap();
+        x.validate_report(&MutationReport::Batch {
+            id: ID,
+            first_index: 0,
+            effects: vec![EffectEntry {
+                path: "/sentinel/read".into(),
+                effect: ReportedEffect::ReadFile,
+                length: Some(length),
+                range,
+                lines,
+            }],
+        })
+        .map(|_| ())
+    }
+    #[test]
+    fn a_read_claim_must_match_the_page_it_was_granted() {
+        let p = maknae_proto::PageRequest {
+            offset_line: 2,
+            limit_lines: 3,
+            column: 0,
+        };
+        let r = |start, end| Some(maknae_proto::ByteRange { start, end });
+        let l = |first, last| {
+            Some(maknae_proto::LineSpan {
+                first,
+                last,
+                complete_last: true,
+            })
+        };
+        assert!(read_claim(p, 3, r(7, 10), l(2, 4)).is_ok());
+        assert!(read_claim(p, 3, r(7, 10), l(2, 2)).is_ok());
+        assert!(read_claim(p, 3, r(7, 10), None).is_ok());
+        assert!(read_claim(p, 0, r(4, 4), None).is_ok());
+        for bad in [
+            read_claim(p, 3, None, None),
+            read_claim(p, 3, r(7, 11), None),
+            read_claim(p, 3, r(10, 7), None),
+            read_claim(p, 3, r(7, 10), l(3, 4)),
+            read_claim(p, 3, r(7, 10), l(2, 5)),
+            read_claim(p, 3, r(7, 10), l(4, 2)),
+            read_claim(p, 0, r(4, 4), l(2, 2)),
+        ] {
+            assert_eq!(bad, Err(ReportError::InconsistentClaim));
+        }
+    }
+    #[test]
+    fn a_non_read_effect_carrying_a_range_or_lines_is_inconsistent() {
+        for (range, lines) in [
+            (Some(maknae_proto::ByteRange { start: 0, end: 0 }), None),
+            (
+                None,
+                Some(maknae_proto::LineSpan {
+                    first: 1,
+                    last: 1,
+                    complete_last: true,
+                }),
+            ),
+        ] {
+            let scope = MutationScope::Exact {
+                path: "/sentinel/new".into(),
+                effect: ReportedEffect::CreatedFile,
+            };
+            let mut x = MutationExchange::begin(ID, scope, limits()).unwrap();
+            let got = x.validate_report(&MutationReport::Batch {
+                id: ID,
+                first_index: 0,
+                effects: vec![EffectEntry {
+                    path: "/sentinel/new".into(),
+                    effect: ReportedEffect::CreatedFile,
+                    length: None,
+                    range,
+                    lines,
+                }],
+            });
+            assert_eq!(got.map(|_| ()), Err(ReportError::InconsistentClaim));
+        }
+    }
+    #[test]
+    fn only_a_read_scope_takes_a_page() {
+        let write = MutationScope::Exact {
+            path: "/sentinel/new".into(),
+            effect: ReportedEffect::CreatedFile,
+        };
+        assert!(
+            MutationExchange::begin_paged(ID, write, limits(), maknae_proto::WHOLE_FILE).is_err()
+        );
+        let read = MutationScope::Exact {
+            path: "/sentinel/read".into(),
+            effect: ReportedEffect::ReadFile,
+        };
+        assert!(
+            MutationExchange::begin_paged(ID, read, read_limits(1), maknae_proto::WHOLE_FILE)
+                .is_ok()
+        );
     }
     fn tree() -> MutationExchange {
         MutationExchange::begin(
@@ -1080,7 +1248,7 @@ mod tests {
             effect: ReportedEffect::ReadFile,
         };
         assert!(MutationExchange::begin(ID, read.clone(), read_limits(0)).is_ok());
-        assert!(MutationExchange::begin(ID, read, read_limits(65024)).is_ok());
+        assert!(MutationExchange::begin(ID, read, read_limits(65536)).is_ok());
         for scope in [
             MutationScope::Exact {
                 path: "/sentinel/read".into(),
