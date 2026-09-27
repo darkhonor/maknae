@@ -118,7 +118,7 @@ ensure_service_user() {
     echo "$uid"
 }
 
-for d in /usr/local/var /usr/local/var/run /usr/local/var/log /usr/local/lib \
+for d in /usr/local /usr/local/var /usr/local/var/db /usr/local/var/run /usr/local/var/log /usr/local/lib \
          /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
          /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" \
          /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
