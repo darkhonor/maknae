@@ -727,6 +727,7 @@ mod tests {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
                 }],
                 tool_calls: vec![],
+                usage: None,
             })),
         };
         let body = maknae_proto::encode_response(&reply).unwrap();

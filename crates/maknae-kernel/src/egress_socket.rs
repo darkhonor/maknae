@@ -356,6 +356,8 @@ fn frame_of(req: EgressRequest) -> EgressFrameRequest {
         reasoning_effort: req.reasoning_effort,
         conversation: req.conversation,
         turns: req.turns,
+        output_tokens: None,
+        output_tokens_field: None,
     }
 }
 
@@ -664,6 +666,7 @@ mod tests {
                 text: SecretText(maknae_io::Zeroizing::new("ok".into())),
             }],
             tool_calls: vec![],
+            usage: None,
         };
         let (path, seen) = fake_deputy(d.path(), Some(reply.clone()));
         let me = nix::unistd::getuid().as_raw();

@@ -177,7 +177,7 @@ pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = maknae_proto::EGRESS_REPLY_FRAME
 /// The largest request frame the kernel will WRITE to the deputy — the
 /// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte
 /// leaves. Without it a prompt that fills `transport.prompt_max_bytes` at its
-/// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
+/// 16 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
 /// as oversize after reading it, and the trail says "outcome unknown" for a
 /// prompt that provably never reached a provider (review round 3). Refused
 /// here it is a pre-send failure: `Failed`, the true record. The VALUE is
@@ -727,6 +727,7 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
+            usage: None,
         };
         let cap = reply_capacity(&reply);
 
@@ -785,6 +786,7 @@ mod tests {
         let text_only = maknae_proto::PromptReply {
             blocks: vec![text("hello")],
             tool_calls: vec![],
+            usage: None,
         };
         // 5 + (1 × 32) + 512 = 549
         assert_eq!(reply_capacity(&text_only), 549);
@@ -797,6 +799,7 @@ mod tests {
                 call_id: "b".into(),
                 arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
             }],
+            usage: None,
         };
         // 1 + 1 + 1 + 64 + 512 = 579
         assert_eq!(reply_capacity(&one_call), 579);
@@ -816,6 +819,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
                 },
             ],
+            usage: None,
         };
         // (1+1+1+64) × 2 + 512 = 646
         assert_eq!(reply_capacity(&two_calls), 646);
@@ -828,12 +832,14 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(16)],
+            usage: None,
         };
         assert_eq!(admitted_reply(&reply), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
                 blocks: vec![],
-                tool_calls: vec![]
+                tool_calls: vec![],
+                usage: None,
             }),
             Err(ReplyRefusal::Empty),
         );
@@ -848,6 +854,7 @@ mod tests {
                 mime_type: "image/png".into(),
             }],
             tool_calls: vec![tc(16)],
+            usage: None,
         };
         assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::NonText));
     }
@@ -858,6 +865,7 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1)],
+            usage: None,
         };
         assert_eq!(
             admitted_reply(&reply),
@@ -923,6 +931,7 @@ mod tests {
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![text("ok")],
+                    usage: None,
                 },
             })
         }
@@ -1106,14 +1115,13 @@ mod tests {
         );
     }
 
-    /// The two frame caps are 1 MiB by VALUE, mirroring the deputy's
-    /// `MAX_REQUEST_FRAME_BYTES`; a mutant turning `1024 * 1024` into 2048
-    /// or 1 survives every test that uses them symbolically (measured: two
-    /// such mutants missed until this test).
+    /// The two frame caps by VALUE, mirroring the deputy's
+    /// `MAX_REQUEST_FRAME_BYTES`; a mutant changing either survives every test
+    /// that uses them symbolically (measured: two such mutants missed until this test).
     #[test]
-    fn the_frame_caps_are_one_mebibyte_by_value() {
+    fn the_frame_caps_by_value() {
         assert_eq!(EGRESS_MAX_REPLY_FRAME_BYTES, 1_048_576);
-        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 1_048_576);
+        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 16_842_752);
     }
 
     /// Only the backend's own deadline is an expiry to the breaker; every
@@ -1470,6 +1478,7 @@ mod tests {
             let reply = maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: blocks.clone(),
+                usage: None,
             };
             let cap = reply_capacity(&reply);
             let resp = maknae_proto::Response {
@@ -1508,13 +1517,15 @@ mod tests {
                         name: "x".into(),
                     },
                 ],
+                usage: None,
             }),
             2
         );
         assert_eq!(
             reply_capacity(&maknae_proto::PromptReply {
                 tool_calls: vec![],
-                blocks: vec![]
+                blocks: vec![],
+                usage: None,
             }),
             crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
@@ -1528,6 +1539,7 @@ mod tests {
             reply_capacity(&maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: vec![text("abc"), text("de")],
+                usage: None,
             }),
             5 + 2 * REPLY_BLOCK_ENVELOPE + crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
@@ -1538,12 +1550,14 @@ mod tests {
         let ok = maknae_proto::PromptReply {
             tool_calls: vec![],
             blocks: vec![text("a"), text("b")],
+            usage: None,
         };
         assert_eq!(admitted_reply(&ok), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
                 tool_calls: vec![],
-                blocks: vec![]
+                blocks: vec![],
+                usage: None,
             }),
             Err(ReplyRefusal::Empty)
         );
@@ -1557,6 +1571,7 @@ mod tests {
                         mime_type: "image/png".into(),
                     },
                 ],
+                usage: None,
             }),
             Err(ReplyRefusal::NonText)
         );

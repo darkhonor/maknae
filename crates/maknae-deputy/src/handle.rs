@@ -203,6 +203,8 @@ mod tests {
                     text: SecretText(zeroize::Zeroizing::new("hello".into())),
                 }],
             }],
+            output_tokens: None,
+            output_tokens_field: None,
         }
     }
 

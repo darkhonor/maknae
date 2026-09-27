@@ -160,6 +160,7 @@ impl Plane for RealPlane<'_> {
         let verb = Verb::SessionPrompt {
             conversation: conversation.to_string(),
             turns: turns.to_vec(),
+            output_tokens: None,
         };
         // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
         // encodes once here and once inside send_verb; accepted for Cooky.
@@ -413,11 +414,13 @@ mod tests {
                 PromptReply {
                     blocks: vec![],
                     tool_calls: vec![],
+                    usage: None,
                 }
             )))),
             Ok(PromptReply {
                 blocks: vec![],
-                tool_calls: vec![]
+                tool_calls: vec![],
+                usage: None,
             })
         );
         assert!(matches!(

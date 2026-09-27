@@ -739,6 +739,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         Verb::SessionPrompt {
             conversation,
             turns,
+            ..
         } => if !maknae_proto::conversation_id_is_acceptable(conversation) {
             Err("conversation identifier not acceptable".to_string())
         } else {
@@ -1329,6 +1330,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let Verb::SessionPrompt {
                 conversation,
                 turns,
+                ..
             } = &request.verb
             else {
                 unreachable!("dispatch keyed on the verb")

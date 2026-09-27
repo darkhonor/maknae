@@ -145,6 +145,7 @@ impl Plane for FixturePlane {
                 Verb::SessionPrompt {
                     conversation: conversation.into(),
                     turns: turns.to_vec(),
+                    output_tokens: None,
                 },
                 None,
             )
@@ -342,6 +343,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
                     "read_file",
                     &format!(r#"{{"path":"{}"}}"#, target.display()),
                 )],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![],
@@ -350,10 +352,12 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
                     "write_file",
                     &format!(r#"{{"path":"{}","content":"new"}}"#, target.display()),
                 )],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("Edited.")],
                 tool_calls: vec![],
+                usage: None,
             },
         ],
     );
@@ -484,10 +488,12 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
                     "read_file",
                     &format!(r#"{{"path":"{}"}}"#, secret.display()),
                 )],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("refused")],
                 tool_calls: vec![],
+                usage: None,
             },
         ],
     );
@@ -548,10 +554,12 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
                     "write_file",
                     &format!(r#"{{"path":"{}","content":"evil"}}"#, target.display()),
                 )],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("done?")],
                 tool_calls: vec![],
+                usage: None,
             },
         ],
     );
@@ -599,6 +607,7 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
     let looping = PromptReply {
         blocks: vec![],
         tool_calls: vec![call("c", "read_file", r#"{"path":"/nonexistent"}"#)],
+        usage: None,
     };
     script(&egress, [looping.clone(), looping.clone(), looping]);
     let records = Records::new(0);

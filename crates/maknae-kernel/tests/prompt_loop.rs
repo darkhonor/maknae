@@ -100,6 +100,7 @@ impl maknae_kernel::Egress for Recording {
             reply: maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: vec![text("ok")],
+                usage: None,
             },
         })
     }
@@ -117,6 +118,7 @@ fn prompt(s: &str) -> Verb {
         turns: vec![Turn::User {
             content: vec![text(s)],
         }],
+        output_tokens: None,
     }
 }
 fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
@@ -336,6 +338,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
                             mime_type: "image/png".into(),
                         },
                     ],
+                    usage: None,
                 },
             })
         }
@@ -387,6 +390,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![],
+                    usage: None,
                 },
             })
         }
@@ -624,6 +628,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         mime_type: "image/png".into(),
                     }],
                 }],
+                output_tokens: None,
             },
             "image",
         ),
@@ -633,6 +638,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("x")],
                 }],
+                output_tokens: None,
             },
             "conversation",
         ),
@@ -642,6 +648,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("x")],
                 }],
+                output_tokens: None,
             },
             "conversation",
         ),
@@ -649,6 +656,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
             Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![],
+                output_tokens: None,
             },
             "no turns",
         ),
@@ -670,6 +678,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -679,6 +688,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("   \n\t ")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -688,6 +698,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text(""), text("  ")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -714,6 +725,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         }],
                     },
                 ],
+                output_tokens: None,
             },
             "shape admission",
         ),
@@ -780,16 +792,19 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
                     mime_type: "image/png".into(),
                 }],
             }],
+            output_tokens: None,
         },
         Verb::SessionPrompt {
             conversation: "has space".into(),
             turns: vec![Turn::User {
                 content: vec![text("x")],
             }],
+            output_tokens: None,
         },
         Verb::SessionPrompt {
             conversation: "c".into(),
             turns: vec![],
+            output_tokens: None,
         },
         // #264 round 5: a prompt bearing no text must also cost ZERO PDP
         // decisions — it is refused by the operand pre-gate, not by policy.
@@ -798,6 +813,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
             turns: vec![Turn::User {
                 content: vec![text("   ")],
             }],
+            output_tokens: None,
         },
     ] {
         let counting = Arc::new(Counting {
@@ -904,6 +920,7 @@ async fn a_pre_gate_refusal_whose_record_cannot_be_appended_is_closed_frameless(
             Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![],
+                output_tokens: None,
             },
             Arc::clone(&records),
             Some("openai"),
@@ -1004,6 +1021,7 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![text(&"x".repeat(1 << 20))],
+                    usage: None,
                 },
             })
         }

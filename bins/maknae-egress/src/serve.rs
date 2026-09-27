@@ -138,6 +138,7 @@ mod tests {
             reply: maknae_proto::PromptReply {
                 blocks: vec![],
                 tool_calls: vec![],
+                usage: None,
             },
         })
     }
@@ -165,6 +166,8 @@ mod tests {
                     text: SecretText(zeroize::Zeroizing::new("hi".into())),
                 }],
             }],
+            output_tokens: None,
+            output_tokens_field: None,
         };
         maknae_proto::encode_egress_frame_request(
             &r,

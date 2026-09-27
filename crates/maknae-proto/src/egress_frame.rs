@@ -48,12 +48,23 @@ pub struct EgressFrameRequest {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_field: Option<OutputTokensField>,
     /// The loop's identifier (#241). Informational, never decided on.
     pub conversation: String,
     /// The transcript leaving the trust plane (#241). Roles per `crate::Turn`;
     /// there is no `System` variant, so the trusted preamble the deputy
     /// prepends is the only system message.
     pub turns: Vec<crate::Turn>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTokensField {
+    MaxCompletionTokens,
+    MaxTokens,
 }
 
 impl std::fmt::Debug for EgressFrameRequest {
@@ -74,6 +85,8 @@ impl std::fmt::Debug for EgressFrameRequest {
             // credential is kept, and nothing needs it in a log line.
             .field("key_field", &"<omitted>")
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("output_tokens", &self.output_tokens)
+            .field("output_tokens_field", &self.output_tokens_field)
             .field("conversation", &self.conversation)
             .field("turns", &format_args!("<{} turns>", self.turns.len()))
             .finish()
@@ -92,7 +105,7 @@ pub struct EgressFrameReply {
 /// larger one (a pre-send failure, so the trail says nothing left), and the
 /// deputy refuses to READ one (checked against the declared length before
 /// any allocation). Two copies of `1024 * 1024` drifted apart in review.
-pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 1024 * 1024;
+pub const EGRESS_REQUEST_FRAME_MAX_BYTES: usize = 16_842_752;
 
 /// The fixed buffer a request frame is encoded INTO when the caller has not
 /// measured the frame itself: allocated once, written once, never grown
@@ -173,6 +186,9 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.key_vault_path.is_empty()
         && !r.key_field.is_empty()
         && r.reasoning_effort.as_deref().is_none_or(|e| !e.is_empty())
+        && r.output_tokens
+            .is_none_or(crate::output_tokens_is_acceptable)
+        && (r.output_tokens_field.is_none() || r.output_tokens.is_some())
         && !r.turns.is_empty()
         && r.turns.iter().all(crate::turn_is_acceptable)
 }
@@ -185,14 +201,15 @@ mod tests {
     /// By VALUE: a mutant turning `1024 * 1024` into 2048 or 1 survives every
     /// symbolic use on both ends.
     #[test]
-    fn the_request_frame_cap_is_one_mebibyte_by_value() {
-        assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 1_048_576);
+    fn the_request_frame_cap_is_sixteen_mebibytes_and_a_margin_by_value() {
+        assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 16_842_752);
+        assert_eq!(EGRESS_REQUEST_FRAME_MAX_BYTES, 16 * 1024 * 1024 + 64 * 1024);
         // By VALUE too, and its relation to the cap stated separately
         // (corrected 2026-09-22, codex round 2 item C: this asserted the cap
         // plus one page, and the page is gone — the kernel measures the frame
         // before it allocates, so no headroom is needed to keep the kernel's
         // own cap refusal from being shadowed by an encoder overflow).
-        assert_eq!(EGRESS_REQUEST_FRAME_ENCODE_BYTES, 1_048_576);
+        assert_eq!(EGRESS_REQUEST_FRAME_ENCODE_BYTES, 16_842_752);
         assert_eq!(
             EGRESS_REQUEST_FRAME_ENCODE_BYTES, EGRESS_REQUEST_FRAME_MAX_BYTES,
             "a buffer larger than the cap can only produce a frame nobody may send"
@@ -235,6 +252,8 @@ mod tests {
             reasoning_effort: None,
             conversation: conversation.into(),
             turns,
+            output_tokens: None,
+            output_tokens_field: None,
         }
     }
 
@@ -296,6 +315,31 @@ mod tests {
             }],
         );
         assert!(!egress_frame_request_is_acceptable(&bad));
+    }
+
+    #[test]
+    fn the_reply_cap_and_its_field_round_trip_and_a_field_without_a_cap_is_malformed() {
+        let mut r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
+        );
+        r.output_tokens = Some(8);
+        r.output_tokens_field = Some(OutputTokensField::MaxTokens);
+        assert!(egress_frame_request_is_acceptable(&r));
+        let mut buf = Vec::new();
+        ciborium::into_writer(&r, &mut buf).unwrap();
+        let back: EgressFrameRequest = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(
+            (back.output_tokens, back.output_tokens_field),
+            (Some(8), Some(OutputTokensField::MaxTokens))
+        );
+        r.output_tokens = None;
+        assert!(!egress_frame_request_is_acceptable(&r));
+        r.output_tokens = Some(0);
+        r.output_tokens_field = None;
+        assert!(!egress_frame_request_is_acceptable(&r));
     }
 
     #[test]
@@ -491,6 +535,7 @@ mod tests {
             reply: crate::PromptReply {
                 blocks: vec![text(&big), text(&big)],
                 tool_calls: vec![],
+                usage: None,
             },
         };
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
@@ -528,6 +573,7 @@ mod tests {
             reply: crate::PromptReply {
                 blocks: vec![text("ok")],
                 tool_calls: vec![],
+                usage: None,
             },
         };
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();

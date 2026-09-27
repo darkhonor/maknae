@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn a_text_only_reply_is_the_answer() {
         assert!(
-            matches!(step(&PromptReply { blocks: vec![text("done")], tool_calls: vec![] }, 3, &budget()), Next::Answer(s) if s == "done")
+            matches!(step(&PromptReply { blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s == "done")
         );
     }
     #[test]
@@ -248,6 +248,7 @@ mod tests {
         let r = PromptReply {
             blocks: vec![],
             tool_calls: vec![call("c1", "read_file", "{}")],
+            usage: None,
         };
         assert!(matches!(step(&r, 1, &budget()), Next::Execute(c) if c.len() == 1));
         assert!(matches!(
@@ -260,6 +261,7 @@ mod tests {
         let at_cap = PromptReply {
             blocks: vec![],
             tool_calls: vec![call("c1", "read_file", "{}"), call("c2", "read_file", "{}")],
+            usage: None,
         };
         assert!(matches!(step(&at_cap, 3, &budget()), Next::Execute(c) if c.len() == 2));
     }
@@ -272,6 +274,7 @@ mod tests {
                 call("2", "read_file", "{}"),
                 call("3", "read_file", "{}"),
             ],
+            usage: None,
         };
         assert!(matches!(
             step(&r, 3, &budget()),
@@ -339,6 +342,7 @@ mod tests {
         let read = |id: &str| PromptReply {
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
+            usage: None,
         };
         let mut p = scripted(vec![
             read("c1"),
@@ -351,11 +355,13 @@ mod tests {
                     "write_file",
                     r#"{"path":"/w/a.txt","content":"new"}"#,
                 )],
+                usage: None,
             },
             read("c5"),
             PromptReply {
                 blocks: vec![text("done")],
                 tool_calls: vec![],
+                usage: None,
             },
         ]);
         p.read_versions = VecDeque::from([[1; 7], [1; 7], [2; 7], [3; 7]]);
@@ -387,6 +393,7 @@ mod tests {
         let read = |id: &str| PromptReply {
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
+            usage: None,
         };
         for outcome in [WriteOutcome::NotSent, WriteOutcome::Unknown] {
             let mut p = scripted(vec![
@@ -398,11 +405,13 @@ mod tests {
                         "write_file",
                         r#"{"path":"/w/a.txt","content":"new"}"#,
                     )],
+                    usage: None,
                 },
                 read("c3"),
                 PromptReply {
                     blocks: vec![text("done")],
                     tool_calls: vec![],
+                    usage: None,
                 },
             ]);
             p.write_outcome = outcome.clone();
@@ -431,6 +440,7 @@ mod tests {
             PromptReply {
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![],
@@ -439,10 +449,12 @@ mod tests {
                     "write_file",
                     r#"{"path":"/w/a.txt","content":"new"}"#,
                 )],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("all done")],
                 tool_calls: vec![],
+                usage: None,
             },
         ]);
         let mut t = Transcript::new("conv", "edit a.txt");
@@ -473,10 +485,12 @@ mod tests {
                     call("c1", "read_file", r#"{"path":"/w/a"}"#),
                     call("c2", "read_file", r#"{"path":"/w/b"}"#),
                 ],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("both read")],
                 tool_calls: vec![],
+                usage: None,
             },
         ]);
         let mut t = Transcript::new("conv", "read both");
@@ -504,10 +518,12 @@ mod tests {
             PromptReply {
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/x/.ssh/id_rsa"}"#)],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("I could not read that")],
                 tool_calls: vec![],
+                usage: None,
             },
         ]);
         p.read_outcome = ReadOutcome::Refused;
@@ -526,10 +542,12 @@ mod tests {
                 PromptReply {
                     blocks: vec![],
                     tool_calls: vec![call("c1", "write_file", r#"{"path":"/w/a","content":"x"}"#)],
+                    usage: None,
                 },
                 PromptReply {
                     blocks: vec![text("ok")],
                     tool_calls: vec![],
+                    usage: None,
                 },
             ]);
             p.write_outcome = outcome;
@@ -545,6 +563,7 @@ mod tests {
         let looping = PromptReply {
             blocks: vec![],
             tool_calls: vec![call("c", "read_file", r#"{"path":"/w/a"}"#)],
+            usage: None,
         };
         let mut p = scripted(vec![
             looping.clone(),
@@ -599,10 +618,12 @@ mod tests {
                 PromptReply {
                     blocks: vec![],
                     tool_calls: vec![call("c1", name, bad)],
+                    usage: None,
                 },
                 PromptReply {
                     blocks: vec![text("sorry")],
                     tool_calls: vec![],
+                    usage: None,
                 },
             ]);
             let mut t = Transcript::new("conv", "q");
@@ -632,10 +653,12 @@ mod tests {
                 PromptReply {
                     blocks: vec![],
                     tool_calls: vec![call("c1", "read_file", &bad)],
+                    usage: None,
                 },
                 PromptReply {
                     blocks: vec![text("sorry")],
                     tool_calls: vec![],
+                    usage: None,
                 },
             ]);
             let mut t = Transcript::new("conv", "q");
@@ -660,6 +683,7 @@ mod tests {
                 text("ok"),
             ],
             tool_calls: vec![],
+            usage: None,
         };
         assert!(matches!(step(&r, 3, &budget()), Next::Answer(s) if s == "ok"));
     }
@@ -672,6 +696,7 @@ mod tests {
         let mut p = scripted(vec![PromptReply {
             blocks: vec![text("never")],
             tool_calls: vec![],
+            usage: None,
         }]);
         let mut t = Transcript::new("conv", "q");
         let out = drive(
@@ -692,10 +717,12 @@ mod tests {
             PromptReply {
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/a"}"#)],
+                usage: None,
             },
             PromptReply {
                 blocks: vec![text("ok")],
                 tool_calls: vec![],
+                usage: None,
             },
         ]);
         p.read_outcome = ReadOutcome::Unavailable;

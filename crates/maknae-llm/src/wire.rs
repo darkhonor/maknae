@@ -245,7 +245,11 @@ pub fn to_prompt_reply(
     if blocks.is_empty() && tool_calls.is_empty() {
         return Err(ReplyError::EmptyMessage);
     }
-    Ok(maknae_proto::PromptReply { blocks, tool_calls })
+    Ok(maknae_proto::PromptReply {
+        blocks,
+        tool_calls,
+        usage: None,
+    })
 }
 
 // ---- #264: the trusted preamble and the baseline tool definitions ----

@@ -335,6 +335,8 @@ mod tests {
                     )),
                 }],
             }],
+            output_tokens: None,
+            output_tokens_field: None,
         }
     }
 

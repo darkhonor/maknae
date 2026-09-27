@@ -58,6 +58,7 @@ async fn the_egress_refusal_record_carries_the_decided_role() {
                         text: maknae_proto::SecretText(maknae_io::Zeroizing::new("hi".into())),
                     }],
                 }],
+                output_tokens: None,
             },
             Arc::clone(&records),
             Some("openai"),

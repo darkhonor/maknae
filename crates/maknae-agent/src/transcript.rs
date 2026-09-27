@@ -80,6 +80,7 @@ mod tests {
         t.push_assistant(&PromptReply {
             blocks: vec![text("thinking")],
             tool_calls: vec![call("c1"), call("c2")],
+            usage: None,
         });
         assert_eq!(
             t.turns()[1],
@@ -95,6 +96,7 @@ mod tests {
         t.push_assistant(&PromptReply {
             blocks: vec![],
             tool_calls: vec![call("c1")],
+            usage: None,
         });
         t.push_tool_result("c1", "the contents");
         assert_eq!(
