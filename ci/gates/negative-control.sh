@@ -4008,6 +4008,57 @@ else
   fi
 fi
 
+# ---- entitlements-empty (#76, ADR-0018 decision 6) ---------------------------
+ee="$here/entitlements-empty.sh"
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "neg-skip: [entitlements-empty/*] not Darwin; plutil(1) is a macOS tool"
+  skipped=$((skipped+4))
+else
+  ee_entitled="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_entitled" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
+EOF
+  expect_reject_because "entitlements-empty/an-entitled-build-is-refused" "declares entitlements" \
+    "$ee" "$ee_entitled"
+
+  ee_emptykey="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_emptykey" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key></key>
+    <true/>
+</dict>
+</plist>
+EOF
+  expect_reject_because "entitlements-empty/an-empty-key-is-refused" "declares entitlements" \
+    "$ee" "$ee_emptykey"
+
+  ee_unreadable="$(mktemp "$NC_TMP/XXXXXX")"
+  printf 'not a plist\n' > "$ee_unreadable"
+  expect_reject_because "entitlements-empty/an-unreadable-file-is-refused" "not a readable plist" \
+    "$ee" "$ee_unreadable"
+
+  ee_empty="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_empty" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>
+EOF
+  expect_accept "entitlements-empty/an-empty-set-passes" "entitlements-empty: ok" \
+    "$ee" "$ee_empty"
+fi
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
