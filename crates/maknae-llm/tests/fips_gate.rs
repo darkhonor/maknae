@@ -27,6 +27,7 @@ async fn a_call_without_an_installed_fips_provider_is_refused_not_attempted() {
         ))],
         tools: vec![],
         tool_choice: None,
+        reasoning_effort: None,
         stream: false,
     };
     let out = maknae_llm::chat_completion(

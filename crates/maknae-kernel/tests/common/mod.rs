@@ -391,6 +391,7 @@ impl Fixture {
                 model: "test-model".into(),
                 key_vault_path: "maknae/providers/test".into(),
                 key_field: "api-key".into(),
+                reasoning_effort: None,
             })),
             egress,
             Duration::from_secs(2),

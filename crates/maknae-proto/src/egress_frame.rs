@@ -43,6 +43,11 @@ pub struct EgressFrameRequest {
     /// moment there are two. Before #308 the only field name in the tree was a
     /// test fixture's `api_key`.
     pub key_field: String,
+    /// The provider's reasoning level, when the registry sets one (#242).
+    /// Absent is omitted from the encoding, so a frame without it decodes as
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// The loop's identifier (#241). Informational, never decided on.
     pub conversation: String,
     /// The transcript leaving the trust plane (#241). Roles per `crate::Turn`;
@@ -68,6 +73,7 @@ impl std::fmt::Debug for EgressFrameRequest {
             // secret, but together with the path it describes exactly where a
             // credential is kept, and nothing needs it in a log line.
             .field("key_field", &"<omitted>")
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("conversation", &self.conversation)
             .field("turns", &format_args!("<{} turns>", self.turns.len()))
             .finish()
@@ -166,6 +172,7 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
         && !r.model.is_empty()
         && !r.key_vault_path.is_empty()
         && !r.key_field.is_empty()
+        && r.reasoning_effort.as_deref().is_none_or(|e| !e.is_empty())
         && !r.turns.is_empty()
         && r.turns.iter().all(crate::turn_is_acceptable)
 }
@@ -225,6 +232,7 @@ mod tests {
             model: "some-model".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            reasoning_effort: None,
             conversation: conversation.into(),
             turns,
         }
@@ -288,6 +296,36 @@ mod tests {
             }],
         );
         assert!(!egress_frame_request_is_acceptable(&bad));
+    }
+
+    #[test]
+    fn reasoning_effort_round_trips_is_omitted_when_absent_and_must_be_non_empty() {
+        let mut r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
+        );
+        let mut absent = Vec::new();
+        ciborium::into_writer(&r, &mut absent).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(&absent[..]).unwrap();
+        let keys: Vec<_> = v
+            .as_map()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, _)| k.as_text())
+            .collect();
+        assert!(!keys.contains(&"reasoning_effort"), "{keys:?}");
+        r.reasoning_effort = Some("none".into());
+        assert!(egress_frame_request_is_acceptable(&r));
+        let mut buf = Vec::new();
+        ciborium::into_writer(&r, &mut buf).unwrap();
+        let back: EgressFrameRequest = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back.reasoning_effort.as_deref(), Some("none"));
+        let old: EgressFrameRequest = ciborium::from_reader(&absent[..]).unwrap();
+        assert_eq!(old.reasoning_effort, None);
+        r.reasoning_effort = Some(String::new());
+        assert!(!egress_frame_request_is_acceptable(&r));
     }
 
     #[test]

@@ -25,8 +25,30 @@ pub struct EgressRequest {
     /// #308: the field name inside the secret, carried per request rather than
     /// fixed in the deputy — the registry knows it, the deputy must not guess.
     pub key_field: String,
+    /// #242: the registry's reasoning level, carried per request like `model`.
+    pub reasoning_effort: Option<String>,
     pub conversation: String,
     pub turns: Vec<Turn>,
+}
+
+impl EgressRequest {
+    pub fn for_provider(
+        p: &maknae_config::ProviderConfig,
+        destination: String,
+        conversation: String,
+        turns: Vec<Turn>,
+    ) -> Self {
+        EgressRequest {
+            destination,
+            endpoint: p.endpoint.clone(),
+            model: p.model.clone(),
+            key_vault_path: p.key_vault_path.clone(),
+            key_field: p.key_field.clone(),
+            reasoning_effort: p.reasoning_effort.clone(),
+            conversation,
+            turns,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -963,6 +985,7 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
+            reasoning_effort: None,
             conversation: "c".into(),
             turns: vec![Turn::User {
                 content: vec![text("a")],
@@ -977,7 +1000,32 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn a_request_for_a_provider_carries_every_registered_field() {
+        let mut p = provider();
+        p.reasoning_effort = Some("none".into());
+        let turns = vec![Turn::User {
+            content: vec![text("a")],
+        }];
+        let r =
+            EgressRequest::for_provider(&p, "provider:openai".into(), "c".into(), turns.clone());
+        assert_eq!(
+            r,
+            EgressRequest {
+                destination: "provider:openai".into(),
+                endpoint: p.endpoint.clone(),
+                model: p.model.clone(),
+                key_vault_path: p.key_vault_path.clone(),
+                key_field: p.key_field.clone(),
+                reasoning_effort: Some("none".into()),
+                conversation: "c".into(),
+                turns,
+            }
+        );
     }
 
     /// THE production choice, pinned (#240): no provider → `Unavailable`, and
