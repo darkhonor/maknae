@@ -1411,7 +1411,7 @@ pub async fn handle<S, E, P>(
                     let egress = Arc::clone(&egress);
                     let intent = Arc::clone(&intent);
                     let req = crate::egress::EgressRequest::for_provider(
-                        &pcfg,
+                        pcfg,
                         destination.clone(),
                         conversation.clone(),
                         turns.clone(),
