@@ -345,7 +345,7 @@ async fn a_megabyte_error_body_is_read_at_most_4_kib() {
     let started = std::time::Instant::now();
     let got = call(&format!("http://{addr}/v1/chat/completions"), &[]).await;
     assert!(
-        started.elapsed() < Duration::from_secs(3),
+        started.elapsed() < maknae_llm::ERROR_BODY_WAIT / 2,
         "the deputy waited for the rest of an error body it had already cut"
     );
     match got {
@@ -408,5 +408,35 @@ async fn a_stalled_error_body_does_not_hold_the_refusal() {
             truncated: true,
         }) => assert_eq!(&body[..], &[b'd'; 100][..]),
         other => panic!("expected a truncated 400, got {other:?}"),
+    }
+}
+
+/// A body the connection cut short is journaled as truncated, not as whole.
+#[tokio::test]
+async fn an_error_body_cut_by_the_connection_is_marked_truncated() {
+    fips();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let _ = s.read(&mut buf).await;
+        let _ = s
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        let _ = s.write_all(&[b'c'; 100]).await;
+    });
+    match call(&format!("http://{addr}/v1/chat/completions"), &[]).await {
+        Err(CallError::Status {
+            code: 400,
+            body,
+            truncated,
+        }) => {
+            assert_eq!(body.len(), 100);
+            assert!(truncated, "a body cut by the connection read as whole");
+        }
+        other => panic!("expected a 400, got {other:?}"),
     }
 }

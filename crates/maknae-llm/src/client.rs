@@ -118,10 +118,19 @@ pub async fn chat_completion(
         let mut body = Zeroizing::new(Vec::with_capacity(ERROR_BODY_MAX_BYTES));
         let mut truncated = false;
         let read = async {
-            while let Ok(Some(chunk)) = resp.chunk().await {
-                if take_capped(&mut body, &chunk, ERROR_BODY_MAX_BYTES) {
-                    truncated = true;
-                    break;
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if take_capped(&mut body, &chunk, ERROR_BODY_MAX_BYTES) {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        truncated = true;
+                        break;
+                    }
                 }
             }
         };

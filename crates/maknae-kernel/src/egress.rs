@@ -626,11 +626,12 @@ pub fn outcome_for(
     r
 }
 
+/// CBOR envelope allowance for a reply's `usage` at its widest (#372).
+pub const USAGE_ENVELOPE: usize = 64;
+
 /// CBOR envelope allowance per content block (variant tag, map header, field
 /// name, text-string header): generous, and pinned by a test that encodes
 /// replies of many shapes and asserts the buffer never grew.
-pub const USAGE_ENVELOPE: usize = 64;
-
 pub const REPLY_BLOCK_ENVELOPE: usize = 32;
 
 /// Per-tool-call CBOR overhead (map header + three key strings + three value

@@ -331,7 +331,10 @@ mod tests {
                 let bytes = 6_000 * k;
                 if m.gate(bytes) == Gate::Stop {
                     stopped = true;
-                    assert!(bytes > 4 * 10_000, "{name}: stopped early at {bytes}");
+                    assert_eq!(
+                        bytes, 42_000,
+                        "{name}: the first bytes past 4 per token of 10,000"
+                    );
                     break;
                 }
                 measured(&mut m, bytes, report(k));
