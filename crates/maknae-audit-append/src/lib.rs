@@ -22,9 +22,10 @@ mod syslog_io;
 
 pub use error::AuditError;
 pub use record::{
-    canonical_json, AuditRecord, EgressAudit, EgressStatus, Integrity, MutationAudit,
-    MutationEffectKind, MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase,
-    MutationStatus, Outcome, Source, Subject, Where, NO_PEER_UID,
+    canonical_json, AuditRecord, ByteRangeAudit, CategoryAudit, EgressAudit, EgressStatus,
+    Integrity, LabelAudit, LineSpanAudit, MutationAudit, MutationEffectKind, MutationEffectRecord,
+    MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Outcome, PageAudit,
+    ProvenanceAudit, Source, Subject, TierAudit, Where, NO_PEER_UID,
 };
 pub use session::{Seq, SessionIds};
 pub use sink::{AuditEmit, AuditSink};

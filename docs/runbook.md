@@ -334,7 +334,9 @@ uid, an in-group-but-NOT-enrolled uid (per-request deny since #77 — the CLI pr
 or the daemon not running each produce a non-zero exit with a `maknae: <reason>` line
 on stderr instead — the CLI never prints a placeholder or partial answer on failure (`bins/maknae/src/cli.rs`
 `execute`'s single `Result<bool, String>` return: `Ok(true)` on a real verb response,
-`Err` for everything else).
+`Err` for everything else). A streamed `maknae read` is the one exception: it writes each
+page to stdout as that page is released, so a failure on page N leaves pages 1 to N−1 on
+stdout and a non-zero exit.
 
 ### 6. Read the audit trail
 
@@ -690,11 +692,11 @@ What to find:
 | `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation` |
 | `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
-| `fs.read` intent | `object` = the canonical path, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `origin:"KernelObserved"`, `status:"IntentOnly"`, no `content_length` |
-| `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N}]` |
+| `fs.read` intent | `object` = the canonical path, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `mutation.label:{"level":"UNCLASSIFIED","categories":[]}`, `mutation.requested_page` for a paged read, `origin:"KernelObserved"`, `status:"IntentOnly"`, no `content_length` |
+| `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N,"range":{"start":S,"end":S+N},"lines":{"first":F,"last":L,"complete_last":…}}]` |
 | `fs.read` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.read` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `read descriptor missing` or `read evidence refused: …`) |
-| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
+| `fs.write` intent | reason `authorized; intent alone does not establish execution`, `mutation.phase:"Intent"`, `mutation.label`, `mutation.operation:"WriteCreate"` (`"WriteExisting"` when replacing), `origin:"KernelObserved"`, `status:"IntentOnly"`, `content_length` (the length the request declared; the kernel never sees the bytes) |
 | `fs.write` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, with the created (`CreatedFile`) or replaced (`ReplacedFile`) file in `effects` |
 | `fs.write` completion | `mutation.phase:"Completion"`, `origin:"ClientReported"`, `status:"ReportedSuccess"` (or another `Reported*` status), `intent_seq` pointing at the intent |
 | `fs.write` refused | `result:"deny"` with the reason, and no `mutation` block (e.g. `mutation descriptor missing`, what an enforcing host without #365 PR 1 records) |
@@ -709,8 +711,19 @@ There is **one `session.prompt` intent-and-outcome pair per model turn that is s
 
 ### 12. The refused turns
 
-- **An oversize read.** Ask the agent to read a file larger than the read grant's byte limit (65,024 bytes), e.g. `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`. The CLI refuses the read against the grant's byte limit and reports it: `fs.read` completion `status:"ReportedLimitReached"`, with no `ReadFile` effect. The model is told the read was unavailable and usually answers anyway, with exit `0`.
-- **Over the conversation cap.** Two files, each inside the read grant, that together exceed the prompt budget (`transport.prompt_max_bytes`, 65,536 bytes by default): `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the prompt budget, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
+- **An oversize read** is no longer refused: reads are paged (§12a).
+- **Over the conversation cap.** Two files, each inside one page, that together exceed the prompt budget (`transport.prompt_max_bytes`, 65,536 bytes by default): `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the prompt budget, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
+
+### 12a. Paged reads
+
+Every read is paged: each page is its own decided, recorded `fs.read` attempt of at most 64 KiB (`READ_PAGE_MAX_BYTES`).
+
+- **Stream a whole file.** `head -c 70000 /dev/urandom | base64 > ~/projects/maknae-242/big.txt`, then `set -o pipefail; maknae read ~/projects/maknae-242/big.txt | cmp - ~/projects/maknae-242/big.txt; echo $?` prints `0`. Each page is its own intent (with `requested_page` and `label`), progress (with the page's `range` and `lines`) and completion.
+- **Binary content streams byte-exactly too.** `head -c 70000 /dev/urandom > ~/projects/maknae-242/big.bin; set -o pipefail; maknae read ~/projects/maknae-242/big.bin | cmp - ~/projects/maknae-242/big.bin; echo $?` prints `0`.
+- **One page.** `maknae read --offset 2 --limit 1 <file>` prints that page and names the next position on stderr (`next: line L column C`, or `eof`). `--column` continues a long line.
+- **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
+- **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
+- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. At the default prompt budget a full 64 KiB page leaves no room for the rest of the conversation, so the loop stops after it until #372's context budget raises the prompt cap.
 
 ### 13. Custody check (manual)
 

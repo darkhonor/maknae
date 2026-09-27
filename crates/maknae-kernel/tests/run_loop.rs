@@ -741,6 +741,7 @@ async fn a_read_declared_as_a_prompt_is_refused_as_a_mismatch() {
     let body = request_bytes(maknae_proto::Verb::Read {
         path: "/tmp/x".into(),
         conversation: None,
+        page: None,
     });
     let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
     assert!(!responded);

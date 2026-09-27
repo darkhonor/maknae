@@ -84,6 +84,7 @@ pub async fn drive<P: Plane>(
     budget: &Budget,
 ) -> Outcome {
     let mut steps_used = 0u32;
+    let mut seen: std::collections::HashMap<String, [i64; 7]> = std::collections::HashMap::new();
     loop {
         if steps_used >= budget.max_steps {
             return Outcome {
@@ -167,14 +168,22 @@ pub async fn drive<P: Plane>(
                             "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most {} bytes and no NUL byte",
                             maknae_proto::MAX_MUTATION_PATH_BYTES
                         )),
-                        Ok(ToolRequest::Read { path, .. }) => match plane.read(transcript.conversation(), &path).await {
-                            ReadOutcome::Content(b) => ToolOutcome::ReadContent(b),
+                        Ok(ToolRequest::Read { path, page, .. }) => match plane.read(transcript.conversation(), &path, page).await {
+                            ReadOutcome::Content(mut p) => {
+                                p.changed = seen
+                                    .insert(path.clone(), p.version)
+                                    .is_some_and(|prev| prev != p.version);
+                                ToolOutcome::ReadContent(p)
+                            }
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
                         },
                         Ok(ToolRequest::Write { path, content, .. }) => {
                             match plane.write(transcript.conversation(), &path, &content).await {
-                                WriteOutcome::Applied => ToolOutcome::WriteApplied,
+                                WriteOutcome::Applied => {
+                                    seen.remove(&path);
+                                    ToolOutcome::WriteApplied
+                                }
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
                             }
@@ -276,6 +285,7 @@ mod tests {
         writes: Vec<(String, String, Vec<u8>)>,
         prompts: usize,
         read_outcome: ReadOutcome,
+        read_versions: VecDeque<[i64; 7]>,
         write_outcome: WriteOutcome,
     }
     impl Plane for Scripted {
@@ -283,9 +293,20 @@ mod tests {
             self.prompts += 1;
             self.replies.pop_front().expect("script exhausted")
         }
-        async fn read(&mut self, _c: &str, p: &str) -> ReadOutcome {
+        async fn read(
+            &mut self,
+            _c: &str,
+            p: &str,
+            _page: maknae_proto::PageRequest,
+        ) -> ReadOutcome {
             self.reads.push(p.into());
-            self.read_outcome.clone()
+            match (self.read_outcome.clone(), self.read_versions.pop_front()) {
+                (ReadOutcome::Content(mut page), Some(v)) => {
+                    page.version = v;
+                    ReadOutcome::Content(page)
+                }
+                (other, _) => other,
+            }
         }
         async fn write(&mut self, conv: &str, p: &str, c: &[u8]) -> WriteOutcome {
             self.writes.push((conv.into(), p.into(), c.to_vec()));
@@ -298,8 +319,108 @@ mod tests {
             reads: vec![],
             writes: vec![],
             prompts: 0,
-            read_outcome: ReadOutcome::Content(Zeroizing::new(b"file body".to_vec())),
+            read_outcome: ReadOutcome::Content(ReadPage {
+                content: Zeroizing::new(b"file body".to_vec()),
+                level: "UNCLASSIFIED".into(),
+                lines: Some((1, 1)),
+                complete_line: true,
+                next: None,
+                eof: true,
+                version: [0; 7],
+                changed: false,
+            }),
+            read_versions: VecDeque::new(),
             write_outcome: WriteOutcome::Applied,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_page_from_a_changed_file_is_flagged_and_the_agents_own_write_clears_it() {
+        let read = |id: &str| PromptReply {
+            blocks: vec![],
+            tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
+        };
+        let mut p = scripted(vec![
+            read("c1"),
+            read("c2"),
+            read("c3"),
+            PromptReply {
+                blocks: vec![],
+                tool_calls: vec![call(
+                    "c4",
+                    "write_file",
+                    r#"{"path":"/w/a.txt","content":"new"}"#,
+                )],
+            },
+            read("c5"),
+            PromptReply {
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+            },
+        ]);
+        p.read_versions = VecDeque::from([[1; 7], [1; 7], [2; 7], [3; 7]]);
+        let mut t = Transcript::new("conv", "go");
+        let budget = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 2,
+        };
+        drive(&mut p, &mut t, &budget).await;
+        let changed: Vec<bool> = [2, 4, 6, 10]
+            .iter()
+            .map(|&i| {
+                let text = tool_text(&t.turns()[i]);
+                let json = text
+                    .split_once("\n\nsteps remaining: ")
+                    .unwrap()
+                    .0
+                    .to_string();
+                serde_json::from_str::<serde_json::Value>(&json).unwrap()["changed"]
+                    .as_bool()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(changed, vec![false, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn a_write_that_was_not_applied_keeps_change_detection() {
+        let read = |id: &str| PromptReply {
+            blocks: vec![],
+            tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
+        };
+        for outcome in [WriteOutcome::NotSent, WriteOutcome::Unknown] {
+            let mut p = scripted(vec![
+                read("c1"),
+                PromptReply {
+                    blocks: vec![],
+                    tool_calls: vec![call(
+                        "c2",
+                        "write_file",
+                        r#"{"path":"/w/a.txt","content":"new"}"#,
+                    )],
+                },
+                read("c3"),
+                PromptReply {
+                    blocks: vec![text("done")],
+                    tool_calls: vec![],
+                },
+            ]);
+            p.write_outcome = outcome.clone();
+            p.read_versions = VecDeque::from([[1; 7], [2; 7]]);
+            let mut t = Transcript::new("conv", "go");
+            let budget = Budget {
+                max_steps: 8,
+                max_tool_calls_per_step: 2,
+            };
+            drive(&mut p, &mut t, &budget).await;
+            let text = tool_text(&t.turns()[6]);
+            let json = text
+                .split_once("\n\nsteps remaining: ")
+                .unwrap()
+                .0
+                .to_string();
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(v["changed"], true, "{outcome:?}");
         }
     }
 
@@ -335,7 +456,7 @@ mod tests {
             vec![("conv".to_string(), "/w/a.txt".to_string(), b"new".to_vec())]
         );
         assert_eq!(t.turns().len(), 6, "user, asst, tool, asst, tool, asst");
-        assert!(tool_text(&t.turns()[2]).starts_with("file body"));
+        assert!(tool_text(&t.turns()[2]).contains("\"content\":\"file body\""));
         assert!(tool_text(&t.turns()[4]).starts_with("applied"));
     }
     #[tokio::test]

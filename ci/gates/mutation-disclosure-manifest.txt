@@ -1,7 +1,13 @@
 # Exact reachable mutation-grant disclosure schema (#158).
 # decision<TAB>field-or-variant:type<TAB>rationale
 # These are authorized attempt parameters, never independently verified effects.
+always	CategoryEntry.category:String	operator-defined category name (ADR-0022 decision 10); empty set this round
+always	CategoryEntry.provenance:Provenance	where the category came from; carried so a later handler can weigh it
+always	DetectionTier.Contextual:variant	detector confidence tier (ADR-0022 decision 10)
+always	DetectionTier.PatternOnly:variant	detector confidence tier (ADR-0022 decision 10)
+always	DetectionTier.Validated:variant	detector confidence tier (ADR-0022 decision 10)
 always	MutationGrant.id:MutationId	connection-local correlation, never a bearer capability
+always	MutationGrant.label:ObjectLabel	the object's label as the kernel resolved it; informs the client, authorizes nothing
 always	MutationGrant.limits:MutationLimits	bounded attempt parameters needed by the subject executor
 always	MutationGrant.scope:MutationScope	only prepared resources already permitted by the composed PDP
 always	MutationId.intent_seq:u64	the durable intent that authorized this attempt
@@ -17,6 +23,13 @@ always	MutationScope.Exact.path:String	verified intended path or prefixes, discl
 always	MutationScope.Exact:variant	closed authorized scope shape; every contained field is separately inventoried
 always	MutationScope.RecursiveDelete.root:String	verified intended path or prefixes, disclosed only after their composed Permit
 always	MutationScope.RecursiveDelete:variant	closed authorized scope shape; every contained field is separately inventoried
+always	ObjectLabel.categories:Vec<CategoryEntry>	sensitivity categories; always empty until decision 10 is built
+always	ObjectLabel.level:String	the system's level name for the object (unmarked level until #229)
+always	Provenance.Declared:variant	an operator-set per-file label
+always	Provenance.Detected.detector:String	the detector's name
+always	Provenance.Detected.tier:DetectionTier	the detector's confidence tier
+always	Provenance.Detected:variant	a detector finding
+always	Provenance.Region:variant	a policy path region declared with categories
 always	ReportedEffect.CreatedDirectory:variant	closed requested effect kind, with no content or additional resource
 always	ReportedEffect.CreatedFile:variant	closed requested effect kind, with no content or additional resource
 always	ReportedEffect.DeletedEntry:variant	closed requested effect kind, with no content or additional resource

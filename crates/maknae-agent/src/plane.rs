@@ -12,15 +12,13 @@ use std::future::Future;
 /// acknowledged success. None of these is a verdict on content. The mapping is
 /// made and tested in `read_outcome`, in `bins/maknae`'s `agent`.
 ///
-/// `Content` carries a `Zeroizing<Vec<u8>>`, not a plain `Vec`: it is the CLI's
-/// own zeroizing read buffer, moved through, never copied out into a plain
-/// `Vec` (`maknae_proto::Bytes::new` states the rule). It is moved on into
+/// `Content` carries a [`ReadPage`] whose bytes are the CLI's own zeroizing
+/// read buffer, moved through, never copied out into a plain `Vec`
+/// (`maknae_proto::Bytes::new` states the rule). It is moved on into
 /// [`crate::render::ToolOutcome::ReadContent`] and rendered into a
 /// `Zeroizing<String>` that [`crate::render::render`] allocates ONCE with
-/// headroom for its suffix on the UTF-8 content path, so the body is never
-/// reallocated. The non-UTF-8 sub-arm returns a renderer-authored
-/// `binary content, N bytes` that MAY grow on the suffix; nothing read is in
-/// it. The render is copied into a `maknae_proto::SecretText`, which zeroizes
+/// headroom for its suffix, so the body is never reallocated. The render is
+/// copied into a `maknae_proto::SecretText`, which zeroizes
 /// too: copies into zeroizing destinations, not zero-copy. Beyond this crate,
 /// the deputy hands the same bytes to `reqwest`'s `.json()`, which serialises
 /// into a plain body buffer. The WRITE direction has a known residue: escapes
@@ -28,8 +26,33 @@ use std::future::Future;
 /// serde_json owns — accepted residual, #241, stated in full at `route.rs`'s
 /// `ZeroizingString`.
 #[derive(Clone, PartialEq, Eq)]
+pub struct ReadPage {
+    pub content: zeroize::Zeroizing<Vec<u8>>,
+    pub level: String,
+    pub lines: Option<(u64, u64)>,
+    pub complete_line: bool,
+    pub next: Option<(u64, u64)>,
+    pub eof: bool,
+    pub version: [i64; 7],
+    pub changed: bool,
+}
+
+impl std::fmt::Debug for ReadPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadPage")
+            .field("content", &format_args!("<{} bytes>", self.content.len()))
+            .field("level", &self.level)
+            .field("lines", &self.lines)
+            .field("next", &self.next)
+            .field("eof", &self.eof)
+            .field("changed", &self.changed)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
-    Content(zeroize::Zeroizing<Vec<u8>>),
+    Content(ReadPage),
     Refused,
     Unavailable,
 }
@@ -42,9 +65,9 @@ pub enum ReadOutcome {
 impl std::fmt::Debug for ReadOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadOutcome::Content(bytes) => f
+            ReadOutcome::Content(page) => f
                 .debug_tuple("Content")
-                .field(&format_args!("<{} bytes>", bytes.len()))
+                .field(&format_args!("<{} bytes>", page.content.len()))
                 .finish(),
             ReadOutcome::Refused => f.write_str("Refused"),
             ReadOutcome::Unavailable => f.write_str("Unavailable"),
@@ -86,7 +109,12 @@ pub trait Plane {
         conversation: &str,
         turns: &[Turn],
     ) -> impl Future<Output = Result<PromptReply, PlaneError>> + Send;
-    fn read(&mut self, conversation: &str, path: &str) -> impl Future<Output = ReadOutcome> + Send;
+    fn read(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        page: maknae_proto::PageRequest,
+    ) -> impl Future<Output = ReadOutcome> + Send;
     fn write(
         &mut self,
         conversation: &str,
@@ -98,10 +126,22 @@ pub trait Plane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_page(content: &[u8]) -> ReadPage {
+        ReadPage {
+            content: zeroize::Zeroizing::new(content.to_vec()),
+            level: "UNCLASSIFIED".into(),
+            lines: Some((1, 1)),
+            complete_line: true,
+            next: None,
+            eof: true,
+            version: [0; 7],
+            changed: false,
+        }
+    }
     #[test]
     fn every_outcome_variant_is_constructible_comparable_and_debuggable() {
         let reads = [
-            ReadOutcome::Content(zeroize::Zeroizing::new(vec![1])),
+            ReadOutcome::Content(test_page(&[1])),
             ReadOutcome::Refused,
             ReadOutcome::Unavailable,
         ];
@@ -154,7 +194,7 @@ mod tests {
     fn a_read_outcomes_debug_never_prints_the_served_bytes() {
         let d = format!(
             "{:?}",
-            ReadOutcome::Content(zeroize::Zeroizing::new(b"SENTINEL-READ-BYTES".to_vec()))
+            ReadOutcome::Content(test_page(b"SENTINEL-READ-BYTES"))
         );
         assert!(!d.contains("SENTINEL-READ-BYTES"), "{d}");
         // A `#[derive(Debug)]` substitution prints `Zeroizing([83, 69, ...])`, so

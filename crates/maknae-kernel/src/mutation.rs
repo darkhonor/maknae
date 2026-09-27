@@ -242,8 +242,10 @@ fn authorize<P: Authorizer>(
     verb: &Verb,
     uid: u32,
     authorizer: &P,
-) -> Result<Option<&'static str>, AuthorizeErr> {
+    policy_name: &str,
+) -> Result<(Option<&'static str>, maknae_proto::ObjectLabel), AuthorizeErr> {
     let mut decided_role: Option<&'static str> = None;
+    let mut last = None;
     for path in &prepared.paths {
         let mut request = build_authz_request(verb, uid, Lane::Local, None);
         request
@@ -268,8 +270,17 @@ fn authorize<P: Authorizer>(
             })?,
             Decision::Deny { reason } => return Err((reason, path.clone(), decided_role)),
         }
+        last = Some((request, path));
     }
-    Ok(decided_role)
+    let (request, path) = last.expect("prepared nonempty paths");
+    let label = object_label(policy_name, &request).ok_or_else(|| {
+        (
+            "object label unresolved".to_string(),
+            path.clone(),
+            decided_role,
+        )
+    })?;
+    Ok((decided_role, label))
 }
 fn mutation_meta(
     seq: u64,
@@ -288,6 +299,26 @@ fn mutation_meta(
         first_index: None,
         effects: Vec::new(),
         stopped_at: None,
+        label: None,
+        requested_page: None,
+    }
+}
+pub(crate) fn object_label(
+    policy_name: &str,
+    req: &maknae_security::Request,
+) -> Option<maknae_proto::ObjectLabel> {
+    let policy = crate::classification::select(policy_name)?;
+    let level =
+        crate::ceiling_authz::resolve_level(policy, crate::ceiling_authz::label_of(req)).ok()?;
+    Some(maknae_proto::ObjectLabel {
+        level: level.name,
+        categories: Vec::new(),
+    })
+}
+fn label_audit(label: &maknae_proto::ObjectLabel) -> maknae_audit_append::LabelAudit {
+    maknae_audit_append::LabelAudit {
+        level: label.level.clone(),
+        categories: Vec::new(),
     }
 }
 async fn commit_intent<E: AuditEmit>(
@@ -296,6 +327,8 @@ async fn commit_intent<E: AuditEmit>(
     content_length: Option<u64>,
     kind: FsOperation,
     paths: Vec<String>,
+    label: &maknae_proto::ObjectLabel,
+    requested: Option<maknae_proto::PageRequest>,
 ) -> Result<DurableIntent, ()> {
     record.outcome.result = "permit".into();
     record.outcome.reason = "authorized; intent alone does not establish execution".into();
@@ -316,6 +349,12 @@ async fn commit_intent<E: AuditEmit>(
         FsOperation::Read => MutationOperation::Read,
     });
     meta.authorized_paths = paths;
+    meta.label = Some(label_audit(label));
+    meta.requested_page = requested.map(|p| maknae_audit_append::PageAudit {
+        offset_line: p.offset_line,
+        limit_lines: p.limit_lines,
+        column: p.column,
+    });
     record.mutation = Some(meta);
     emit.emit(&record).await.map_err(|_| ())?;
     Ok(DurableIntent { record })
@@ -402,6 +441,7 @@ pub(crate) async fn handle<S, E, P>(
     mut record: AuditRecord,
     authz_timeout: Duration,
     caps: AttemptCaps,
+    policy_name: &str,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -428,11 +468,12 @@ where
     };
     let fd = delegated.take();
     let original = verb.clone();
+    let policy_name = policy_name.to_string();
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
             let prepared = prepare(original.clone(), fd, &principal, lane)?;
-            let decision = authorize(&prepared, &original, uid, &*authorizer);
+            let decision = authorize(&prepared, &original, uid, &*authorizer, &policy_name);
             Ok::<_, String>((prepared, permit, decision))
         }),
     )
@@ -469,15 +510,26 @@ where
     // Both arms carry it; the permit arm alone would leave every denied
     // fs.write/fs.delete/fs.mkdir saying role=none while a role WAS resolved.
     record.subject.role = match &decision {
-        Ok(role) => role.map(str::to_string),
+        Ok((role, _)) => role.map(str::to_string),
         Err((_, _, role)) => role.map(str::to_string),
     };
-    if let Err((reason, denied_path, _role)) = decision {
-        record.object_requested = (asked != denied_path).then(|| asked.into());
-        record.object = Some(denied_path);
-        refuse(stream, cfg, &*emit, record, reason).await;
-        return true;
-    }
+    let label = match decision {
+        Ok((_, label)) => label,
+        Err((reason, denied_path, _role)) => {
+            record.object_requested = (asked != denied_path).then(|| asked.into());
+            record.object = Some(denied_path);
+            refuse(stream, cfg, &*emit, record, reason).await;
+            return true;
+        }
+    };
+    let requested = match verb {
+        Verb::Read { page, .. } => *page,
+        _ => None,
+    };
+    let read_page = match verb {
+        Verb::Read { page, .. } => Some(page.unwrap_or(maknae_proto::WHOLE_FILE)),
+        _ => None,
+    };
     let length = if let Verb::FsWrite { content_length, .. } = verb {
         Some(*content_length)
     } else {
@@ -485,17 +537,37 @@ where
     };
     if let Ok(Ok(intent)) = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        commit_intent(&*emit, record, length, prepared.kind, prepared.paths),
+        commit_intent(
+            &*emit,
+            record,
+            length,
+            prepared.kind,
+            prepared.paths,
+            &label,
+            requested,
+        ),
     )
     .await
     {
-        attempt(stream, cfg, caps, &*emit, intent, prepared.scope, seq).await;
+        attempt(
+            stream,
+            cfg,
+            caps,
+            &*emit,
+            intent,
+            prepared.scope,
+            label,
+            read_page,
+            seq,
+        )
+        .await;
     }
     drop(prepared._evidence);
     drop(permit);
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
@@ -503,6 +575,8 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     emit: &E,
     intent: DurableIntent,
     scope: MutationScope,
+    label: maknae_proto::ObjectLabel,
+    read_page: Option<maknae_proto::PageRequest>,
     seq: &Seq,
 ) {
     let id = MutationId {
@@ -520,19 +594,24 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                 ..
             }
         ) {
-            crate::handler::READ_GRANT_MAX_BYTES
+            crate::handler::READ_PAGE_MAX_BYTES
         } else {
             0
         },
     };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(limits.deadline_ms);
-    let exchange = MutationExchange::begin(id, scope.clone(), limits).ok();
+    let exchange = match read_page {
+        Some(page) => MutationExchange::begin_paged(id, scope.clone(), limits, page),
+        None => MutationExchange::begin(id, scope.clone(), limits),
+    }
+    .ok();
     let bytes = maknae_proto::encode_response(&Response {
         protocol_version: PROTOCOL_VERSION,
         result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
             id,
             scope,
             limits,
+            label,
         })),
     })
     .ok()
@@ -625,6 +704,15 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                             ReportedEffect::ReadFile => MutationEffectKind::ReadFile,
                         },
                         length: e.length,
+                        range: e.range.map(|r| maknae_audit_append::ByteRangeAudit {
+                            start: r.start,
+                            end: r.end,
+                        }),
+                        lines: e.lines.map(|l| maknae_audit_append::LineSpanAudit {
+                            first: l.first,
+                            last: l.last,
+                            complete_last: l.complete_last,
+                        }),
                     })
                     .collect();
                 false
@@ -715,6 +803,34 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn the_object_label_is_the_ceiling_operands_resolution_with_no_categories() {
+        let verb = Verb::Read {
+            path: "/h/f".into(),
+            conversation: None,
+            page: None,
+        };
+        let plain = build_authz_request(&verb, 1000, Lane::Local, None);
+        let us = object_label("US", &plain).unwrap();
+        assert_eq!(
+            (us.level.as_str(), us.categories.len()),
+            ("UNCLASSIFIED", 0)
+        );
+        let mut marked = build_authz_request(&verb, 1000, Lane::Local, None);
+        marked.resource.0.insert(
+            maknae_security::RESOURCE_CLASSIFICATION,
+            AttrValue::Str("SECRET//NOFORN".into()),
+        );
+        assert_eq!(object_label("US", &marked).unwrap().level, "SECRET");
+        let mut foreign = build_authz_request(&verb, 1000, Lane::Local, None);
+        foreign.resource.0.insert(
+            maknae_security::RESOURCE_CLASSIFICATION,
+            AttrValue::Str("NOT A LEVEL".into()),
+        );
+        assert!(object_label("US", &foreign).is_none());
+        assert!(object_label("NO-SUCH-SYSTEM", &plain).is_none());
+    }
+
     struct Fixture {
         root: std::path::PathBuf,
         principal: Principal,
@@ -761,6 +877,7 @@ mod tests {
         let read = || Verb::Read {
             path: target.to_str().unwrap().into(),
             conversation: None,
+            page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
         let prepared = prepare(read(), held(), &fx.principal, Lane::Local).unwrap();
@@ -889,7 +1006,8 @@ mod tests {
                 &seq,
                 record(),
                 Duration::from_secs(1),
-                AttemptCaps::default()
+                AttemptCaps::default(),
+                "US",
             )
             .await
         );
@@ -923,7 +1041,8 @@ mod tests {
                 &seq,
                 record(),
                 Duration::from_secs(1),
-                AttemptCaps::default()
+                AttemptCaps::default(),
+                "US",
             )
             .await
         );
@@ -957,6 +1076,7 @@ mod tests {
             record(),
             Duration::from_millis(20),
             AttemptCaps::default(),
+            "US",
         )
         .await;
         assert!(emit

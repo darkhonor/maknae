@@ -8,7 +8,7 @@
 //! First, the write lane driven here is the REPLACEMENT lane and only that:
 //! `FixturePlane::write` sends `WriteMode::Existing`, and replaces the file
 //! itself after a `MutationAttempt` grant, and `FixturePlane::read` reads after
-//! a `MutationAttempt` grant through `maknae_io::read_held_file`. The CREATE
+//! a `MutationAttempt` grant through `maknae_io::read_held_page`. The CREATE
 //! lane — `WriteMode::CreateExclusive`, a `MutationAttempt` grant,
 //! `mutation::execute` — is never driven against the brain from here (#241);
 //! its coverage lives where the lane lives, in `bins/maknae`'s `mutation`
@@ -163,13 +163,19 @@ impl Plane for FixturePlane {
             other => Err(PlaneError::Transport(format!("{other:?}"))),
         }
     }
-    async fn read(&mut self, conversation: &str, path: &str) -> ReadOutcome {
+    async fn read(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        page: maknae_proto::PageRequest,
+    ) -> ReadOutcome {
         // Mapped exactly as production's `read_outcome` maps `send_verb`'s outcome.
         let held = maknae_io::open_path_for_delegation(std::path::Path::new(path)).ok();
         let (mut client, task, body) = self.fx.start_egress(
             Verb::Read {
                 path: path.into(),
                 conversation: Some(conversation.into()),
+                page: Some(page),
             },
             held.as_ref().map(|fd| fd.try_clone().unwrap()),
             Arc::clone(&self.records),
@@ -178,7 +184,16 @@ impl Plane for FixturePlane {
             self.egress.clone(),
         );
         common::write_frame(&mut client, &body).await.unwrap();
-        let run = common::read_as_subject(&mut client, held.as_ref()).await;
+        let run = common::read_page_as_subject(
+            &mut client,
+            held.as_ref(),
+            maknae_io::PageWindow {
+                offset_line: page.offset_line,
+                limit_lines: page.limit_lines,
+                column: page.column,
+            },
+        )
+        .await;
         drop(client);
         task.await.unwrap();
         let first = run
@@ -187,7 +202,19 @@ impl Plane for FixturePlane {
             .and_then(|b| maknae_proto::decode_response(b).ok())
             .map(|r| r.result);
         match (run.content, first, held.is_some()) {
-            (Some(b), _, _) => ReadOutcome::Content(b),
+            (Some(b), _, _) => {
+                let p = run.page.expect("a released read carries its page");
+                ReadOutcome::Content(maknae_agent::plane::ReadPage {
+                    content: b,
+                    level: run.label.expect("a grant carries its label").level,
+                    lines: p.lines,
+                    complete_line: p.complete_last,
+                    next: p.next.map(|n| (n.line, n.column)),
+                    eof: p.eof,
+                    version: p.version.key(),
+                    changed: false,
+                })
+            }
             (None, Some(RespResult::Err(e)), true)
                 if e.code == maknae_proto::ProtoErrCode::Unauthorized =>
             {
@@ -240,6 +267,8 @@ impl Plane for FixturePlane {
                                     path: path.clone(),
                                     effect: ReportedEffect::ReplacedFile,
                                     length: None,
+                                    range: None,
+                                    lines: None,
                                 }],
                             },
                             1,

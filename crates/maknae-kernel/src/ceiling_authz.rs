@@ -76,7 +76,7 @@
 
 use maknae_config::Ceiling;
 use maknae_security::{
-    AttrValue, Authorizer, ClassificationPolicy, Request, Verdict, RESOURCE_CLASSIFICATION,
+    AttrValue, Authorizer, ClassificationPolicy, Level, Request, Verdict, RESOURCE_CLASSIFICATION,
 };
 
 /// The action classes that are CONTROL PLANE: no content crosses the boundary,
@@ -127,6 +127,31 @@ pub fn label_of(req: &Request) -> Label<'_> {
     }
 }
 
+pub fn resolve_level(policy: &dyn ClassificationPolicy, label: Label<'_>) -> Result<Level, String> {
+    match label {
+        Label::NotAString => Err("ceiling: classification attribute is not a string".into()),
+        // Unmarked IS a level: the system's lowest.
+        Label::Absent => Ok(policy.unmarked()),
+        Label::Marking(raw) => policy.level_of(raw).ok_or_else(|| {
+            // Recognized-and-refused (ADR-0022 decision 5): name the
+            // compiled-in system(s) that DO carry this first token, if any.
+            let others: Vec<&str> = crate::classification::recognizing(raw)
+                .into_iter()
+                .filter(|n| *n != policy.name())
+                .collect();
+            if others.is_empty() {
+                "ceiling: unrecognized classification marking".to_string()
+            } else {
+                format!(
+                    "ceiling: marking is a level of the {} system, not {}",
+                    others.join("/"),
+                    policy.name()
+                )
+            }
+        }),
+    }
+}
+
 /// The pure decision — the truth table this file exists to hold.
 ///
 /// | action | label | verdict |
@@ -151,36 +176,9 @@ pub fn decide_ceiling(
     if is_control_plane(action) {
         return Verdict::NotApplicable { note: None };
     }
-    let level = match label {
-        Label::NotAString => {
-            return Verdict::Deny {
-                reason: "ceiling: classification attribute is not a string".into(),
-            }
-        }
-        // Unmarked IS a level: the system's lowest.
-        Label::Absent => policy.unmarked(),
-        Label::Marking(raw) => match policy.level_of(raw) {
-            Some(level) => level,
-            None => {
-                // Recognized-and-refused (ADR-0022 decision 5): name the
-                // compiled-in system(s) that DO carry this first token, if any.
-                let others: Vec<&str> = crate::classification::recognizing(raw)
-                    .into_iter()
-                    .filter(|n| *n != policy.name())
-                    .collect();
-                return Verdict::Deny {
-                    reason: if others.is_empty() {
-                        "ceiling: unrecognized classification marking".to_string()
-                    } else {
-                        format!(
-                            "ceiling: marking is a level of the {} system, not {}",
-                            others.join("/"),
-                            policy.name()
-                        )
-                    },
-                };
-            }
-        },
+    let level = match resolve_level(policy, label) {
+        Ok(level) => level,
+        Err(reason) => return Verdict::Deny { reason },
     };
     match policy.dominates(&ceiling.classification, &level) {
         Some(true) => Verdict::NotApplicable { note: None },

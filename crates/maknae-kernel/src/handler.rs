@@ -341,7 +341,7 @@ pub fn lexical_pregate(path: &str) -> Result<(), &'static str> {
 
 pub const FRAME_ENVELOPE_MARGIN: u64 = 512;
 
-pub const READ_GRANT_MAX_BYTES: u64 = 65_024;
+pub const READ_PAGE_MAX_BYTES: u64 = 65_536;
 
 /// The named requirements for a SUBJECT-DELEGATED object descriptor (ADR-0009).
 ///
@@ -622,7 +622,8 @@ mod tests {
         assert_eq!(
             verb_to_action(&Verb::Read {
                 path: "/x".into(),
-                conversation: None
+                conversation: None,
+                page: None,
             }),
             "fs.read"
         );
@@ -635,6 +636,7 @@ mod tests {
         let r = verb_to_action(&Verb::Read {
             path: "/x".into(),
             conversation: None,
+            page: None,
         });
         assert_ne!(p, w);
         assert_ne!(p, r);
@@ -647,20 +649,23 @@ mod tests {
             dispatch_verb(&Verb::Read {
                 path: "/home/op/a".into(),
                 conversation: None,
+                page: None,
             }),
             Dispatch::MutationRequested
         );
         assert_ne!(
             dispatch_verb(&Verb::Read {
                 path: "/x".into(),
-                conversation: None
+                conversation: None,
+                page: None,
             }),
             Dispatch::Pong
         );
         assert_ne!(
             dispatch_verb(&Verb::Read {
                 path: "/x".into(),
-                conversation: None
+                conversation: None,
+                page: None,
             }),
             Dispatch::WhoamiRequested
         );
@@ -719,6 +724,7 @@ mod tests {
             &Verb::Read {
                 path: "/home/op/n".into(),
                 conversation: None,
+                page: None,
             },
             501,
             maknae_security::Lane::Local,
@@ -760,6 +766,7 @@ mod tests {
             &Verb::Read {
                 path: "/home/op/remote".into(),
                 conversation: None,
+                page: None,
             },
             501,
             Lane::Local,
@@ -852,7 +859,7 @@ mod tests {
     }
     #[test]
     fn the_read_grant_bound_and_envelope_margin_by_value() {
-        assert_eq!((READ_GRANT_MAX_BYTES, FRAME_ENVELOPE_MARGIN), (65_024, 512));
+        assert_eq!((READ_PAGE_MAX_BYTES, FRAME_ENVELOPE_MARGIN), (65_536, 512));
     }
 
     #[test]
@@ -931,6 +938,7 @@ mod tests {
             Verb::Read {
                 path: String::new(),
                 conversation: None,
+                page: None,
             },
             Verb::FsWrite {
                 path: "/x".into(),
@@ -1141,6 +1149,7 @@ mod tests {
                 Verb::Read {
                     path: "/x".into(),
                     conversation: None,
+                    page: None,
                 },
                 "Read",
             ),

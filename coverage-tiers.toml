@@ -64,6 +64,7 @@ files = [
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
+  "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions. Corrected 2026-09-06 (#126):
   # current measurements are macOS 97/97 and Linux 116/116, both 100.00%.
   # The earlier 87/87 and 107/107 figures described the promotion revision,
@@ -557,7 +558,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_GRANT_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
@@ -622,6 +623,28 @@ path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
 why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds a body by its frame class cap (at most 1 MiB), never by this defensive cap. write_frame's Io error paths (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
+
+[[exception]]
+path = "crates/maknae-io/src/mutation.rs"
+anchor = "nix::unistd::read(self.fd, buf).map_err"
+why = "read(2) on a freshly reopened, pinned regular file fails only on a device error (EIO); pure errno passthrough with no decision. read_page's own error handling is proven with a failing reader in page.rs"
+
+[[exception]]
+path = "crates/maknae-io/src/mutation.rs"
+anchor = "_ => io_error("
+end_anchor = "nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)),"
+why = "maps a read(2) device error (see the HeldReader exception) to a no-effect failure; unreachable without a failing device. The deadline arm beside it is tested, and the no-effect mapping itself is proven by the fstat-seam tests"
+
+[[exception]]
+path = "crates/maknae-agent/src/render.rs"
+anchor = "match String::from_utf8(std::mem::take(&mut *buf)) {"
+end_anchor = "drop(Zeroizing::new(e.into_bytes()));"
+why = "serde_json writes only UTF-8, so from_utf8 on its output cannot fail; the arm exists so a failure could never drop the bytes unzeroized. Both serializer-failure passes are tested"
+
+[[exception]]
+path = "crates/maknae-agent/src/render.rs"
+anchor = "None => Zeroizing::new(READ_UNAVAILABLE.to_string()),"
+why = "json_exact returns None only if serde fails on a plain struct of strings, integers and booleans, which it cannot; json_exact's None paths are tested directly"
 
 # #240: the egress socket's budget, both legs (egress_socket.rs). Errno
 # passthroughs with no decision, or a retry that needs a signal or a transient

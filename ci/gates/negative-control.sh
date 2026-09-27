@@ -1697,6 +1697,17 @@ done
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
 import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/mutation.rs"
+s = p.read_text()
+old = "pub struct CategoryEntry {"
+assert s.count(old) == 1
+p.write_text(s.replace(old, old + "\n    pub credential: String,"))
+PYFIX
+expect_reject_because "mutation-disclosure/new-field-inside-a-vec-element" \
+  "mutation grant disclosure inventory differs" "$fx/ci/gates/config-disclosure-drift.sh"
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
 s = p.read_text()
 p.write_text(s.replace("MutationAttempt(crate::MutationGrant)", "MutationAttempt(String)"))

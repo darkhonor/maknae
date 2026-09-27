@@ -759,6 +759,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         } if !maknae_proto::conversation_id_is_acceptable(conversation) => {
             Some(("read", "conversation identifier not acceptable".to_string()))
         }
+        Verb::Read { page: Some(p), .. } if !maknae_proto::page_request_is_acceptable(p) => {
+            Some(("read", "page request not acceptable".to_string()))
+        }
         _ => None,
     };
     if let Some((noun, reason)) = pregate {
@@ -836,6 +839,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             record,
             authz_decide_timeout,
             attempt_caps,
+            &classification_policy_name,
         )
         .await;
         close_bounded(&mut stream).await;

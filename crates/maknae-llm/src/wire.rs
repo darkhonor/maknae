@@ -746,13 +746,24 @@ mod tests {
         let catalog = baseline_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(names, vec!["read_file", "write_file"]);
+        assert!(
+            catalog[1]
+                .function
+                .description
+                .contains("until `eof` is true"),
+            "a paged read must not be mistaken for the whole file before a replace"
+        );
 
         // The EXACT schema, not merely "a `properties` key exists": deleting
         // `required`, or the whole `content` property, previously left this
         // test green while the model lost the signal that a whole-file
         // replacement needs its bytes.
         let want: &[(&str, &[&str], &[&str])] = &[
-            ("read_file", &["path"], &["path"]),
+            (
+                "read_file",
+                &["column", "limit", "offset", "path"],
+                &["path"],
+            ),
             ("write_file", &["content", "path"], &["path", "content"]),
         ];
         for (t, (name, props, required)) in catalog.iter().zip(want) {

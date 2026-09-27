@@ -36,6 +36,23 @@ pub fn conversation_id_is_acceptable(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageRequest {
+    pub offset_line: u64,
+    pub limit_lines: u32,
+    pub column: u64,
+}
+
+pub const WHOLE_FILE: PageRequest = PageRequest {
+    offset_line: 1,
+    limit_lines: u32::MAX,
+    column: 0,
+};
+
+pub fn page_request_is_acceptable(p: &PageRequest) -> bool {
+    p.offset_line >= 1 && p.limit_lines >= 1
+}
+
 /// Prompt text: secret-adjacent like file content (`Bytes`), so it zeroizes
 /// on drop and `Debug` redacts; unlike `Bytes` it is a CBOR TEXT string,
 /// because ACP's `text` is a string and a peer must not have to re-encode.
@@ -399,6 +416,8 @@ pub enum Verb {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<PageRequest>,
     },
     /// Create or replace a file. The subject writes the bytes under its own credentials;
     /// the request carries only their length, a client claim recorded on the intent (#365).
@@ -865,6 +884,63 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_paged_read_round_trips_and_an_unpaged_one_omits_the_field() {
+        let page = PageRequest {
+            offset_line: 42,
+            limit_lines: 2000,
+            column: 65_536,
+        };
+        let paged = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::Read {
+                path: "/h/f".into(),
+                conversation: None,
+                page: Some(page),
+            },
+        };
+        let bytes = encode_request(&paged).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap().verb, paged.verb);
+        let plain = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::Read {
+                path: "/h/f".into(),
+                conversation: None,
+                page: None,
+            },
+        };
+        let bytes = encode_request(&plain).unwrap();
+        assert!(!bytes.windows(4).any(|w| w == b"page"));
+        assert_eq!(decode_request(&bytes).unwrap().verb, plain.verb);
+    }
+
+    #[test]
+    fn a_page_request_needs_a_first_line_and_a_line_count() {
+        let ok = PageRequest {
+            offset_line: 1,
+            limit_lines: 1,
+            column: 0,
+        };
+        assert!(page_request_is_acceptable(&ok));
+        assert!(!page_request_is_acceptable(&PageRequest {
+            offset_line: 0,
+            ..ok
+        }));
+        assert!(!page_request_is_acceptable(&PageRequest {
+            limit_lines: 0,
+            ..ok
+        }));
+        assert!(page_request_is_acceptable(&WHOLE_FILE));
+        assert_eq!(
+            WHOLE_FILE,
+            PageRequest {
+                offset_line: 1,
+                limit_lines: u32::MAX,
+                column: 0
+            }
+        );
+    }
+
+    #[test]
     fn request_secret_encoding_enforces_actual_frame_limit() {
         let request = Request {
             protocol_version: PROTOCOL_VERSION,
@@ -1128,6 +1204,10 @@ mod tests {
                 deadline_ms: 5000,
                 max_bytes: 0,
             },
+            label: crate::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: vec![],
+            },
         });
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
@@ -1243,6 +1323,7 @@ mod tests {
                     verb: Verb::Read {
                         path: "/home/op/notes.txt".into(),
                         conversation: conversation.clone(),
+                        page: None,
                     },
                 };
                 let bytes = encode_request(&r).unwrap();
@@ -1255,7 +1336,8 @@ mod tests {
                     back.verb,
                     Verb::Read {
                         path: "/home/op/notes.txt".into(),
-                        conversation
+                        conversation,
+                        page: None,
                     }
                 );
             }
@@ -1299,6 +1381,7 @@ mod tests {
                 verb: Verb::Read {
                     path: "/home/op/x".into(),
                     conversation: None,
+                    page: None,
                 },
             };
             let mut b = Vec::new();
@@ -1308,6 +1391,7 @@ mod tests {
                 Verb::Read {
                     path: "/home/op/x".into(),
                     conversation: None,
+                    page: None,
                 }
             );
         }
@@ -1574,6 +1658,7 @@ mod tests {
                     Verb::Read {
                         path: "/p".into(),
                         conversation: None,
+                        page: None,
                     },
                     FrameClass::Attempt,
                 ),
@@ -1660,6 +1745,15 @@ mod tests {
             let (ancestor, components) = deepest_path();
             let path = format!("{ancestor}/{}", components.join("/"));
             for verb in [
+                Verb::Read {
+                    path: path.clone(),
+                    conversation: Some("c".repeat(MAX_CONVERSATION_ID_BYTES)),
+                    page: Some(PageRequest {
+                        offset_line: u64::MAX,
+                        limit_lines: u32::MAX,
+                        column: u64::MAX,
+                    }),
+                },
                 Verb::FsMkdir {
                     path: path.clone(),
                     parents: true,
@@ -1701,6 +1795,10 @@ mod tests {
                     max_depth: u16::MAX,
                     deadline_ms: u64::MAX,
                     max_bytes: u64::MAX,
+                },
+                label: crate::ObjectLabel {
+                    level: "OFFICIAL: SENSITIVE".into(),
+                    categories: vec![],
                 },
             };
             let bytes = encode_response(&Response {
