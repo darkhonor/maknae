@@ -493,6 +493,10 @@ path = "crates/maknae-vault/src/secret_io.rs"
 why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
 
 [[t3]]
+path = "crates/maknae-vault/src/keychain.rs"
+why = "#76: the System-keychain read through Security.framework — the ACL, the item and the interaction lock need a real keychain; the ACL refusal, the absent item and the account gate are tested on darwin, the decisions are keychain_policy.rs (T1). Mutation-excluded like secret_io.rs"
+
+[[t3]]
 path = "crates/maknae-vault/src/operator.rs"
 why = "OperatorClient — token-authed role-id/secret-id/accessor/CA-chain I/O adapter for enroll (Task 3); thin pass-throughs to verified vaultrs calls + one hand-rolled rustify Endpoint, exercised by a gated live test. The one pure helper (join_ca_chain) has real unit tests."
 

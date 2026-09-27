@@ -20,6 +20,7 @@ mod error;
 mod fips;
 mod fips_glue;
 mod http;
+mod keychain;
 mod keychain_policy;
 mod operator;
 mod plane;
