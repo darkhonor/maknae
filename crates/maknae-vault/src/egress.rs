@@ -58,9 +58,12 @@ pub fn load_egress_auth(
     approle_mount: String,
     credentials_dir_env: Option<&str>,
 ) -> Result<AppRoleAuth, VaultError> {
-    let secret_path = resolve_egress_secret_source(credentials_dir_env)?;
+    let source = resolve_egress_secret_source(
+        credentials_dir_env,
+        crate::keychain::observe_pointer(egress_dir, crate::KeychainPlane::Egress).as_deref(),
+    )?;
     let role_id = crate::client::read_trimmed(&egress_dir.join(EGRESS_ROLE_ID_FILE))?;
-    let secret_id = crate::secret_io::read_egress_secret(&secret_path)?;
+    let secret_id = crate::secret_io::read_egress_secret(&source)?;
     Ok(AppRoleAuth {
         role_id,
         secret_id,

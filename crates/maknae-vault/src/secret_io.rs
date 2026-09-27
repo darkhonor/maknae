@@ -9,15 +9,17 @@
 //! **Permission-gating split (LOAD BEARING):** the PLAINTEXT branches
 //! (`DaemonSecretSource::PlaintextPath`, `CliSecretSource::ResidualFile`) route
 //! through `client::read_secret_credential`'s `mode & 0o077` gate — a plaintext file
-//! must be owner-only. The SEALED branches (`CredentialsDirectory`, `SepSealed`,
+//! must be owner-only. The SEALED branches (`CredentialsDirectory`, `Keychain`,
 //! `UserCreds`) do NOT go through that gate: systemd `LoadCredential`/
-//! `SetCredentialEncrypted` and SEP both produce their own `0400`-or-stricter,
-//! already-trusted artifacts, and re-applying the plaintext gate to them would be
-//! redundant at best and a spurious refusal at worst (systemd may root-own the
-//! credentials directory in a way this process's uid doesn't "own" by our check).
+//! `SetCredentialEncrypted` produce their own `0400`-or-stricter, already-trusted
+//! artifacts, and the keychain arm reads no file as the secret, so re-applying the
+//! plaintext gate to them would be redundant at best and a spurious refusal at
+//! worst (systemd may root-own the credentials directory in a way this process's
+//! uid doesn't "own" by our check).
 use crate::client::read_secret_credential;
-use crate::secret_source::{CliSecretSource, DaemonSecretSource};
-use crate::VaultError;
+use crate::keychain::read_plane_secret;
+use crate::secret_source::{CliSecretSource, DaemonSecretSource, EgressSecretSource};
+use crate::{KeychainPlane, VaultError};
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -34,19 +36,6 @@ fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
         source: std::io::Error::other(e.to_string()),
     })?;
     Ok(Zeroizing::new(text.trim().to_string()))
-}
-
-/// SEP-sealed SecretID unwrap. Real Secure-Enclave-backed unsealing requires FFI
-/// into Apple's Security framework, which is out of reach for this task (and this
-/// exact worktree is iterated on a macOS dev host, so an `unimplemented!()` here
-/// would PANIC `cargo test` locally rather than fail an assertion — worse than a
-/// clean `Err`). Stubbed to fail closed rather than silently treating the sealed
-/// blob as plaintext (that would be exactly the fallthrough-to-plaintext hole this
-/// task exists to prevent). TODO(PR-J2 spec §6.2): real SEP unseal.
-fn read_sep_sealed(_path: &Path) -> Result<Zeroizing<String>, VaultError> {
-    Err(VaultError::CredentialSource(
-        "SEP-sealed SecretID unwrap is not yet implemented (PR-J2 spec §6.2)".to_string(),
-    ))
 }
 
 /// macOS Keychain SecretID lookup. Same rationale as `read_sep_sealed`: real
@@ -109,16 +98,19 @@ pub(crate) fn read_daemon_secret(
 ) -> Result<Zeroizing<String>, VaultError> {
     match src {
         DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
-        DaemonSecretSource::SepSealed(path) => read_sep_sealed(path),
+        DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon),
         DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path).map(Zeroizing::new),
     }
 }
 
-/// Read the egress deputy's SecretID from its already-resolved path (#240b).
-/// The sealed branch, no permission gate — systemd's credentials directory is
-/// the trust boundary, exactly as for the daemon's `CredentialsDirectory` arm.
-pub(crate) fn read_egress_secret(path: &Path) -> Result<Zeroizing<String>, VaultError> {
-    read_sealed_trimmed(path)
+/// Read the deputy's SecretID from its resolved source (#240b, #76).
+pub(crate) fn read_egress_secret(
+    src: &EgressSecretSource,
+) -> Result<Zeroizing<String>, VaultError> {
+    match src {
+        EgressSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
+        EgressSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Egress),
+    }
 }
 
 /// Read the CLI's SecretID from an already-resolved source. Same single-source
@@ -183,21 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn sep_sealed_read_fails_closed_does_not_fall_through_to_plaintext() {
-        // Prove the single-source contract for the OTHER sealed branch too: even a
-        // path that points at a REAL, READABLE plaintext file must NOT get read as
-        // plaintext just because the SEP unseal itself isn't implemented yet — that
-        // would be exactly the fallthrough-to-plaintext hole. It must fail closed.
-        let p = tmpfile("sep-real-plaintext", "not-actually-sealed", 0o600);
-        let src = DaemonSecretSource::SepSealed(p.clone());
-        let result = read_daemon_secret(&src);
-        assert!(result.is_err(), "SEP-sealed read must fail closed, not silently return the underlying file's plaintext bytes");
-        if let Err(VaultError::CredentialSource(msg)) = &result {
-            assert!(!msg.is_empty());
-        } else {
-            panic!("expected CredentialSource error, got {result:?}");
-        }
+    fn a_keychain_source_never_returns_the_pointer_file_as_the_secret() {
+        let p = tmpfile("kc-pointer-plaintext", "not-a-secret-id", 0o600);
+        let got = read_daemon_secret(&DaemonSecretSource::Keychain(p.clone()));
         let _ = std::fs::remove_file(&p);
+        assert!(
+            got.is_err(),
+            "a keychain source must not read its pointer as the secret"
+        );
     }
 
     #[test]

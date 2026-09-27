@@ -90,8 +90,8 @@ fn main() {
 
     // The third plane's credential (#240b): the RoleID and the Vault CA sit
     // beside the bounds file under `egress/`, the SecretID comes from
-    // $CREDENTIALS_DIRECTORY (the unit's LoadCredentialEncrypted=). Resolved
-    // ONCE, fail-closed, and the SecretID is `Zeroizing` from the read. The
+    // $CREDENTIALS_DIRECTORY on Linux, the System keychain on macOS (#76).
+    // Resolved ONCE, fail-closed, and the SecretID is `Zeroizing` from the read. The
     // AppRole mount defaults to the packaged Terraform's, resolved HERE rather
     // than in the config crate so there is one place for that default.
     let egress_dir = bounds_path

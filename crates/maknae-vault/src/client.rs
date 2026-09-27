@@ -15,7 +15,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use rustls::sign::CertifiedKey;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -184,21 +184,6 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
     }
 }
 
-/// The daemon's SEP-sealed blob path, IF one is present — macOS only (there is no
-/// systemd on darwin, so `$CREDENTIALS_DIRECTORY` never applies there; a SEP blob is
-/// the darwin equivalent). Observing "is it present" here (rather than inside the
-/// PURE `resolve_daemon_secret_source`) is what keeps that resolver pure/testable —
-/// this is the one spot that touches the filesystem to decide what to hand it.
-#[cfg(target_os = "macos")]
-fn daemon_sep_blob_path(dir: &Path) -> Option<PathBuf> {
-    let p = dir.join("maknaed-secret-id.sep");
-    p.is_file().then_some(p)
-}
-#[cfg(not(target_os = "macos"))]
-fn daemon_sep_blob_path(_dir: &Path) -> Option<PathBuf> {
-    None
-}
-
 /// Whether this target has a user-scoped `systemd-creds` credential file for the
 /// CLI — observed here (filesystem), handed to the PURE `resolve_cli_secret_source`
 /// as a plain `bool`.
@@ -344,7 +329,7 @@ impl PlaneClient {
     /// **Dispatches on `plane` — the two planes do NOT share a resolver (round-1
     /// C1 regression guard):**
     /// - `Plane::Kernel` → [`resolve_daemon_secret_source`]: `$CREDENTIALS_DIRECTORY`
-    ///   (if set) → a SEP-sealed blob (macOS only) → `vault.insecure_plaintext_secret_path`
+    ///   (if set) → the System-keychain pointer (macOS only) → `vault.insecure_plaintext_secret_path`
     ///   (from config) → fail closed. This is EXACTLY the daemon's pre-existing boot
     ///   path when `$CREDENTIALS_DIRECTORY` is set — that env var, when present,
     ///   ALWAYS wins here, never falling through to a CLI-shaped order.
@@ -366,7 +351,11 @@ impl PlaneClient {
             Plane::Kernel => {
                 let src = resolve_daemon_secret_source(
                     std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-                    daemon_sep_blob_path(dir).as_deref(),
+                    crate::keychain::observe_pointer(
+                        &dir.join("private"),
+                        crate::KeychainPlane::Daemon,
+                    )
+                    .as_deref(),
                     cfg.insecure_plaintext_secret_path.as_deref(),
                 )?;
                 let secret = read_daemon_secret(&src)?;
@@ -456,7 +445,7 @@ impl PlaneClient {
 
     /// This client's resolved SecretID credential-source posture (Task 7's audit
     /// seam, round-1 C2). Reflects whichever source [`Self::from_document`] actually
-    /// used — `CredentialsDirectory`/`SepSealed` are the sealed postures,
+    /// used — `CredentialsDirectory`/`Keychain` are the sealed postures,
     /// `PlaintextPath` the weakest (also the default for a client built directly via
     /// [`Self::from_document_with_secret`], which has no resolution info to report).
     pub fn secret_source(&self) -> CredentialSourceKind {

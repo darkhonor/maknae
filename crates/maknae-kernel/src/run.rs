@@ -3144,7 +3144,7 @@ async fn boot_after_sink(
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
             config_dir.join("private").join("maknaed-secret-id.cred")
         }
-        maknae_vault::CredentialSourceKind::SepSealed => {
+        maknae_vault::CredentialSourceKind::Keychain => {
             config_dir.join("private").join("maknaed-secret-id.sep")
         }
         // Unused by `determine` for the plaintext branch (it ignores both the
@@ -4320,12 +4320,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn enroll_writer_sep_fixture_determines_hrot_sealed() {
         // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
-        // determine HrotSealed for a SepSealed boot.
+        // determine HrotSealed for a Keychain boot.
         let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
         let value = maknae_config::load_str(fixture).unwrap();
         let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
-            crate::posture::CredentialSource::SepSealed,
+            crate::posture::CredentialSource::Keychain,
             marker.as_ref(),
             "/etc/maknae/private/maknaed-secret-id.sep",
         );

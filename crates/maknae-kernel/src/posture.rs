@@ -17,7 +17,7 @@ use maknae_vault::CredentialSourceKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSource {
     CredentialsDirectory,
-    SepSealed,
+    Keychain,
     PlaintextPath,
 }
 
@@ -25,7 +25,7 @@ impl From<CredentialSourceKind> for CredentialSource {
     fn from(kind: CredentialSourceKind) -> Self {
         match kind {
             CredentialSourceKind::CredentialsDirectory => CredentialSource::CredentialsDirectory,
-            CredentialSourceKind::SepSealed => CredentialSource::SepSealed,
+            CredentialSourceKind::Keychain => CredentialSource::Keychain,
             CredentialSourceKind::PlaintextPath => CredentialSource::PlaintextPath,
         }
     }
@@ -46,7 +46,7 @@ pub struct PostureMarker {
 /// The mechanism token a [`CredentialSource::CredentialsDirectory`] boot expects
 /// its marker to attest (Linux `systemd-creds`, TPM2-key-pinned per spec §6.1).
 pub const MECHANISM_TPM2: &str = "tpm2";
-/// The mechanism token a [`CredentialSource::SepSealed`] boot expects its marker
+/// The mechanism token a [`CredentialSource::Keychain`] boot expects its marker
 /// to attest (macOS Secure Enclave).
 pub const MECHANISM_SEP: &str = "sep";
 
@@ -77,7 +77,7 @@ impl Posture {
 ///   marker that happens to look valid must never launder a plaintext secret into
 ///   a sealed posture).
 /// - A sealed source ([`CredentialSource::CredentialsDirectory`] /
-///   [`CredentialSource::SepSealed`]) with a marker whose `mechanism` matches the
+///   [`CredentialSource::Keychain`]) with a marker whose `mechanism` matches the
 ///   sealed kind AND whose `target` matches `expected_target` (the deterministic
 ///   sealed-credential path this boot's config implies — computed by the caller,
 ///   `run.rs`) → [`Posture::HrotSealed`].
@@ -107,7 +107,7 @@ pub fn determine(
         CredentialSource::CredentialsDirectory => {
             sealed_posture(marker, MECHANISM_TPM2, expected_target)
         }
-        CredentialSource::SepSealed => sealed_posture(marker, MECHANISM_SEP, expected_target),
+        CredentialSource::Keychain => sealed_posture(marker, MECHANISM_SEP, expected_target),
     }
 }
 
@@ -196,7 +196,7 @@ mod tests {
     fn sep_sealed_with_matching_marker_is_hrot_sealed() {
         assert_eq!(
             determine(
-                CredentialSource::SepSealed,
+                CredentialSource::Keychain,
                 Some(&marker(MECHANISM_SEP)),
                 EXPECTED_TARGET
             ),
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn sep_sealed_with_missing_marker_is_unverified() {
         assert_eq!(
-            determine(CredentialSource::SepSealed, None, EXPECTED_TARGET),
+            determine(CredentialSource::Keychain, None, EXPECTED_TARGET),
             Posture::Unverified
         );
     }
@@ -216,7 +216,7 @@ mod tests {
     fn sep_sealed_with_mismatched_marker_is_unverified() {
         assert_eq!(
             determine(
-                CredentialSource::SepSealed,
+                CredentialSource::Keychain,
                 Some(&marker(MECHANISM_TPM2)),
                 EXPECTED_TARGET
             ),
@@ -229,7 +229,7 @@ mod tests {
         // Mirrors the CredentialsDirectory regression pin above for the SEP branch.
         assert_eq!(
             determine(
-                CredentialSource::SepSealed,
+                CredentialSource::Keychain,
                 Some(&marker(MECHANISM_SEP)),
                 "/etc/maknae/private/some-other-secret-id.sep"
             ),
@@ -280,8 +280,8 @@ mod tests {
             CredentialSource::CredentialsDirectory
         );
         assert_eq!(
-            CredentialSource::from(CredentialSourceKind::SepSealed),
-            CredentialSource::SepSealed
+            CredentialSource::from(CredentialSourceKind::Keychain),
+            CredentialSource::Keychain
         );
         assert_eq!(
             CredentialSource::from(CredentialSourceKind::PlaintextPath),
