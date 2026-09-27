@@ -1410,15 +1410,12 @@ pub async fn handle<S, E, P>(
                 BreakerAdmission::Admit => {
                     let egress = Arc::clone(&egress);
                     let intent = Arc::clone(&intent);
-                    let req = crate::egress::EgressRequest {
-                        destination: destination.clone(),
-                        endpoint: pcfg.endpoint.clone(),
-                        model: pcfg.model.clone(),
-                        key_vault_path: pcfg.key_vault_path.clone(),
-                        key_field: pcfg.key_field.clone(),
-                        conversation: conversation.clone(),
-                        turns: turns.clone(),
-                    };
+                    let req = crate::egress::EgressRequest::for_provider(
+                        &pcfg,
+                        destination.clone(),
+                        conversation.clone(),
+                        turns.clone(),
+                    );
                     let deadline = egress.deadline();
                     let sent = tokio::time::timeout(
                         deadline,

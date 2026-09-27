@@ -22,6 +22,10 @@ pub struct ChatRequest<'a> {
     pub tools: Vec<ToolDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<&'a str>,
+    /// The provider's reasoning level, only when the operator configured one
+    /// (#242).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'a str>,
     /// Non-streaming only (#240 scope). Sent explicitly rather than relying on
     /// a provider default.
     pub stream: bool,
@@ -506,6 +510,7 @@ mod tests {
             messages: vec![ChatMessage::user(secret("hi"))],
             tools: vec![],
             tool_choice: None,
+            reasoning_effort: None,
             stream: false,
         };
         let v: serde_json::Value =
@@ -516,9 +521,24 @@ mod tests {
         assert_eq!(
             keys,
             vec!["messages", "model", "stream"],
-            "an empty tools list and an absent tool_choice must not be sent at all"
+            "an empty tools list, an absent tool_choice and an absent reasoning_effort must not be sent at all"
         );
         assert_eq!(obj["stream"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn a_configured_reasoning_effort_is_sent_as_written() {
+        let req = ChatRequest {
+            model: "m",
+            messages: vec![ChatMessage::user(secret("hi"))],
+            tools: vec![],
+            tool_choice: None,
+            reasoning_effort: Some("none"),
+            stream: false,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["reasoning_effort"], serde_json::json!("none"));
     }
 
     #[test]
@@ -594,6 +614,7 @@ mod tests {
             messages: vec![msg.clone()],
             tools: vec![],
             tool_choice: None,
+            reasoning_effort: None,
             stream: false,
         };
         for d in [
@@ -790,6 +811,7 @@ mod tests {
             messages: with_preamble(vec![ChatMessage::user(secret("sentinel"))]),
             tools: advertised,
             tool_choice: None,
+            reasoning_effort: None,
             stream: false,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();

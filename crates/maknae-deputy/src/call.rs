@@ -231,6 +231,7 @@ pub async fn fulfil<S: KeySource>(
         messages: maknae_llm::with_preamble(messages),
         tools: advertised,
         tool_choice: None,
+        reasoning_effort: req.reasoning_effort.as_deref(),
         stream: false,
     };
 
@@ -316,6 +317,7 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            reasoning_effort: None,
             conversation: "conv1".into(),
             // A UNIQUE sentinel, not a word fragment. `contains("hi")` was
             // satisfied by the PREAMBLE itself ("nothing", "something",
@@ -576,6 +578,29 @@ mod tests {
     /// (The "nothing to send" shapes are refused by `handle::decide` before an
     /// `Admitted` exists, so they cannot reach `fulfil` at all; that class is
     /// tested in `handle.rs`, where the judgement lives.)
+    #[tokio::test]
+    async fn the_registered_reasoning_effort_rides_only_when_set() {
+        fips();
+        for (effort, want) in [(Some("none"), true), (None, false)] {
+            let (url, h) =
+                provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+            let mut f = frame_to(url);
+            f.reasoning_effort = effort.map(str::to_string);
+            let admitted = crate::handle::decide(&f, &bounds()).unwrap();
+            let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
+            let _ = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+                .await
+                .unwrap();
+            let sent = h.await.unwrap();
+            assert_eq!(
+                sent.contains(r#""reasoning_effort":"none""#),
+                want,
+                "sent:\n{sent}"
+            );
+            assert_eq!(sent.contains("reasoning_effort"), want, "sent:\n{sent}");
+        }
+    }
+
     #[tokio::test]
     async fn every_text_block_rides_verbatim_so_the_trail_matches_the_wire() {
         fips();

@@ -260,15 +260,7 @@ impl Egress for SocketEgress {
             ));
         }
 
-        let frame = EgressFrameRequest {
-            destination: req.destination,
-            endpoint: req.endpoint,
-            model: req.model,
-            key_vault_path: req.key_vault_path,
-            key_field: req.key_field,
-            conversation: req.conversation,
-            turns: req.turns,
-        };
+        let frame = frame_of(req);
         // MEASURED FIRST, allocated second (#241, codex round 2 item C). The
         // counting pass serializes through a sink that stores nothing, so the
         // exact encoded length is known before a byte of frame content is
@@ -355,6 +347,19 @@ impl Egress for SocketEgress {
     }
 }
 
+fn frame_of(req: EgressRequest) -> EgressFrameRequest {
+    EgressFrameRequest {
+        destination: req.destination,
+        endpoint: req.endpoint,
+        model: req.model,
+        key_vault_path: req.key_vault_path,
+        key_field: req.key_field,
+        reasoning_effort: req.reasoning_effort,
+        conversation: req.conversation,
+        turns: req.turns,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +375,7 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            reasoning_effort: Some("none".into()),
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
@@ -379,6 +385,20 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn the_frame_carries_every_field_of_the_request() {
+        let r = req();
+        let f = frame_of(r.clone());
+        assert_eq!(f.destination, r.destination);
+        assert_eq!(f.endpoint, r.endpoint);
+        assert_eq!(f.model, r.model);
+        assert_eq!(f.key_vault_path, r.key_vault_path);
+        assert_eq!(f.key_field, r.key_field);
+        assert_eq!(f.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(f.conversation, r.conversation);
+        assert_eq!(f.turns, r.turns);
     }
 
     /// A fake deputy. Returns how many bytes it ever read, so a test can assert

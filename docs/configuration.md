@@ -497,11 +497,13 @@ provider:
   model: gpt-5
   key_vault_path: maknae/providers/openai  # MOUNT-RELATIVE, no `data/`; never disclosed
   key_field: api-key                    # the field INSIDE the secret; required, no default
+  reasoning_effort: none                # optional; sent with every request only when set
 ```
 
 - **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. The key lives in Vault under the mount `egress-bounds.yaml` declares, at the mount-relative path `key_vault_path` names, in the field `key_field` names — readable by the `maknae-egress` principal only.
 - **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses (`SectionNotRootOwned`, naming the file or directory that failed). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
-- **Disclosure.** `admin.config.show` shows `name`, `endpoint` and `model` in the clear and omits `key_vault_path` **and `key_field`**. A field *name* is not a secret, but together with the path it describes exactly where a credential is kept, and nothing needs it in a log line.
+- **`reasoning_effort`** is optional. When set, it is sent as `reasoning_effort` on every request to this provider's model; when absent, nothing is sent. It is 1 to 16 lowercase ASCII letters and is not checked against any provider's list of levels, which differ between providers: a level the provider does not know comes back as the provider's own error. Some models need it: `gpt-5.6-luna` refuses function tools on `/v1/chat/completions` unless it is `none`, answering `400` with *"Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions"* (#242). The deputy re-checks the value's shape on every frame.
+- **Disclosure.** `admin.config.show` shows `name`, `endpoint`, `model` and `reasoning_effort` in the clear and omits `key_vault_path` **and `key_field`**. A field *name* is not a secret, but together with the path it describes exactly where a credential is kept, and nothing needs it in a log line.
 - **`key_vault_path` is MOUNT-RELATIVE and `data/`-free** (#308) — `maknae/providers/openai`. It must not start or end with `/`, contain whitespace, an empty segment, a `.`/`..` segment, or **any `data` segment**. That last refusal is the migration guard: a value still reading `maknae-kv/data/maknae/providers/openai` would compose to `maknae-kv/data/maknae-kv/data/maknae/providers/openai` and fetch nothing, and #307 showed that this class fails at the **credential read** rather than at boot, because nothing compares a host-side value to Vault's grant. The cost is stated plainly: a secret path legitimately containing a `data` segment cannot be expressed. That is rare; the migration error is not.
 - **`key_field`** names the field inside the secret — required, at most 64 bytes, no whitespace, and **no default**. Before #308 the only field name in the tree was a test fixture's `api_key`; defaulting to it would have asked the wrong question of a store using `api-key`. Note that naming this key `key:` instead is refused as a **pasted credential** (`ProviderPlaintextKey`) — the plaintext-key check is on the field's *name* and cannot know your value is only a field name.
 - **The examples in this reference use the SHIPPED Terraform defaults, deliberately.** `provider_key_prefix` defaults to `maknae/providers` and `kv_mount_path` to `maknae-kv`, so copy-pasting from here matches the grant `deploy/vault-pki` actually creates. A deployment is free to choose different values — but then **all three change together**, and nothing in the boot path will tell you if they do not. *(Recorded 2026-09-13 after this section briefly carried one deployment's own prefix while the Terraform default was unchanged: the copy-paste path then booted clean and took a 403 at the credential read, which is #307 reintroduced inside the change that fixed it.)*
@@ -838,8 +840,8 @@ file.
 
 #### What the parser accepts (`crates/maknae-config/src/provider.rs`)
 
-**Exactly five keys, all required, no others** — a sixth key refuses with
-`unknown key '<name>' in 'provider'` *(the message changed with #210, which made
+**Six keys: five required and `reasoning_effort` optional, no others** — any other key
+refuses with `unknown key '<name>' in 'provider'` *(the message changed with #210, which made
 `UnknownKey` the one refusal for a wrong key everywhere)*.
 
 - **`name`** — at most **32 bytes** (it is written into every egress audit record's
@@ -863,6 +865,9 @@ file.
   64 bytes, no whitespace, **no default**. It is carried per request rather than fixed in
   the deputy, for the same reason `destination` is: two providers may use different field
   names, and a constant fails the moment there are two.
+- **`reasoning_effort`** — optional; 1 to 16 lowercase ASCII letters, e.g. `none`. Sent
+  verbatim as `reasoning_effort` on every request when present, and not sent at all when
+  absent. Not checked against a provider's list of levels.
 
 Values are trimmed, and an empty-after-trim value is refused as missing.
 

@@ -112,6 +112,13 @@ pub fn decide<'a>(
     {
         return Err(Refusal::MalformedFrame);
     }
+    if req
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|e| !maknae_config::reasoning_effort_is_acceptable(e))
+    {
+        return Err(Refusal::MalformedFrame);
+    }
     if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
@@ -189,6 +196,7 @@ mod tests {
             model: "m".into(),
             key_vault_path: key_vault_path.into(),
             key_field: "api-key".into(),
+            reasoning_effort: None,
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
@@ -242,6 +250,23 @@ mod tests {
         }
         let mut ok = req("maknae/providers/openai");
         ok.key_field = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
+        assert!(decide(&ok, &bounds()).is_ok());
+    }
+
+    #[test]
+    fn a_reasoning_effort_the_config_would_refuse_is_a_malformed_frame() {
+        let long = "e".repeat(maknae_config::MAX_REASONING_EFFORT_BYTES + 1);
+        for bad in ["None", "low medium", long.as_str()] {
+            let mut r = req("maknae/providers/openai");
+            r.reasoning_effort = Some(bad.into());
+            assert_eq!(
+                decide(&r, &bounds()).map(|_| ()),
+                Err(Refusal::MalformedFrame),
+                "{bad}"
+            );
+        }
+        let mut ok = req("maknae/providers/openai");
+        ok.reasoning_effort = Some("none".into());
         assert!(decide(&ok, &bounds()).is_ok());
     }
 

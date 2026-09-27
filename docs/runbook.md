@@ -586,6 +586,7 @@ provider:
   model: gpt-5.6-luna
   key_vault_path: maknae/providers/openai
   key_field: api-key
+  reasoning_effort: none
 EOF
 sudo chown root:_maknae /etc/maknae/config.d/10-provider.yaml
 sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
@@ -593,7 +594,8 @@ sudo restorecon -Rv /etc/maknae
 ```
 
 - **`endpoint` is POSTed exactly as written.** Give the full chat-completions URL, not the API base (`crates/maknae-llm/src/client.rs`).
-- **All five keys are required.** A field named `key`, `api_key`, `token` or `secret` is refused as a plaintext key.
+- **`reasoning_effort: none` is required for `gpt-5.6-luna`.** Without it the model refuses the loop's tools on chat completions: every turn is recorded `OutcomeUnknown`, with `provider answered 400` in the deputy's journal.
+- **The other five keys are required.** A field named `key`, `api_key`, `token` or `secret` is refused as a plaintext key.
 - **`key_vault_path` is mount-relative**, carries no `data/` segment, and must sit **strictly beneath** the prefix from step 4, or boot refuses with `OutsideBounds`.
 
 ### 6. Put the key in Vault

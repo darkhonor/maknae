@@ -7,7 +7,7 @@
 //! Vault, never plaintext (ADR-0005 decision 8; the `maknae-egress` process
 //! reads the path under its own policy — #240). Absent section → `None`: a
 //! deployment with no provider boots and its loop has nothing to prompt.
-//! Present → strictly validated (exactly the four keys); present-but-invalid →
+//! Present → strictly validated (exactly [`KEYS`]); present-but-invalid →
 //! [`ConfigError::InvalidProvider`]; a plaintext-key key →
 //! [`ConfigError::ProviderPlaintextKey`], named separately because it is the
 //! misconfiguration an operator is most likely to make and the one whose
@@ -25,8 +25,15 @@ use crate::{ConfigError, Value};
 /// The registered section name.
 pub const PROVIDER_SECTION: &str = "provider";
 
-/// The five keys the section accepts, and no others.
-pub(crate) const KEYS: [&str; 5] = ["name", "endpoint", "model", "key_vault_path", "key_field"];
+/// The six keys the section accepts, and no others.
+pub(crate) const KEYS: [&str; 6] = [
+    "name",
+    "endpoint",
+    "model",
+    "key_vault_path",
+    "key_field",
+    "reasoning_effort",
+];
 /// Upper bound on `provider.key_field`. It reaches `VaultError::MissingKvField`
 /// and therefore terminals and audit lines, so it is bounded like every other
 /// operator-supplied string that can be printed.
@@ -35,6 +42,9 @@ pub const MAX_KEY_FIELD_BYTES: usize = 64;
 /// audit record's `object`, and the macOS unified-log line cap was measured
 /// with this bound (maknae-audit-append `syslog_fmt.rs` tests).
 pub const MAX_PROVIDER_NAME_BYTES: usize = 32;
+/// Upper bound on `provider.reasoning_effort`, a level name sent on every
+/// request and disclosed by the configuration view.
+pub const MAX_REASONING_EFFORT_BYTES: usize = 16;
 
 /// Spellings under which an operator might paste the key itself. Any of these
 /// present — with any value — refuses the section by name.
@@ -71,6 +81,18 @@ pub struct ProviderConfig {
     /// `api_key`, and defaulting to it would silently ask the wrong question of
     /// a store that used a different name.
     pub key_field: String,
+    /// The provider's reasoning level, sent on every request only when set
+    /// (#242: `gpt-5.6-luna` refuses tools on chat completions unless it is
+    /// `none`). Not checked against any provider's list of levels.
+    pub reasoning_effort: Option<String>,
+}
+
+/// The one shape a reasoning level may take, here and in the deputy's
+/// re-check of the frame.
+pub fn reasoning_effort_is_acceptable(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_REASONING_EFFORT_BYTES
+        && s.chars().all(|c| c.is_ascii_lowercase())
 }
 
 fn err(reason: impl Into<String>) -> ConfigError {
@@ -242,12 +264,22 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
             "provider.key_field may be at most {MAX_KEY_FIELD_BYTES} bytes"
         )));
     }
+    let reasoning_effort = match get(m, "reasoning_effort") {
+        None => None,
+        Some(Value::Str(s)) if reasoning_effort_is_acceptable(s) => Some(s.clone()),
+        Some(_) => {
+            return Err(err(format!(
+                "provider.reasoning_effort must be 1 to {MAX_REASONING_EFFORT_BYTES} lowercase ASCII letters"
+            )))
+        }
+    };
     Ok(Some(ProviderConfig {
         name: name.to_string(),
         endpoint: endpoint.to_string(),
         model: model.to_string(),
         key_vault_path: key_vault_path.to_string(),
         key_field: key_field.to_string(),
+        reasoning_effort,
     }))
 }
 
@@ -337,6 +369,28 @@ mod tests {
     fn parse(yaml: &str) -> Result<Option<ProviderConfig>, ConfigError> {
         let v = load_str(yaml).expect("test yaml parses");
         provider_from_section(Some(&v))
+    }
+
+    #[test]
+    fn reasoning_effort_is_optional_and_a_bounded_lowercase_token() {
+        assert_eq!(parse(OK).unwrap().unwrap().reasoning_effort, None);
+        let p = parse(&format!("{OK}reasoning_effort: none\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.reasoning_effort.as_deref(), Some("none"));
+        let at = "e".repeat(MAX_REASONING_EFFORT_BYTES);
+        let p = parse(&format!("{OK}reasoning_effort: {at}\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.reasoning_effort.as_deref(), Some(at.as_str()));
+        let over = "e".repeat(MAX_REASONING_EFFORT_BYTES + 1);
+        for bad in ["''", "None", "low medium", "'x-high'", "7", over.as_str()] {
+            let e = parse(&format!("{OK}reasoning_effort: {bad}\n")).unwrap_err();
+            assert!(
+                matches!(&e, ConfigError::InvalidProvider(m) if m.contains("reasoning_effort")),
+                "{bad}: {e}"
+            );
+        }
     }
 
     #[test]

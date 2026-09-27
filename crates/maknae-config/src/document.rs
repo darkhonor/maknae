@@ -322,6 +322,7 @@ const DISCLOSABLE: &[&str] = &[
     "provider.name",
     "provider.endpoint",
     "provider.model",
+    "provider.reasoning_effort",
     // The `egress` section (#240): where the daemon finds the deputy and how
     // long one send may take — deployment shape, never a credential.
     "egress.socket_path",

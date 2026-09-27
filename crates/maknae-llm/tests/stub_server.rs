@@ -61,6 +61,7 @@ fn req<'a>(model: &'a str) -> ChatRequest<'a> {
         ))],
         tools: vec![],
         tool_choice: None,
+        reasoning_effort: None,
         stream: false,
     }
 }
