@@ -65,8 +65,7 @@ pub enum ContentKind {
     /// The maknae intermediate CA, split from the fetched issuer chain.
     IntCa,
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
-    /// Linux; on macOS the SecretID goes to the System keychain, and this row
-    /// is a pointer file `write_artifacts` writes directly.
+    /// Linux; on macOS the SecretID goes to the System keychain.
     SealedDaemonSecret,
     /// The sealed CLI SecretID — user-scoped `systemd-creds` `.cred` (Linux
     /// only; macOS uses the login Keychain instead, which is not a filesystem

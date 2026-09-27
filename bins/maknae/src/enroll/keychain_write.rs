@@ -139,6 +139,7 @@ pub(crate) async fn seal_secret_macos(
     secret: &Zeroizing<String>,
     plane: KeychainPlane,
     binary: &'static str,
+    team: &str,
 ) -> Result<(), EnrollError> {
     use tokio::io::AsyncWriteExt;
     validate_secret_id(secret)?;
@@ -156,8 +157,11 @@ pub(crate) async fn seal_secret_macos(
         });
     }
 
+    check_install_path(std::path::Path::new(binary))?;
+    verify_release(binary, plane, team).await?;
     let mut child = tokio::process::Command::new(SECURITY)
         .arg("-i")
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -188,10 +192,23 @@ pub(crate) async fn seal_secret_macos(
     }
     match parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) {
         Some(k) if k == SYSTEM_KEYCHAIN => Ok(()),
-        other => Err(EnrollError::Keychain {
-            op: "verify",
-            detail: format!("the item landed in {other:?}, not {SYSTEM_KEYCHAIN}"),
-        }),
+        other => {
+            let _ = run(
+                SECURITY,
+                &[
+                    "delete-generic-password",
+                    "-a",
+                    KEYCHAIN_ACCOUNT,
+                    "-s",
+                    plane.service(),
+                ],
+            )
+            .await;
+            Err(EnrollError::Keychain {
+                op: "verify",
+                detail: format!("the item landed in {other:?}, not {SYSTEM_KEYCHAIN}"),
+            })
+        }
     }
 }
 
@@ -285,8 +302,19 @@ pub(crate) async fn verify_release(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn binary_requirement(owner: u32) -> maknae_io::TargetRequired {
+    maknae_io::TargetRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o022),
+        nlink_exactly_one: false,
+        regular_file: true,
+        max_bytes: Some(1 << 30),
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn check_install_path(bin: &std::path::Path) -> Result<(), EnrollError> {
-    use maknae_io::{open_anchor, AnchorRequired, IoError, IoKind, StrategyPref, TargetRequired};
+    use maknae_io::{open_anchor, AnchorRequired, IoError, IoKind, StrategyPref};
     use std::path::Path;
     let refuse = |path: &Path, detail: String| EnrollError::NotRootInstalled {
         path: path.display().to_string(),
@@ -300,7 +328,9 @@ pub(crate) fn check_install_path(bin: &std::path::Path) -> Result<(), EnrollErro
                 ..
             }
         ) {
-            refuse(path, "not installed".to_string())
+            EnrollError::NotInstalled {
+                path: path.display().to_string(),
+            }
         } else {
             refuse(path, e.to_string())
         }
@@ -325,17 +355,7 @@ pub(crate) fn check_install_path(bin: &std::path::Path) -> Result<(), EnrollErro
     }
     let anchor = last.ok_or_else(|| refuse(dir, "no directory to anchor".to_string()))?;
     anchor
-        .read(
-            Path::new(name),
-            None,
-            TargetRequired {
-                owner: Some(0),
-                mode_mask: Some(0o022),
-                nlink_exactly_one: true,
-                regular_file: true,
-                max_bytes: Some(1 << 30),
-            },
-        )
+        .read(Path::new(name), None, binary_requirement(0))
         .map_err(|e| not_found(bin, e))?;
     Ok(())
 }
@@ -447,9 +467,6 @@ mod tests {
 
     #[test]
     fn an_adhoc_flag_is_refused_even_with_no_signature_adhoc_line() {
-        // P4's forged-DR `-dv` shape: the flags bitmask carries `adhoc`, but the
-        // line-based `Signature=adhoc` giveaway is absent — the flags check alone
-        // must still refuse it.
         let dv = "Identifier=io.maknae.maknaed\nCodeDirectory v=20500 size=306 flags=0x10002(adhoc,runtime) hashes=4+2 location=embedded\nSignature size=8987\nTeamIdentifier=TEAM123456\n";
         assert!(check_runtime_and_entitlements(dv, "").is_err());
     }
@@ -536,5 +553,50 @@ mod tests {
             "io.maknae.maknaed",
             "TEAM123456"
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_hard_link_does_not_disqualify_an_installed_binary() {
+        let uid = nix::unistd::geteuid().as_raw();
+        let req = binary_requirement(uid);
+
+        let dir = std::env::temp_dir().join(format!("maknae-nlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = dir.join("maknaed");
+        std::fs::write(&bin, b"binary").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::hard_link(&bin, dir.join("second-name")).unwrap();
+
+        let anchor = maknae_io::open_anchor(
+            &dir,
+            maknae_io::AnchorRequired::OS_DAC,
+            maknae_io::StrategyPref::Auto,
+        )
+        .unwrap();
+        let read = anchor.read(std::path::Path::new("maknaed"), None, req.clone());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(read.is_ok(), "{:?}", read.err());
+        assert!(!req.nlink_exactly_one);
+        assert!(req.regular_file);
+        assert_eq!(req.owner, Some(uid));
+        assert_eq!(req.mode_mask, Some(0o022));
+    }
+
+    #[test]
+    fn a_missing_binary_is_reported_as_not_installed() {
+        let e = EnrollError::NotInstalled {
+            path: DAEMON_BINARY.to_string(),
+        };
+        let text = e.to_string();
+        assert!(!text.contains("replaced"), "{text}");
+        assert!(text.contains("is not installed"), "{text}");
     }
 }

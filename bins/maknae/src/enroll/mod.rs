@@ -131,6 +131,10 @@ pub enum EnrollError {
         path: String,
         detail: String,
     },
+    #[cfg(target_os = "macos")]
+    NotInstalled {
+        path: String,
+    },
     PlaintextOptOutOnMacos,
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
@@ -210,6 +214,11 @@ impl std::fmt::Display for EnrollError {
             EnrollError::NotRootInstalled { path, detail } => write!(
                 f,
                 "{path} could be replaced by a non-root user ({detail}); the keychain item would trust whatever sits there"
+            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::NotInstalled { path } => write!(
+                f,
+                "{path} is not installed — install the Maknae package first"
             ),
             EnrollError::PlaintextOptOutOnMacos => write!(
                 f,
@@ -1470,6 +1479,8 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     check_vault_reachable(&args.vault_addr)?;
 
     // Daemon-surface gate, pre-mint: Linux's TPM2 round-trip; macOS's release checks.
+    #[cfg(target_os = "macos")]
+    let mut release_team = String::new();
     if macos {
         if args.insecure_plaintext_secret {
             eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
@@ -1497,12 +1508,15 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
                     keychain_write::check_install_path(Path::new(bin))?;
                     keychain_write::verify_release(bin, plane, &team).await?;
                 }
-                Ok::<(), EnrollError>(())
+                Ok::<String, EnrollError>(team)
             }
             .await;
-            if let Err(e) = checked {
-                eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
-                return Err(e);
+            match checked {
+                Ok(team) => release_team = team,
+                Err(e) => {
+                    eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+                    return Err(e);
+                }
             }
         }
     } else if !detect_hrot_capability(args.verbose) {
@@ -1634,6 +1648,8 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         &operator,
         &cli_dir,
         macos,
+        #[cfg(target_os = "macos")]
+        &release_team,
         &daemon_role_id,
         &cli_role_id,
         &egress_role_id,
@@ -1662,6 +1678,7 @@ async fn finish_enrollment(
     operator: &Operator,
     cli_dir: &Path,
     macos: bool,
+    #[cfg(target_os = "macos")] release_team: &str,
     daemon_role_id: &str,
     cli_role_id: &str,
     egress_role_id: &str,
@@ -1748,9 +1765,8 @@ async fn finish_enrollment(
         );
     }
 
-    // Only the rows `write_artifacts` can fill from `contents` — the sealed-
-    // secret placeholder row is excluded (produced by the seal step below);
-    // CLI rows are excluded (the operator-context helper's job, step 7).
+    // Only the rows `write_artifacts` can fill from `contents` — CLI rows are
+    // excluded (the operator-context helper's job, step 7).
     let daemon_rows: Vec<_> = table
         .iter()
         .filter(|a| {
@@ -1774,6 +1790,7 @@ async fn finish_enrollment(
                 daemon_secret,
                 maknae_vault::KeychainPlane::Daemon,
                 keychain_write::DAEMON_BINARY,
+                release_team,
             )
             .await?;
             artifact_write::write_file(
@@ -1794,7 +1811,6 @@ async fn finish_enrollment(
     }
 
     // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
-    // The same mechanism under the name maknae-egress.service loads.
     let egress_sealed_row = table
         .iter()
         .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
@@ -1806,6 +1822,7 @@ async fn finish_enrollment(
                 egress_secret,
                 maknae_vault::KeychainPlane::Egress,
                 keychain_write::EGRESS_BINARY,
+                release_team,
             )
             .await?;
             artifact_write::write_file(
@@ -1863,9 +1880,9 @@ async fn finish_enrollment(
         })?;
 
     // ---- Step 7b: root context — enroll IS root under sudo -------
-    // Enroll grants the daemon nothing on the home and removes what an earlier
-    // enroll granted; the deputy gets its /etc/maknae traversal entry. Both are
-    // WARN-on-failure: enrollment establishes identity and must not hinge on them.
+    // Enroll grants the daemon nothing on the home; the deputy gets its
+    // /etc/maknae traversal entry. Both are WARN-on-failure: enrollment
+    // establishes identity and must not hinge on them.
     if !macos {
         revoke_legacy_home_access(&operator.home, args.verbose);
         grant_egress_traversal(args.verbose);
@@ -1879,8 +1896,22 @@ async fn finish_enrollment(
     Ok(format!(
         "{summary}\n{}\n{}\n{}",
         msg(locale, MsgId::EnrollReloginNote),
-        msg(locale, MsgId::EnrollEgressBoundsHint),
-        msg(locale, MsgId::EnrollEnableDaemonHint),
+        msg(
+            locale,
+            if macos {
+                MsgId::EnrollEgressBoundsHintMacos
+            } else {
+                MsgId::EnrollEgressBoundsHint
+            }
+        ),
+        msg(
+            locale,
+            if macos {
+                MsgId::EnrollEnableDaemonHintMacos
+            } else {
+                MsgId::EnrollEnableDaemonHint
+            }
+        ),
     ))
 }
 
