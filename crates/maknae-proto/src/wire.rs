@@ -1204,6 +1204,10 @@ mod tests {
                 deadline_ms: 5000,
                 max_bytes: 0,
             },
+            label: crate::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: vec![],
+            },
         });
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
@@ -1791,6 +1795,10 @@ mod tests {
                     max_depth: u16::MAX,
                     deadline_ms: u64::MAX,
                     max_bytes: u64::MAX,
+                },
+                label: crate::ObjectLabel {
+                    level: "OFFICIAL: SENSITIVE".into(),
+                    categories: vec![],
                 },
             };
             let bytes = encode_response(&Response {

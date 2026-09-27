@@ -2620,6 +2620,18 @@ async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
         Some(maknae_audit_append::MutationOperation::Read)
     );
     assert_eq!(intent.content_length, None);
+    assert_eq!(
+        grant.label,
+        maknae_proto::ObjectLabel {
+            level: "UNCLASSIFIED".into(),
+            categories: vec![]
+        }
+    );
+    let label = intent.label.as_ref().unwrap();
+    assert_eq!(
+        (label.level.as_str(), label.categories.len()),
+        ("UNCLASSIFIED", 0)
+    );
     let progress = phase(maknae_audit_append::MutationPhase::Progress);
     assert_eq!(
         progress.effects[0].effect,

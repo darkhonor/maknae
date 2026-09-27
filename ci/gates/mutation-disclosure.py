@@ -30,13 +30,17 @@ def inventory(source):
                 continue
             field = re.sub(r"^\s*pub\s+", "", field)
             field = re.sub(r"\s+", "", field)
-            match = re.fullmatch(r"([A-Za-z_]\w*):([A-Za-z_]\w*(?:<String>)?)", field)
+            match = re.fullmatch(r"([A-Za-z_]\w*):([A-Za-z_]\w*)(?:<([A-Za-z_]\w*)>)?", field)
             if not match:
                 raise ValueError(f"unsupported grant field in {prefix}: {field}")
-            name, kind = match.groups()
+            name, outer, inner = match.groups()
+            if inner is not None and outer != "Vec":
+                raise ValueError(f"unsupported grant field in {prefix}: {field}")
+            kind = f"Vec<{inner}>" if inner else outer
             rows.append(f"{prefix}.{name}:{kind}")
-            if kind not in primitives:
-                pending.append(kind)
+            walked = inner if inner else outer
+            if kind not in primitives and walked != "String":
+                pending.append(walked)
 
     while pending:
         name = pending.pop()

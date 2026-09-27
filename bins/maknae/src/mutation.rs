@@ -955,6 +955,10 @@ mod tests {
                 deadline_ms: 5000,
                 max_bytes: 0,
             },
+            label: maknae_proto::ObjectLabel {
+                level: "UNCLASSIFIED".into(),
+                categories: vec![],
+            },
         }
     }
     fn mkdir(path: String, parents: bool) -> proto::Verb {

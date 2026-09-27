@@ -1245,6 +1245,10 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
                     deadline_ms: 0,
                     max_bytes: 0,
                 },
+                label: maknae_proto::ObjectLabel {
+                    level: "UNCLASSIFIED".into(),
+                    categories: vec![],
+                },
             })),
         })
         .unwrap();

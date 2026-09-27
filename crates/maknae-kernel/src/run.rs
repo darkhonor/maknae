@@ -836,6 +836,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             record,
             authz_decide_timeout,
             attempt_caps,
+            &classification_policy_name,
         )
         .await;
         close_bounded(&mut stream).await;

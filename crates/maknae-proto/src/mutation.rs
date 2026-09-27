@@ -51,6 +51,7 @@ pub struct MutationGrant {
     pub id: MutationId,
     pub scope: MutationScope,
     pub limits: MutationLimits,
+    pub label: ObjectLabel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +119,35 @@ pub enum MutationReport {
 pub struct MutationAck {
     pub id: MutationId,
     pub next_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectLabel {
+    pub level: String,
+    pub categories: Vec<CategoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryEntry {
+    pub category: String,
+    pub provenance: Provenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provenance {
+    Declared,
+    Region,
+    Detected {
+        detector: String,
+        tier: DetectionTier,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DetectionTier {
+    Validated,
+    Contextual,
+    PatternOnly,
 }
 
 #[cfg(test)]
@@ -217,6 +247,10 @@ mod tests {
                     max_depth: 128,
                     deadline_ms: 5000,
                     max_bytes,
+                },
+                label: crate::ObjectLabel {
+                    level: "UNCLASSIFIED".into(),
+                    categories: vec![],
                 },
             });
         }

@@ -196,12 +196,40 @@ pub struct MutationEffectRecord {
 }
 /// Trusted schema outside the deployer's free-form AU-3(1) extension. Session ID
 /// lives on AuditRecord; intent_seq correlates every phase within that session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelAudit {
+    pub level: String,
+    pub categories: Vec<CategoryAudit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryAudit {
+    pub category: String,
+    pub provenance: ProvenanceAudit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProvenanceAudit {
+    Declared,
+    Region,
+    Detected { detector: String, tier: TierAudit },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TierAudit {
+    Validated,
+    Contextual,
+    PatternOnly,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationAudit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<MutationOperation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorized_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<LabelAudit>,
     pub intent_seq: u64,
     pub phase: MutationPhase,
     pub origin: MutationOrigin,
@@ -393,6 +421,7 @@ mod tests {
                 length: None,
             }],
             stopped_at: None,
+            label: None,
         });
         let encoded = canonical_json(&rec).unwrap();
         let decoded: AuditRecord = serde_json::from_str(&encoded).unwrap();
@@ -403,6 +432,34 @@ mod tests {
         );
         let invalid = encoded.replace("ClientReported", "VerifiedClient");
         assert!(serde_json::from_str::<AuditRecord>(&invalid).is_err());
+    }
+
+    #[test]
+    fn an_intent_label_serializes_its_level_and_an_empty_category_list() {
+        let mut m = MutationAudit {
+            operation: Some(MutationOperation::Read),
+            authorized_paths: vec!["/sentinel/read".into()],
+            label: None,
+            intent_seq: 3,
+            phase: MutationPhase::Intent,
+            origin: MutationOrigin::KernelObserved,
+            status: MutationStatus::IntentOnly,
+            content_length: None,
+            first_index: None,
+            effects: vec![],
+            stopped_at: None,
+        };
+        m.label = Some(LabelAudit {
+            level: "UNCLASSIFIED".into(),
+            categories: vec![],
+        });
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            json.contains(r#""label":{"level":"UNCLASSIFIED","categories":[]}"#),
+            "{json}"
+        );
+        m.label = None;
+        assert!(!serde_json::to_string(&m).unwrap().contains("label"));
     }
 
     #[test]
@@ -429,6 +486,7 @@ mod tests {
                 },
             ],
             stopped_at: None,
+            label: None,
         };
         let json = serde_json::to_string(&audit).unwrap();
         assert!(
