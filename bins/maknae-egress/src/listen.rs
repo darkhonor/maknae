@@ -1,9 +1,8 @@
 //! Socket acquisition (#240a D4-A, maintainer ruling: option b).
 //!
-//! The listening socket is created by the init system — a systemd `.socket`
-//! with `SocketUser=_maknae-egress`, `SocketGroup=_maknae`, `SocketMode=0660`
-//! — so there is no `chgrp`, no `CAP_CHOWN`, and no supplementary-group
-//! workaround. The fd arrives through `LISTEN_FDS`.
+//! On Linux the socket is created by a systemd `.socket` (`SocketGroup=_maknae`,
+//! `SocketMode=0660`) and arrives through `LISTEN_FDS`. On macOS the deputy binds
+//! it itself; see [`bind_gated`].
 //!
 //! Adopting an inherited fd needs `unsafe`, which `[workspace.lints.rust]
 //! unsafe_code = "forbid"` denies and an in-crate `#[allow]` cannot lift.
@@ -42,7 +41,7 @@ pub fn from_init_system() -> Result<Option<UnixListener>, ListenError> {
 /// bind. Only reachable when the init system passed nothing. The shipped
 /// Linux unit always socket-activates, and a test asserts the packaged unit
 /// carries no bind path; on macOS this is the launchd job's only path, since
-/// launchd has no socket-activation equivalent for a non-`root` listener here.
+/// launchd's socket hand-off is a C API (`launch_activate_socket`).
 pub fn bind_gated(
     rt: &tokio::runtime::Runtime,
     path: &Path,
@@ -79,7 +78,20 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let gid = nix::unistd::getegid();
+        // A group the socket is NOT born with (egid on Linux, the dir's on
+        // macOS), so the gid assertion fails if the chown is dropped.
+        let born = [
+            nix::unistd::getegid().as_raw(),
+            std::os::unix::fs::MetadataExt::gid(&std::fs::metadata(d.path()).unwrap()),
+        ];
+        // `id -G`: nix's `getgroups` is configured out on Apple targets.
+        let ids = std::process::Command::new("id").arg("-G").output().unwrap();
+        let gid = String::from_utf8(ids.stdout)
+            .unwrap()
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .find(|g| !born.contains(g))
+            .map_or_else(nix::unistd::getegid, nix::unistd::Gid::from_raw);
         let p = d.path().join("egress.sock");
         let _l = bind_gated(&rt, &p, gid).unwrap();
         let meta = std::fs::metadata(&p).unwrap();

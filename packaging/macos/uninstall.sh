@@ -30,12 +30,14 @@ rm -rf /usr/local/lib/maknae
 # Before the accounts go: the ACE names _maknae-egress and must still resolve.
 chmod -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
 
+kc_left=""
 for s in io.maknae.maknaed io.maknae.maknae-egress; do
     rc=0
     security delete-generic-password -a secret-id -s "$s" /Library/Keychains/System.keychain >/dev/null 2>&1 || rc=$?
     case "$rc" in
         0|44) : ;;
-        *) echo "WARNING: could not delete the $s keychain item (exit $rc)" >&2 ;;
+        *) echo "WARNING: could not delete the $s keychain item (exit $rc)" >&2
+           kc_left="$kc_left $s" ;;
     esac
 done
 
@@ -89,6 +91,9 @@ done
 # Clear append-only so the operator CAN remove the trail if they choose to.
 chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 
-echo "Removed. RETAINED: /var/log/maknae (audit trail) and /etc/maknae (config, not reusable: reinstall needs \`sudo maknae enroll\`)."
-echo "Remove them by hand if you intend a full teardown."
-exit 0
+echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
+if [ -n "$kc_left" ]; then
+    echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
+    exit 1
+fi
+echo "Removed."

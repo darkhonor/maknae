@@ -57,7 +57,7 @@ fn main() {
             // (#76); the shipped Linux unit socket-activates and passes no
             // bind path, a packaging test asserts that.
             "--bind" => bind = args.next().map(PathBuf::from),
-            // Development only, likewise — and it relocates the whole
+            // Development only — and it relocates the whole
             // credential set: the RoleID and the Vault CA are read from
             // `egress/` BESIDE the bounds file, not from a fixed path.
             "--bounds" => bounds_path = args.next().map(PathBuf::from).unwrap_or(bounds_path),

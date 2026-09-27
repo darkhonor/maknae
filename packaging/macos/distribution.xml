@@ -12,9 +12,6 @@
     <os-version min="26.0"/>
   </allowed-os-versions>
 
-  <!-- ONE product, N components. #240 adds a third pkg-ref/line/choice triple for
-       io.maknae.egress alongside its binary; that is the whole change, because the
-       components are already separate. -->
   <choices-outline>
     <line choice="default">
       <line choice="io.maknae.daemon"/>

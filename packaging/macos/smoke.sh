@@ -66,7 +66,6 @@ phase1() {
         '')  fail "no runtime-dir install line found in preinstall" ;;
         *)   fail "runtime dir not -g \"\$OPERATOR_GID\" — D1's premise is broken: $rt_line" ;;
     esac
-    # The deputy's socket is born with its parent's group, and maknaed must reach it.
     ert_line="$(grep -E '^install -d .*/usr/local/var/run/maknae-egress$' "$HERE/scripts/preinstall" || true)"
     case "$ert_line" in
         *'-o "$EGRESS_UID" -g "$MAKNAE_GID"'*) ok "deputy runtime dir is _maknae-egress:_maknae" ;;
@@ -494,10 +493,43 @@ PROBE
     launchctl disable "system/$LABEL" 2>/dev/null || :
 
     # --- uninstall, asserted --------------------------------------------------
+    # Planted: phase 2 never enrolls, so an absence check would pass on nothing.
+    local svc
+    for svc in io.maknae.maknaed io.maknae.maknae-egress; do
+        security add-generic-password -a secret-id -s "$svc" -w smoke-sentinel \
+            /Library/Keychains/System.keychain \
+            && ok "planted $svc keychain item" || fail "could not plant $svc keychain item"
+    done
+    chmod +a "user:_maknae-egress allow list,search" /etc/maknae \
+        && ok "planted the deputy's /etc/maknae ACE" || fail "could not plant the ACE"
     "$HERE/uninstall.sh" >/dev/null && ok "uninstall.sh ran" || fail "uninstall.sh failed"
     [ ! -e /usr/local/bin/maknaed ] && ok "binary removed" || fail "binary still present"
     [ ! -e "/Library/LaunchDaemons/${LABEL}.plist" ] && ok "plist removed" || fail "plist still present"
     [ ! -e /usr/local/lib/maknae ] && ok "FIPS dylib removed" || fail "FIPS dylib still present"
+    local src
+    for svc in io.maknae.maknaed io.maknae.maknae-egress; do
+        src=0
+        security find-generic-password -a secret-id -s "$svc" /Library/Keychains/System.keychain \
+            >/dev/null 2>&1 || src=$?
+        [ "$src" -eq 44 ] && ok "$svc keychain item removed" \
+                          || fail "$svc keychain item: find exited $src (want 44)"
+    done
+    case "$(ls -led /etc/maknae 2>/dev/null)" in
+        *_maknae-egress*) fail "the deputy's ACE is still on /etc/maknae" ;;
+        *) ok "the deputy's ACE is gone from /etc/maknae" ;;
+    esac
+    local gone
+    for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
+                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+        [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
+    done
+    local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"
+    for svc in "$LABEL" io.maknae.maknae-egress; do
+        case "$dis3" in
+            *"\"$svc\" => disabled"*) fail "$svc left disabled in the launchd database" ;;
+            *) ok "$svc has no stale disable" ;;
+        esac
+    done
     # The administrator's replacement must SURVIVE uninstall — that is the whole
     # point of declining the ownership claim above.
     if dscl . -read /Users/_maknae-egress >/dev/null 2>&1; then

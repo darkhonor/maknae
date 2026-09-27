@@ -25,9 +25,7 @@ pub const EGRESS_SECTION: &str = "egress";
 pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
 
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
-/// The macOS deputy's socket path — one constant shared by `enroll`'s
-/// generated daemon config, this crate's own tests, and the launchd plist
-/// test in `bins/maknae-egress`.
+/// The macOS deputy's socket path.
 pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
 /// The deputy's worst-case wall time on one request, plus a margin. Every
 /// Vault operation is bounded by `maknae-vault`'s `VAULT_HTTP_TIMEOUT`

@@ -4011,8 +4011,8 @@ fi
 # ---- entitlements-empty (#76, ADR-0018 decision 6) ---------------------------
 ee="$here/entitlements-empty.sh"
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "neg-skip: [entitlements-empty/*] not Darwin; plutil(1) is a macOS tool"
-  skipped=$((skipped+5))
+  echo "neg-skip: [entitlements-empty/*, signed-entitlements-empty/*] not Darwin; plutil(1) is a macOS tool"
+  skipped=$((skipped+8))
 else
   ee_entitled="$(mktemp "$NC_TMP/XXXXXX")"
   cat > "$ee_entitled" <<'EOF'
@@ -4060,6 +4060,18 @@ EOF
 
   expect_accept "entitlements-empty/the-shipped-files-pass" "entitlements-empty: ok" \
     "$ee" "$repo_root/packaging/macos/"*.entitlements
+
+  # signing-lib.sh's read-back of a SIGNED binary's entitlements.
+  see() { bash -c 'source "$1"; signed_entitlements_empty "$2" || { echo "FAIL: entitled"; exit 1; }; echo "signed-ok"' \
+    _ "$repo_root/packaging/macos/signing-lib.sh" "$1"; }
+  see_bin="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$see_bin"
+  codesign -f -s - --entitlements "$ee_entitled" "$see_bin" 2>/dev/null
+  expect_reject_because "signed-entitlements-empty/an-entitled-binary-is-refused" "entitled" see "$see_bin"
+  see_clean="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$see_clean"
+  codesign -f -s - --entitlements "$ee_empty" "$see_clean" 2>/dev/null
+  expect_accept "signed-entitlements-empty/an-empty-set-passes" "signed-ok" see "$see_clean"
+  expect_reject_because "signed-entitlements-empty/a-missing-binary-is-refused" "entitled" \
+    see "$NC_TMP/no-such-binary"
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
