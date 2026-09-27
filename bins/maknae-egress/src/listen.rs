@@ -38,13 +38,24 @@ pub fn from_init_system() -> Result<Option<UnixListener>, ListenError> {
     }
 }
 
-/// The DEVELOPMENT path: bind a path ourselves.
-///
-/// Only reachable when the init system passed nothing. The shipped unit always
-/// socket-activates, and a test asserts the packaged unit carries no bind path,
-/// so this cannot become the production route by accident.
-pub fn bind_path(p: &Path) -> Result<UnixListener, ListenError> {
-    UnixListener::bind(p).map_err(|e| ListenError::Bind(format!("{}: {e}", p.display())))
+/// Bind a path ourselves, group-gated through `maknae-vault`'s shared UDS
+/// bind. Only reachable when the init system passed nothing. The shipped
+/// Linux unit always socket-activates, and a test asserts the packaged unit
+/// carries no bind path; on macOS this is the launchd job's only path, since
+/// launchd has no socket-activation equivalent for a non-`root` listener here.
+pub fn bind_gated(
+    rt: &tokio::runtime::Runtime,
+    path: &Path,
+    group: nix::unistd::Gid,
+) -> Result<UnixListener, ListenError> {
+    let bind = |e: String| ListenError::Bind(format!("{}: {e}", path.display()));
+    let l = rt
+        .block_on(async { maknae_vault::bind_group_gated_uds(path, Some(group)) })
+        .map_err(|e| bind(e.to_string()))?
+        .into_std()
+        .map_err(|e| bind(e.to_string()))?;
+    l.set_nonblocking(false).map_err(|e| bind(e.to_string()))?;
+    Ok(l)
 }
 
 #[cfg(test)]
@@ -60,15 +71,39 @@ mod tests {
     }
 
     #[test]
-    fn the_development_path_binds_and_reports_its_own_failures() {
+    fn a_bound_socket_is_group_gated() {
+        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        assert!(bind_path(&d.path().join("egress.sock")).is_ok());
-        // Binding the same path twice fails, and the message names the path.
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let gid = nix::unistd::getegid();
         let p = d.path().join("egress.sock");
-        match bind_path(&p) {
-            Err(ListenError::Bind(m)) => assert!(m.contains("egress.sock"), "{m}"),
-            other => panic!("expected a bind failure, got {other:?}"),
+        let _l = bind_gated(&rt, &p, gid).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o660);
+        assert_eq!(std::os::unix::fs::MetadataExt::gid(&meta), gid.as_raw());
+        match bind_gated(&rt, &d.path().join("nope").join("egress.sock"), gid) {
+            Err(ListenError::Bind(m)) => assert!(m.contains("cannot stat"), "{m}"),
+            other => panic!("expected a parent-directory refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_group_writable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            bind_gated(&rt, &d.path().join("egress.sock"), nix::unistd::getegid()),
+            Err(ListenError::Bind(_))
+        ));
     }
 
     /// Both error shapes render something an operator can act on — these

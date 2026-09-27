@@ -76,6 +76,8 @@ pub use secret_source::{
     EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
 };
 #[cfg(unix)]
+pub use socket::bind_listener as bind_group_gated_uds;
+#[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
     RawPlaneConn, RejectReason,

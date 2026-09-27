@@ -9,8 +9,8 @@ Wants=network-online.target
 Type=exec
 User=_maknae-egress
 # Socket-activated: the listening fd arrives via LISTEN_FDS. NO bind path is
-# passed — the --bind fallback exists for the hermetic harness and non-systemd
-# dev hosts only, and a test asserts this unit carries none.
+# passed — --bind is also the macOS launchd job's path, and a test asserts
+# this unit carries none.
 ExecStart=/usr/bin/maknae-egress
 # systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
 # (0400, _maknae-egress-only, memory-backed). Name pinned: enroll seals

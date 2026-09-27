@@ -25,6 +25,10 @@ pub const EGRESS_SECTION: &str = "egress";
 pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
 
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
+/// The macOS deputy's socket path — one constant shared by `enroll`'s
+/// generated daemon config, this crate's own tests, and the launchd plist
+/// test in `bins/maknae-egress`.
+pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
 /// The deputy's worst-case wall time on one request, plus a margin. Every
 /// Vault operation is bounded by `maknae-vault`'s `VAULT_HTTP_TIMEOUT`
 /// (30 s). On a socket-activated FIRST request the deputy is still booting:
@@ -141,17 +145,11 @@ mod tests {
     #[test]
     fn both_keys_are_honoured() {
         let c = egress_from_section(Some(&sec(vec![
-            (
-                "socket_path",
-                Value::Str("/usr/local/var/run/maknae-egress/egress.sock".into()),
-            ),
+            ("socket_path", Value::Str(MACOS_EGRESS_SOCKET_PATH.into())),
             ("deadline_ms", Value::Int(30_000)),
         ])))
         .unwrap();
-        assert_eq!(
-            c.socket_path,
-            PathBuf::from("/usr/local/var/run/maknae-egress/egress.sock")
-        );
+        assert_eq!(c.socket_path, PathBuf::from(MACOS_EGRESS_SOCKET_PATH));
         assert_eq!(c.deadline_ms, 30_000);
     }
 

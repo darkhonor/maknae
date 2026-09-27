@@ -1,4 +1,4 @@
-# The binaries the Linux packages SHIP. One list, driving both build lanes.
+# The binaries the packages SHIP. One list, driving both build lanes.
 #
 # This is a PACKAGING DECISION and is deliberately hand-maintained: it is not
 # derivable from `cargo metadata`, because the workspace builds a binary the

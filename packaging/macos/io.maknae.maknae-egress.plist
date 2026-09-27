@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.maknae.maknae-egress</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/maknae-egress</string>
+    <string>--bind</string>
+    <string>/usr/local/var/run/maknae-egress/egress.sock</string>
+  </array>
+  <key>UserName</key>
+  <string>_maknae-egress</string>
+  <key>GroupName</key>
+  <string>_maknae-egress</string>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/maknae-egress/maknae-egress.err</string>
+  <key>WorkingDirectory</key>
+  <string>/</string>
+  <key>ProcessType</key>
+  <string>Standard</string>
+</dict>
+</plist>
