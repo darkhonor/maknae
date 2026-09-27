@@ -647,10 +647,10 @@ async fn report<S: AsyncRead + AsyncWrite + Unpin>(
         return Err("mutation report exceeds frame limit; no automatic retry".into());
     }
     let exchange = async {
-        proto::write_classed_frame(stream, proto::FrameClass::Attempt, &body)
+        proto::write_frame(stream, proto::FrameClass::Attempt, &body)
             .await
             .map_err(|e| e.to_string())?;
-        let (class, bytes) = proto::read_classed_frame_zeroizing(
+        let (class, bytes) = proto::read_frame_zeroizing(
             stream,
             &proto::FrameCaps {
                 control: 0,
@@ -964,14 +964,14 @@ mod tests {
             attempt: max,
             prompt: max,
         };
-        let (_, mut body) = proto::read_classed_frame_zeroizing(r, &caps).await?;
+        let (_, mut body) = proto::read_frame_zeroizing(r, &caps).await?;
         Ok(std::mem::take(&mut *body))
     }
     async fn write_frame<W: AsyncWrite + Unpin>(
         w: &mut W,
         body: &[u8],
     ) -> Result<(), proto::ProtoFrameError> {
-        proto::write_classed_frame(w, proto::FrameClass::Attempt, body).await
+        proto::write_frame(w, proto::FrameClass::Attempt, body).await
     }
     async fn acknowledged(
         prepared: PreparedMutation,

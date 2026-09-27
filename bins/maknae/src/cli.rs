@@ -22,7 +22,7 @@
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
 use maknae_proto::{
-    class_of, read_classed_frame_zeroizing, write_classed_frame, FrameCaps, ATTEMPT_REQUEST_MAX,
+    class_of, read_frame_zeroizing, write_frame, FrameCaps, ATTEMPT_REQUEST_MAX,
     ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX, CONTROL_RESPONSE_MAX,
 };
 use maknae_proto::{
@@ -205,7 +205,7 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
     class: maknae_proto::FrameClass,
     caps: &FrameCaps,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let (got, body) = read_classed_frame_zeroizing(stream, caps)
+    let (got, body) = read_frame_zeroizing(stream, caps)
         .await
         .map_err(|e| e.to_string())?;
     if got != class {
@@ -446,7 +446,7 @@ pub(crate) async fn send_verb(
     let request_started = std::time::Instant::now();
     match tokio::time::timeout(
         std::time::Duration::from_millis(transport.read_timeout_ms),
-        write_classed_frame(&mut stream, class, &body),
+        write_frame(&mut stream, class, &body),
     )
     .await
     {
@@ -681,7 +681,7 @@ mod tests {
         };
         async fn framed(class: maknae_proto::FrameClass, body: &[u8]) -> Vec<u8> {
             let mut buf = Vec::new();
-            write_classed_frame(&mut buf, class, body).await.unwrap();
+            write_frame(&mut buf, class, body).await.unwrap();
             buf
         }
         let prompt = maknae_proto::FrameClass::Prompt;

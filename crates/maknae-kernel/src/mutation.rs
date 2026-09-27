@@ -339,11 +339,7 @@ async fn send<S: AsyncWrite + Unpin>(stream: &mut S, cfg: &TransportConfig, resp
         if bytes.len() <= maknae_proto::ATTEMPT_RESPONSE_MAX {
             let _ = tokio::time::timeout(
                 Duration::from_millis(cfg.read_timeout_ms),
-                maknae_proto::write_classed_frame(
-                    stream,
-                    maknae_proto::FrameClass::Attempt,
-                    &bytes,
-                ),
+                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes),
             )
             .await;
         }
@@ -545,11 +541,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         (Some(exchange), Some(bytes)) => matches!(
             tokio::time::timeout_at(
                 deadline,
-                maknae_proto::write_classed_frame(
-                    stream,
-                    maknae_proto::FrameClass::Attempt,
-                    &bytes
-                )
+                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
             )
             .await,
             Ok(Ok(()))
@@ -571,7 +563,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     loop {
         let result = tokio::time::timeout_at(
             deadline,
-            maknae_proto::read_classed_frame_zeroizing(
+            maknae_proto::read_frame_zeroizing(
                 stream,
                 &maknae_proto::FrameCaps {
                     control: 0,
@@ -688,11 +680,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         if !matches!(
             tokio::time::timeout_at(
                 deadline,
-                maknae_proto::write_classed_frame(
-                    stream,
-                    maknae_proto::FrameClass::Attempt,
-                    &bytes
-                )
+                maknae_proto::write_frame(stream, maknae_proto::FrameClass::Attempt, &bytes)
             )
             .await,
             Ok(Ok(()))

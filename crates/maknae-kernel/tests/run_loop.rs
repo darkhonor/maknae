@@ -688,7 +688,7 @@ async fn serve_raw(
     let responded = matches!(
         tokio::time::timeout(
             Duration::from_millis(200),
-            maknae_proto::read_classed_frame_zeroizing(&mut c, &caps),
+            maknae_proto::read_frame_zeroizing(&mut c, &caps),
         )
         .await,
         Ok(Ok(_))

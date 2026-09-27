@@ -690,7 +690,7 @@ pub async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(
         Ok(r) => maknae_proto::class_of(&r.verb),
         Err(_) => maknae_proto::FrameClass::Attempt,
     };
-    maknae_proto::write_classed_frame(w, class, body).await
+    maknae_proto::write_frame(w, class, body).await
 }
 
 pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
@@ -702,6 +702,6 @@ pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
         attempt: max,
         prompt: max,
     };
-    let (_, mut body) = maknae_proto::read_classed_frame_zeroizing(r, &caps).await?;
+    let (_, mut body) = maknae_proto::read_frame_zeroizing(r, &caps).await?;
     Ok(std::mem::take(&mut *body))
 }

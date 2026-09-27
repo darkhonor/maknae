@@ -52,7 +52,7 @@ fn frame_len(body: &[u8]) -> Result<u32, ProtoFrameError> {
     })
 }
 
-pub async fn write_classed_frame<W: AsyncWrite + Unpin>(
+pub async fn write_frame<W: AsyncWrite + Unpin>(
     w: &mut W,
     class: FrameClass,
     body: &[u8],
@@ -72,7 +72,7 @@ pub async fn write_classed_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-pub async fn read_classed_frame_zeroizing<R: AsyncRead + Unpin>(
+pub async fn read_frame_zeroizing<R: AsyncRead + Unpin>(
     r: &mut R,
     caps: &FrameCaps,
 ) -> Result<(FrameClass, zeroize::Zeroizing<Vec<u8>>), ProtoFrameError> {
@@ -93,73 +93,9 @@ pub async fn read_classed_frame_zeroizing<R: AsyncRead + Unpin>(
     Ok((class, body))
 }
 
-pub async fn write_frame<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    body: &[u8],
-) -> Result<(), ProtoFrameError> {
-    let len = frame_len(body)?;
-    w.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
-    w.write_all(body)
-        .await
-        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
-    w.flush()
-        .await
-        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
-    Ok(())
-}
-
-pub async fn read_frame<R: AsyncRead + Unpin>(
-    r: &mut R,
-    max: usize,
-) -> Result<Vec<u8>, ProtoFrameError> {
-    read_frame_zeroizing(r, max)
-        .await
-        .map(|mut body| std::mem::take(&mut *body))
-}
-
-/// Keep incoming content zeroizing even when the read errors or its future is
-/// dropped mid-frame. The length is checked before allocating the body.
-pub async fn read_frame_zeroizing<R: AsyncRead + Unpin>(
-    r: &mut R,
-    max: usize,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoFrameError> {
-    let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf)
-        .await
-        .map_err(|_| ProtoFrameError::Truncated)?;
-    let declared = u32::from_be_bytes(len_buf) as usize;
-    if declared > max {
-        return Err(ProtoFrameError::Oversize { declared, max });
-    } // BEFORE allocation
-    let mut body = zeroize::Zeroizing::new(vec![0u8; declared]);
-    r.read_exact(&mut body)
-        .await
-        .map_err(|_| ProtoFrameError::Truncated)?;
-    Ok(body)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn secret_frames_are_bounded_and_zeroizing_from_allocation() {
-        let mut bytes = &b"\0\0\0\x03\x00\xff\x17"[..];
-        let body: zeroize::Zeroizing<Vec<u8>> = read_frame_zeroizing(&mut bytes, 3).await.unwrap();
-        assert_eq!(&*body, &[0, 255, 23]);
-        assert!(matches!(
-            read_frame_zeroizing(&mut &b"\0\0\0\x03"[..], 2).await,
-            Err(ProtoFrameError::Oversize {
-                declared: 3,
-                max: 2
-            })
-        ));
-        assert!(matches!(
-            read_frame_zeroizing(&mut &b"\0\0\0\x03x"[..], 3).await,
-            Err(ProtoFrameError::Truncated)
-        ));
-    }
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -223,31 +159,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn write_frame_surfaces_io_error_on_header_write() {
-        let mut w = FailingWriter::fail_write(1); // fails the length-prefix write
-        assert!(matches!(
-            write_frame(&mut w, b"x").await,
-            Err(ProtoFrameError::Io(_))
-        ));
-    }
-    #[tokio::test]
-    async fn write_frame_surfaces_io_error_on_body_write() {
-        let mut w = FailingWriter::fail_write(2); // header write ok, body write fails
-        assert!(matches!(
-            write_frame(&mut w, b"x").await,
-            Err(ProtoFrameError::Io(_))
-        ));
-    }
-    #[tokio::test]
-    async fn write_frame_surfaces_io_error_on_flush() {
-        let mut w = FailingWriter::fail_flush();
-        assert!(matches!(
-            write_frame(&mut w, b"x").await,
-            Err(ProtoFrameError::Io(_))
-        ));
-    }
-
     fn caps(control: usize) -> FrameCaps {
         FrameCaps {
             control,
@@ -259,11 +170,11 @@ mod tests {
     #[tokio::test]
     async fn a_classed_frame_round_trips() {
         let mut buf = Vec::new();
-        write_classed_frame(&mut buf, FrameClass::Attempt, b"abc")
+        write_frame(&mut buf, FrameClass::Attempt, b"abc")
             .await
             .unwrap();
         assert_eq!(&buf[..5], &[0, 0, 0, 3, 2]);
-        let (class, body) = read_classed_frame_zeroizing(&mut &buf[..], &caps(1024))
+        let (class, body) = read_frame_zeroizing(&mut &buf[..], &caps(1024))
             .await
             .unwrap();
         assert_eq!((class, &body[..]), (FrameClass::Attempt, &b"abc"[..]));
@@ -273,7 +184,7 @@ mod tests {
     async fn over_its_class_cap_is_refused_before_the_body_is_read() {
         let mut bytes: &[u8] = &[0, 0, 0, 5, 1, b'x'];
         assert_eq!(
-            read_classed_frame_zeroizing(&mut bytes, &caps(4))
+            read_frame_zeroizing(&mut bytes, &caps(4))
                 .await
                 .unwrap_err(),
             ProtoFrameError::Oversize {
@@ -290,7 +201,7 @@ mod tests {
             let frame = [0, 0, 0, 1, bad, b'x'];
             let mut bytes: &[u8] = &frame;
             assert_eq!(
-                read_classed_frame_zeroizing(&mut bytes, &caps(1024))
+                read_frame_zeroizing(&mut bytes, &caps(1024))
                     .await
                     .unwrap_err(),
                 ProtoFrameError::UnknownClass(bad)
@@ -315,82 +226,98 @@ mod tests {
     async fn a_classed_write_surfaces_io_errors() {
         let mut w = FailingWriter::fail_write(1);
         assert!(matches!(
-            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
+            write_frame(&mut w, FrameClass::Control, b"x").await,
             Err(ProtoFrameError::Io(_))
         ));
         let mut w = FailingWriter::fail_write(2);
         assert!(matches!(
-            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
+            write_frame(&mut w, FrameClass::Control, b"x").await,
             Err(ProtoFrameError::Io(_))
         ));
         let mut w = FailingWriter::fail_flush();
         assert!(matches!(
-            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
+            write_frame(&mut w, FrameClass::Control, b"x").await,
             Err(ProtoFrameError::Io(_))
         ));
     }
-
+    #[tokio::test]
+    async fn secret_frames_are_bounded_and_zeroizing_from_allocation() {
+        let mut bytes = &b"\0\0\0\x03\x02\x00\xff\x17"[..];
+        let (_, body): (_, zeroize::Zeroizing<Vec<u8>>) =
+            read_frame_zeroizing(&mut bytes, &caps(1024)).await.unwrap();
+        assert_eq!(&*body, &[0, 255, 23]);
+        assert!(matches!(
+            read_frame_zeroizing(&mut &b"\0\0\0\x03\x02x"[..], &caps(1024)).await,
+            Err(ProtoFrameError::Truncated)
+        ));
+    }
     #[tokio::test]
     async fn round_trip_frame() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let payload = b"hello".to_vec();
-        bounded(write_frame(&mut a, &payload)).await.unwrap();
-        let got = bounded(read_frame(&mut b, 1024)).await.unwrap();
-        assert_eq!(got, payload);
+        bounded(write_frame(&mut a, FrameClass::Control, &payload))
+            .await
+            .unwrap();
+        let (class, got) = bounded(read_frame_zeroizing(&mut b, &caps(1024)))
+            .await
+            .unwrap();
+        assert_eq!((class, &got[..]), (FrameClass::Control, &payload[..]));
     }
     #[tokio::test]
     async fn oversize_fails_before_alloc() {
-        // Hand-craft a length prefix of 10 MiB with max 1 KiB.
         let (mut a, mut b) = tokio::io::duplex(64);
         let big: u32 = 10 * 1024 * 1024;
-        tokio::io::AsyncWriteExt::write_all(&mut a, &big.to_be_bytes())
+        let mut header = big.to_be_bytes().to_vec();
+        header.push(FrameClass::Control as u8);
+        tokio::io::AsyncWriteExt::write_all(&mut a, &header)
             .await
             .unwrap();
-        // Close the write half: the correct code path returns Oversize
-        // BEFORE ever touching `b` again, so this has no effect there; a
-        // mutant that lets the oversize check fall through would otherwise
-        // block forever on `read_exact` waiting for body bytes that will
-        // never arrive — dropping `a` turns that into a prompt EOF instead.
         drop(a);
-        let e = bounded(read_frame(&mut b, 1024)).await.unwrap_err();
-        assert!(
-            matches!(e, ProtoFrameError::Oversize { declared, max } if declared == big as usize && max == 1024)
+        let e = bounded(read_frame_zeroizing(&mut b, &caps(1024)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ProtoFrameError::Oversize {
+                declared: big as usize,
+                max: 1024
+            }
         );
     }
     #[tokio::test]
-    async fn truncated_length_fails() {
+    async fn truncated_header_fails() {
         let (mut a, mut b) = tokio::io::duplex(64);
-        tokio::io::AsyncWriteExt::write_all(&mut a, &[0u8, 0u8])
+        tokio::io::AsyncWriteExt::write_all(&mut a, &[0u8, 0u8, 0u8, 1u8])
             .await
-            .unwrap(); // only 2 of 4 length bytes
+            .unwrap();
         drop(a);
-        assert!(matches!(
-            read_frame(&mut b, 1024).await,
-            Err(ProtoFrameError::Truncated)
-        ));
+        assert_eq!(
+            read_frame_zeroizing(&mut b, &caps(1024)).await.unwrap_err(),
+            ProtoFrameError::Truncated
+        );
     }
     #[tokio::test]
     async fn truncated_body_fails() {
         let (mut a, mut b) = tokio::io::duplex(64);
-        let declared: u32 = 8;
-        tokio::io::AsyncWriteExt::write_all(&mut a, &declared.to_be_bytes())
+        tokio::io::AsyncWriteExt::write_all(&mut a, &[0u8, 0, 0, 8, 2, 0, 1, 2])
             .await
             .unwrap();
-        tokio::io::AsyncWriteExt::write_all(&mut a, &[0u8, 1u8, 2u8])
-            .await
-            .unwrap(); // only 3 of 8 body bytes
         drop(a);
-        assert!(matches!(
-            read_frame(&mut b, 1024).await,
-            Err(ProtoFrameError::Truncated)
-        ));
+        assert_eq!(
+            read_frame_zeroizing(&mut b, &caps(1024)).await.unwrap_err(),
+            ProtoFrameError::Truncated
+        );
     }
     #[tokio::test]
     async fn exact_max_succeeds() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let payload = vec![0xabu8; 1024];
-        bounded(write_frame(&mut a, &payload)).await.unwrap();
-        let got = bounded(read_frame(&mut b, 1024)).await.unwrap();
-        assert_eq!(got, payload);
+        bounded(write_frame(&mut a, FrameClass::Control, &payload))
+            .await
+            .unwrap();
+        let (_, got) = bounded(read_frame_zeroizing(&mut b, &caps(1024)))
+            .await
+            .unwrap();
+        assert_eq!(&got[..], &payload[..]);
     }
 }

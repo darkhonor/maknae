@@ -40,9 +40,9 @@ use maknae_audit_append::{
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
-    class_of, decode_request, encode_response, read_classed_frame_zeroizing, write_classed_frame,
-    FrameCaps, FrameClass, Payload, RespResult, Response, Verb, ATTEMPT_RESPONSE_MAX,
-    CONTROL_REQUEST_MAX, CONTROL_RESPONSE_MAX, PROTOCOL_VERSION,
+    class_of, decode_request, encode_response, read_frame_zeroizing, write_frame, FrameCaps,
+    FrameClass, Payload, RespResult, Response, Verb, ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX,
+    CONTROL_RESPONSE_MAX, PROTOCOL_VERSION,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -595,7 +595,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // 2. Read exactly one request frame, bounded by read_timeout + the frame cap.
     let read = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        read_classed_frame_zeroizing(&mut stream, &request_caps(&cfg, attempt_caps)),
+        read_frame_zeroizing(&mut stream, &request_caps(&cfg, attempt_caps)),
     )
     .await;
     let body = match read {
@@ -1879,7 +1879,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     }
     let _ = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
-        write_classed_frame(stream, class, bytes),
+        write_frame(stream, class, bytes),
     )
     .await;
 }
@@ -1905,7 +1905,7 @@ async fn write_error_bounded<S>(
     if let Ok(bytes) = encode_response(&response) {
         let _ = tokio::time::timeout(
             Duration::from_millis(cfg.read_timeout_ms),
-            write_classed_frame(stream, class, &bytes),
+            write_frame(stream, class, &bytes),
         )
         .await;
     }
