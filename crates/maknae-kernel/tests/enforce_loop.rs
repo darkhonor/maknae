@@ -221,7 +221,7 @@ where
         maknae_security::Lane::Local,
         fds,
     ));
-    maknae_proto::write_frame(&mut client, &request_frame(verb))
+    common::write_frame(&mut client, &request_frame(verb))
         .await
         .unwrap();
     before_read();
@@ -286,7 +286,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     let (mut client, server) = tokio::io::duplex(256 * 1024);
-    maknae_proto::write_frame(&mut client, &request_frame(verb))
+    common::write_frame(&mut client, &request_frame(verb))
         .await
         .unwrap();
     // The harness plays the BOOT role: production captures this once in
@@ -317,7 +317,7 @@ where
     .await;
     match tokio::time::timeout(
         Duration::from_millis(300),
-        maknae_proto::read_frame(&mut client, 1024 * 1024),
+        common::read_frame(&mut client, 1024 * 1024),
     )
     .await
     {
@@ -1877,7 +1877,7 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
 ///
 /// `ConfigView` is the only payload on that arm whose size scales with input --
 /// one entry per config leaf. Without a bound the daemon writes a frame the
-/// client's own `read_frame(frame_max_bytes)` then refuses as a framing
+/// client's own reply cap then refuses as a framing
 /// `Oversize`: an authorized request failing with an undiagnosable transport
 /// error, after its audit record already said "permit / authorized". The read
 /// PEP's stance applies unchanged -- a PERMIT whose delivery is refused is
@@ -1916,9 +1916,8 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
     .await
     .expect("a frame");
 
-    let cfg = maknae_config::transport_from_section(None).unwrap();
     assert!(
-        frame.len() <= cfg.frame_max_bytes + 64,
+        frame.len() <= maknae_proto::CONTROL_RESPONSE_MAX,
         "the daemon must not emit a frame its own client cannot read: {} bytes",
         frame.len()
     );
@@ -2557,7 +2556,7 @@ async fn a_read_is_a_client_performed_attempt_and_the_daemon_never_reads() {
         Some(held.try_clone().unwrap()),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let run = common::read_as_subject(&mut client, Some(&held)).await;
     drop(client);
     task.await.unwrap();
@@ -2634,7 +2633,7 @@ async fn a_readable_descriptor_is_refused_before_intent() {
         Some(std::fs::File::open(&target).unwrap().into()),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let run = common::read_as_subject(&mut client, None).await;
     drop(client);
     task.await.unwrap();
@@ -2669,7 +2668,7 @@ async fn a_read_whose_report_cannot_be_recorded_is_not_acknowledged_and_ends_inc
         Some(held.try_clone().unwrap()),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let run = common::read_as_subject(&mut client, Some(&held)).await;
     drop(client);
     task.await.unwrap();
@@ -2694,10 +2693,10 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
         Some(maknae_io::open_path_for_delegation(&target).unwrap()),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let frame = tokio::time::timeout(
         Duration::from_secs(2),
-        maknae_proto::read_frame(&mut client, 1 << 20),
+        common::read_frame(&mut client, 1 << 20),
     )
     .await
     .expect("a grant frame")
@@ -2716,7 +2715,7 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
             length: Some(grant.limits.max_bytes + 1),
         }],
     };
-    maknae_proto::write_frame(
+    common::write_frame(
         &mut client,
         &maknae_proto::encode_mutation_report(&report).unwrap(),
     )
@@ -2724,7 +2723,7 @@ async fn a_read_grant_accepts_only_a_read_file_report_within_its_limit() {
     .unwrap();
     let ack = tokio::time::timeout(
         Duration::from_secs(2),
-        maknae_proto::read_frame(&mut client, 65536),
+        common::read_frame(&mut client, 65536),
     )
     .await
     .ok()

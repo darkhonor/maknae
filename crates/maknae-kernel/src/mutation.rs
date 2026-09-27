@@ -336,10 +336,14 @@ fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> Audit
 }
 async fn send<S: AsyncWrite + Unpin>(stream: &mut S, cfg: &TransportConfig, response: Response) {
     if let Ok(bytes) = maknae_proto::encode_response(&response) {
-        if bytes.len() <= cfg.frame_max_bytes {
+        if bytes.len() <= maknae_proto::ATTEMPT_RESPONSE_MAX {
             let _ = tokio::time::timeout(
                 Duration::from_millis(cfg.read_timeout_ms),
-                maknae_proto::write_frame(stream, &bytes),
+                maknae_proto::write_classed_frame(
+                    stream,
+                    maknae_proto::FrameClass::Attempt,
+                    &bytes,
+                ),
             )
             .await;
         }
@@ -371,6 +375,21 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttemptCaps {
+    pub request: usize,
+    pub response: usize,
+}
+
+impl Default for AttemptCaps {
+    fn default() -> Self {
+        AttemptCaps {
+            request: maknae_proto::ATTEMPT_REQUEST_MAX,
+            response: maknae_proto::ATTEMPT_RESPONSE_MAX,
+        }
+    }
+}
+
 /// Called once after request decode. True means this connection is consumed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle<S, E, P>(
@@ -386,6 +405,7 @@ pub(crate) async fn handle<S, E, P>(
     seq: &Seq,
     mut record: AuditRecord,
     authz_timeout: Duration,
+    caps: AttemptCaps,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -473,7 +493,7 @@ where
     )
     .await
     {
-        attempt(stream, cfg, &*emit, intent, prepared.scope, seq).await;
+        attempt(stream, cfg, caps, &*emit, intent, prepared.scope, seq).await;
     }
     drop(prepared._evidence);
     drop(permit);
@@ -483,6 +503,7 @@ where
 async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     stream: &mut S,
     cfg: &TransportConfig,
+    caps: AttemptCaps,
     emit: &E,
     intent: DurableIntent,
     scope: MutationScope,
@@ -503,7 +524,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
                 ..
             }
         ) {
-            crate::handler::read_budget(cfg.frame_max_bytes)
+            crate::handler::READ_GRANT_MAX_BYTES
         } else {
             0
         },
@@ -519,10 +540,18 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         })),
     })
     .ok()
-    .filter(|bytes| bytes.len() <= cfg.frame_max_bytes);
+    .filter(|bytes| bytes.len() <= caps.response);
     let delivered = match (exchange, bytes) {
         (Some(exchange), Some(bytes)) => matches!(
-            tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
+            tokio::time::timeout_at(
+                deadline,
+                maknae_proto::write_classed_frame(
+                    stream,
+                    maknae_proto::FrameClass::Attempt,
+                    &bytes
+                )
+            )
+            .await,
             Ok(Ok(()))
         )
         .then_some(exchange),
@@ -542,11 +571,20 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     loop {
         let result = tokio::time::timeout_at(
             deadline,
-            maknae_proto::read_frame(stream, cfg.frame_max_bytes),
+            maknae_proto::read_classed_frame_zeroizing(
+                stream,
+                &maknae_proto::FrameCaps {
+                    control: 0,
+                    attempt: caps.request,
+                    prompt: 0,
+                },
+            ),
         )
         .await;
         let report = match result {
-            Ok(Ok(bytes)) => maknae_proto::decode_mutation_report(&bytes).ok(),
+            Ok(Ok((maknae_proto::FrameClass::Attempt, bytes))) => {
+                maknae_proto::decode_mutation_report(&bytes).ok()
+            }
             _ => None,
         };
         let Some(report) = report else {
@@ -648,7 +686,15 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         // maximal integer fields is smaller than every grant encoding; the
         // encoding-bound invariant is checked in mutation_loop.rs.
         if !matches!(
-            tokio::time::timeout_at(deadline, maknae_proto::write_frame(stream, &bytes)).await,
+            tokio::time::timeout_at(
+                deadline,
+                maknae_proto::write_classed_frame(
+                    stream,
+                    maknae_proto::FrameClass::Attempt,
+                    &bytes
+                )
+            )
+            .await,
             Ok(Ok(()))
         ) {
             incomplete(cfg, emit, &intent, seq, ACK_UNDELIVERED).await;
@@ -855,7 +901,8 @@ mod tests {
                 &cfg,
                 &seq,
                 record(),
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                AttemptCaps::default()
             )
             .await
         );
@@ -888,7 +935,8 @@ mod tests {
                 &cfg,
                 &seq,
                 record(),
-                Duration::from_secs(1)
+                Duration::from_secs(1),
+                AttemptCaps::default()
             )
             .await
         );
@@ -921,6 +969,7 @@ mod tests {
             &seq,
             record(),
             Duration::from_millis(20),
+            AttemptCaps::default(),
         )
         .await;
         assert!(emit

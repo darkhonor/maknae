@@ -12,19 +12,19 @@ pub const TRANSPORT_SECTION: &str = "transport";
 pub(crate) const TRANSPORT_KEYS: [&str; 5] = [
     "socket_path",
     "max_connections",
-    "frame_max_bytes",
+    "prompt_max_bytes",
     "handshake_timeout_ms",
     "read_timeout_ms",
 ];
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 64;
-const DEFAULT_FRAME_MAX_BYTES: usize = 65536;
+const DEFAULT_PROMPT_MAX_BYTES: usize = 65536;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
 
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
-const FRAME_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 1..=1_048_576;
+const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 65_536..=1_048_576;
 /// The ceiling on both transport timeouts. Named and exported because the
 /// shipped units' stop timeouts are derived from it (`maknae-kernel`'s
 /// shutdown-chain test evaluates the handler drain at this ceiling too).
@@ -38,7 +38,7 @@ const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=TRANSPORT_TIMEOUT_
 pub struct TransportConfig {
     pub socket_path: PathBuf,
     pub max_connections: u32,
-    pub frame_max_bytes: usize,
+    pub prompt_max_bytes: usize,
     pub handshake_timeout_ms: u64,
     pub read_timeout_ms: u64,
 }
@@ -48,7 +48,7 @@ impl Default for TransportConfig {
         TransportConfig {
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             max_connections: DEFAULT_MAX_CONNECTIONS,
-            frame_max_bytes: DEFAULT_FRAME_MAX_BYTES,
+            prompt_max_bytes: DEFAULT_PROMPT_MAX_BYTES,
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
             read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
         }
@@ -186,11 +186,11 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
         MAX_CONNECTIONS_RANGE,
         DEFAULT_MAX_CONNECTIONS,
     )?;
-    let frame_max_bytes = bounded_usize(
+    let prompt_max_bytes = bounded_usize(
         section,
-        "frame_max_bytes",
-        FRAME_MAX_BYTES_RANGE,
-        DEFAULT_FRAME_MAX_BYTES,
+        "prompt_max_bytes",
+        PROMPT_MAX_BYTES_RANGE,
+        DEFAULT_PROMPT_MAX_BYTES,
     )?;
     let handshake_timeout_ms = bounded_u64(
         section,
@@ -208,7 +208,7 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
     Ok(TransportConfig {
         socket_path,
         max_connections,
-        frame_max_bytes,
+        prompt_max_bytes,
         handshake_timeout_ms,
         read_timeout_ms,
     })
@@ -222,7 +222,7 @@ mod tests {
     fn defaults_when_absent() {
         let c = transport_from_section(None).unwrap();
         assert_eq!(c.max_connections, 64);
-        assert_eq!(c.frame_max_bytes, 65536);
+        assert_eq!(c.prompt_max_bytes, 65536);
         assert_eq!(c.handshake_timeout_ms, 5000);
         assert_eq!(c.read_timeout_ms, 5000);
         assert_eq!(
@@ -236,7 +236,7 @@ mod tests {
         let v = crate::Value::Map(vec![]);
         let c = transport_from_section(Some(&v)).unwrap();
         assert_eq!(c.max_connections, 64);
-        assert_eq!(c.frame_max_bytes, 65536);
+        assert_eq!(c.prompt_max_bytes, 65536);
         assert_eq!(c.handshake_timeout_ms, 5000);
         assert_eq!(c.read_timeout_ms, 5000);
         assert_eq!(
@@ -253,14 +253,14 @@ mod tests {
                 crate::Value::Str("/tmp/x.sock".into()),
             ),
             ("max_connections".into(), crate::Value::Int(1)),
-            ("frame_max_bytes".into(), crate::Value::Int(1_048_576)),
+            ("prompt_max_bytes".into(), crate::Value::Int(1_048_576)),
             ("handshake_timeout_ms".into(), crate::Value::Int(100)),
             ("read_timeout_ms".into(), crate::Value::Int(60_000)),
         ]);
         let c = transport_from_section(Some(&v)).unwrap();
         assert_eq!(c.socket_path, std::path::PathBuf::from("/tmp/x.sock"));
         assert_eq!(c.max_connections, 1);
-        assert_eq!(c.frame_max_bytes, 1_048_576);
+        assert_eq!(c.prompt_max_bytes, 1_048_576);
         assert_eq!(c.handshake_timeout_ms, 100);
         assert_eq!(c.read_timeout_ms, 60_000);
     }
@@ -290,9 +290,42 @@ mod tests {
     }
 
     #[test]
+    fn prompt_max_bytes_defaults_to_64_kib_and_is_bounded() {
+        assert_eq!(TransportConfig::default().prompt_max_bytes, 65_536);
+        for ok in [65_536, 1_048_576] {
+            let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(ok))]);
+            assert_eq!(
+                transport_from_section(Some(&v)).unwrap().prompt_max_bytes,
+                ok as usize
+            );
+        }
+        for bad in [65_535, 1_048_577] {
+            let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(bad))]);
+            assert!(matches!(
+                transport_from_section(Some(&v)),
+                Err(ConfigError::InvalidTransport(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn frame_max_bytes_is_now_an_unknown_key() {
+        let v = crate::Value::Map(vec![("frame_max_bytes".into(), crate::Value::Int(65_536))]);
+        match transport_from_section(Some(&v)) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(
+                    (section.as_str(), key.as_str()),
+                    ("transport", "frame_max_bytes")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_oversize_frame_cap() {
         let v = crate::Value::Map(vec![(
-            "frame_max_bytes".into(),
+            "prompt_max_bytes".into(),
             crate::Value::Int(2 * 1024 * 1024),
         )]);
         assert!(transport_from_section(Some(&v)).is_err());
@@ -300,7 +333,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_frame_cap() {
-        let v = crate::Value::Map(vec![("frame_max_bytes".into(), crate::Value::Int(0))]);
+        let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(0))]);
         assert!(matches!(
             transport_from_section(Some(&v)),
             Err(ConfigError::InvalidTransport(_))
@@ -308,15 +341,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_frame_max_bytes_floor() {
-        let v = crate::Value::Map(vec![("frame_max_bytes".into(), crate::Value::Int(1))]);
-        assert_eq!(transport_from_section(Some(&v)).unwrap().frame_max_bytes, 1);
+    fn accepts_prompt_max_bytes_floor() {
+        let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(65_536))]);
+        assert_eq!(
+            transport_from_section(Some(&v)).unwrap().prompt_max_bytes,
+            65_536
+        );
     }
 
     #[test]
-    fn rejects_frame_max_bytes_above_ceiling() {
+    fn rejects_prompt_max_bytes_above_ceiling() {
         let v = crate::Value::Map(vec![(
-            "frame_max_bytes".into(),
+            "prompt_max_bytes".into(),
             crate::Value::Int(1_048_577),
         )]);
         assert!(matches!(
@@ -439,7 +475,7 @@ mod tests {
         let v = Value::Map(vec![
             ("socket_path".into(), Value::Null),
             ("max_connections".into(), Value::Null),
-            ("frame_max_bytes".into(), Value::Null),
+            ("prompt_max_bytes".into(), Value::Null),
             ("handshake_timeout_ms".into(), Value::Null),
             ("read_timeout_ms".into(), Value::Null),
         ]);

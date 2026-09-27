@@ -97,9 +97,7 @@ fn ping_frame_bytes() -> Vec<u8> {
 }
 
 async fn write_ping(c: &mut tokio::io::DuplexStream) {
-    maknae_proto::write_frame(c, &ping_frame_bytes())
-        .await
-        .unwrap();
+    common::write_frame(c, &ping_frame_bytes()).await.unwrap();
 }
 
 #[tokio::test]
@@ -143,7 +141,7 @@ async fn audit_failure_withholds_response() {
     // ...but NO response frame may be released once that append failed.
     let r = tokio::time::timeout(
         Duration::from_millis(200),
-        maknae_proto::read_frame(&mut c, 65536),
+        common::read_frame(&mut c, 65536),
     )
     .await;
     assert!(
@@ -206,7 +204,7 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
     // No response frame.
     let r = tokio::time::timeout(
         Duration::from_millis(200),
-        maknae_proto::read_frame(&mut c, 65536),
+        common::read_frame(&mut c, 65536),
     )
     .await;
     assert!(
@@ -263,7 +261,7 @@ async fn deny_audits_then_closes() {
     // No response frame.
     let r = tokio::time::timeout(
         Duration::from_millis(200),
-        maknae_proto::read_frame(&mut c, 65536),
+        common::read_frame(&mut c, 65536),
     )
     .await;
     assert!(
@@ -313,7 +311,7 @@ async fn happy_ping_responds() {
     assert_eq!(req.action, "liveness.ping");
 
     // ...and a readable Pong frame follows.
-    let frame = maknae_proto::read_frame(&mut c, 65536).await.unwrap();
+    let frame = common::read_frame(&mut c, 65536).await.unwrap();
     let resp = maknae_proto::decode_response(&frame).unwrap();
     assert_eq!(resp.protocol_version, maknae_proto::PROTOCOL_VERSION);
     match resp.result {
@@ -391,7 +389,7 @@ async fn happy_whoami_carries_peer_facts() {
         verb: maknae_proto::Verb::Whoami,
     })
     .unwrap();
-    maknae_proto::write_frame(&mut c, &whoami).await.unwrap();
+    common::write_frame(&mut c, &whoami).await.unwrap();
 
     let authz = permissive_authz();
     maknae_kernel::handle(
@@ -417,7 +415,7 @@ async fn happy_whoami_carries_peer_facts() {
     )
     .await;
 
-    let frame = maknae_proto::read_frame(&mut c, 65536).await.unwrap();
+    let frame = common::read_frame(&mut c, 65536).await.unwrap();
     match maknae_proto::decode_response(&frame).unwrap().result {
         maknae_proto::RespResult::Ok(maknae_proto::Payload::Whoami(w)) => {
             assert_eq!(w.peer_uid, 501);
@@ -476,7 +474,7 @@ async fn read_timeout_closes() {
     // No response frame.
     let r = tokio::time::timeout(
         Duration::from_millis(200),
-        maknae_proto::read_frame(&mut c, 65536),
+        common::read_frame(&mut c, 65536),
     )
     .await;
     assert!(
@@ -589,6 +587,7 @@ async fn unread_response_does_not_hang_the_handler() {
     let writer = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut framed = (u32::try_from(req.len()).unwrap().to_be_bytes()).to_vec();
+        framed.push(maknae_proto::FrameClass::Control as u8);
         framed.extend_from_slice(&req);
         let _ = client.write_all(&framed).await;
         // Hold the pipe open (no read, no drop) long past the write bound.
@@ -631,4 +630,132 @@ async fn unread_response_does_not_hang_the_handler() {
     assert_eq!(recs.len(), 2, "admission + request records expected");
     assert_eq!(recs[1].outcome.reason, "authorized");
     writer.abort();
+}
+
+fn raw_frame(class: u8, body: &[u8]) -> Vec<u8> {
+    let mut f = (body.len() as u32).to_be_bytes().to_vec();
+    f.push(class);
+    f.extend_from_slice(body);
+    f
+}
+
+fn request_bytes(verb: maknae_proto::Verb) -> Vec<u8> {
+    maknae_proto::encode_request(&maknae_proto::Request {
+        protocol_version: maknae_proto::PROTOCOL_VERSION,
+        verb,
+    })
+    .unwrap()
+}
+
+async fn serve_raw(
+    raw: Vec<u8>,
+    cfg: maknae_config::TransportConfig,
+) -> (Vec<maknae_audit_append::AuditRecord>, bool) {
+    let (mut c, s) = tokio::io::duplex(1 << 21);
+    let emit = RecEmit::new(false);
+    {
+        use tokio::io::AsyncWriteExt;
+        c.write_all(&raw).await.unwrap();
+    }
+    let authz = permissive_authz();
+    maknae_kernel::handle(
+        s,
+        "maknae://d/plane/cli".to_string(),
+        501,
+        true,
+        None,
+        emit.clone(),
+        9,
+        cfg,
+        serde_json::json!({}),
+        authz.0.clone(),
+        authz.1.clone(),
+        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new("test-backend".to_string()),
+        std::sync::Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+        maknae_kernel::unavailable_egress(),
+        authz.2,
+        maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
+    )
+    .await;
+    let caps = maknae_proto::FrameCaps {
+        control: 1 << 20,
+        attempt: 1 << 20,
+        prompt: 1 << 20,
+    };
+    let responded = matches!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            maknae_proto::read_classed_frame_zeroizing(&mut c, &caps),
+        )
+        .await,
+        Ok(Ok(_))
+    );
+    (emit.records(), responded)
+}
+
+fn denied_with(recs: &[maknae_audit_append::AuditRecord], reason: &str) -> bool {
+    recs.iter()
+        .any(|r| r.outcome.result == "deny" && r.outcome.reason.contains(reason))
+}
+
+#[tokio::test]
+async fn a_control_frame_over_one_kib_is_refused_unread() {
+    let (recs, responded) = serve_raw(raw_frame(1, &[0u8; 2048]), default_cfg()).await;
+    assert!(!responded);
+    assert!(
+        denied_with(&recs, "frame oversize: declared 2048 > max 1024"),
+        "{recs:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_ping_declared_as_a_prompt_is_refused_and_recorded() {
+    let (recs, responded) = serve_raw(raw_frame(3, &ping_frame_bytes()), default_cfg()).await;
+    assert!(!responded);
+    assert!(denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+}
+
+#[tokio::test]
+async fn a_small_prompt_declared_control_is_refused_as_a_mismatch() {
+    let body = request_bytes(maknae_proto::Verb::SessionPrompt {
+        conversation: "c".into(),
+        turns: vec![],
+    });
+    assert!(body.len() <= maknae_proto::CONTROL_REQUEST_MAX);
+    let (recs, responded) = serve_raw(raw_frame(1, &body), default_cfg()).await;
+    assert!(!responded);
+    assert!(denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+}
+
+#[tokio::test]
+async fn a_read_declared_as_a_prompt_is_refused_as_a_mismatch() {
+    let body = request_bytes(maknae_proto::Verb::Read {
+        path: "/tmp/x".into(),
+        conversation: None,
+    });
+    let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
+    assert!(!responded);
+    assert!(denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+}
+
+#[tokio::test]
+async fn a_prompt_class_frame_uses_the_prompt_cap() {
+    let text = maknae_proto::SecretText(maknae_io::Zeroizing::new("x".repeat(200 * 1024)));
+    let body = request_bytes(maknae_proto::Verb::SessionPrompt {
+        conversation: "c".into(),
+        turns: vec![maknae_proto::Turn::User {
+            content: vec![maknae_proto::ContentBlock::Text { text }],
+        }],
+    });
+    let mut cfg = default_cfg();
+    cfg.prompt_max_bytes = 1 << 20;
+    let (recs, _) = serve_raw(raw_frame(3, &body), cfg).await;
+    assert!(!denied_with(&recs, "frame oversize"), "{recs:#?}");
+    assert!(!denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+    let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
+    assert!(!responded);
+    assert!(denied_with(&recs, "frame oversize"), "{recs:#?}");
 }

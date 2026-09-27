@@ -27,7 +27,7 @@ async fn drive_in(
     let target = fx.root.join("unique-existing-write-sentinel");
     let fd = delegate.then(|| maknae_io::open_path_for_delegation(&target).unwrap());
     let (mut client, task, body) = fx.start(write_verb(&target, bytes, conversation), fd, records);
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let response = next_response(&mut client).await;
     drop(client);
     task.await.unwrap();
@@ -109,7 +109,7 @@ async fn replace_start(
         Some(held.try_clone().unwrap()),
         records,
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     (client, task, held)
 }
 fn assert_undelivered_grant_is_incomplete(records: &[AuditRecord]) {
@@ -217,7 +217,7 @@ async fn an_unacceptable_conversation_id_refuses_the_read_before_the_pdp() {
             conversation: Some(bad.into()),
         };
         let (mut client, task, body) = fx.start(verb, Some(fd), records.clone());
-        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        common::write_frame(&mut client, &body).await.unwrap();
         let response = next_response(&mut client).await.unwrap();
         drop(client);
         task.await.unwrap();
@@ -344,7 +344,7 @@ async fn a_replacement_delegating_a_writable_descriptor_is_refused_before_intent
         Some(writable),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let response = next_response(&mut client).await.unwrap();
     drop(client);
     task.await.unwrap();
@@ -449,14 +449,11 @@ impl AuditEmit for GateRecords {
     }
 }
 async fn next_response(client: &mut tokio::io::DuplexStream) -> Option<maknae_proto::Response> {
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        maknae_proto::read_frame(client, 65536),
-    )
-    .await
-    .ok()?
-    .ok()
-    .and_then(|b| maknae_proto::decode_response(&b).ok())
+    tokio::time::timeout(Duration::from_secs(2), common::read_frame(client, 65536))
+        .await
+        .ok()?
+        .ok()
+        .and_then(|b| maknae_proto::decode_response(&b).ok())
 }
 async fn namespace_start(
     fx: &Fixture,
@@ -465,7 +462,7 @@ async fn namespace_start(
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
     let fd = std::fs::File::open(&fx.root).unwrap().into();
     let (mut client, task, body) = fx.start(verb, Some(fd), records);
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     (client, task)
 }
 fn create_verb(fx: &Fixture) -> Verb {
@@ -482,7 +479,7 @@ fn create_verb(fx: &Fixture) -> Verb {
     }
 }
 async fn send_report(client: &mut tokio::io::DuplexStream, report: &maknae_proto::MutationReport) {
-    maknae_proto::write_frame(
+    common::write_frame(
         client,
         &maknae_proto::encode_mutation_report(report).unwrap(),
     )
@@ -490,14 +487,11 @@ async fn send_report(client: &mut tokio::io::DuplexStream, report: &maknae_proto
     .unwrap();
 }
 async fn ack(client: &mut tokio::io::DuplexStream) -> Option<maknae_proto::MutationAck> {
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        maknae_proto::read_frame(client, 65536),
-    )
-    .await
-    .ok()?
-    .ok()
-    .and_then(|b| maknae_proto::decode_mutation_ack(&b).ok())
+    tokio::time::timeout(Duration::from_secs(2), common::read_frame(client, 65536))
+        .await
+        .ok()?
+        .ok()
+        .and_then(|b| maknae_proto::decode_mutation_ack(&b).ok())
 }
 #[tokio::test]
 async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
@@ -507,7 +501,7 @@ async fn namespace_grant_requires_durable_intent_and_never_creates_as_daemon() {
     records.entered.notified().await;
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
-        maknae_proto::read_frame(&mut client, 65536)
+        common::read_frame(&mut client, 65536)
     )
     .await
     .is_err());
@@ -549,7 +543,7 @@ async fn false_namespace_success_is_only_client_reported_and_ack_waits_for_audit
     records.entered.notified().await;
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
-        maknae_proto::read_frame(&mut client, 65536)
+        common::read_frame(&mut client, 65536)
     )
     .await
     .is_err());
@@ -649,7 +643,7 @@ async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_write
     records.entered.notified().await;
     assert!(tokio::time::timeout(
         Duration::from_millis(20),
-        maknae_proto::read_frame(&mut client, 65536)
+        common::read_frame(&mut client, 65536)
     )
     .await
     .is_err());
@@ -706,7 +700,7 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
         Some(fd),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     assert!(matches!(
         next_response(&mut client).await.unwrap().result,
         RespResult::Err(_)
@@ -902,7 +896,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
         recursive: true,
     };
     let (mut client, task, body) = fx.start_with_config(verb, Some(fd), records.clone(), config);
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let RespResult::Ok(Payload::MutationAttempt(grant)) =
         next_response(&mut client).await.unwrap().result
     else {
@@ -929,7 +923,7 @@ async fn namespace_progress_does_not_extend_configured_absolute_deadline() {
         matches!(
             tokio::time::timeout(
                 Duration::from_millis(50),
-                maknae_proto::read_frame(&mut client, 65536)
+                common::read_frame(&mut client, 65536)
             )
             .await,
             Ok(Err(_))
@@ -1091,16 +1085,17 @@ async fn oversized_grant_is_withheld_even_when_the_prepare_frame_fits() {
         parents: true,
         components,
     };
-    let mut config = maknae_config::transport_from_section(None).unwrap();
-    config.frame_max_bytes = 1024;
-    let (mut client, task, body) = fx.start_with_config(
+    let (mut client, task, body) = fx.start_with_attempt_caps(
         verb,
         Some(std::fs::File::open(&fx.root).unwrap().into()),
         records.clone(),
-        config,
+        maknae_kernel::AttemptCaps {
+            response: 1024,
+            ..Default::default()
+        },
     );
     assert!(body.len() < 1024);
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     assert!(next_response(&mut client).await.is_none());
     task.await.unwrap();
     let records = records.snapshot();
@@ -1119,7 +1114,7 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
     // Measure an actual composed-policy grant. The next connection uses the
     // same request, correlation and timeout, so only its frame budget changes.
     let (mut client, task) = namespace_start(&fx, Records::new(0), create_verb(&fx)).await;
-    let grant_bytes = maknae_proto::read_frame(&mut client, 65536).await.unwrap();
+    let grant_bytes = common::read_frame(&mut client, 65536).await.unwrap();
     assert!(matches!(
         maknae_proto::decode_response(&grant_bytes).unwrap().result,
         RespResult::Ok(Payload::MutationAttempt(_))
@@ -1128,16 +1123,17 @@ async fn exact_grant_frame_budget_allows_reported_effect_but_one_byte_less_does_
     task.await.unwrap();
     for (shortfall, allowed) in [(1, false), (0, true)] {
         let records = Records::new(0);
-        let mut config = maknae_config::transport_from_section(None).unwrap();
-        config.frame_max_bytes = grant_bytes.len() - shortfall;
-        let (mut client, task, body) = fx.start_with_config(
+        let (mut client, task, body) = fx.start_with_attempt_caps(
             create_verb(&fx),
             Some(std::fs::File::open(&fx.root).unwrap().into()),
             records.clone(),
-            config,
+            maknae_kernel::AttemptCaps {
+                response: grant_bytes.len() - shortfall,
+                ..Default::default()
+            },
         );
         assert!(body.len() < grant_bytes.len() - 1);
-        maknae_proto::write_frame(&mut client, &body).await.unwrap();
+        common::write_frame(&mut client, &body).await.unwrap();
         if allowed {
             let RespResult::Ok(Payload::MutationAttempt(grant)) = next_response(&mut client)
                 .await
@@ -1353,9 +1349,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
         };
         // Queue reports before the server is polled when the grant itself fails.
         // This proves a failed outbound frame cannot be ignored while accepting input.
-        maknae_proto::write_frame(&mut client, &request)
-            .await
-            .unwrap();
+        common::write_frame(&mut client, &request).await.unwrap();
         if !fail_grant {
             assert!(matches!(
                 next_response(&mut client).await.unwrap().result,
@@ -1497,7 +1491,7 @@ async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes(
         Some(held.try_clone().unwrap()),
         records.clone(),
     );
-    maknae_proto::write_frame(&mut client, &body).await.unwrap();
+    common::write_frame(&mut client, &body).await.unwrap();
     let response = next_response(&mut client).await.expect("a response frame");
     assert_eq!(
         std::fs::read(&target).unwrap(),

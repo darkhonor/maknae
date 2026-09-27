@@ -39,12 +39,14 @@ pub use handler::{
     admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, may_respond,
     serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
 };
+pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
 };
 pub use run::{
-    accept_loop, handle, run, ConfigView, Conn, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, PlaneAccept, WhereCtx,
+    MAX_SUBJECT_USER_BYTES,
 };
 
 #[used]

@@ -281,7 +281,7 @@ mod tests {
                 max: 4
             }
         );
-        assert_eq!(bytes, &[b'x']);
+        assert_eq!(bytes, b"x");
     }
 
     #[tokio::test]
@@ -295,7 +295,7 @@ mod tests {
                     .unwrap_err(),
                 ProtoFrameError::UnknownClass(bad)
             );
-            assert_eq!(bytes, &[b'x']);
+            assert_eq!(bytes, b"x");
         }
     }
 
