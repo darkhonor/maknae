@@ -195,7 +195,15 @@ fn main() {
                         // deputy is the only component in the tree that reads KV.
                         &bounds.kv_mount,
                     ))
-                    .map_err(|e| serve::ServeError::Fulfil(e.to_string()))
+                    .map_err(|e| {
+                        if let call::FulfilError::Provider {
+                            journal: Some(j), ..
+                        } = &e
+                        {
+                            eprintln!("{}", j.as_str());
+                        }
+                        serve::ServeError::Fulfil(e.to_string())
+                    })
                 }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }

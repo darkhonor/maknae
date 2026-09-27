@@ -386,7 +386,8 @@ mod tests {
         assert_eq!(
             dispatch_verb(&Verb::SessionPrompt {
                 conversation: "c".into(),
-                turns: vec![]
+                turns: vec![],
+                output_tokens: None,
             }),
             Dispatch::PromptRequested
         );
@@ -399,6 +400,7 @@ mod tests {
         let v = Verb::SessionPrompt {
             conversation: "c".into(),
             turns: vec![],
+            output_tokens: None,
         };
         let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some("openai"));
         assert_eq!(
@@ -925,6 +927,7 @@ mod tests {
             Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![],
+                output_tokens: None,
             },
             Verb::SessionCancel,
             Verb::SessionSetconfigoption,

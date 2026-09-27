@@ -25,15 +25,18 @@ use crate::{ConfigError, Value};
 /// The registered section name.
 pub const PROVIDER_SECTION: &str = "provider";
 
-/// The six keys the section accepts, and no others.
-pub(crate) const KEYS: [&str; 6] = [
+/// The seven keys the section accepts, and no others.
+pub(crate) const KEYS: [&str; 7] = [
     "name",
     "endpoint",
     "model",
     "key_vault_path",
     "key_field",
     "reasoning_effort",
+    "output_tokens_field",
 ];
+
+pub const OUTPUT_TOKENS_FIELDS: [&str; 2] = ["max_completion_tokens", "max_tokens"];
 /// Upper bound on `provider.key_field`. It reaches `VaultError::MissingKvField`
 /// and therefore terminals and audit lines, so it is bounded like every other
 /// operator-supplied string that can be printed.
@@ -85,6 +88,7 @@ pub struct ProviderConfig {
     /// (#242: `gpt-5.6-luna` refuses tools on chat completions unless it is
     /// `none`). Not checked against any provider's list of levels.
     pub reasoning_effort: Option<String>,
+    pub output_tokens_field: Option<String>,
 }
 
 /// The one shape a reasoning level may take, here and in the deputy's
@@ -273,6 +277,15 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
             )))
         }
     };
+    let output_tokens_field = match get(m, "output_tokens_field") {
+        None => None,
+        Some(Value::Str(s)) if OUTPUT_TOKENS_FIELDS.contains(&s.as_str()) => Some(s.clone()),
+        Some(_) => {
+            return Err(err(
+                "provider.output_tokens_field must be max_completion_tokens or max_tokens",
+            ))
+        }
+    };
     Ok(Some(ProviderConfig {
         name: name.to_string(),
         endpoint: endpoint.to_string(),
@@ -280,6 +293,7 @@ pub fn provider_from_section(v: Option<&Value>) -> Result<Option<ProviderConfig>
         key_vault_path: key_vault_path.to_string(),
         key_field: key_field.to_string(),
         reasoning_effort,
+        output_tokens_field,
     }))
 }
 
@@ -369,6 +383,24 @@ mod tests {
     fn parse(yaml: &str) -> Result<Option<ProviderConfig>, ConfigError> {
         let v = load_str(yaml).expect("test yaml parses");
         provider_from_section(Some(&v))
+    }
+
+    #[test]
+    fn output_tokens_field_is_a_closed_choice() {
+        for v in ["max_completion_tokens", "max_tokens"] {
+            let p = parse(&format!("{OK}output_tokens_field: {v}\n"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.output_tokens_field.as_deref(), Some(v));
+        }
+        assert_eq!(parse(OK).unwrap().unwrap().output_tokens_field, None);
+        for bad in ["maxTokens", "max_output_tokens", "''", "3"] {
+            let e = parse(&format!("{OK}output_tokens_field: {bad}\n")).unwrap_err();
+            assert!(
+                matches!(&e, ConfigError::InvalidProvider(m) if m.contains("output_tokens_field")),
+                "{bad}: {e}"
+            );
+        }
     }
 
     #[test]

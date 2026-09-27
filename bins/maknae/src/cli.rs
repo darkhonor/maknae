@@ -60,8 +60,9 @@ pub fn resolve_config_dir() -> PathBuf {
 /// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
 /// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
 /// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
-/// which `execute` never does).
-pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
+/// which `execute` never does). The user-side `provider` block (#372) is the same case:
+/// accepted everywhere, read only by `maknae agent`.
+pub(crate) fn cli_config_specs() -> [SectionSpec; 4] {
     [
         SectionSpec {
             name: VAULT_SECTION.to_string(),
@@ -73,6 +74,10 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
         },
         SectionSpec {
             name: crate::agent::AGENT_SECTION.to_string(),
+            required: false,
+        },
+        SectionSpec {
+            name: crate::agent::USER_PROVIDER_SECTION.to_string(),
             required: false,
         },
     ]
@@ -727,6 +732,7 @@ mod tests {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
                 }],
                 tool_calls: vec![],
+                usage: None,
             })),
         };
         let body = maknae_proto::encode_response(&reply).unwrap();

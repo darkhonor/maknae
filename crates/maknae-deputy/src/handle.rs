@@ -203,6 +203,8 @@ mod tests {
                     text: SecretText(zeroize::Zeroizing::new("hello".into())),
                 }],
             }],
+            output_tokens: None,
+            output_tokens_field: None,
         }
     }
 
@@ -267,6 +269,26 @@ mod tests {
         }
         let mut ok = req("maknae/providers/openai");
         ok.reasoning_effort = Some("none".into());
+        assert!(decide(&ok, &bounds()).is_ok());
+    }
+
+    #[test]
+    fn a_reply_cap_the_kernel_would_refuse_is_a_malformed_frame() {
+        let mut zero = req("maknae/providers/openai");
+        zero.output_tokens = Some(0);
+        assert_eq!(
+            decide(&zero, &bounds()).map(|_| ()),
+            Err(Refusal::MalformedFrame)
+        );
+        let mut orphan = req("maknae/providers/openai");
+        orphan.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
+        assert_eq!(
+            decide(&orphan, &bounds()).map(|_| ()),
+            Err(Refusal::MalformedFrame)
+        );
+        let mut ok = req("maknae/providers/openai");
+        ok.output_tokens = Some(4_096);
+        ok.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
         assert!(decide(&ok, &bounds()).is_ok());
     }
 

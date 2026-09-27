@@ -53,6 +53,14 @@ pub fn page_request_is_acceptable(p: &PageRequest) -> bool {
     p.offset_line >= 1 && p.limit_lines >= 1
 }
 
+pub const MAX_CONTEXT_TOKENS: u64 = 16_777_216;
+pub const DEFAULT_BYTES_PER_TOKEN: u64 = 4;
+pub const PREAMBLE_ALLOWANCE_TOKENS: u64 = 1_536;
+
+pub fn output_tokens_is_acceptable(n: u64) -> bool {
+    (1..=MAX_CONTEXT_TOKENS).contains(&n)
+}
+
 /// Prompt text: secret-adjacent like file content (`Bytes`), so it zeroizes
 /// on drop and `Debug` redacts; unlike `Bytes` it is a CBOR TEXT string,
 /// because ACP's `text` is a string and a peer must not have to re-encode.
@@ -226,6 +234,15 @@ pub fn turn_is_acceptable(t: &Turn) -> bool {
 pub struct PromptReply {
     pub blocks: Vec<ContentBlock>,
     pub tool_calls: Vec<ProposedToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +384,8 @@ pub enum Verb {
     SessionPrompt {
         conversation: String,
         turns: Vec<Turn>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
     },
     /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: NOT built
     /// in Cooky — the operand names a session and no session identity exists
@@ -884,6 +903,69 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_prompt_carries_its_reply_cap_only_when_set_and_the_cap_is_bounded() {
+        let with = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![],
+                output_tokens: Some(4096),
+            },
+        };
+        let bytes = encode_request(&with).unwrap();
+        assert_eq!(decode_request(&bytes).unwrap().verb, with.verb);
+        let without = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![],
+                output_tokens: None,
+            },
+        };
+        assert!(!encode_request(&without)
+            .unwrap()
+            .windows(13)
+            .any(|w| w == b"output_tokens"));
+        assert!(output_tokens_is_acceptable(1) && output_tokens_is_acceptable(MAX_CONTEXT_TOKENS));
+        assert!(
+            !output_tokens_is_acceptable(0) && !output_tokens_is_acceptable(MAX_CONTEXT_TOKENS + 1)
+        );
+    }
+
+    #[test]
+    fn a_reply_carries_usage_only_when_reported() {
+        let r = PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: Some(Usage {
+                prompt_tokens: 7,
+                completion_tokens: None,
+            }),
+        };
+        let bytes = encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::PromptReply(r.clone())),
+        })
+        .unwrap();
+        let RespResult::Ok(Payload::PromptReply(back)) = decode_response(&bytes).unwrap().result
+        else {
+            panic!()
+        };
+        assert_eq!(back, r);
+        let none = PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: None,
+        };
+        let bytes = encode_response(&Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::PromptReply(none)),
+        })
+        .unwrap();
+        assert!(!bytes.windows(5).any(|w| w == b"usage"));
+    }
+
+    #[test]
     fn a_paged_read_round_trips_and_an_unpaged_one_omits_the_field() {
         let page = PageRequest {
             offset_line: 42,
@@ -949,6 +1031,7 @@ mod tests {
                 turns: vec![Turn::User {
                     content: vec![text("frame-limit-sentinel")],
                 }],
+                output_tokens: None,
             },
         };
         let expected = encode_request(&request).unwrap();
@@ -1012,6 +1095,7 @@ mod tests {
                 turns: vec![Turn::User {
                     content: vec![text("the secret plan")],
                 }],
+                output_tokens: None,
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -1065,6 +1149,7 @@ mod tests {
             verb: Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![Turn::User { content: blocks }],
+                output_tokens: None,
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -1093,6 +1178,7 @@ mod tests {
             result: RespResult::Ok(Payload::PromptReply(PromptReply {
                 tool_calls: vec![],
                 blocks: vec![text("hi there")],
+                usage: None,
             })),
         };
         let bytes = encode_response(&resp).unwrap();
@@ -1422,6 +1508,7 @@ mod tests {
                         text: SecretText(zeroize::Zeroizing::new(content.clone())),
                     }],
                     tool_calls: vec![],
+                    usage: None,
                 })),
             };
             let cap = 1000 + 1024;
@@ -1479,6 +1566,7 @@ mod tests {
         let reply = PromptReply {
             blocks: vec![],
             tool_calls: vec![c],
+            usage: None,
         };
         assert!(!format!("{reply:?}").contains("authz.yaml"));
     }
@@ -1492,6 +1580,7 @@ mod tests {
                 call_id: "call_1".into(),
                 arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
             }],
+            usage: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&reply, &mut buf).unwrap();
@@ -1544,6 +1633,7 @@ mod tests {
         let v = Verb::SessionPrompt {
             conversation: "c".into(),
             turns: turns.clone(),
+            output_tokens: None,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&v, &mut buf).unwrap();
@@ -1642,6 +1732,7 @@ mod tests {
                     Verb::SessionPrompt {
                         conversation: "c".into(),
                         turns: vec![],
+                        output_tokens: None,
                     },
                     FrameClass::Prompt,
                 ),

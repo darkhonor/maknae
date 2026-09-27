@@ -323,6 +323,7 @@ const DISCLOSABLE: &[&str] = &[
     "provider.endpoint",
     "provider.model",
     "provider.reasoning_effort",
+    "provider.output_tokens_field",
     // The `egress` section (#240): where the daemon finds the deputy and how
     // long one send may take — deployment shape, never a credential.
     "egress.socket_path",
@@ -1016,7 +1017,7 @@ mod tests {
                 egress: &crate::EgressConfig::default(),
             },
         );
-        assert_eq!(v["transport"]["prompt_max_bytes"], "65536");
+        assert_eq!(v["transport"]["prompt_max_bytes"], "1048576");
         assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");

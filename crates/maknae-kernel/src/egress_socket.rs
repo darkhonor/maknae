@@ -356,6 +356,8 @@ fn frame_of(req: EgressRequest) -> EgressFrameRequest {
         reasoning_effort: req.reasoning_effort,
         conversation: req.conversation,
         turns: req.turns,
+        output_tokens: req.output_tokens,
+        output_tokens_field: req.output_tokens_field,
     }
 }
 
@@ -375,6 +377,8 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             reasoning_effort: Some("none".into()),
+            output_tokens: None,
+            output_tokens_field: None,
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
@@ -388,7 +392,9 @@ mod tests {
 
     #[test]
     fn the_frame_carries_every_field_of_the_request() {
-        let r = req();
+        let mut r = req();
+        r.output_tokens = Some(4_096);
+        r.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
         let f = frame_of(r.clone());
         assert_eq!(f.destination, r.destination);
         assert_eq!(f.endpoint, r.endpoint);
@@ -398,6 +404,11 @@ mod tests {
         assert_eq!(f.reasoning_effort.as_deref(), Some("none"));
         assert_eq!(f.conversation, r.conversation);
         assert_eq!(f.turns, r.turns);
+        assert_eq!(f.output_tokens, Some(4_096));
+        assert_eq!(
+            f.output_tokens_field,
+            Some(maknae_proto::OutputTokensField::MaxTokens)
+        );
     }
 
     /// A fake deputy. Returns how many bytes it ever read, so a test can assert
@@ -664,6 +675,7 @@ mod tests {
                 text: SecretText(maknae_io::Zeroizing::new("ok".into())),
             }],
             tool_calls: vec![],
+            usage: None,
         };
         let (path, seen) = fake_deputy(d.path(), Some(reply.clone()));
         let me = nix::unistd::getuid().as_raw();

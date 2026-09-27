@@ -59,6 +59,19 @@ sudo restorecon -Rv /etc/maknae
 - **`key_field`** is the field name inside the Vault secret.
 - **`reasoning_effort`** is optional. Some models need it: `gpt-5.6-luna` refuses the agent's tools unless it is `none`. Leave it out if your model does not need it.
 - **Root owns this file** on purpose. The agent runs as you, so you cannot redirect where its content goes by editing your own files.
+- **The daemon's prompt cap**, `transport.prompt_max_bytes` in `/etc/maknae/maknae.yaml`, defaults to 1 MiB. That carries a context window of up to about 174,000 tokens. For a larger window, raise it to `context_tokens × 6` (at most 16 MiB).
+
+Then declare the model's context window in **your own** configuration. `maknae agent` will not start without it:
+
+```bash
+cat >> ~/.maknae/maknae.yaml <<'EOF'
+provider:
+  context_tokens: 128000   # your model's context window, in tokens
+  output_tokens: 16000     # optional: the reply cap
+EOF
+```
+
+Use the window your provider documents for your model. The agent warns at 80% and 95% of it and stops before a turn would exceed it. `docs/configuration.md` §6.1.1 has the details.
 
 ## 4. Allow the prompt
 
@@ -123,8 +136,12 @@ The intent is written before the action, every time. `content_length` on each pr
 | `maknaed` will not start: `section 'provider' must come from a root-owned, non-group/other-writable source` | the provider file or its directory is writable by someone other than root | step 3's owner and mode |
 | `maknaed` will not start: `… is outside the egress grant prefix …` | `key_vault_path` is not beneath `key_vault_path_prefix` | make the path sit under the prefix |
 | The agent stops; the prompt outcome is `OutcomeUnknown`; `journalctl -u maknae-egress` shows `provider credential unavailable` | the deputy could not read the key from Vault: wrong mount, path or field, or its Vault policy does not allow the read | check steps 1–3 against your Vault |
-| The agent stops; `journalctl -u maknae-egress` shows `provider answered 400` | the provider rejected the request's shape | replay the request with `curl` to see the provider's own error. For `gpt-5.6-luna` it is the missing `reasoning_effort: none` |
-| `maknae agent: stopped: the conversation has reached the platform's frame bound` | the conversation outgrew the transport frame | expected for large files: keep this first conversation small |
+| The agent stops; `journalctl -u maknae-egress` shows `provider answered 400 (conversation …): …` | the provider rejected the request's shape | the text after the colon is the provider's own reason, with the key masked. For `gpt-5.6-luna` it is the missing `reasoning_effort: none`; a server that names `max_completion_tokens` as unsupported needs `output_tokens_field: max_tokens` in step 3's file |
+| `maknae agent` will not start: `provider.context_tokens is required by maknae agent` | your own configuration does not declare the window | step 3's `~/.maknae` block |
+| `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171` | the next turn would exceed the window you declared | start a new conversation, or declare the larger window your model has |
+| `maknae agent: stopped:` with a connection error, on a long conversation | the daemon's prompt cap is below your loop's, so the daemon refused the frame and closed the connection | raise the daemon's `transport.prompt_max_bytes` (step 3) |
+| `maknae agent: stopped: the conversation has reached the platform's frame bound` | your own `transport.prompt_max_bytes` in `~/.maknae` is smaller than your window needs; or, with none set, the conversation's framing outgrew the margin in `context_tokens × 6` bytes (very many small turns: the meter counts text, not framing) | remove the setting, and the loop derives its cap from `context_tokens`; otherwise start a new conversation |
+| `journalctl -u maknae-egress` shows file or prompt text after `provider answered …` | some servers quote the rejected request in their error body | expected: the journal can hold up to 4 KiB of conversation content; limit who reads it (`docs/configuration.md` §6.2) |
 
 ## What stays true
 

@@ -729,6 +729,7 @@ async fn a_small_prompt_declared_control_is_refused_as_a_mismatch() {
     let body = request_bytes(maknae_proto::Verb::SessionPrompt {
         conversation: "c".into(),
         turns: vec![],
+        output_tokens: None,
     });
     assert!(body.len() <= maknae_proto::CONTROL_REQUEST_MAX);
     let (recs, responded) = serve_raw(raw_frame(1, &body), default_cfg()).await;
@@ -756,6 +757,7 @@ async fn a_prompt_class_frame_uses_the_prompt_cap() {
         turns: vec![maknae_proto::Turn::User {
             content: vec![maknae_proto::ContentBlock::Text { text }],
         }],
+        output_tokens: None,
     });
     let mut cfg = default_cfg();
     cfg.prompt_max_bytes = 1 << 20;
@@ -765,7 +767,9 @@ async fn a_prompt_class_frame_uses_the_prompt_cap() {
             .any(|r| r.event == "request" && r.action == "session.prompt"),
         "{recs:#?}"
     );
-    let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
+    let mut narrow = default_cfg();
+    narrow.prompt_max_bytes = 65_536;
+    let (recs, responded) = serve_raw(raw_frame(3, &body), narrow).await;
     assert!(!responded);
     assert!(denied_with(&recs, "frame oversize"), "{recs:#?}");
 }

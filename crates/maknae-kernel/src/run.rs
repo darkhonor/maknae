@@ -737,8 +737,15 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // gated on the append: `emit_request_deny` is for legs that serve nothing.
     let pregate = match &request.verb {
         Verb::SessionPrompt {
+            output_tokens: Some(n),
+            ..
+        } if !maknae_proto::output_tokens_is_acceptable(*n) => {
+            Some(("prompt", "reply cap not acceptable".to_string()))
+        }
+        Verb::SessionPrompt {
             conversation,
             turns,
+            ..
         } => if !maknae_proto::conversation_id_is_acceptable(conversation) {
             Err("conversation identifier not acceptable".to_string())
         } else {
@@ -1329,6 +1336,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let Verb::SessionPrompt {
                 conversation,
                 turns,
+                output_tokens,
             } = &request.verb
             else {
                 unreachable!("dispatch keyed on the verb")
@@ -1379,6 +1387,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 content_digest: m.digest32.clone(),
                 conversation: conversation.clone(),
                 reply_length: None,
+                output_tokens: *output_tokens,
+                prompt_tokens: None,
+                completion_tokens: None,
             };
             // 1. readiness BEFORE any intent: a refusal is not a send.
             if let Err(_f) = egress.ready() {
@@ -1508,6 +1519,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         destination.clone(),
                         conversation.clone(),
                         turns.clone(),
+                        *output_tokens,
                     );
                     let deadline = egress.deadline();
                     let sent = tokio::time::timeout(
@@ -1564,6 +1576,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             crate::egress::SendOutcome::LandedUndelivered {
                                 reply_length: n,
                                 refusal,
+                                usage: r.reply.usage,
                             },
                             None,
                         ),
@@ -1574,12 +1587,16 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 crate::egress::SendOutcome::LandedUndelivered {
                                     reply_length: n,
                                     refusal: crate::egress::ReplyRefusal::Oversize,
+                                    usage: r.reply.usage,
                                 },
                                 None,
                             )
                         }
                         Ok(()) => (
-                            crate::egress::SendOutcome::Sent { reply_length: n },
+                            crate::egress::SendOutcome::Sent {
+                                reply_length: n,
+                                usage: r.reply.usage,
+                            },
                             Some(r.reply),
                         ),
                     }

@@ -26,6 +26,8 @@ pub struct Recording {
     /// #240: the backend reports a failure AFTER the request left.
     pub fail_after_send: bool,
     pub sleep: Option<Duration>,
+    pub reply_usage: Option<maknae_proto::Usage>,
+    requested: Mutex<Vec<(Option<u64>, Option<maknae_proto::OutputTokensField>)>>,
     /// #240: the backend states its own outer deadline; `None` is a
     /// generous default so only the deadline test sets one.
     pub deadline: Option<Duration>,
@@ -37,6 +39,9 @@ impl Recording {
     /// (destination, conversation, total text bytes) per send.
     pub fn seen(&self) -> Vec<(String, String, u64)> {
         self.seen.lock().unwrap().clone()
+    }
+    pub fn requested(&self) -> Vec<(Option<u64>, Option<maknae_proto::OutputTokensField>)> {
+        self.requested.lock().unwrap().clone()
     }
 }
 impl maknae_kernel::Egress for Recording {
@@ -53,6 +58,10 @@ impl maknae_kernel::Egress for Recording {
         r: maknae_kernel::EgressRequest,
     ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
         self.calls.lock().unwrap().push("send");
+        self.requested
+            .lock()
+            .unwrap()
+            .push((r.output_tokens, r.output_tokens_field));
         // Mirrors `content_measure`: every `Text` block across every turn,
         // PLUS every assistant turn's tool-call arguments — both leave the
         // process, so the recorded sum is what the trail digests.
@@ -100,6 +109,7 @@ impl maknae_kernel::Egress for Recording {
             reply: maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: vec![text("ok")],
+                usage: self.reply_usage,
             },
         })
     }
@@ -117,6 +127,7 @@ fn prompt(s: &str) -> Verb {
         turns: vec![Turn::User {
             content: vec![text(s)],
         }],
+        output_tokens: None,
     }
 }
 fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
@@ -336,6 +347,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
                             mime_type: "image/png".into(),
                         },
                     ],
+                    usage: None,
                 },
             })
         }
@@ -387,6 +399,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![],
+                    usage: None,
                 },
             })
         }
@@ -612,6 +625,68 @@ async fn a_failure_after_the_request_left_is_outcome_unknown_never_failed() {
 }
 
 #[tokio::test]
+async fn the_requested_reply_cap_is_on_the_intent_and_reaches_the_deputy() {
+    let fx = Fixture::with_policy("prompt-cap", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let verb = Verb::SessionPrompt {
+        conversation: "conv-1".into(),
+        turns: vec![Turn::User {
+            content: vec![text("hello")],
+        }],
+        output_tokens: Some(512),
+    };
+    fx.roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
+        .await
+        .expect("a reply frame");
+    let trail = records.snapshot();
+    let intent = trail
+        .iter()
+        .find(|r| r.egress.as_ref().is_some_and(|e| e.is_intent()))
+        .expect("an intent record");
+    assert_eq!(intent.egress.as_ref().unwrap().output_tokens, Some(512));
+    assert_eq!(
+        eg.requested(),
+        vec![(
+            Some(512),
+            Some(maknae_proto::OutputTokensField::MaxCompletionTokens)
+        )]
+    );
+}
+
+#[tokio::test]
+async fn the_providers_usage_reaches_the_outcome_record() {
+    let fx = Fixture::with_policy("prompt-usage", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        reply_usage: Some(maknae_proto::Usage {
+            prompt_tokens: 77,
+            completion_tokens: Some(5),
+        }),
+        ..Default::default()
+    });
+    fx.roundtrip(
+        prompt("hello"),
+        Arc::clone(&records),
+        Some("openai"),
+        eg.clone(),
+    )
+    .await
+    .expect("a reply frame");
+    let trail = records.snapshot();
+    let outcome = trail
+        .iter()
+        .find(|r| {
+            r.egress
+                .as_ref()
+                .is_some_and(|e| e.status == EgressStatus::Sent)
+        })
+        .expect("an outcome record");
+    let e = outcome.egress.as_ref().unwrap();
+    assert_eq!((e.prompt_tokens, e.completion_tokens), (Some(77), Some(5)));
+}
+
+#[tokio::test]
 async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decision() {
     let fx = Fixture::with_policy("prompt-shape", "Read", GRANTED);
     for (verb, needle) in [
@@ -624,6 +699,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         mime_type: "image/png".into(),
                     }],
                 }],
+                output_tokens: None,
             },
             "image",
         ),
@@ -633,6 +709,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("x")],
                 }],
+                output_tokens: None,
             },
             "conversation",
         ),
@@ -642,6 +719,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("x")],
                 }],
+                output_tokens: None,
             },
             "conversation",
         ),
@@ -649,8 +727,19 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
             Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![],
+                output_tokens: None,
             },
             "no turns",
+        ),
+        (
+            Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![Turn::User {
+                    content: vec![text("x")],
+                }],
+                output_tokens: Some(0),
+            },
+            "reply cap not acceptable",
         ),
         // #264 review round 5: the blank-TEXT shapes, on the PRODUCTION chain.
         // The justification for placing the content-bearing check in
@@ -670,6 +759,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -679,6 +769,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text("   \n\t ")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -688,6 +779,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 turns: vec![Turn::User {
                     content: vec![text(""), text("  ")],
                 }],
+                output_tokens: None,
             },
             "no text to send",
         ),
@@ -714,6 +806,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         }],
                     },
                 ],
+                output_tokens: None,
             },
             "shape admission",
         ),
@@ -780,16 +873,19 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
                     mime_type: "image/png".into(),
                 }],
             }],
+            output_tokens: None,
         },
         Verb::SessionPrompt {
             conversation: "has space".into(),
             turns: vec![Turn::User {
                 content: vec![text("x")],
             }],
+            output_tokens: None,
         },
         Verb::SessionPrompt {
             conversation: "c".into(),
             turns: vec![],
+            output_tokens: None,
         },
         // #264 round 5: a prompt bearing no text must also cost ZERO PDP
         // decisions — it is refused by the operand pre-gate, not by policy.
@@ -798,6 +894,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
             turns: vec![Turn::User {
                 content: vec![text("   ")],
             }],
+            output_tokens: None,
         },
     ] {
         let counting = Arc::new(Counting {
@@ -904,6 +1001,7 @@ async fn a_pre_gate_refusal_whose_record_cannot_be_appended_is_closed_frameless(
             Verb::SessionPrompt {
                 conversation: "c".into(),
                 turns: vec![],
+                output_tokens: None,
             },
             Arc::clone(&records),
             Some("openai"),
@@ -1004,6 +1102,7 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![text(&"x".repeat(1 << 20))],
+                    usage: None,
                 },
             })
         }

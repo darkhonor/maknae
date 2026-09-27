@@ -27,6 +27,8 @@ pub struct EgressRequest {
     pub key_field: String,
     /// #242: the registry's reasoning level, carried per request like `model`.
     pub reasoning_effort: Option<String>,
+    pub output_tokens: Option<u64>,
+    pub output_tokens_field: Option<maknae_proto::OutputTokensField>,
     pub conversation: String,
     pub turns: Vec<Turn>,
 }
@@ -37,7 +39,12 @@ impl EgressRequest {
         destination: String,
         conversation: String,
         turns: Vec<Turn>,
+        output_tokens: Option<u64>,
     ) -> Self {
+        let output_tokens_field = output_tokens.map(|_| match p.output_tokens_field.as_deref() {
+            Some("max_tokens") => maknae_proto::OutputTokensField::MaxTokens,
+            _ => maknae_proto::OutputTokensField::MaxCompletionTokens,
+        });
         EgressRequest {
             destination,
             endpoint: p.endpoint.clone(),
@@ -45,6 +52,8 @@ impl EgressRequest {
             key_vault_path: p.key_vault_path.clone(),
             key_field: p.key_field.clone(),
             reasoning_effort: p.reasoning_effort.clone(),
+            output_tokens,
+            output_tokens_field,
             conversation,
             turns,
         }
@@ -177,7 +186,7 @@ pub const EGRESS_MAX_REPLY_FRAME_BYTES: usize = maknae_proto::EGRESS_REPLY_FRAME
 /// The largest request frame the kernel will WRITE to the deputy — the
 /// deputy's own `MAX_REQUEST_FRAME_BYTES`, checked here BEFORE the first byte
 /// leaves. Without it a prompt that fills `transport.prompt_max_bytes` at its
-/// 1 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
+/// 16 MiB ceiling re-wraps into a larger egress frame, the deputy refuses it
 /// as oversize after reading it, and the trail says "outcome unknown" for a
 /// prompt that provably never reached a provider (review round 3). Refused
 /// here it is a pre-send failure: `Failed`, the true record. The VALUE is
@@ -485,6 +494,7 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
 pub enum SendOutcome {
     Sent {
         reply_length: u64,
+        usage: Option<maknae_proto::Usage>,
     },
     Failed,
     DeadlineExpired,
@@ -495,6 +505,7 @@ pub enum SendOutcome {
     LandedUndelivered {
         reply_length: u64,
         refusal: ReplyRefusal,
+        usage: Option<maknae_proto::Usage>,
     },
 }
 
@@ -516,8 +527,12 @@ pub fn outcome_for(
     let mut r = intent.record.clone();
     r.seq = seq;
     r.ts = ts;
+    let usage = match &outcome {
+        SendOutcome::Sent { usage, .. } | SendOutcome::LandedUndelivered { usage, .. } => *usage,
+        _ => None,
+    };
     let (status, reply_length, result, reason, posture) = match outcome {
-        SendOutcome::Sent { reply_length } => (
+        SendOutcome::Sent { reply_length, .. } => (
             EgressStatus::Sent,
             Some(reply_length),
             "permit",
@@ -550,6 +565,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::Oversize,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -562,6 +578,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::NonText,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -572,6 +589,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::Empty,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -587,6 +605,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::ToolCallUnacceptable,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -601,9 +620,14 @@ pub fn outcome_for(
     if let Some(e) = r.egress.as_mut() {
         e.status = status;
         e.reply_length = reply_length;
+        e.prompt_tokens = usage.map(|u| u.prompt_tokens);
+        e.completion_tokens = usage.and_then(|u| u.completion_tokens);
     }
     r
 }
+
+/// CBOR envelope allowance for a reply's `usage` at its widest (#372).
+pub const USAGE_ENVELOPE: usize = 64;
 
 /// CBOR envelope allowance per content block (variant tag, map header, field
 /// name, text-string header): generous, and pinned by a test that encodes
@@ -648,6 +672,7 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
             .iter()
             .map(|c| c.name.len() + c.call_id.len() + c.arguments.0.len() + TOOL_CALL_ENVELOPE)
             .sum::<usize>()
+        + if reply.usage.is_some() { USAGE_ENVELOPE } else { 0 }
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
@@ -727,6 +752,7 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
+            usage: None,
         };
         let cap = reply_capacity(&reply);
 
@@ -785,6 +811,7 @@ mod tests {
         let text_only = maknae_proto::PromptReply {
             blocks: vec![text("hello")],
             tool_calls: vec![],
+            usage: None,
         };
         // 5 + (1 × 32) + 512 = 549
         assert_eq!(reply_capacity(&text_only), 549);
@@ -797,6 +824,7 @@ mod tests {
                 call_id: "b".into(),
                 arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
             }],
+            usage: None,
         };
         // 1 + 1 + 1 + 64 + 512 = 579
         assert_eq!(reply_capacity(&one_call), 579);
@@ -816,6 +844,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
                 },
             ],
+            usage: None,
         };
         // (1+1+1+64) × 2 + 512 = 646
         assert_eq!(reply_capacity(&two_calls), 646);
@@ -828,12 +857,14 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(16)],
+            usage: None,
         };
         assert_eq!(admitted_reply(&reply), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
                 blocks: vec![],
-                tool_calls: vec![]
+                tool_calls: vec![],
+                usage: None,
             }),
             Err(ReplyRefusal::Empty),
         );
@@ -848,6 +879,7 @@ mod tests {
                 mime_type: "image/png".into(),
             }],
             tool_calls: vec![tc(16)],
+            usage: None,
         };
         assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::NonText));
     }
@@ -858,6 +890,7 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1)],
+            usage: None,
         };
         assert_eq!(
             admitted_reply(&reply),
@@ -923,6 +956,7 @@ mod tests {
                 reply: maknae_proto::PromptReply {
                     tool_calls: vec![],
                     blocks: vec![text("ok")],
+                    usage: None,
                 },
             })
         }
@@ -973,6 +1007,9 @@ mod tests {
                 content_digest: "a".repeat(32),
                 conversation: "c".into(),
                 reply_length: None,
+                output_tokens: None,
+                prompt_tokens: None,
+                completion_tokens: None,
             }),
             conversation: None,
         }
@@ -986,6 +1023,8 @@ mod tests {
             key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
             reasoning_effort: None,
+            output_tokens: None,
+            output_tokens_field: None,
             conversation: "c".into(),
             turns: vec![Turn::User {
                 content: vec![text("a")],
@@ -1001,6 +1040,7 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             reasoning_effort: None,
+            output_tokens_field: None,
         }
     }
 
@@ -1011,8 +1051,13 @@ mod tests {
         let turns = vec![Turn::User {
             content: vec![text("a")],
         }];
-        let r =
-            EgressRequest::for_provider(&p, "provider:openai".into(), "c".into(), turns.clone());
+        let r = EgressRequest::for_provider(
+            &p,
+            "provider:openai".into(),
+            "c".into(),
+            turns.clone(),
+            None,
+        );
         assert_eq!(
             r,
             EgressRequest {
@@ -1022,6 +1067,8 @@ mod tests {
                 key_vault_path: p.key_vault_path.clone(),
                 key_field: p.key_field.clone(),
                 reasoning_effort: Some("none".into()),
+                output_tokens: None,
+                output_tokens_field: None,
                 conversation: "c".into(),
                 turns,
             }
@@ -1106,14 +1153,13 @@ mod tests {
         );
     }
 
-    /// The two frame caps are 1 MiB by VALUE, mirroring the deputy's
-    /// `MAX_REQUEST_FRAME_BYTES`; a mutant turning `1024 * 1024` into 2048
-    /// or 1 survives every test that uses them symbolically (measured: two
-    /// such mutants missed until this test).
+    /// The two frame caps by VALUE, mirroring the deputy's
+    /// `MAX_REQUEST_FRAME_BYTES`; a mutant changing either survives every test
+    /// that uses them symbolically (measured: two such mutants missed until this test).
     #[test]
-    fn the_frame_caps_are_one_mebibyte_by_value() {
+    fn the_frame_caps_by_value() {
         assert_eq!(EGRESS_MAX_REPLY_FRAME_BYTES, 1_048_576);
-        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 1_048_576);
+        assert_eq!(EGRESS_MAX_REQUEST_FRAME_BYTES, 16_842_752);
     }
 
     /// Only the backend's own deadline is an expiry to the breaker; every
@@ -1470,6 +1516,7 @@ mod tests {
             let reply = maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: blocks.clone(),
+                usage: None,
             };
             let cap = reply_capacity(&reply);
             let resp = maknae_proto::Response {
@@ -1508,13 +1555,15 @@ mod tests {
                         name: "x".into(),
                     },
                 ],
+                usage: None,
             }),
             2
         );
         assert_eq!(
             reply_capacity(&maknae_proto::PromptReply {
                 tool_calls: vec![],
-                blocks: vec![]
+                blocks: vec![],
+                usage: None,
             }),
             crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
@@ -1528,6 +1577,7 @@ mod tests {
             reply_capacity(&maknae_proto::PromptReply {
                 tool_calls: vec![],
                 blocks: vec![text("abc"), text("de")],
+                usage: None,
             }),
             5 + 2 * REPLY_BLOCK_ENVELOPE + crate::handler::FRAME_ENVELOPE_MARGIN as usize
         );
@@ -1538,12 +1588,14 @@ mod tests {
         let ok = maknae_proto::PromptReply {
             tool_calls: vec![],
             blocks: vec![text("a"), text("b")],
+            usage: None,
         };
         assert_eq!(admitted_reply(&ok), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
                 tool_calls: vec![],
-                blocks: vec![]
+                blocks: vec![],
+                usage: None,
             }),
             Err(ReplyRefusal::Empty)
         );
@@ -1557,8 +1609,124 @@ mod tests {
                         mime_type: "image/png".into(),
                     },
                 ],
+                usage: None,
             }),
             Err(ReplyRefusal::NonText)
+        );
+    }
+
+    #[test]
+    fn for_provider_sends_a_reply_cap_only_with_its_field() {
+        let mut p = provider();
+        let at = |p: &maknae_config::ProviderConfig, o| {
+            let r = EgressRequest::for_provider(p, "provider:openai".into(), "c".into(), vec![], o);
+            (r.output_tokens, r.output_tokens_field)
+        };
+        assert_eq!(at(&p, None), (None, None));
+        assert_eq!(
+            at(&p, Some(9)),
+            (
+                Some(9),
+                Some(maknae_proto::OutputTokensField::MaxCompletionTokens)
+            )
+        );
+        p.output_tokens_field = Some("max_tokens".into());
+        assert_eq!(
+            at(&p, Some(9)),
+            (Some(9), Some(maknae_proto::OutputTokensField::MaxTokens))
+        );
+        assert_eq!(at(&p, None), (None, None));
+    }
+
+    #[test]
+    fn a_sent_or_landed_outcome_records_the_providers_usage() {
+        let i = DurableEgressIntent {
+            record: intent_record(),
+        };
+        let usage = Some(maknae_proto::Usage {
+            prompt_tokens: 11,
+            completion_tokens: Some(2),
+        });
+        for outcome in [
+            SendOutcome::Sent {
+                reply_length: 3,
+                usage,
+            },
+            SendOutcome::LandedUndelivered {
+                reply_length: 3,
+                refusal: ReplyRefusal::Oversize,
+                usage,
+            },
+        ] {
+            let e = outcome_for(&i, 9, "t".into(), outcome).egress.unwrap();
+            assert_eq!((e.prompt_tokens, e.completion_tokens), (Some(11), Some(2)));
+        }
+        let e = outcome_for(
+            &i,
+            9,
+            "t".into(),
+            SendOutcome::Sent {
+                reply_length: 3,
+                usage: None,
+            },
+        )
+        .egress
+        .unwrap();
+        assert_eq!((e.prompt_tokens, e.completion_tokens), (None, None));
+    }
+
+    #[test]
+    fn a_usage_only_reply_has_an_exact_capacity() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: Some(maknae_proto::Usage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: Some(u64::MAX),
+            }),
+        };
+        let cap = reply_capacity(&reply);
+        // USAGE_ENVELOPE 64 + FRAME_ENVELOPE_MARGIN 512.
+        assert_eq!(cap, 576);
+        let buf = maknae_proto::encode_response_zeroizing(
+            &maknae_proto::Response {
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            },
+            cap,
+        )
+        .unwrap();
+        assert_eq!(buf.capacity(), cap);
+        assert!(buf.len() <= cap);
+    }
+
+    #[test]
+    fn the_usage_envelope_covers_the_widest_encoded_usage() {
+        let encoded = |usage| {
+            maknae_proto::encode_response_zeroizing(
+                &maknae_proto::Response {
+                    protocol_version: maknae_proto::PROTOCOL_VERSION,
+                    result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
+                        maknae_proto::PromptReply {
+                            blocks: vec![],
+                            tool_calls: vec![],
+                            usage,
+                        },
+                    )),
+                },
+                1 << 16,
+            )
+            .unwrap()
+            .len()
+        };
+        let widest = encoded(Some(maknae_proto::Usage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: Some(u64::MAX),
+        }));
+        assert!(
+            widest - encoded(None) <= USAGE_ENVELOPE,
+            "{}",
+            widest - encoded(None)
         );
     }
 
@@ -1569,7 +1737,10 @@ mod tests {
         };
         for (outcome, status, result, reason, posture, reply_length) in [
             (
-                SendOutcome::Sent { reply_length: 2 },
+                SendOutcome::Sent {
+                    reply_length: 2,
+                    usage: None,
+                },
                 EgressStatus::Sent,
                 "permit",
                 "sent",
@@ -1606,6 +1777,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 7,
                     refusal: ReplyRefusal::Oversize,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1617,6 +1789,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 7,
                     refusal: ReplyRefusal::NonText,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1628,6 +1801,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 0,
                     refusal: ReplyRefusal::Empty,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1639,6 +1813,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 3,
                     refusal: ReplyRefusal::ToolCallUnacceptable,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",

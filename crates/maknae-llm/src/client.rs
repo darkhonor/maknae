@@ -17,19 +17,23 @@
 //! default; the deputy's `.fips()`-asserted provider is the one used. Building
 //! a client that installed its own would be the failure the pin prevents.
 
-use crate::{to_prompt_reply, ChatRequest, ReplyError};
+use crate::{take_capped, to_prompt_reply, ChatRequest, ReplyError};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Why a call did not produce a usable reply. Distinct from [`ReplyError`]:
 /// that is about the CONTENT of an answer, this is about getting one.
-#[derive(Debug)]
 pub enum CallError {
     /// The request never completed — connect, TLS, timeout, truncated read.
     Transport(String),
-    /// The provider answered with a non-2xx status. The body is NOT included:
-    /// a provider error body is untrusted content and can carry anything.
-    Status(u16),
+    /// The provider answered with a non-2xx status. The body is untrusted
+    /// content: neither `Display` nor `Debug` renders it, and it goes only to
+    /// the deputy's journal, with the key redacted, bounded and escaped (#372).
+    Status {
+        code: u16,
+        body: Zeroizing<Vec<u8>>,
+        truncated: bool,
+    },
     /// The answer arrived and is unusable.
     Reply(ReplyError),
 }
@@ -38,18 +42,35 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CallError::Transport(m) => write!(f, "provider call failed: {m}"),
-            CallError::Status(c) => write!(f, "provider answered {c}"),
+            CallError::Status { code, .. } => write!(f, "provider answered {code}"),
             CallError::Reply(e) => write!(f, "{e}"),
         }
     }
 }
 
+impl std::fmt::Debug for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::Transport(m) => f.debug_tuple("Transport").field(m).finish(),
+            CallError::Status { code, body, .. } => {
+                write!(f, "Status {{ {code}, <{} bytes> }}", body.len())
+            }
+            CallError::Reply(e) => f.debug_tuple("Reply").field(e).finish(),
+        }
+    }
+}
+
+/// How much of a provider's error body is kept for the journal.
+pub const ERROR_BODY_MAX_BYTES: usize = 4096;
+/// How long a refusal may wait on its own body before it is reported.
+pub const ERROR_BODY_WAIT: Duration = Duration::from_secs(2);
+
 /// One non-streaming chat completion.
 ///
 /// `api_key` is `Zeroizing` and is used only as a bearer header — it is never
-/// logged, never rendered by `Debug`, and never returned in an error. The
-/// `Status` variant deliberately carries the code and NOT the body, because a
-/// provider error body is third-party content.
+/// logged, never rendered by `Debug`, and never returned in an error. A
+/// `Status` carries at most [`ERROR_BODY_MAX_BYTES`] of the error body, read
+/// for at most [`ERROR_BODY_WAIT`], for the caller to journal.
 pub async fn chat_completion(
     endpoint: &str,
     api_key: &Zeroizing<String>,
@@ -93,7 +114,34 @@ pub async fn chat_completion(
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(CallError::Status(status.as_u16()));
+        let mut resp = resp;
+        let mut body = Zeroizing::new(Vec::with_capacity(ERROR_BODY_MAX_BYTES));
+        let mut truncated = false;
+        let read = async {
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if take_capped(&mut body, &chunk, ERROR_BODY_MAX_BYTES) {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+        };
+        if tokio::time::timeout(ERROR_BODY_WAIT, read).await.is_err() {
+            truncated = true;
+        }
+        return Err(CallError::Status {
+            code: status.as_u16(),
+            body,
+            truncated,
+        });
     }
 
     // BOUNDED before it is a String. `Content-Length` is the provider's claim,

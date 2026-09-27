@@ -6,25 +6,51 @@
 
 use crate::handle::Admitted;
 use crate::keys::{KeyCache, KeySource};
-use maknae_proto::EgressFrameReply;
+use maknae_proto::{EgressFrameReply, OutputTokensField};
 use std::time::Duration;
 
 /// Why fulfilment failed. Distinct from `handle::Refusal`, which is about
 /// ADMISSION — this is about the call.
-#[derive(Debug, PartialEq, Eq)]
 pub enum FulfilError {
     /// The provider credential could not be obtained. Carries the reason, which
     /// names the PATH and never the value.
     Credential(String),
-    /// The call did not produce a usable reply.
-    Provider(String),
+    /// The call did not produce a usable reply. `journal` is the provider's
+    /// error body, key redacted and escaped, for the deputy's journal only;
+    /// neither `Display` nor `Debug` renders it.
+    Provider {
+        summary: String,
+        journal: Option<zeroize::Zeroizing<String>>,
+    },
+}
+
+impl FulfilError {
+    fn provider(summary: String) -> Self {
+        FulfilError::Provider {
+            summary,
+            journal: None,
+        }
+    }
 }
 
 impl std::fmt::Display for FulfilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FulfilError::Credential(m) => write!(f, "provider credential unavailable: {m}"),
-            FulfilError::Provider(m) => write!(f, "{m}"),
+            FulfilError::Provider { summary, .. } => write!(f, "{summary}"),
+        }
+    }
+}
+
+impl std::fmt::Debug for FulfilError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FulfilError::Credential(m) => f.debug_tuple("Credential").field(m).finish(),
+            FulfilError::Provider { summary, journal } => write!(
+                f,
+                "Provider {{ {summary:?}, <{}-byte journal line> }}",
+                journal.as_ref().map_or(0, |j| j.len())
+            ),
         }
     }
 }
@@ -98,7 +124,7 @@ fn text_of(
         match b {
             maknae_proto::ContentBlock::Text { text } => s.push_str(&text.0),
             other => {
-                return Err(FulfilError::Provider(format!(
+                return Err(FulfilError::provider(format!(
                     "frame carried a non-text {} block the prompt leg cannot send",
                     other.kind()
                 )))
@@ -232,6 +258,12 @@ pub async fn fulfil<S: KeySource>(
         tools: advertised,
         tool_choice: None,
         reasoning_effort: req.reasoning_effort.as_deref(),
+        max_completion_tokens: req
+            .output_tokens
+            .filter(|_| req.output_tokens_field != Some(OutputTokensField::MaxTokens)),
+        max_tokens: req
+            .output_tokens
+            .filter(|_| req.output_tokens_field == Some(OutputTokensField::MaxTokens)),
         stream: false,
     };
 
@@ -244,7 +276,25 @@ pub async fn fulfil<S: KeySource>(
         bounds.max_body_bytes,
     )
     .await
-    .map_err(|e| FulfilError::Provider(e.to_string()))?;
+    .map_err(|e| match e {
+        maknae_llm::CallError::Status {
+            code,
+            mut body,
+            truncated,
+        } => {
+            maknae_llm::redact(&mut body, key.as_bytes());
+            FulfilError::Provider {
+                summary: format!("provider answered {code}"),
+                journal: Some(maknae_llm::journal_line(
+                    code,
+                    &req.conversation,
+                    &body,
+                    truncated,
+                )),
+            }
+        }
+        other => FulfilError::provider(other.to_string()),
+    })?;
 
     Ok(EgressFrameReply { reply })
 }
@@ -297,7 +347,7 @@ mod tests {
                     mime_type: "image/png".into(),
                 },
             ]),
-            Err(FulfilError::Provider(_))
+            Err(FulfilError::Provider { .. })
         ));
         // The empty content case allocates nothing at all.
         assert_eq!(text_of(&[]).expect("empty").0.capacity(), 0);
@@ -335,6 +385,8 @@ mod tests {
                     )),
                 }],
             }],
+            output_tokens: None,
+            output_tokens_field: None,
         }
     }
 
@@ -699,7 +751,8 @@ mod tests {
     /// connection, so what the kernel observes is a failed exchange after
     /// send. What this test checks is the error's own text for the one
     /// provider response it scripts (corrected 2026-09-22, #344: this said the
-    /// kernel reads the name).
+    /// kernel reads the name). Since #372 the provider's error body also reaches
+    /// that stderr, as its own escaped line with the key redacted.
     #[tokio::test]
     async fn a_provider_failure_is_a_named_refusal_that_never_echoes_the_key() {
         fips();
@@ -711,7 +764,14 @@ mod tests {
             .await
             .unwrap_err();
         match &e {
-            FulfilError::Provider(m) => assert!(m.contains("401"), "{m}"),
+            FulfilError::Provider { summary, journal } => {
+                assert!(summary.contains("401"), "{summary}");
+                let j = journal.as_ref().expect("a status carries a journal line");
+                assert!(
+                    !j.contains("sk-SECRET-VALUE"),
+                    "the key reached the journal"
+                );
+            }
             other => panic!("expected a provider refusal, got {other:?}"),
         }
         // THE credential assertion #240's scope requires.
@@ -719,5 +779,77 @@ mod tests {
             !e.to_string().contains("sk-SECRET-VALUE"),
             "the credential reached a rendered error: {e}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_provider_error_is_journaled_with_the_key_redacted_and_never_returned() {
+        fips();
+        let (url, _h) = provider(
+            "401 Unauthorized",
+            "invalid key sk-SECRET-VALUE SECRET-BODY",
+        )
+        .await;
+        let f = frame_to(url);
+        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
+        let mut keys = KeyCache::new(Fixed("sk-SECRET-VALUE"));
+        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            .await
+            .unwrap_err();
+        let FulfilError::Provider { summary, journal } = &e else {
+            panic!("expected a provider refusal, got {e:?}");
+        };
+        assert!(!summary.contains("SECRET"), "{summary}");
+        let j = journal.as_ref().expect("a status carries a journal line");
+        assert!(
+            j.contains("SECRET-BODY") && j.contains("conv1"),
+            "{}",
+            j.as_str()
+        );
+        assert!(!j.contains("sk-SECRET-VALUE"), "{}", j.as_str());
+        let dbg = format!("{e:?}");
+        assert!(!dbg.contains("SECRET"), "{dbg}");
+        assert_eq!(
+            dbg,
+            format!(
+                "Provider {{ \"provider answered 401\", <{}-byte journal line> }}",
+                j.len()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reply_cap_rides_under_the_registered_field_only_when_set() {
+        fips();
+        use maknae_proto::OutputTokensField::*;
+        for (cap, field, want) in [
+            (Some(64), None, Some(r#""max_completion_tokens":64"#)),
+            (
+                Some(64),
+                Some(MaxCompletionTokens),
+                Some(r#""max_completion_tokens":64"#),
+            ),
+            (Some(64), Some(MaxTokens), Some(r#""max_tokens":64"#)),
+            (None, None, None),
+        ] {
+            let (url, h) =
+                provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+            let mut f = frame_to(url);
+            f.output_tokens = cap;
+            f.output_tokens_field = field;
+            let admitted = crate::handle::decide(&f, &bounds()).unwrap();
+            let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
+            fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+                .await
+                .unwrap();
+            let sent = h.await.unwrap();
+            assert_eq!(
+                sent.matches("max_").count(),
+                usize::from(want.is_some()),
+                "sent:\n{sent}"
+            );
+            if let Some(w) = want {
+                assert!(sent.contains(w), "sent:\n{sent}");
+            }
+        }
     }
 }

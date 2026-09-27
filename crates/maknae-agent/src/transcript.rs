@@ -38,6 +38,32 @@ impl Transcript {
             tool_calls: reply.tool_calls.clone(),
         });
     }
+    pub fn bytes(&self) -> u64 {
+        let block = |b: &ContentBlock| match b {
+            ContentBlock::Text { text } => text.0.len(),
+            _ => 0,
+        };
+        let n: usize = self
+            .turns
+            .iter()
+            .map(|t| match t {
+                Turn::User { content } | Turn::Tool { content, .. } => {
+                    content.iter().map(block).sum()
+                }
+                Turn::Assistant {
+                    content,
+                    tool_calls,
+                } => {
+                    content.iter().map(block).sum::<usize>()
+                        + tool_calls
+                            .iter()
+                            .map(|c| c.arguments.0.len())
+                            .sum::<usize>()
+                }
+            })
+            .sum();
+        n as u64
+    }
     pub fn push_tool_result(&mut self, call_id: &str, result: &str) {
         self.turns.push(Turn::Tool {
             call_id: call_id.to_string(),
@@ -80,6 +106,7 @@ mod tests {
         t.push_assistant(&PromptReply {
             blocks: vec![text("thinking")],
             tool_calls: vec![call("c1"), call("c2")],
+            usage: None,
         });
         assert_eq!(
             t.turns()[1],
@@ -95,6 +122,7 @@ mod tests {
         t.push_assistant(&PromptReply {
             blocks: vec![],
             tool_calls: vec![call("c1")],
+            usage: None,
         });
         t.push_tool_result("c1", "the contents");
         assert_eq!(
@@ -104,5 +132,22 @@ mod tests {
                 content: vec![text("the contents")]
             }
         );
+    }
+    #[test]
+    fn bytes_counts_every_turns_text_and_tool_arguments() {
+        let mut t = Transcript::new("c", "12345");
+        assert_eq!(t.bytes(), 5);
+        t.push_assistant(&PromptReply {
+            blocks: vec![text("abc")],
+            tool_calls: vec![ProposedToolCall {
+                name: "read_file".into(),
+                call_id: "c1".into(),
+                arguments: SecretText(Zeroizing::new("{\"p\":1}".into())),
+            }],
+            usage: None,
+        });
+        assert_eq!(t.bytes(), 5 + 3 + 7);
+        t.push_tool_result("c1", "0123456789");
+        assert_eq!(t.bytes(), 5 + 3 + 7 + 10);
     }
 }
