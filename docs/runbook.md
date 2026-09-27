@@ -599,6 +599,18 @@ sudo restorecon -Rv /etc/maknae
 - **`reasoning_effort: none` is required for `gpt-5.6-luna`.** Without it the model refuses the loop's tools on chat completions: every turn is recorded `OutcomeUnknown`, with `provider answered 400` in the deputy's journal.
 - **The other five keys are required.** A field named `key`, `api_key`, `token` or `secret` is refused as a plaintext key.
 - **`key_vault_path` is mount-relative**, carries no `data/` segment, and must sit **strictly beneath** the prefix from step 4, or boot refuses with `OutsideBounds`.
+- **The daemon's prompt cap.** `transport.prompt_max_bytes` in `/etc/maknae/maknae.yaml` defaults to 1 MiB, enough for a context window of about 174,000 tokens. For a larger window raise it to `context_tokens × 6`, at most 16 MiB, or the daemon refuses the loop's larger frames.
+- **Declare the window on the operator's side.** `maknae agent` will not start without `provider.context_tokens` in `~/.maknae/maknae.yaml`:
+
+  ```bash
+  cat >> ~/.maknae/maknae.yaml <<'EOF'
+  provider:
+    context_tokens: 128000
+    output_tokens: 16000
+  EOF
+  ```
+
+  Use the model's documented window. `output_tokens` is optional; it rides on every prompt, and the intent record carries it (`docs/configuration.md` §6.1.1).
 
 ### 6. Put the key in Vault
 
@@ -689,8 +701,8 @@ What to find:
 | Record | Shape |
 |---|---|
 | Boot composition evidence | `event:"boot"`, `action:"authz"`, reason `authorization composition: …; system: …; ceiling: …`. Written at every boot, before serving |
-| `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation` |
-| `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`) |
+| `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest` and `conversation`, and `output_tokens` when the operator set a reply cap |
+| `session.prompt` outcome | the same identity at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`). `prompt_tokens` and `completion_tokens` appear when the provider reported usage; they are the provider's claim, informational |
 | `session.prompt` refused before intent | a single record: `result:"deny"`, reason `egress backend not ready`, `egress.status:"BackendUnavailable"`, with no intent ahead of it |
 | `fs.read` intent | `object` = the canonical path, `mutation.phase:"Intent"`, `mutation.operation:"Read"`, `mutation.label:{"level":"UNCLASSIFIED","categories":[]}`, `mutation.requested_page` for a paged read, `origin:"KernelObserved"`, `status:"IntentOnly"`, no `content_length` |
 | `fs.read` progress | `mutation.phase:"Progress"`, `origin:"ClientReported"`, `status:"ReportedProgress"`, `effects:[{…,"effect":"ReadFile","length":N,"range":{"start":S,"end":S+N},"lines":{"first":F,"last":L,"complete_last":…}}]` |
@@ -712,7 +724,7 @@ There is **one `session.prompt` intent-and-outcome pair per model turn that is s
 ### 12. The refused turns
 
 - **An oversize read** is no longer refused: reads are paged (§12a).
-- **Over the conversation cap.** Two files, each inside one page, that together exceed the prompt budget (`transport.prompt_max_bytes`, 65,536 bytes by default): `for n in 1 2; do head -c 30000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 40 KB each). Ask the agent to read both. Both reads succeed, and the transcript then outgrows the prompt budget, so the loop refuses to send the next prompt: `maknae agent: stopped: the conversation has reached the platform's frame bound`, exit `2`. Nothing oversize is sent.
+- **At the context budget.** Set `context_tokens: 4096` (and no `output_tokens`) in `~/.maknae/maknae.yaml`. Create two files, each inside one page: `for n in 1 2; do head -c 6000 /dev/urandom | base64 > ~/projects/maknae-242/half$n.txt; done` (about 8 KB each). Ask the agent to read both. As the transcript grows, the loop prints `warning: this conversation is at …% of the declared context budget (… of 4,096 tokens)` once it passes 80% and again past 95%; one large read can jump straight past both, so a warning line is not guaranteed. Before a turn would exceed the budget, it stops: `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171`, exit `2`. The trail has no intent for the stopped turn, because nothing was sent. Restore `context_tokens` afterwards.
 
 ### 12a. Paged reads
 
@@ -723,7 +735,7 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 - **One page.** `maknae read --offset 2 --limit 1 <file>` prints that page and names the next position on stderr (`next: line L column C`, or `eof`). `--column` continues a long line.
 - **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
 - **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
-- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. At the default prompt budget a full 64 KiB page leaves no room for the rest of the conversation, so the loop stops after it until #372's context budget raises the prompt cap.
+- **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
 
 ### 13. Custody check (manual)
 
