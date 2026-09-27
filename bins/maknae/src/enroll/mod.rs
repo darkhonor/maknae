@@ -59,8 +59,7 @@ pub enum EnrollError {
     /// A `maknae-vault` operation failed (Vault client build, RoleID read,
     /// SecretID mint/destroy, CA-chain fetch).
     Vault(maknae_vault::VaultError),
-    /// An external command (`usermod`, `systemd-creds`, `sudo`, `restorecon`,
-    /// `id`) failed to spawn or exited non-zero.
+    /// An external command failed to spawn or exited non-zero.
     Command {
         program: String,
         detail: String,
@@ -1479,6 +1478,11 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         #[cfg(target_os = "macos")]
         {
             let checked = async {
+                let me = std::env::current_exe().map_err(|e| EnrollError::Command {
+                    program: "current_exe".to_string(),
+                    detail: e.to_string(),
+                })?;
+                keychain_write::check_install_path(&me)?;
                 let team = keychain_write::own_team().await?;
                 for (bin, plane) in [
                     (
@@ -1490,7 +1494,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
                         maknae_vault::KeychainPlane::Egress,
                     ),
                 ] {
-                    keychain_write::check_install_path(bin)?;
+                    keychain_write::check_install_path(Path::new(bin))?;
                     keychain_write::verify_release(bin, plane, &team).await?;
                 }
                 Ok::<(), EnrollError>(())

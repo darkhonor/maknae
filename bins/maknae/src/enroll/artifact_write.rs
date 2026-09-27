@@ -150,10 +150,10 @@ pub fn write_file(
 /// function is handed with no supplied bytes is a caller bug (a silently
 /// unwritten config file is exactly the failure mode this refuses), so it
 /// fails closed rather than skipping the row. Rows whose content is produced
-/// by an external seal command (`SealedDaemonSecret`/`SealedCliSecret`) are
-/// the caller's responsibility to exclude from `rows` — they are written by
-/// that seal step, then ownership-applied via [`apply_ownership_and_mode`]
-/// directly.
+/// by an external seal command or the macOS keychain write
+/// (`SealedDaemonSecret`/`SealedCliSecret`/`SealedEgressSecret`) are the
+/// caller's responsibility to exclude from `rows` — they are written by that
+/// step, then ownership-applied via [`apply_ownership_and_mode`] directly.
 pub fn write_artifacts(
     rows: &[Artifact],
     contents: &BTreeMap<PathBuf, Vec<u8>>,

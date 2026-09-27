@@ -600,7 +600,7 @@ why = "the operator-context helper — self-verification + systemd-creds/Keychai
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
-why = "#76: enroll's keychain write and release-build checks — /usr/bin/security and /usr/bin/codesign subprocess I/O on macOS; the command builder, SecretID shape, keychain-line, requirement, team and runtime/entitlement checks carry real unit tests on every target, T3 like the rest of this crate"
+why = "#76: enroll's keychain write and release-build checks — the cryptographic codesign --verify -R requirement, the team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality, the maknae-io install-path check and the SecretID-on-stdin-only discipline all carry real unit tests on every target, T3 like the rest of this crate"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +

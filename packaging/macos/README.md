@@ -29,6 +29,8 @@ normative statement; this directory holds the packaging that follows from it.
 >
 > **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `postinstall` runs `launchctl disable` on a fresh install. The flow is: install → `sudo maknae enroll` → `sudo launchctl enable system/io.maknae.maknaed` → `sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist`.
 >
+> **Corrected 2026-09-27 (#76):** superseded — macOS enroll now writes the System-keychain items (ADR-0018 decision 6) and refuses `--insecure-plaintext-secret`; it requires Developer ID-signed `maknaed` and `maknae-egress` (the latter ships with #76's packaging PR). The full rewrite is #76's docs PR.
+>
 > **A fully enrolled macOS daemon is not yet possible.** `seal_daemon_secret_macos` (`bins/maknae/src/enroll/mod.rs:1028`) returns `MacosSepUnimplemented`, so enrollment needs `--insecure-plaintext-secret`. Acceptance therefore rests on the exit-4 fail-closed boot refusal, which runs before the credential step.
 >
 > **Corrected 2026-09-12 (#227).** The binaries row read *"`maknaed` + `maknae` universal binaries | `cargo build --target {aarch64,x86_64}-apple-darwin` → `lipo`"*. **There are no x86 macOS builds** (AGENTS.md; maintainer ruling 2026-09-05), so there is no universal binary and no `lipo` step. It now also names `cargo auditable`, matching how CI builds every shipped binary (`ci.yml:145`) — the embedded dependency SBOM is an SCRM control and the Apple-native artifact is the last place to drop it.

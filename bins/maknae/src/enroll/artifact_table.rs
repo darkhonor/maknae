@@ -65,9 +65,8 @@ pub enum ContentKind {
     /// The maknae intermediate CA, split from the fetched issuer chain.
     IntCa,
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
-    /// Linux, the keychain pointer on macOS. Produced by the seal step (an
-    /// external command), not a literal byte copy — `artifact_write`
-    /// applies ownership/mode to an already-written file for this row.
+    /// Linux; on macOS the SecretID goes to the System keychain, and this row
+    /// is a pointer file `write_artifacts` writes directly.
     SealedDaemonSecret,
     /// The sealed CLI SecretID — user-scoped `systemd-creds` `.cred` (Linux
     /// only; macOS uses the login Keychain instead, which is not a filesystem
@@ -88,8 +87,9 @@ pub enum ContentKind {
     /// `tls/vault-ca.crt` is `root:_maknae` under a `0750` dir the deputy
     /// cannot enter, so it gets its own copy under its own group.
     EgressVaultCaCopy,
-    /// The sealed egress SecretID — the same mechanism as the daemon's, sealed
-    /// under the name `maknae-egress.service`'s `LoadCredentialEncrypted=` loads.
+    /// The sealed egress SecretID — `systemd-creds` ciphertext under the name
+    /// `maknae-egress.service`'s `LoadCredentialEncrypted=` loads on Linux;
+    /// on macOS, a pointer file to the System keychain, same as the daemon's.
     SealedEgressSecret,
 }
 

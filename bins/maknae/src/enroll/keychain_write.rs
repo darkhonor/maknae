@@ -259,7 +259,8 @@ pub(crate) async fn own_team() -> Result<String, EnrollError> {
     if let Some(why) = codesign_verify(&me_s, &anchor_requirement(&team)).await? {
         return Err(refuse(why));
     }
-    check_runtime_and_entitlements(&d.details, &d.entitlements).map_err(refuse)?;
+    let verified = display(&me_s).await.map_err(refuse)?;
+    check_runtime_and_entitlements(&verified.details, &verified.entitlements).map_err(refuse)?;
     Ok(team)
 }
 
@@ -284,18 +285,30 @@ pub(crate) async fn verify_release(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn check_install_path(binary: &'static str) -> Result<(), EnrollError> {
-    use maknae_io::{open_anchor, AnchorRequired, StrategyPref, TargetRequired};
+pub(crate) fn check_install_path(bin: &std::path::Path) -> Result<(), EnrollError> {
+    use maknae_io::{open_anchor, AnchorRequired, IoError, IoKind, StrategyPref, TargetRequired};
     use std::path::Path;
     let refuse = |path: &Path, detail: String| EnrollError::NotRootInstalled {
         path: path.display().to_string(),
         detail,
     };
+    let not_found = |path: &Path, e: IoError| {
+        if matches!(
+            e,
+            IoError::Io {
+                kind: IoKind::NotFound,
+                ..
+            }
+        ) {
+            refuse(path, "not installed".to_string())
+        } else {
+            refuse(path, e.to_string())
+        }
+    };
     let root_only = AnchorRequired {
         owner: Some(0),
         mode_mask: Some(0o022),
     };
-    let bin = Path::new(binary);
     let dir = bin
         .parent()
         .ok_or_else(|| refuse(bin, "no parent directory".to_string()))?;
@@ -307,8 +320,7 @@ pub(crate) fn check_install_path(binary: &'static str) -> Result<(), EnrollError
     let mut last = None;
     for d in chain {
         last = Some(
-            open_anchor(d, root_only.clone(), StrategyPref::Auto)
-                .map_err(|e| refuse(d, e.to_string()))?,
+            open_anchor(d, root_only.clone(), StrategyPref::Auto).map_err(|e| not_found(d, e))?,
         );
     }
     let anchor = last.ok_or_else(|| refuse(dir, "no directory to anchor".to_string()))?;
@@ -324,7 +336,7 @@ pub(crate) fn check_install_path(binary: &'static str) -> Result<(), EnrollError
                 max_bytes: Some(1 << 30),
             },
         )
-        .map_err(|e| refuse(bin, e.to_string()))?;
+        .map_err(|e| not_found(bin, e))?;
     Ok(())
 }
 
@@ -431,6 +443,23 @@ mod tests {
         assert_eq!(parse_team(FORGED_DV), None);
         assert_eq!(parse_team("Identifier=x\n"), None);
         assert_eq!(parse_team("TeamIdentifier=TEAM\"1\n"), None);
+    }
+
+    #[test]
+    fn an_adhoc_flag_is_refused_even_with_no_signature_adhoc_line() {
+        // P4's forged-DR `-dv` shape: the flags bitmask carries `adhoc`, but the
+        // line-based `Signature=adhoc` giveaway is absent — the flags check alone
+        // must still refuse it.
+        let dv = "Identifier=io.maknae.maknaed\nCodeDirectory v=20500 size=306 flags=0x10002(adhoc,runtime) hashes=4+2 location=embedded\nSignature size=8987\nTeamIdentifier=TEAM123456\n";
+        assert!(check_runtime_and_entitlements(dv, "").is_err());
+    }
+
+    #[test]
+    fn a_secret_id_hex_digit_out_of_range_is_refused() {
+        assert!(matches!(
+            validate_secret_id("4f3c2a10-9b7e-4d21-8c55-0a1b2c3d4e5g"),
+            Err(EnrollError::SecretIdShape)
+        ));
     }
 
     #[test]
