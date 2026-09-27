@@ -25,7 +25,7 @@ normative statement; this directory holds the packaging that follows from it.
 
 > **`maknae-spifc` is deliberately not packaged.** CI builds three shipped binaries (`ci.yml:145`), but the Linux packages ship two (`build-deb.sh:63-64`, `maknae.spec:65-66`); macOS follows the packaging precedent, not the CI one.
 >
-> **Corrected 2026-09-28 (#76):** the deputy's launchd job now ships in the daemon component (io.maknae.maknae-egress); the full rewrite is #76's docs PR.
+> **Corrected 2026-09-28 (#76):** the deputy's launchd job (`io.maknae.maknae-egress`) now ships in the daemon component (`io.maknae.daemon`), not a separate `io.maknae.egress` component; the full rewrite is #76's docs PR.
 >
 > **`maknae-egress`'s launchd unit is NOT here.** ADR-0023 decision 3 names units for both daemons; the binary is #240's deliverable and does not exist yet, and a unit definition for an absent executable cannot be tested. Both *accounts* are created here — custody rests on the account, not the unit — and #240 adds the unit and the `io.maknae.egress` component together, which `distribution.xml` makes a one-row change.
 >

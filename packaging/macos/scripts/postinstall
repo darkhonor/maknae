@@ -121,8 +121,15 @@ WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
 EGRESS_WAS_LOADED="$(sed -n 3p "$KIND_FILE" 2>/dev/null || echo false)"
 EGRESS_PLIST_EXISTED="$(sed -n 4p "$KIND_FILE" 2>/dev/null || echo false)"
 rm -f "$KIND_FILE"
+disabled_state() {
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *"\"$1\" => disabled"*) echo disabled ;;
+        *) echo "not disabled" ;;
+    esac
+}
 if [ "$KIND" = "fresh" ]; then
     launchctl disable "system/$LABEL" 2>/dev/null || :
+    verify "launchctl disable $LABEL" disabled "$(disabled_state "$LABEL")"
 elif [ "$WAS_LOADED" = "true" ]; then
     # Upgrade of a running daemon: the payload replaced the file but the live
     # process still holds the old inode. Restart it onto the new binary, exactly as
@@ -136,6 +143,7 @@ fi
 EGRESS_LABEL="io.maknae.maknae-egress"
 if [ "$KIND" = "fresh" ] || [ "$EGRESS_PLIST_EXISTED" != "true" ]; then
     launchctl disable "system/$EGRESS_LABEL" 2>/dev/null || :
+    verify "launchctl disable $EGRESS_LABEL" disabled "$(disabled_state "$EGRESS_LABEL")"
 elif [ "$EGRESS_WAS_LOADED" = "true" ]; then
     launchctl kickstart -k "system/$EGRESS_LABEL" 2>/dev/null || :
 fi

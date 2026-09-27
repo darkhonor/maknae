@@ -4011,8 +4011,8 @@ fi
 # ---- entitlements-empty (#76, ADR-0018 decision 6) ---------------------------
 ee="$here/entitlements-empty.sh"
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "neg-skip: [entitlements-empty/*, signed-entitlements-empty/*] not Darwin; plutil(1) is a macOS tool"
-  skipped=$((skipped+8))
+  echo "neg-skip: [entitlements-empty/*, signed-entitlements-empty/*, signed-hardened-runtime/*] not Darwin; plutil(1) and codesign(1) are macOS tools"
+  skipped=$((skipped+11))
 else
   ee_entitled="$(mktemp "$NC_TMP/XXXXXX")"
   cat > "$ee_entitled" <<'EOF'
@@ -4072,6 +4072,17 @@ EOF
   expect_accept "signed-entitlements-empty/an-empty-set-passes" "signed-ok" see "$see_clean"
   expect_reject_because "signed-entitlements-empty/a-missing-binary-is-refused" "entitled" \
     see "$NC_TMP/no-such-binary"
+
+  shr() { bash -c 'source "$1"; signed_hardened_runtime "$2" || { echo "FAIL: not hardened"; exit 1; }; echo "hardened-ok"' \
+    _ "$repo_root/packaging/macos/signing-lib.sh" "$1"; }
+  shr_plain="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$shr_plain"
+  codesign -f -s - "$shr_plain" 2>/dev/null
+  expect_reject_because "signed-hardened-runtime/a-signature-without-runtime-is-refused" "not hardened" shr "$shr_plain"
+  shr_hard="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$shr_hard"
+  codesign -f -s - --options runtime "$shr_hard" 2>/dev/null
+  expect_accept "signed-hardened-runtime/a-runtime-signature-passes" "hardened-ok" shr "$shr_hard"
+  expect_reject_because "signed-hardened-runtime/a-missing-binary-is-refused" "not hardened" \
+    shr "$NC_TMP/no-such-binary"
 fi
 
 # The skip count is REPORTED, because `$total` is environment-dependent: probes

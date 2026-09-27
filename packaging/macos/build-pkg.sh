@@ -165,9 +165,15 @@ refuse_entitled() {
     echo "REFUSED: $1 was signed with entitlements, or its signature cannot be read (ADR-0018 decision 6)" >&2
     exit 2
 }
+refuse_unhardened() {
+    echo "REFUSED: $1 was signed without Hardened Runtime, or its signature cannot be read (ADR-0018 decision 6)" >&2
+    exit 2
+}
 signed_entitlements_empty "$STAGE/$FIPS_BASE" || refuse_entitled "$STAGE/$FIPS_BASE"
+signed_hardened_runtime "$STAGE/$FIPS_BASE" || refuse_unhardened "$STAGE/$FIPS_BASE"
 for b in $BINS; do
     signed_entitlements_empty "$BIN/$b" || refuse_entitled "$BIN/$b"
+    signed_hardened_runtime "$BIN/$b" || refuse_unhardened "$BIN/$b"
 done
 for b in $BINS; do
     rust-audit-info "$BIN/$b" >/dev/null || { echo "ERROR: no embedded SBOM in $b" >&2; exit 1; }

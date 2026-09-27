@@ -29,11 +29,20 @@ rm -rf /usr/local/lib/maknae
 
 # Before the accounts go: the ACE names _maknae-egress and must still resolve.
 chmod -a "user:_maknae-egress allow list,search" /etc/maknae 2>/dev/null || :
+ace_left=false
+if [ -e /etc/maknae ]; then
+    if ! led="$(ls -led /etc/maknae)"; then
+        ace_left=true
+    elif grep -Eqx ' *[0-9]+: user:_maknae-egress allow list,search' <<<"$led"; then
+        ace_left=true
+    fi
+fi
 
 kc_left=""
 for s in io.maknae.maknaed io.maknae.maknae-egress; do
     rc=0
     security delete-generic-password -a secret-id -s "$s" /Library/Keychains/System.keychain >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 44 ] || [ -f /Library/Keychains/System.keychain ] || rc="44, no System keychain file"
     case "$rc" in
         0|44) : ;;
         *) echo "WARNING: could not delete the $s keychain item (exit $rc)" >&2
@@ -92,8 +101,9 @@ done
 chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
-if [ -n "$kc_left" ]; then
-    echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
+[ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE" >&2
+[ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
+if [ -n "$kc_left" ] || [ "$ace_left" != false ]; then
     exit 1
 fi
 echo "Removed."

@@ -72,6 +72,12 @@ phase1() {
         '')  fail "no deputy runtime-dir install line found in preinstall" ;;
         *)   fail "deputy runtime dir not -o \"\$EGRESS_UID\" -g \"\$MAKNAE_GID\": $ert_line" ;;
     esac
+    elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
+    case "$elog_line" in
+        *'-o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress" ;;
+        '')  fail "no deputy log-dir install line found in preinstall" ;;
+        *)   fail "deputy log dir not -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
+    esac
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
         && ok "every entitlements file is empty" \
@@ -115,6 +121,8 @@ phase1() {
                                                              || fail "entitlements unreadable on $b"
         signed_entitlements_empty "$B/$b" && ok "$b was signed with no entitlements" \
                                           || fail "$b carries signed entitlements, or none could be read"
+        signed_hardened_runtime "$B/$b" && ok "$b was signed with Hardened Runtime" \
+                                        || fail "$b was signed without Hardened Runtime, or its signature could not be read"
         local cs; cs="$(codesign -dv "$B/$b" 2>&1)"
         case "$cs" in
             *"Identifier=io.maknae.$b"*) ok "$b carries Identifier=io.maknae.$b" ;;
@@ -363,7 +371,15 @@ REFUSE
     esac
     case "$dis2" in
         *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade left the deputy job disabled" ;;
-        *) ok "upgrade did not force-disable the deputy job" ;;
+        *) fail "the deputy job is NOT disabled after an ordinary upgrade" ;;
+    esac
+    launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
+    rm -f /Library/LaunchDaemons/io.maknae.maknae-egress.plist
+    installer -pkg "$PKG" -target / >/dev/null && ok "upgrade from a package without the deputy succeeded" \
+                                               || fail "upgrade from a package without the deputy failed"
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade from a package without the deputy disabled it" ;;
+        *) fail "upgrade from a package without the deputy left it enabled — it would start unenrolled at boot" ;;
     esac
 
     # REPLACEMENT: delete the installer-created _maknae-egress and recreate it under
@@ -496,8 +512,8 @@ PROBE
     # Planted: phase 2 never enrolls, so an absence check would pass on nothing.
     local svc
     for svc in io.maknae.maknaed io.maknae.maknae-egress; do
-        security add-generic-password -U -a secret-id -s "$svc" -w smoke-sentinel \
-            /Library/Keychains/System.keychain \
+        security add-generic-password -U -a secret-id -s "$svc" -T "/usr/local/bin/${svc#io.maknae.}" \
+            -w smoke-sentinel /Library/Keychains/System.keychain \
             && ok "planted $svc keychain item" || fail "could not plant $svc keychain item"
     done
     chmod +a "user:_maknae-egress allow list,search" /etc/maknae \
@@ -511,13 +527,25 @@ PROBE
         src=0
         security find-generic-password -a secret-id -s "$svc" /Library/Keychains/System.keychain \
             >/dev/null 2>&1 || src=$?
-        [ "$src" -eq 44 ] && ok "$svc keychain item removed" \
-                          || fail "$svc keychain item: find exited $src (want 44)"
+        if [ ! -f /Library/Keychains/System.keychain ]; then
+            fail "no System keychain file, so exit $src proves nothing about $svc"
+        elif [ "$src" -eq 44 ]; then
+            ok "$svc keychain item removed"
+        else
+            fail "$svc keychain item: find exited $src (want 44)"
+        fi
     done
-    case "$(ls -led /etc/maknae 2>/dev/null)" in
-        *_maknae-egress*) fail "the deputy's ACE is still on /etc/maknae" ;;
-        *) ok "the deputy's ACE is gone from /etc/maknae" ;;
-    esac
+    [ -d /etc/maknae ] && ok "config RETAINED (correct)" || fail "uninstall removed /etc/maknae"
+    local led lrc=0
+    led="$(ls -led /etc/maknae 2>/dev/null)" || lrc=$?
+    if [ "$lrc" -ne 0 ]; then
+        fail "ls -led /etc/maknae exited $lrc; the deputy's ACE cannot be checked"
+    else
+        case "$led" in
+            *_maknae-egress*) fail "the deputy's ACE is still on /etc/maknae" ;;
+            *) ok "the deputy's ACE is gone from /etc/maknae" ;;
+        esac
+    fi
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do

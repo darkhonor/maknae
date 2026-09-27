@@ -37,11 +37,8 @@ pub fn from_init_system() -> Result<Option<UnixListener>, ListenError> {
     }
 }
 
-/// Bind a path ourselves, group-gated through `maknae-vault`'s shared UDS
-/// bind. Only reachable when the init system passed nothing. The shipped
-/// Linux unit always socket-activates, and a test asserts the packaged unit
-/// carries no bind path; on macOS this is the launchd job's only path, since
-/// launchd's socket hand-off is a C API (`launch_activate_socket`).
+/// Bind `path` through `maknae-vault`'s group-gated bind; the macOS launchd
+/// job's only path (ADR-0023 decision 3).
 pub fn bind_gated(
     rt: &tokio::runtime::Runtime,
     path: &Path,
@@ -86,12 +83,16 @@ mod tests {
         ];
         // `id -G`: nix's `getgroups` is configured out on Apple targets.
         let ids = std::process::Command::new("id").arg("-G").output().unwrap();
-        let gid = String::from_utf8(ids.stdout)
+        let Some(gid) = String::from_utf8(ids.stdout)
             .unwrap()
             .split_whitespace()
             .filter_map(|g| g.parse::<u32>().ok())
             .find(|g| !born.contains(g))
-            .map_or_else(nix::unistd::getegid, nix::unistd::Gid::from_raw);
+            .map(nix::unistd::Gid::from_raw)
+        else {
+            eprintln!("SKIP a_bound_socket_is_group_gated: no supplementary gid outside {born:?}");
+            return;
+        };
         let p = d.path().join("egress.sock");
         let _l = bind_gated(&rt, &p, gid).unwrap();
         let meta = std::fs::metadata(&p).unwrap();
