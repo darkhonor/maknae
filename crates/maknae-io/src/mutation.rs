@@ -778,6 +778,19 @@ mod tests {
         );
     }
     #[test]
+    fn a_file_versions_key_is_its_seven_fields_in_order() {
+        let v = FileVersion {
+            dev: 1,
+            ino: 2,
+            size: 3,
+            mtime: 4,
+            mtime_nsec: 5,
+            ctime: 6,
+            ctime_nsec: 7,
+        };
+        assert_eq!(v.key(), [1, 2, 3, 4, 5, 6, 7]);
+    }
+    #[test]
     fn a_held_files_version_holds_until_the_file_changes() {
         crate::testutil::isolated(
             "mutation::tests::a_held_files_version_holds_until_the_file_changes",

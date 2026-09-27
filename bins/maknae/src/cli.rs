@@ -660,13 +660,7 @@ pub async fn run_cli() -> ExitCode {
             limit,
             column,
         } => {
-            let page = (offset.is_some() || limit.is_some() || column.is_some()).then(|| {
-                maknae_proto::PageRequest {
-                    offset_line: offset.unwrap_or(1),
-                    limit_lines: limit.unwrap_or(2000),
-                    column: column.unwrap_or(0),
-                }
-            });
+            let page = single_page(offset, limit, column);
             // Lexically absolutize client-side (std::path::absolute keeps `..`
             // on Unix — the daemon's canonical pre-gate refuses those as
             // BadRequest, a stated consequence); `~` is the shell's business.
@@ -708,6 +702,18 @@ fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn single_page(
+    offset: Option<u64>,
+    limit: Option<u32>,
+    column: Option<u64>,
+) -> Option<maknae_proto::PageRequest> {
+    (offset.is_some() || limit.is_some() || column.is_some()).then(|| maknae_proto::PageRequest {
+        offset_line: offset.unwrap_or(1),
+        limit_lines: limit.unwrap_or(2000),
+        column: column.unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
@@ -1190,6 +1196,22 @@ mod tests {
         ));
     }
     // ---- read verb surface (#77) ----
+
+    #[test]
+    fn any_one_paging_flag_selects_a_single_page() {
+        assert_eq!(single_page(None, None, None), None);
+        let one = |offset, limit, column| single_page(offset, limit, column).unwrap();
+        assert_eq!(
+            one(Some(5), None, None),
+            maknae_proto::PageRequest {
+                offset_line: 5,
+                limit_lines: 2000,
+                column: 0
+            }
+        );
+        assert_eq!(one(None, Some(7), None).limit_lines, 7);
+        assert_eq!(one(None, None, Some(9)).column, 9);
+    }
 
     #[test]
     fn read_parses_with_a_path() {
