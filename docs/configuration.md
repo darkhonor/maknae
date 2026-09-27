@@ -537,10 +537,10 @@ provider:
 ```
 
 - **`context_tokens`** is required by `maknae agent`, which refuses to start without it (`provider.context_tokens is required by maknae agent`). At most 16,777,216. Other verbs accept the block and do not read it.
-- **`output_tokens`** is optional: at least 1, and below `context_tokens`. When set, it rides on every `session.prompt`; the kernel bounds it, records it on the egress intent, and the deputy sends it under the name the daemon's `provider.output_tokens_field` gives. A reply is capped at 1 MiB whatever this says, so a value above about 250,000 tokens buys nothing.
+- **`output_tokens`** is optional: at least 1, and below `context_tokens`. When set, it rides on every `session.prompt`; the kernel bounds it, records it on the egress intent, and the deputy sends it under the name the daemon's `provider.output_tokens_field` gives. A reply is capped at 1 MiB whatever this says, so above about 250,000 tokens the cap no longer limits the visible reply; on a reasoning model it still bounds the hidden reasoning tokens.
 - **The prompt budget** is `context_tokens` less `output_tokens`, and it must exceed the 1,536-token allowance for the trusted preamble and tool definitions, so the smallest window accepted is 1,537.
 - **How the loop meters it.** Before each turn the loop projects the conversation's size in tokens: the provider's last reported `prompt_tokens`, plus the bytes added since at the bytes-per-token ratio it has observed (clamped to 1–4). Before the provider has reported usage, it counts bytes at 4 per token plus the preamble allowance. It warns on stderr once at 80% and once at 95% — `warning: this conversation is at 82% of the declared context budget (104,960 of 128,000 tokens)`, with ` — estimated from bytes; the provider has not reported usage` appended when it has nothing better. It does not send a turn projected past the budget: it prints `stopped: the conversation has reached the declared context budget; compaction arrives with #171` and exits 2. Nothing is sent and nothing is recorded for the turn it stops.
-- **The loop's byte cap follows the window:** `context_tokens × 6` bytes, clamped to 65,536..=16,777,216 — or, when this configuration sets `transport.prompt_max_bytes` explicitly, the smaller of the two. Writes keep the configured `transport.prompt_max_bytes`.
+- **The loop's byte cap follows the window:** `context_tokens × 6` bytes, clamped to 65,536..=16,777,216 — or, when this configuration sets `transport.prompt_max_bytes` explicitly, the smaller of the two. Writes keep the configured `transport.prompt_max_bytes` — whose default rose from 64 KiB to 1 MiB with #372, so `maknae fs write` and the agent's `write_file` now accept up to 1 MiB unless the configuration sets it lower.
 - **Raise the daemon's `transport.prompt_max_bytes` to at least your derived cap, or the daemon refuses the frame and the loop stops with a transport error.** The daemon's default, 1 MiB, covers a window of about 174,000 tokens; its ceiling is 16 MiB.
 - **A configuration directory shared between the CLI and the daemon is not supported.** The two blocks share a name, and each side's parser refuses the other's keys.
 - **Where to find a model's window:** the provider's documentation, or models.dev. Maknae reads neither; the number declared here is the number the loop uses.
@@ -592,7 +592,12 @@ egress:
   appears, escapes everything outside printable ASCII and writes one line:
   `maknae-egress: provider answered 400 (conversation c…): <body>`. On Linux that is
   `journalctl -u maknae-egress`; the macOS deputy is not packaged yet (#227). Neither the
-  trail nor the subject's terminal carries the body.
+  trail nor the subject's terminal carries the body. **The journal line can carry
+  conversation content:** some OpenAI-compatible servers quote the offending request in a
+  `400`/`422` body, so up to 4 KiB of the prompt — including file content the agent read —
+  may be written to the journal, outside the trail's never-the-content rule. Treat the
+  deputy's journal as holding conversation content, and limit who can read it (on Linux,
+  root and the `systemd-journal`/`adm` groups).
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
   by name if the account does not exist or cannot be looked up — on macOS that account

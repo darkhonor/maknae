@@ -365,3 +365,48 @@ async fn a_megabyte_error_body_is_read_at_most_4_kib() {
         other => panic!("expected a truncated 500, got {other:?}"),
     }
 }
+
+/// A refusal is not held open by its own body: a provider that answers 400,
+/// declares a megabyte and sends 100 bytes is reported within seconds, with
+/// what arrived, not at the end of the call's whole timeout.
+#[tokio::test]
+async fn a_stalled_error_body_does_not_hold_the_refusal() {
+    fips();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let _ = s.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            1 << 20
+        );
+        let _ = s.write_all(head.as_bytes()).await;
+        let _ = s.write_all(&[b'd'; 100]).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let started = std::time::Instant::now();
+    let got = maknae_llm::chat_completion(
+        &format!("http://{addr}/v1/chat/completions"),
+        &key(),
+        &req("m"),
+        &[],
+        Duration::from_secs(20),
+        64 * 1024,
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "the refusal waited {:?} on its own body",
+        started.elapsed()
+    );
+    match got {
+        Err(CallError::Status {
+            code: 400,
+            body,
+            truncated: true,
+        }) => assert_eq!(&body[..], &[b'd'; 100][..]),
+        other => panic!("expected a truncated 400, got {other:?}"),
+    }
+}

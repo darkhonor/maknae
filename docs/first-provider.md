@@ -140,7 +140,8 @@ The intent is written before the action, every time. `content_length` on each pr
 | `maknae agent` will not start: `provider.context_tokens is required by maknae agent` | your own configuration does not declare the window | step 3's `~/.maknae` block |
 | `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171` | the next turn would exceed the window you declared | start a new conversation, or declare the larger window your model has |
 | `maknae agent: stopped:` with a connection error, on a long conversation | the daemon's prompt cap is below your loop's, so the daemon refused the frame and closed the connection | raise the daemon's `transport.prompt_max_bytes` (step 3) |
-| `maknae agent: stopped: the conversation has reached the platform's frame bound` | your own `transport.prompt_max_bytes` in `~/.maknae` is smaller than your window needs | remove it, and the loop derives its cap from `context_tokens` |
+| `maknae agent: stopped: the conversation has reached the platform's frame bound` | your own `transport.prompt_max_bytes` in `~/.maknae` is smaller than your window needs; or, with none set, the conversation's encoded size outgrew `context_tokens × 6` bytes (many small turns, or text denser than 6 bytes per token) | remove the setting, and the loop derives its cap from `context_tokens`; otherwise start a new conversation |
+| `journalctl -u maknae-egress` shows file or prompt text after `provider answered …` | some servers quote the rejected request in their error body | expected: the journal can hold up to 4 KiB of conversation content; limit who reads it (`docs/configuration.md` §6.2) |
 
 ## What stays true
 

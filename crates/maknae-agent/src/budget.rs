@@ -100,17 +100,17 @@ impl Meter {
         }
     }
 
+    /// A measured projection never falls below the bytes at the default ratio,
+    /// so a provider that under-reports usage cannot switch the meter off.
     fn projected(&self, bytes: u64) -> (u128, bool) {
+        let floor = u128::from(bytes).div_ceil(u128::from(DEFAULT_BYTES_PER_TOKEN));
         match self.last {
             Some((bl, tl)) => (
-                u128::from(tl) + u128::from(bytes.saturating_sub(bl)).div_ceil(self.ratio()),
+                (u128::from(tl) + u128::from(bytes.saturating_sub(bl)).div_ceil(self.ratio()))
+                    .max(floor),
                 false,
             ),
-            None => (
-                u128::from(PREAMBLE_ALLOWANCE_TOKENS)
-                    + u128::from(bytes).div_ceil(u128::from(DEFAULT_BYTES_PER_TOKEN)),
-                true,
-            ),
+            None => (u128::from(PREAMBLE_ALLOWANCE_TOKENS) + floor, true),
         }
     }
 
@@ -280,17 +280,13 @@ mod tests {
             warns(offset.gate(42_000 + 3 * 14_600)),
             Some((80, 25_600, false))
         );
-        let mut dense = meter(32_000, None);
-        measured(&mut dense, 0, 100);
-        measured(&mut dense, 60_000, 10_100);
+        let mut dense = meter(10_000, None);
+        measured(&mut dense, 100, 1_600);
+        measured(&mut dense, 6_100, 2_600);
         assert_eq!(
-            dense.gate(60_000 + 4 * 15_500),
-            Gate::Send(Some(Notice {
-                percent: 80,
-                tokens: 25_600,
-                budget: 32_000,
-                estimated: false
-            }))
+            warns(dense.gate(6_100 + 24_000)),
+            Some((86, 8_600, false)),
+            "6 bytes/token observed, clamped to 4, above the 7,525 floor"
         );
     }
 
@@ -318,6 +314,30 @@ mod tests {
         measured(&mut flat, 100, 1_000);
         measured(&mut flat, 6_000, 1_000);
         assert_eq!(flat.gate(6_000 + 24_000), Gate::Send(None));
+    }
+
+    #[test]
+    fn a_provider_that_under_reports_usage_cannot_switch_the_meter_off() {
+        for (name, report) in [
+            ("constant", (|_k: u64| 1_000) as fn(u64) -> u64),
+            ("falling", |k: u64| {
+                5_000u64.saturating_sub(k * 1_000).max(1)
+            }),
+            ("tiny", |_k: u64| 1),
+        ] {
+            let mut m = meter(10_000, None);
+            let mut stopped = false;
+            for k in 1..=20u64 {
+                let bytes = 6_000 * k;
+                if m.gate(bytes) == Gate::Stop {
+                    stopped = true;
+                    assert!(bytes > 4 * 10_000, "{name}: stopped early at {bytes}");
+                    break;
+                }
+                measured(&mut m, bytes, report(k));
+            }
+            assert!(stopped, "{name}: the meter never stopped");
+        }
     }
 
     #[test]

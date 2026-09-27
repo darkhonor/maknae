@@ -62,13 +62,15 @@ impl std::fmt::Debug for CallError {
 
 /// How much of a provider's error body is kept for the journal.
 pub const ERROR_BODY_MAX_BYTES: usize = 4096;
+/// How long a refusal may wait on its own body before it is reported.
+pub const ERROR_BODY_WAIT: Duration = Duration::from_secs(2);
 
 /// One non-streaming chat completion.
 ///
 /// `api_key` is `Zeroizing` and is used only as a bearer header — it is never
 /// logged, never rendered by `Debug`, and never returned in an error. A
 /// `Status` carries at most [`ERROR_BODY_MAX_BYTES`] of the error body, read
-/// within the same timeout, for the caller to journal.
+/// for at most [`ERROR_BODY_WAIT`], for the caller to journal.
 pub async fn chat_completion(
     endpoint: &str,
     api_key: &Zeroizing<String>,
@@ -115,11 +117,16 @@ pub async fn chat_completion(
         let mut resp = resp;
         let mut body = Zeroizing::new(Vec::with_capacity(ERROR_BODY_MAX_BYTES));
         let mut truncated = false;
-        while let Ok(Some(chunk)) = resp.chunk().await {
-            if take_capped(&mut body, &chunk, ERROR_BODY_MAX_BYTES) {
-                truncated = true;
-                break;
+        let read = async {
+            while let Ok(Some(chunk)) = resp.chunk().await {
+                if take_capped(&mut body, &chunk, ERROR_BODY_MAX_BYTES) {
+                    truncated = true;
+                    break;
+                }
             }
+        };
+        if tokio::time::timeout(ERROR_BODY_WAIT, read).await.is_err() {
+            truncated = true;
         }
         return Err(CallError::Status {
             code: status.as_u16(),

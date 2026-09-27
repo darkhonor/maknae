@@ -1700,6 +1700,36 @@ mod tests {
     }
 
     #[test]
+    fn the_usage_envelope_covers_the_widest_encoded_usage() {
+        let encoded = |usage| {
+            maknae_proto::encode_response_zeroizing(
+                &maknae_proto::Response {
+                    protocol_version: maknae_proto::PROTOCOL_VERSION,
+                    result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
+                        maknae_proto::PromptReply {
+                            blocks: vec![],
+                            tool_calls: vec![],
+                            usage,
+                        },
+                    )),
+                },
+                1 << 16,
+            )
+            .unwrap()
+            .len()
+        };
+        let widest = encoded(Some(maknae_proto::Usage {
+            prompt_tokens: u64::MAX,
+            completion_tokens: Some(u64::MAX),
+        }));
+        assert!(
+            widest - encoded(None) <= USAGE_ENVELOPE,
+            "{}",
+            widest - encoded(None)
+        );
+    }
+
+    #[test]
     fn outcome_for_sets_status_result_reason_and_posture_per_send_outcome() {
         let i = DurableEgressIntent {
             record: intent_record(),

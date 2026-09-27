@@ -349,7 +349,8 @@ pub fn redact(body: &mut zeroize::Zeroizing<Vec<u8>>, secret: &[u8]) {
 // no I/O, and a direct `std::fs` call here would appear in the
 // `std-fs-drift` exact inventory (which scans `std::fs` / `File::` /
 // `OpenOptions::`, so it is that class it refuses, not every conceivable
-// backend -- `tokio` is a dev-only dependency of this crate).
+// backend -- `tokio` is a dependency of this crate with the `time` feature
+// alone, and no `fs`; corrected 2026-09-28, #372: this said dev-only).
 //
 // They live HERE because this crate is linked into `bins/maknae-egress` and
 // nothing else in the workspace -- so the prompt can never reach a client
