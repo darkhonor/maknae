@@ -19,7 +19,10 @@ pub enum VaultError {
     InvalidKeyVaultPath(String),
     /// The KV secret exists but carries no such field. Names the FIELD, never
     /// the secret's contents.
-    MissingKvField { path: String, field: String },
+    MissingKvField {
+        path: String,
+        field: String,
+    },
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
@@ -36,7 +39,10 @@ pub enum VaultError {
     },
     /// A sensitive credential file has unsafe permissions (group/other access) or is a
     /// symlink — refused before reading (fail-closed).
-    InsecureCredential { path: PathBuf, detail: String },
+    InsecureCredential {
+        path: PathBuf,
+        detail: String,
+    },
     /// `maknae-io`'s anchor-relative, symlink-checked read is unavailable on this
     /// (non-Unix) target — a sensitive credential file's owner-only permissions
     /// cannot be verified, AND a plain storage read (CA pins, sealed-source
@@ -65,7 +71,10 @@ pub enum VaultError {
     /// carries the underlying detail for logging).
     Renew(String),
     /// The UDS parent directory has unsafe ownership/permissions — refused before bind.
-    InsecureSocketDir { path: PathBuf, detail: String },
+    InsecureSocketDir {
+        path: PathBuf,
+        detail: String,
+    },
     /// Binding/listening on the UDS failed (incl. a live socket already present).
     SocketBind(String),
     /// Setting the bound UDS's group ownership failed (codex round-7 P1) — the 0660
@@ -85,9 +94,17 @@ pub enum VaultError {
     Operator(String),
     /// A per-plane SecretID credential SOURCE (spec §5.1) could not be resolved (no
     /// source configured — fail-closed default) or a resolved source could not be
-    /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
-    /// or is not yet implemented on this platform/build).
+    /// read (an external unseal helper — `systemd-creds`, Keychain — failed, or is
+    /// not yet implemented on this platform/build).
     CredentialSource(String),
+    WrongAccount {
+        expected: &'static str,
+        euid: u32,
+    },
+    KeychainPointer(String),
+    Keychain {
+        status: i32,
+    },
 }
 
 impl std::fmt::Display for VaultError {
@@ -138,6 +155,21 @@ impl std::fmt::Display for VaultError {
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
             VaultError::Operator(msg) => write!(f, "operator Vault operation failed: {msg}"),
             VaultError::CredentialSource(msg) => write!(f, "credential source failed: {msg}"),
+            VaultError::WrongAccount { expected, euid } => write!(
+                f,
+                "refusing the keychain read: running as uid {euid}, not as {expected}"
+            ),
+            VaultError::KeychainPointer(msg) => write!(f, "keychain pointer: {msg}"),
+            VaultError::Keychain { status: -25293 } => write!(
+                f,
+                "keychain read refused (-25293): the keychain is locked, or this binary is not the \
+                 Developer ID-signed one the item was enrolled for (an ad-hoc or re-signed build)"
+            ),
+            VaultError::Keychain { status: -25300 } => write!(
+                f,
+                "no keychain item (-25300): this plane is not enrolled; run `sudo maknae enroll`"
+            ),
+            VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
         }
     }
 }
@@ -167,9 +199,23 @@ mod tests {
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
             VaultError::Operator("issuer/default/json: connection refused".into()),
             VaultError::CredentialSource("no daemon SecretID source configured".into()),
+            VaultError::WrongAccount {
+                expected: "_maknae",
+                euid: 501,
+            },
+            VaultError::KeychainPointer("names /tmp/x.keychain".into()),
+            VaultError::Keychain { status: -25308 },
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
         }
+    }
+
+    #[test]
+    fn the_acl_refusal_names_the_ad_hoc_case() {
+        let m = format!("{}", VaultError::Keychain { status: -25293 });
+        assert!(m.contains("ad-hoc") && m.contains("locked"), "{m}");
+        let m = format!("{}", VaultError::Keychain { status: -25300 });
+        assert!(m.contains("maknae enroll"), "{m}");
     }
 }

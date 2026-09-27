@@ -175,6 +175,10 @@ maknae-io = { path = "../maknae-io" }
 # into maknae-plane, the wrapping happens here and the adapter is borrowed from there.
 maknae-plane = { path = "../maknae-plane" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The plane SecretID read from the System keychain (#76, ADR-0018 amendment); safe API only.
+security-framework = "3"
+
 [dev-dependencies]
 # Fixtures CREATE the objects they delegate rather than borrowing a system file:
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.

@@ -5,6 +5,7 @@
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::VaultError;
+use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 /// The credential name `$CREDENTIALS_DIRECTORY` always carries for the daemon
@@ -29,11 +30,19 @@ pub enum DaemonSecretSource {
     /// systemd `$CREDENTIALS_DIRECTORY/maknaed-secret-id` — the HRoT-sealed boot path
     /// (`LoadCredential`/`SetCredentialEncrypted`), preferred whenever present.
     CredentialsDirectory(PathBuf),
-    /// A macOS Secure-Enclave-sealed blob (opt-in, no systemd on darwin).
-    SepSealed(PathBuf),
+    /// A macOS System-keychain pointer (opt-in, no systemd on darwin).
+    Keychain(PathBuf),
     /// An operator-opted-in plaintext file (`vault.insecure_plaintext_secret_path`) —
     /// the weakest posture, last resort, never a silent default.
     PlaintextPath(PathBuf),
+}
+
+/// Where the egress deputy's SecretID comes from — resolved by
+/// [`resolve_egress_secret_source`], read by `secret_io::read_egress_secret`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressSecretSource {
+    CredentialsDirectory(PathBuf),
+    Keychain(PathBuf),
 }
 
 /// Where the CLI's (`maknae`) SecretID comes from — resolved by
@@ -54,13 +63,13 @@ pub enum CliSecretSource {
 /// A small `Copy` classifier mirroring the three DAEMON source kinds — the posture
 /// record `PlaneClient::secret_source()` exposes for Task 7's audit. Both
 /// [`DaemonSecretSource`] and [`CliSecretSource`] map onto it (the CLI's three
-/// branches are the same POSTURE shape: OS-credential-store-sealed, hardware/OS
-/// enclave-sealed, or plaintext-on-disk) so the audit can reason about "is this
+/// branches are the same POSTURE shape: OS-credential-store-sealed, code-bound
+/// keychain, or plaintext-on-disk) so the audit can reason about "is this
 /// plane's SecretID sealed or plaintext" uniformly across planes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSourceKind {
     CredentialsDirectory,
-    SepSealed,
+    Keychain,
     PlaintextPath,
 }
 
@@ -70,7 +79,7 @@ impl From<&DaemonSecretSource> for CredentialSourceKind {
             DaemonSecretSource::CredentialsDirectory(_) => {
                 CredentialSourceKind::CredentialsDirectory
             }
-            DaemonSecretSource::SepSealed(_) => CredentialSourceKind::SepSealed,
+            DaemonSecretSource::Keychain(_) => CredentialSourceKind::Keychain,
             DaemonSecretSource::PlaintextPath(_) => CredentialSourceKind::PlaintextPath,
         }
     }
@@ -79,11 +88,8 @@ impl From<&DaemonSecretSource> for CredentialSourceKind {
 impl From<&CliSecretSource> for CredentialSourceKind {
     fn from(src: &CliSecretSource) -> Self {
         match src {
-            // systemd-creds --user is an OS-managed credential store, same posture
-            // family as the daemon's $CREDENTIALS_DIRECTORY.
             CliSecretSource::UserCreds(_) => CredentialSourceKind::CredentialsDirectory,
-            // Keychain is OS/hardware-backed secure storage, same posture family as SEP.
-            CliSecretSource::Keychain => CredentialSourceKind::SepSealed,
+            CliSecretSource::Keychain => CredentialSourceKind::Keychain,
             CliSecretSource::ResidualFile(_) => CredentialSourceKind::PlaintextPath,
         }
     }
@@ -96,18 +102,18 @@ impl From<&CliSecretSource> for CredentialSourceKind {
 ///    and non-empty — the systemd HRoT-sealed boot path; ALWAYS preferred when
 ///    present, regardless of what else is configured. `Some("")`, an exported
 ///    but empty variable, is a REFUSAL, never a fallthrough to 2 or 3).
-/// 2. The SEP-sealed blob (if `sep_blob` is `Some`).
+/// 2. The System-keychain pointer (macOS, if keychain_pointer is Some).
 /// 3. The configured plaintext path (if `insecure_plaintext_secret_path` is `Some`).
 /// 4. Else `Err` — fail closed. There is no silent plaintext default.
 pub fn resolve_daemon_secret_source(
     credentials_dir_env: Option<&str>,
-    sep_blob: Option<&Path>,
+    keychain_pointer: Option<&Path>,
     insecure_plaintext_secret_path: Option<&Path>,
 ) -> Result<DaemonSecretSource, VaultError> {
     // An exported-but-empty $CREDENTIALS_DIRECTORY is a REFUSAL, not a
     // fallthrough: it must resolve neither to `/maknaed-secret-id` nor —
-    // silently — to the SEP or plaintext arm below (self-review round 4 caught
-    // this as a demotion). The egress resolver refuses the same input.
+    // silently to a weaker arm (self-review round 4 caught this as a
+    // demotion). The egress resolver refuses the same input.
     match credentials_dir_env {
         Some("") => {
             return Err(VaultError::CredentialSource(
@@ -123,34 +129,35 @@ pub fn resolve_daemon_secret_source(
         }
         None => {}
     }
-    if let Some(blob) = sep_blob {
-        return Ok(DaemonSecretSource::SepSealed(blob.to_path_buf()));
+    if let Some(p) = keychain_pointer {
+        return Ok(DaemonSecretSource::Keychain(p.to_path_buf()));
     }
     if let Some(path) = insecure_plaintext_secret_path {
         return Ok(DaemonSecretSource::PlaintextPath(path.to_path_buf()));
     }
     Err(VaultError::CredentialSource(
-        "no daemon SecretID source configured (spec §5.1): set $CREDENTIALS_DIRECTORY, \
-         provide a SEP-sealed blob, or configure vault.insecure_plaintext_secret_path"
+        "no daemon SecretID source configured: set $CREDENTIALS_DIRECTORY, enroll the \
+         keychain item (macOS), or configure vault.insecure_plaintext_secret_path"
             .to_string(),
     ))
 }
 
-/// Resolve the egress deputy's SecretID source (#240b). ONE source and no
-/// fallthrough: `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, else a named
-/// refusal. There is deliberately no SEP arm and no plaintext arm — the deputy
-/// holds the provider credential, and its custody on macOS is #227's to
-/// design, stated as weaker rather than papered over with a plaintext file.
+/// The deputy's SecretID source: the unit's credential, else the macOS keychain pointer (#76). No plaintext arm.
 pub fn resolve_egress_secret_source(
     credentials_dir_env: Option<&str>,
-) -> Result<PathBuf, VaultError> {
-    match credentials_dir_env {
-        Some(dir) if !dir.is_empty() => {
-            Ok(Path::new(dir).join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME))
-        }
-        _ => Err(VaultError::CredentialSource(
-            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset — the unit's \
-             LoadCredentialEncrypted= is the only source (#240b; macOS custody is #227)"
+    keychain_pointer: Option<&Path>,
+) -> Result<EgressSecretSource, VaultError> {
+    match (credentials_dir_env, keychain_pointer) {
+        (Some(""), _) => Err(VaultError::CredentialSource(
+            "$CREDENTIALS_DIRECTORY is exported but empty — refusing rather than falling through"
+                .to_string(),
+        )),
+        (Some(dir), _) => Ok(EgressSecretSource::CredentialsDirectory(
+            Path::new(dir).join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME),
+        )),
+        (None, Some(p)) => Ok(EgressSecretSource::Keychain(p.to_path_buf())),
+        (None, None) => Err(VaultError::CredentialSource(
+            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset and no keychain pointer is enrolled"
                 .to_string(),
         )),
     }
@@ -183,27 +190,72 @@ pub fn resolve_cli_secret_source(
     ))
 }
 
+/// `$CREDENTIALS_DIRECTORY`: unset is `None`; set but not UTF-8 refuses rather
+/// than reading as unset (#76 codex r3).
+pub fn credentials_directory_env() -> Result<Option<String>, VaultError> {
+    classify(std::env::var("CREDENTIALS_DIRECTORY"))
+}
+
+fn classify(r: Result<String, VarError>) -> Result<Option<String>, VaultError> {
+    match r {
+        Ok(s) => Ok(Some(s)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(VaultError::CredentialSource(
+            "$CREDENTIALS_DIRECTORY is set but not UTF-8 — refusing".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn classify_ok_is_some() {
+        assert_eq!(
+            classify(Ok("/run/creds".to_string())).unwrap(),
+            Some("/run/creds".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_not_present_is_none() {
+        assert_eq!(classify(Err(VarError::NotPresent)).unwrap(), None);
+    }
+
+    #[test]
+    fn classify_not_unicode_refuses() {
+        let bytes = OsString::from_vec(vec![0xff]);
+        assert!(matches!(
+            classify(Err(VarError::NotUnicode(bytes))),
+            Err(VaultError::CredentialSource(_))
+        ));
+    }
 
     // ---- egress resolution (#240b) -------------------------------------------
 
-    /// The deputy has ONE source — the unit's LoadCredentialEncrypted= — and
-    /// no fallthrough. An unset or empty $CREDENTIALS_DIRECTORY is a named
-    /// refusal, never a plaintext default (macOS custody is #227's).
     #[test]
-    fn the_egress_secret_comes_from_credentials_directory_or_nowhere() {
+    fn the_egress_secret_comes_from_credentials_directory_then_the_keychain() {
+        let ptr = Path::new("/etc/maknae/egress/maknae-egress-secret-id.keychain");
         assert_eq!(
-            resolve_egress_secret_source(Some("/run/credentials/maknae-egress.service")).unwrap(),
-            PathBuf::from("/run/credentials/maknae-egress.service/maknae-egress-secret-id")
+            resolve_egress_secret_source(Some("/run/credentials/maknae-egress.service"), Some(ptr))
+                .unwrap(),
+            EgressSecretSource::CredentialsDirectory(PathBuf::from(
+                "/run/credentials/maknae-egress.service/maknae-egress-secret-id"
+            ))
+        );
+        assert_eq!(
+            resolve_egress_secret_source(None, Some(ptr)).unwrap(),
+            EgressSecretSource::Keychain(ptr.to_path_buf())
         );
         assert!(matches!(
-            resolve_egress_secret_source(None),
+            resolve_egress_secret_source(None, None),
             Err(VaultError::CredentialSource(_))
         ));
         assert!(matches!(
-            resolve_egress_secret_source(Some("")),
+            resolve_egress_secret_source(Some(""), Some(ptr)),
             Err(VaultError::CredentialSource(_))
         ));
     }
@@ -228,26 +280,20 @@ mod tests {
     fn daemon_no_source_fails_closed() {
         assert!(resolve_daemon_secret_source(None, None, None).is_err());
         // An exported-but-empty $CREDENTIALS_DIRECTORY is a refusal — and NOT
-        // a demotion to the SEP or plaintext arm when those are available
+        // a demotion to the keychain or plaintext arm when those are available
         // (#240b, self-review round 4).
         assert!(resolve_daemon_secret_source(Some(""), None, None).is_err());
         assert!(matches!(
-            resolve_daemon_secret_source(Some(""), Some(Path::new("/sep")), Some(Path::new("/x"))),
+            resolve_daemon_secret_source(Some(""), Some(Path::new("/k")), Some(Path::new("/x"))),
             Err(VaultError::CredentialSource(_))
         ));
     }
 
-    /// Precedence, not fallthrough: when BOTH CredentialsDirectory and SEP are
-    /// available, CredentialsDirectory wins — SEP is never consulted (renamed from
-    /// `daemon_sealed_never_falls_through`, round-1 SF7: that name implied a
-    /// fallthrough-on-failure guarantee this test doesn't make; it only proves
-    /// ordering among available sources. The real no-fallthrough control lives in
-    /// `secret_io.rs`'s `read_daemon_secret` tests.)
     #[test]
-    fn daemon_precedence_credentials_over_sep() {
+    fn daemon_precedence_credentials_over_keychain() {
         let s = resolve_daemon_secret_source(
             Some("/run/credentials/maknaed.service"),
-            Some(Path::new("/sep/blob")),
+            Some(Path::new("/k/ptr")),
             None,
         )
         .unwrap();
@@ -255,9 +301,9 @@ mod tests {
     }
 
     #[test]
-    fn daemon_sep_used_when_no_credentials_directory() {
-        let s = resolve_daemon_secret_source(None, Some(Path::new("/sep/blob")), None).unwrap();
-        assert_eq!(s, DaemonSecretSource::SepSealed(PathBuf::from("/sep/blob")));
+    fn daemon_keychain_used_when_no_credentials_directory() {
+        let s = resolve_daemon_secret_source(None, Some(Path::new("/k/ptr")), None).unwrap();
+        assert_eq!(s, DaemonSecretSource::Keychain(PathBuf::from("/k/ptr")));
     }
 
     #[test]
@@ -270,23 +316,23 @@ mod tests {
         );
     }
 
-    /// Mutation probe: swapping the SEP/plaintext order arms would make this pass
-    /// with the WRONG variant. Explicitly assert the variant, not just "is Ok".
+    /// Mutation probe: swapping the keychain/plaintext order arms would make this
+    /// pass with the WRONG variant. Explicitly assert the variant, not just "is Ok".
     #[test]
-    fn daemon_order_is_credentials_then_sep_then_plaintext() {
+    fn daemon_order_is_credentials_then_keychain_then_plaintext() {
         assert!(matches!(
             resolve_daemon_secret_source(
                 Some("/run/creds"),
-                Some(Path::new("/sep")),
+                Some(Path::new("/k")),
                 Some(Path::new("/plain"))
             )
             .unwrap(),
             DaemonSecretSource::CredentialsDirectory(_)
         ));
         assert!(matches!(
-            resolve_daemon_secret_source(None, Some(Path::new("/sep")), Some(Path::new("/plain")))
+            resolve_daemon_secret_source(None, Some(Path::new("/k")), Some(Path::new("/plain")))
                 .unwrap(),
-            DaemonSecretSource::SepSealed(_)
+            DaemonSecretSource::Keychain(_)
         ));
         assert!(matches!(
             resolve_daemon_secret_source(None, None, Some(Path::new("/plain"))).unwrap(),
@@ -343,8 +389,8 @@ mod tests {
             CredentialSourceKind::CredentialsDirectory
         );
         assert_eq!(
-            CredentialSourceKind::from(&DaemonSecretSource::SepSealed(PathBuf::from("/x"))),
-            CredentialSourceKind::SepSealed
+            CredentialSourceKind::from(&DaemonSecretSource::Keychain(PathBuf::from("/x"))),
+            CredentialSourceKind::Keychain
         );
         assert_eq!(
             CredentialSourceKind::from(&DaemonSecretSource::PlaintextPath(PathBuf::from("/x"))),
@@ -360,7 +406,7 @@ mod tests {
         );
         assert_eq!(
             CredentialSourceKind::from(&CliSecretSource::Keychain),
-            CredentialSourceKind::SepSealed
+            CredentialSourceKind::Keychain
         );
         assert_eq!(
             CredentialSourceKind::from(&CliSecretSource::ResidualFile(PathBuf::from("/x"))),

@@ -20,6 +20,8 @@ mod error;
 mod fips;
 mod fips_glue;
 mod http;
+mod keychain;
+mod keychain_policy;
 mod operator;
 mod plane;
 mod plane_verify;
@@ -56,6 +58,10 @@ pub use egress::{
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+pub use keychain_policy::{
+    daemon_keychain_pointer, gate, parse_pointer, read_gated, KeychainItem, KeychainPlane,
+    KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+};
 #[cfg(unix)]
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
@@ -64,9 +70,10 @@ pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_
 pub use peercred::PeerCreds;
 pub use plane::Plane;
 pub use secret_source::{
-    resolve_cli_secret_source, resolve_daemon_secret_source, resolve_egress_secret_source,
-    CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
+    resolve_egress_secret_source, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
+    EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
 };
 #[cfg(unix)]
 pub use stream::{

@@ -42,7 +42,7 @@ pub use handler::{
 pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
-    determine, CredentialSource, Posture, PostureMarker, MECHANISM_SEP, MECHANISM_TPM2,
+    determine, CredentialSource, Posture, PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2,
 };
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, PlaneAccept, WhereCtx,

@@ -15,7 +15,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use rustls::sign::CertifiedKey;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -135,8 +135,8 @@ pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// group/other access BEFORE reading — the SecretID must never be world-readable
 /// (maknae-config gates `maknae.yaml` + the dir, but not files we read directly).
 /// `pub(crate)`: `secret_io.rs`'s PLAINTEXT read branches route through this SAME
-/// gate (the sealed branches — `$CREDENTIALS_DIRECTORY`, SEP — do not, since
-/// systemd/SEP produce their own `0400` artifacts).
+/// gate (the sealed `$CREDENTIALS_DIRECTORY` branch does not, since systemd
+/// produces its own `0400` artifacts).
 pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
@@ -182,21 +182,6 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
                 source: std::io::Error::other(e.to_string()),
             })
     }
-}
-
-/// The daemon's SEP-sealed blob path, IF one is present — macOS only (there is no
-/// systemd on darwin, so `$CREDENTIALS_DIRECTORY` never applies there; a SEP blob is
-/// the darwin equivalent). Observing "is it present" here (rather than inside the
-/// PURE `resolve_daemon_secret_source`) is what keeps that resolver pure/testable —
-/// this is the one spot that touches the filesystem to decide what to hand it.
-#[cfg(target_os = "macos")]
-fn daemon_sep_blob_path(dir: &Path) -> Option<PathBuf> {
-    let p = dir.join("maknaed-secret-id.sep");
-    p.is_file().then_some(p)
-}
-#[cfg(not(target_os = "macos"))]
-fn daemon_sep_blob_path(_dir: &Path) -> Option<PathBuf> {
-    None
 }
 
 /// Whether this target has a user-scoped `systemd-creds` credential file for the
@@ -344,7 +329,7 @@ impl PlaneClient {
     /// **Dispatches on `plane` — the two planes do NOT share a resolver (round-1
     /// C1 regression guard):**
     /// - `Plane::Kernel` → [`resolve_daemon_secret_source`]: `$CREDENTIALS_DIRECTORY`
-    ///   (if set) → a SEP-sealed blob (macOS only) → `vault.insecure_plaintext_secret_path`
+    ///   (if set) → the System-keychain pointer (macOS only) → `vault.insecure_plaintext_secret_path`
     ///   (from config) → fail closed. This is EXACTLY the daemon's pre-existing boot
     ///   path when `$CREDENTIALS_DIRECTORY` is set — that env var, when present,
     ///   ALWAYS wins here, never falling through to a CLI-shaped order.
@@ -364,9 +349,17 @@ impl PlaneClient {
         let cfg = vault_config_from_document(doc)?;
         let (secret_id, kind) = match plane {
             Plane::Kernel => {
+                let creds = crate::secret_source::credentials_directory_env()?;
+                let pointer = match creds {
+                    None => crate::keychain::observe_pointer(
+                        &crate::keychain_policy::daemon_keychain_dir(dir),
+                        crate::KeychainPlane::Daemon,
+                    )?,
+                    Some(_) => None,
+                };
                 let src = resolve_daemon_secret_source(
-                    std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
-                    daemon_sep_blob_path(dir).as_deref(),
+                    creds.as_deref(),
+                    pointer.as_deref(),
                     cfg.insecure_plaintext_secret_path.as_deref(),
                 )?;
                 let secret = read_daemon_secret(&src)?;
@@ -456,7 +449,7 @@ impl PlaneClient {
 
     /// This client's resolved SecretID credential-source posture (Task 7's audit
     /// seam, round-1 C2). Reflects whichever source [`Self::from_document`] actually
-    /// used — `CredentialsDirectory`/`SepSealed` are the sealed postures,
+    /// used — `CredentialsDirectory` is the sealed posture, `Keychain` is code-bound,
     /// `PlaintextPath` the weakest (also the default for a client built directly via
     /// [`Self::from_document_with_secret`], which has no resolution info to report).
     pub fn secret_source(&self) -> CredentialSourceKind {
@@ -1157,5 +1150,195 @@ mod tests {
             }
             Err(e) => panic!("unexpected error proving the CLI plane uses its own order: {e:?}"),
         }
+    }
+
+    /// #76: the daemon's keychain pointer is found under private/ and wins over the plaintext arm.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_finds_the_pointer_under_private_and_prefers_it() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-kcpriv-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fx = DispatchFixture::new(
+            "kernel-keychain-private",
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        std::fs::create_dir_all(fx.0.join("private")).unwrap();
+        std::fs::write(
+            fx.0.join("private")
+                .join(crate::KeychainPlane::Daemon.pointer_file()),
+            "",
+        )
+        .unwrap();
+
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        let _ = std::fs::remove_file(&plain);
+
+        match result {
+            Err(VaultError::WrongAccount {
+                expected: "_maknae",
+                ..
+            }) => {}
+            Err(e) => panic!(
+                "expected WrongAccount(_maknae) proving the pointer was found under \
+                 private/ and beat the plaintext arm, got a different error: {e}"
+            ),
+            Ok(_) => panic!(
+                "expected WrongAccount(_maknae); got Ok — the pointer under private/ \
+                 was not found (or lost to the plaintext arm)"
+            ),
+        }
+    }
+
+    /// #76: a broken keychain pointer refuses; it never downgrades to the plaintext arm.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_symlinked_pointer_over_plaintext() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-kclink-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let fx = DispatchFixture::new(
+            "kernel-keychain-symlink",
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        std::fs::create_dir_all(fx.0.join("private")).unwrap();
+        std::os::unix::fs::symlink(
+            fx.0.join("private").join("gone"),
+            fx.0.join("private")
+                .join(crate::KeychainPlane::Daemon.pointer_file()),
+        )
+        .unwrap();
+
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        let _ = std::fs::remove_file(&plain);
+
+        match result {
+            Err(VaultError::KeychainPointer(_)) => {}
+            Err(e) => panic!("expected KeychainPointer, got {e}"),
+            Ok(c) => panic!("downgraded to {:?}", c.secret_source()),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kernel_outcome_with_private(
+        tag: &str,
+        creds: Option<&str>,
+        wire_private: impl FnOnce(&Path),
+    ) -> Result<CredentialSourceKind, VaultError> {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let plain = std::env::temp_dir().join(format!("mv-dispatch-{tag}-{}", std::process::id()));
+        std::fs::write(&plain, "plaintext-secret-value").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let fx = DispatchFixture::new(
+            tag,
+            &format!(
+                "  insecure_plaintext_secret_path: {}\n",
+                plain.to_string_lossy()
+            ),
+        );
+        wire_private(&fx.0);
+        match creds {
+            Some(c) => std::env::set_var("CREDENTIALS_DIRECTORY", c),
+            None => std::env::remove_var("CREDENTIALS_DIRECTORY"),
+        }
+        let doc = fx.doc();
+        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Kernel);
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let _ = std::fs::remove_file(&plain);
+        result.map(|c| c.secret_source())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn valid_pointer_in(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(crate::KeychainPlane::Daemon.pointer_file()), "").unwrap();
+    }
+
+    /// #76: a dangling `private` symlink refuses; it never downgrades to plaintext.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_dangling_private_symlink() {
+        let got = kernel_outcome_with_private("kc-private-dangling", None, |cfg| {
+            std::os::unix::fs::symlink(cfg.join("gone"), cfg.join("private")).unwrap();
+        });
+        assert!(
+            matches!(got, Err(VaultError::KeychainPointer(_))),
+            "{got:?}"
+        );
+    }
+
+    /// #76: a `private` symlink to a real directory is refused, not followed.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_refuses_a_private_symlink_to_a_real_dir() {
+        let got = kernel_outcome_with_private("kc-private-linked", None, |cfg| {
+            valid_pointer_in(&cfg.join("elsewhere"));
+            std::os::unix::fs::symlink(cfg.join("elsewhere"), cfg.join("private")).unwrap();
+        });
+        assert!(
+            matches!(got, Err(VaultError::KeychainPointer(_))),
+            "{got:?}"
+        );
+    }
+
+    /// #76: with `private/` absent the plaintext arm is reached.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_without_private_reaches_plaintext() {
+        let got = kernel_outcome_with_private("kc-private-absent", None, |_| {});
+        assert!(
+            matches!(got, Ok(CredentialSourceKind::PlaintextPath)),
+            "{got:?}"
+        );
+    }
+
+    /// #76: a set `$CREDENTIALS_DIRECTORY` wins over a broken pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_credentials_directory_wins_over_a_broken_pointer() {
+        let creds =
+            std::env::temp_dir().join(format!("mv-dispatch-kc-creds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&creds);
+        std::fs::create_dir_all(&creds).unwrap();
+        std::fs::write(creds.join("maknaed-secret-id"), "kernel-secret-value").unwrap();
+        let got = kernel_outcome_with_private("kc-creds-wins", creds.to_str(), |cfg| {
+            std::fs::create_dir_all(
+                cfg.join("private")
+                    .join(crate::KeychainPlane::Daemon.pointer_file()),
+            )
+            .unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&creds);
+        assert!(
+            matches!(got, Ok(CredentialSourceKind::CredentialsDirectory)),
+            "{got:?}"
+        );
+    }
+
+    /// #76: an exported-but-empty `$CREDENTIALS_DIRECTORY` refuses even beside a valid pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn kernel_dispatch_empty_credentials_directory_still_refuses() {
+        let got = kernel_outcome_with_private("kc-creds-empty", Some(""), |cfg| {
+            valid_pointer_in(&cfg.join("private"));
+        });
+        assert!(
+            matches!(got, Err(VaultError::CredentialSource(_))),
+            "{got:?}"
+        );
     }
 }

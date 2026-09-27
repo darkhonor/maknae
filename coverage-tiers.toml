@@ -115,6 +115,7 @@ files = [
   # [t1].files ONLY (own 95% floor; NOT ratchet_cohort). The I/O half
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
+  "crates/maknae-vault/src/keychain_policy.rs",
   # #240b: the deputy's per-read token lifecycle — login/read/revoke composed
   # over the EgressOps seam; a failed revoke is a failed probe and a withheld
   # secret. The vaultrs half is egress.rs (T3).
@@ -490,6 +491,10 @@ why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O 
 [[t3]]
 path = "crates/maknae-vault/src/secret_io.rs"
 why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
+
+[[t3]]
+path = "crates/maknae-vault/src/keychain.rs"
+why = "#76: the System-keychain read through Security.framework — the ACL, the item and the interaction lock need a real keychain; the ACL refusal, the absent item and the account gate are tested on darwin, the decisions are keychain_policy.rs (T1). Mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/operator.rs"

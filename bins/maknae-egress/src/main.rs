@@ -90,10 +90,11 @@ fn main() {
 
     // The third plane's credential (#240b): the RoleID and the Vault CA sit
     // beside the bounds file under `egress/`, the SecretID comes from
-    // $CREDENTIALS_DIRECTORY (the unit's LoadCredentialEncrypted=). Resolved
-    // ONCE, fail-closed, and the SecretID is `Zeroizing` from the read. The
-    // AppRole mount defaults to the packaged Terraform's, resolved HERE rather
-    // than in the config crate so there is one place for that default.
+    // $CREDENTIALS_DIRECTORY on Linux, the System keychain on macOS (#76).
+    // Resolved ONCE, fail-closed, and the SecretID is `Zeroizing` from the
+    // read. The AppRole mount defaults to the packaged Terraform's, resolved
+    // HERE rather than in the config crate so there is one place for that
+    // default.
     let egress_dir = bounds_path
         .parent()
         .map(|p| p.join("egress"))
@@ -102,10 +103,14 @@ fn main() {
         .approle_mount
         .clone()
         .unwrap_or_else(|| maknae_vault::DEFAULT_APPROLE_MOUNT.to_string());
+    let credentials_dir = match maknae_vault::credentials_directory_env() {
+        Ok(c) => c,
+        Err(e) => fail(format!("egress credential: {e}")),
+    };
     let auth = match maknae_vault::load_egress_auth(
         &egress_dir,
         approle_mount,
-        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+        credentials_dir.as_deref(),
     ) {
         Ok(a) => a,
         Err(e) => fail(format!("egress credential: {e}")),
