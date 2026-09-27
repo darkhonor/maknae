@@ -1010,6 +1010,7 @@ mod tests {
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
             reasoning_effort: None,
+            output_tokens_field: None,
         }
     }
 

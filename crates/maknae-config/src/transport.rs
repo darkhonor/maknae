@@ -18,13 +18,13 @@ pub(crate) const TRANSPORT_KEYS: [&str; 5] = [
 ];
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 64;
-const DEFAULT_PROMPT_MAX_BYTES: usize = 65536;
+const DEFAULT_PROMPT_MAX_BYTES: usize = 1_048_576;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
 
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
-const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 65_536..=1_048_576;
+const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 65_536..=16_777_216;
 /// The ceiling on both transport timeouts. Named and exported because the
 /// shipped units' stop timeouts are derived from it (`maknae-kernel`'s
 /// shutdown-chain test evaluates the handler drain at this ceiling too).
@@ -222,7 +222,7 @@ mod tests {
     fn defaults_when_absent() {
         let c = transport_from_section(None).unwrap();
         assert_eq!(c.max_connections, 64);
-        assert_eq!(c.prompt_max_bytes, 65536);
+        assert_eq!(c.prompt_max_bytes, 1_048_576);
         assert_eq!(c.handshake_timeout_ms, 5000);
         assert_eq!(c.read_timeout_ms, 5000);
         assert_eq!(
@@ -236,7 +236,7 @@ mod tests {
         let v = crate::Value::Map(vec![]);
         let c = transport_from_section(Some(&v)).unwrap();
         assert_eq!(c.max_connections, 64);
-        assert_eq!(c.prompt_max_bytes, 65536);
+        assert_eq!(c.prompt_max_bytes, 1_048_576);
         assert_eq!(c.handshake_timeout_ms, 5000);
         assert_eq!(c.read_timeout_ms, 5000);
         assert_eq!(
@@ -290,16 +290,16 @@ mod tests {
     }
 
     #[test]
-    fn prompt_max_bytes_defaults_to_64_kib_and_is_bounded() {
-        assert_eq!(TransportConfig::default().prompt_max_bytes, 65_536);
-        for ok in [65_536, 1_048_576] {
+    fn prompt_max_bytes_defaults_to_1_mib_and_is_bounded() {
+        assert_eq!(TransportConfig::default().prompt_max_bytes, 1_048_576);
+        for ok in [65_536, 1_048_576, 16_777_216] {
             let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(ok))]);
             assert_eq!(
                 transport_from_section(Some(&v)).unwrap().prompt_max_bytes,
                 ok as usize
             );
         }
-        for bad in [65_535, 1_048_577] {
+        for bad in [65_535, 16_777_217] {
             let v = crate::Value::Map(vec![("prompt_max_bytes".into(), crate::Value::Int(bad))]);
             assert!(matches!(
                 transport_from_section(Some(&v)),
@@ -326,7 +326,7 @@ mod tests {
     fn rejects_oversize_frame_cap() {
         let v = crate::Value::Map(vec![(
             "prompt_max_bytes".into(),
-            crate::Value::Int(2 * 1024 * 1024),
+            crate::Value::Int(32 * 1024 * 1024),
         )]);
         assert!(transport_from_section(Some(&v)).is_err());
     }
@@ -353,7 +353,7 @@ mod tests {
     fn rejects_prompt_max_bytes_above_ceiling() {
         let v = crate::Value::Map(vec![(
             "prompt_max_bytes".into(),
-            crate::Value::Int(1_048_577),
+            crate::Value::Int(16_777_217),
         )]);
         assert!(matches!(
             transport_from_section(Some(&v)),

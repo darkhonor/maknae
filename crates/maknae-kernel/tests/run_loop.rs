@@ -767,7 +767,9 @@ async fn a_prompt_class_frame_uses_the_prompt_cap() {
             .any(|r| r.event == "request" && r.action == "session.prompt"),
         "{recs:#?}"
     );
-    let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
+    let mut narrow = default_cfg();
+    narrow.prompt_max_bytes = 65_536;
+    let (recs, responded) = serve_raw(raw_frame(3, &body), narrow).await;
     assert!(!responded);
     assert!(denied_with(&recs, "frame oversize"), "{recs:#?}");
 }
