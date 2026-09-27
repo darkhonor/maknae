@@ -54,9 +54,7 @@ rpassword = "7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The CLI's login-Keychain-backed SecretID seal (spec §6.3) and the enroll helper's
-# macOS capability probe (Keychain write/read round-trip, spec §4.1 step 1). The
-# daemon-side SEP envelope seal (spec §6.2) is a documented stub this increment —
-# see `enroll/mod.rs`'s `seal_daemon_secret_macos`. PR-J1 Task 8.
+# macOS capability probe (Keychain write/read round-trip, spec §4.1 step 1). PR-J1 Task 8.
 security-framework = "3"
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.

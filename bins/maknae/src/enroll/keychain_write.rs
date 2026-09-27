@@ -195,6 +195,139 @@ pub(crate) async fn seal_secret_macos(
     }
 }
 
+#[cfg(target_os = "macos")]
+async fn codesign_verify(path: &str, req: &str) -> Result<Option<String>, EnrollError> {
+    let o = run(CODESIGN, &["--verify", "--strict", "-R", req, path]).await?;
+    Ok((!o.status.success()).then(|| {
+        format!(
+            "codesign --verify exited {:?}: {}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        )
+    }))
+}
+
+#[cfg(target_os = "macos")]
+struct Display {
+    requirement: String,
+    details: String,
+    entitlements: String,
+}
+
+#[cfg(target_os = "macos")]
+async fn display(path: &str) -> Result<Display, String> {
+    let req = run(CODESIGN, &["-d", "-r-", path])
+        .await
+        .map_err(|e| e.to_string())?;
+    let dv = run(CODESIGN, &["-dv", path])
+        .await
+        .map_err(|e| e.to_string())?;
+    let ents = run(CODESIGN, &["-d", "--entitlements", "-", "--xml", path])
+        .await
+        .map_err(|e| e.to_string())?;
+    for (what, o) in [("-d -r-", &req), ("-dv", &dv), ("-d --entitlements", &ents)] {
+        if !o.status.success() {
+            return Err(format!(
+                "codesign {what} exited {:?}: {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+        }
+    }
+    Ok(Display {
+        requirement: String::from_utf8_lossy(&req.stdout).into_owned(),
+        details: String::from_utf8_lossy(&dv.stderr).into_owned(),
+        entitlements: String::from_utf8_lossy(&ents.stdout).into_owned(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn own_team() -> Result<String, EnrollError> {
+    let me = std::env::current_exe().map_err(|e| EnrollError::Command {
+        program: "current_exe".to_string(),
+        detail: e.to_string(),
+    })?;
+    let me_s = me.to_string_lossy().into_owned();
+    let refuse = |reason: String| EnrollError::NotDeveloperIdSigned {
+        binary: me_s.clone(),
+        reason,
+    };
+    let d = display(&me_s).await.map_err(refuse)?;
+    let team = parse_team(&d.details)
+        .ok_or_else(|| refuse("no team identifier".to_string()))?
+        .to_string();
+    if let Some(why) = codesign_verify(&me_s, &anchor_requirement(&team)).await? {
+        return Err(refuse(why));
+    }
+    check_runtime_and_entitlements(&d.details, &d.entitlements).map_err(refuse)?;
+    Ok(team)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn verify_release(
+    binary: &'static str,
+    plane: KeychainPlane,
+    team: &str,
+) -> Result<(), EnrollError> {
+    let refuse = |reason: String| EnrollError::NotDeveloperIdSigned {
+        binary: binary.to_string(),
+        reason,
+    };
+    if let Some(why) = codesign_verify(binary, &requirement(plane.service(), team)).await? {
+        return Err(refuse(why));
+    }
+    let d = display(binary).await.map_err(refuse)?;
+    if !embedded_requirement_is_strong(&d.requirement, plane.service(), team) {
+        return Err(refuse("its embedded designated requirement does not pin the Developer ID chain and team; the keychain ACL records that requirement".to_string()));
+    }
+    check_runtime_and_entitlements(&d.details, &d.entitlements).map_err(refuse)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn check_install_path(binary: &'static str) -> Result<(), EnrollError> {
+    use maknae_io::{open_anchor, AnchorRequired, StrategyPref, TargetRequired};
+    use std::path::Path;
+    let refuse = |path: &Path, detail: String| EnrollError::NotRootInstalled {
+        path: path.display().to_string(),
+        detail,
+    };
+    let root_only = AnchorRequired {
+        owner: Some(0),
+        mode_mask: Some(0o022),
+    };
+    let bin = Path::new(binary);
+    let dir = bin
+        .parent()
+        .ok_or_else(|| refuse(bin, "no parent directory".to_string()))?;
+    let name = bin
+        .file_name()
+        .ok_or_else(|| refuse(bin, "no file name".to_string()))?;
+    let mut chain: Vec<&Path> = dir.ancestors().filter(|a| a.parent().is_some()).collect();
+    chain.reverse();
+    let mut last = None;
+    for d in chain {
+        last = Some(
+            open_anchor(d, root_only.clone(), StrategyPref::Auto)
+                .map_err(|e| refuse(d, e.to_string()))?,
+        );
+    }
+    let anchor = last.ok_or_else(|| refuse(dir, "no directory to anchor".to_string()))?;
+    anchor
+        .read(
+            Path::new(name),
+            None,
+            TargetRequired {
+                owner: Some(0),
+                mode_mask: Some(0o022),
+                nlink_exactly_one: true,
+                regular_file: true,
+                max_bytes: Some(1 << 30),
+            },
+        )
+        .map_err(|e| refuse(bin, e.to_string()))?;
+    Ok(())
+}
+
 pub(crate) fn embedded_requirement_is_strong(display: &str, identifier: &str, team: &str) -> bool {
     let canonical = |t: &str| {
         format!(
