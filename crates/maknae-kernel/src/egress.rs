@@ -27,6 +27,8 @@ pub struct EgressRequest {
     pub key_field: String,
     /// #242: the registry's reasoning level, carried per request like `model`.
     pub reasoning_effort: Option<String>,
+    pub output_tokens: Option<u64>,
+    pub output_tokens_field: Option<maknae_proto::OutputTokensField>,
     pub conversation: String,
     pub turns: Vec<Turn>,
 }
@@ -37,7 +39,12 @@ impl EgressRequest {
         destination: String,
         conversation: String,
         turns: Vec<Turn>,
+        output_tokens: Option<u64>,
     ) -> Self {
+        let output_tokens_field = output_tokens.map(|_| match p.output_tokens_field.as_deref() {
+            Some("max_tokens") => maknae_proto::OutputTokensField::MaxTokens,
+            _ => maknae_proto::OutputTokensField::MaxCompletionTokens,
+        });
         EgressRequest {
             destination,
             endpoint: p.endpoint.clone(),
@@ -45,6 +52,8 @@ impl EgressRequest {
             key_vault_path: p.key_vault_path.clone(),
             key_field: p.key_field.clone(),
             reasoning_effort: p.reasoning_effort.clone(),
+            output_tokens,
+            output_tokens_field,
             conversation,
             turns,
         }
@@ -485,6 +494,7 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
 pub enum SendOutcome {
     Sent {
         reply_length: u64,
+        usage: Option<maknae_proto::Usage>,
     },
     Failed,
     DeadlineExpired,
@@ -495,6 +505,7 @@ pub enum SendOutcome {
     LandedUndelivered {
         reply_length: u64,
         refusal: ReplyRefusal,
+        usage: Option<maknae_proto::Usage>,
     },
 }
 
@@ -516,8 +527,12 @@ pub fn outcome_for(
     let mut r = intent.record.clone();
     r.seq = seq;
     r.ts = ts;
+    let usage = match &outcome {
+        SendOutcome::Sent { usage, .. } | SendOutcome::LandedUndelivered { usage, .. } => *usage,
+        _ => None,
+    };
     let (status, reply_length, result, reason, posture) = match outcome {
-        SendOutcome::Sent { reply_length } => (
+        SendOutcome::Sent { reply_length, .. } => (
             EgressStatus::Sent,
             Some(reply_length),
             "permit",
@@ -550,6 +565,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::Oversize,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -562,6 +578,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::NonText,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -572,6 +589,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::Empty,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -587,6 +605,7 @@ pub fn outcome_for(
         SendOutcome::LandedUndelivered {
             reply_length,
             refusal: ReplyRefusal::ToolCallUnacceptable,
+            ..
         } => (
             EgressStatus::LandedUndelivered,
             Some(reply_length),
@@ -601,6 +620,8 @@ pub fn outcome_for(
     if let Some(e) = r.egress.as_mut() {
         e.status = status;
         e.reply_length = reply_length;
+        e.prompt_tokens = usage.map(|u| u.prompt_tokens);
+        e.completion_tokens = usage.and_then(|u| u.completion_tokens);
     }
     r
 }
@@ -608,6 +629,8 @@ pub fn outcome_for(
 /// CBOR envelope allowance per content block (variant tag, map header, field
 /// name, text-string header): generous, and pinned by a test that encodes
 /// replies of many shapes and asserts the buffer never grew.
+pub const USAGE_ENVELOPE: usize = 64;
+
 pub const REPLY_BLOCK_ENVELOPE: usize = 32;
 
 /// Per-tool-call CBOR overhead (map header + three key strings + three value
@@ -648,6 +671,7 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
             .iter()
             .map(|c| c.name.len() + c.call_id.len() + c.arguments.0.len() + TOOL_CALL_ENVELOPE)
             .sum::<usize>()
+        + if reply.usage.is_some() { USAGE_ENVELOPE } else { 0 }
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
@@ -982,6 +1006,9 @@ mod tests {
                 content_digest: "a".repeat(32),
                 conversation: "c".into(),
                 reply_length: None,
+                output_tokens: None,
+                prompt_tokens: None,
+                completion_tokens: None,
             }),
             conversation: None,
         }
@@ -995,6 +1022,8 @@ mod tests {
             key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
             reasoning_effort: None,
+            output_tokens: None,
+            output_tokens_field: None,
             conversation: "c".into(),
             turns: vec![Turn::User {
                 content: vec![text("a")],
@@ -1021,8 +1050,13 @@ mod tests {
         let turns = vec![Turn::User {
             content: vec![text("a")],
         }];
-        let r =
-            EgressRequest::for_provider(&p, "provider:openai".into(), "c".into(), turns.clone());
+        let r = EgressRequest::for_provider(
+            &p,
+            "provider:openai".into(),
+            "c".into(),
+            turns.clone(),
+            None,
+        );
         assert_eq!(
             r,
             EgressRequest {
@@ -1032,6 +1066,8 @@ mod tests {
                 key_vault_path: p.key_vault_path.clone(),
                 key_field: p.key_field.clone(),
                 reasoning_effort: Some("none".into()),
+                output_tokens: None,
+                output_tokens_field: None,
                 conversation: "c".into(),
                 turns,
             }
@@ -1579,13 +1615,101 @@ mod tests {
     }
 
     #[test]
+    fn for_provider_sends_a_reply_cap_only_with_its_field() {
+        let mut p = provider();
+        let at = |p: &maknae_config::ProviderConfig, o| {
+            let r = EgressRequest::for_provider(p, "provider:openai".into(), "c".into(), vec![], o);
+            (r.output_tokens, r.output_tokens_field)
+        };
+        assert_eq!(at(&p, None), (None, None));
+        assert_eq!(
+            at(&p, Some(9)),
+            (
+                Some(9),
+                Some(maknae_proto::OutputTokensField::MaxCompletionTokens)
+            )
+        );
+        p.output_tokens_field = Some("max_tokens".into());
+        assert_eq!(
+            at(&p, Some(9)),
+            (Some(9), Some(maknae_proto::OutputTokensField::MaxTokens))
+        );
+        assert_eq!(at(&p, None), (None, None));
+    }
+
+    #[test]
+    fn a_sent_or_landed_outcome_records_the_providers_usage() {
+        let i = DurableEgressIntent {
+            record: intent_record(),
+        };
+        let usage = Some(maknae_proto::Usage {
+            prompt_tokens: 11,
+            completion_tokens: Some(2),
+        });
+        for outcome in [
+            SendOutcome::Sent {
+                reply_length: 3,
+                usage,
+            },
+            SendOutcome::LandedUndelivered {
+                reply_length: 3,
+                refusal: ReplyRefusal::Oversize,
+                usage,
+            },
+        ] {
+            let e = outcome_for(&i, 9, "t".into(), outcome).egress.unwrap();
+            assert_eq!((e.prompt_tokens, e.completion_tokens), (Some(11), Some(2)));
+        }
+        let e = outcome_for(
+            &i,
+            9,
+            "t".into(),
+            SendOutcome::Sent {
+                reply_length: 3,
+                usage: None,
+            },
+        )
+        .egress
+        .unwrap();
+        assert_eq!((e.prompt_tokens, e.completion_tokens), (None, None));
+    }
+
+    #[test]
+    fn a_usage_only_reply_has_an_exact_capacity() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: Some(maknae_proto::Usage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: Some(u64::MAX),
+            }),
+        };
+        let cap = reply_capacity(&reply);
+        // USAGE_ENVELOPE 64 + FRAME_ENVELOPE_MARGIN 512.
+        assert_eq!(cap, 576);
+        let buf = maknae_proto::encode_response_zeroizing(
+            &maknae_proto::Response {
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            },
+            cap,
+        )
+        .unwrap();
+        assert_eq!(buf.capacity(), cap);
+        assert!(buf.len() <= cap);
+    }
+
+    #[test]
     fn outcome_for_sets_status_result_reason_and_posture_per_send_outcome() {
         let i = DurableEgressIntent {
             record: intent_record(),
         };
         for (outcome, status, result, reason, posture, reply_length) in [
             (
-                SendOutcome::Sent { reply_length: 2 },
+                SendOutcome::Sent {
+                    reply_length: 2,
+                    usage: None,
+                },
                 EgressStatus::Sent,
                 "permit",
                 "sent",
@@ -1622,6 +1746,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 7,
                     refusal: ReplyRefusal::Oversize,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1633,6 +1758,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 7,
                     refusal: ReplyRefusal::NonText,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1644,6 +1770,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 0,
                     refusal: ReplyRefusal::Empty,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",
@@ -1655,6 +1782,7 @@ mod tests {
                 SendOutcome::LandedUndelivered {
                     reply_length: 3,
                     refusal: ReplyRefusal::ToolCallUnacceptable,
+                    usage: None,
                 },
                 EgressStatus::LandedUndelivered,
                 "permit",

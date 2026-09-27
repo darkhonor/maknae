@@ -370,6 +370,9 @@ mod tests {
             content_digest: "f".repeat(32),
             conversation: "c".repeat(32),
             reply_length,
+            output_tokens: Some(u64::MAX),
+            prompt_tokens: Some(u64::MAX),
+            completion_tokens: Some(u64::MAX),
         });
         r
     }
