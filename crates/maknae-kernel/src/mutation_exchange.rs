@@ -344,13 +344,17 @@ fn read_claim_is_consistent(
     let Some(r) = range else {
         return false;
     };
-    let range_ok = r.start <= r.end && r.end - r.start == length;
-    let lines_ok = lines.is_none_or(|l| {
-        length > 0
-            && l.first == page.offset_line
-            && l.first <= l.last
-            && l.last - l.first < u64::from(page.limit_lines)
-    });
+    let range_ok = r.start <= r.end
+        && r.end - r.start == length
+        && (page.offset_line != 1 || r.start <= page.column)
+        && (length == 0 || r.start >= page.offset_line.saturating_sub(1));
+    let lines_ok = (length == 0 || lines.is_some())
+        && lines.is_none_or(|l| {
+            length > 0
+                && l.first == page.offset_line
+                && l.first <= l.last
+                && l.last - l.first < u64::from(page.limit_lines)
+        });
     range_ok && lines_ok
 }
 
@@ -388,7 +392,11 @@ mod tests {
                     start: 0,
                     end: length.unwrap_or(0),
                 }),
-                lines: None,
+                lines: length.filter(|n| *n > 0).map(|_| maknae_proto::LineSpan {
+                    first: 1,
+                    last: 1,
+                    complete_last: true,
+                }),
             }],
         }
     }
@@ -433,9 +441,24 @@ mod tests {
         };
         assert!(read_claim(p, 3, r(7, 10), l(2, 4)).is_ok());
         assert!(read_claim(p, 3, r(7, 10), l(2, 2)).is_ok());
-        assert!(read_claim(p, 3, r(7, 10), None).is_ok());
         assert!(read_claim(p, 0, r(4, 4), None).is_ok());
+        let first_line = maknae_proto::PageRequest {
+            offset_line: 1,
+            limit_lines: 3,
+            column: 5,
+        };
+        assert!(read_claim(first_line, 3, r(5, 8), l(1, 1)).is_ok());
         for bad in [
+            read_claim(p, 3, r(7, 10), None),
+            read_claim(p, 3, r(0, 3), l(2, 2)),
+            read_claim(first_line, 3, r(6, 9), l(1, 1)),
+            read_claim(
+                maknae_proto::WHOLE_FILE,
+                10,
+                r(1_000_000, 1_000_010),
+                l(1, 1),
+            ),
+            read_claim(p, 3, r(7, 10), l(2, 1)),
             read_claim(p, 3, None, None),
             read_claim(p, 3, r(7, 11), None),
             read_claim(p, 3, r(10, 7), None),

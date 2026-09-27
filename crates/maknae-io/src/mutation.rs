@@ -372,10 +372,8 @@ fn read_held_page_with(
     })?;
     let after = stat(&fd)?;
     if FileVersion::of(&before) != FileVersion::of(&after) {
-        return Err(no_effect(expected)(IoError::SizeChanged {
+        return Err(no_effect(expected)(IoError::MutationPathChanged {
             path: expected.to_path_buf(),
-            expected: before.st_size.max(0) as usize,
-            got: after.st_size.max(0) as usize,
         }));
     }
     Ok(crate::Page {
@@ -768,7 +766,7 @@ mod tests {
                     });
                     let e = changed.unwrap_err();
                     assert!(
-                        matches!(e.source, IoError::SizeChanged { .. }),
+                        matches!(e.source, IoError::MutationPathChanged { .. }),
                         "field {field}: {e:?}"
                     );
                     assert_eq!(e.state, EffectState::NoEffect);

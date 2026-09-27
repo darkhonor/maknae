@@ -746,6 +746,13 @@ mod tests {
         let catalog = baseline_catalog();
         let names: Vec<&str> = catalog.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(names, vec!["read_file", "write_file"]);
+        assert!(
+            catalog[1]
+                .function
+                .description
+                .contains("until `eof` is true"),
+            "a paged read must not be mistaken for the whole file before a replace"
+        );
 
         // The EXACT schema, not merely "a `properties` key exists": deleting
         // `required`, or the whole `content` property, previously left this

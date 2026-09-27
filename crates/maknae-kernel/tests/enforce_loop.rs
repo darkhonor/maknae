@@ -1069,7 +1069,11 @@ async fn a_permitted_read_returns_the_file_bytes() {
                 start: 0,
                 end: content.len() as u64
             }),
-            lines: None,
+            lines: Some(maknae_audit_append::LineSpanAudit {
+                first: 1,
+                last: 1,
+                complete_last: true,
+            }),
         }]
     );
     let last = mutation_of(records.last().unwrap());

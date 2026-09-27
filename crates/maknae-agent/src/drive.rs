@@ -179,9 +179,11 @@ pub async fn drive<P: Plane>(
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
                         },
                         Ok(ToolRequest::Write { path, content, .. }) => {
-                            seen.remove(&path);
                             match plane.write(transcript.conversation(), &path, &content).await {
-                                WriteOutcome::Applied => ToolOutcome::WriteApplied,
+                                WriteOutcome::Applied => {
+                                    seen.remove(&path);
+                                    ToolOutcome::WriteApplied
+                                }
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
                             }
@@ -378,6 +380,48 @@ mod tests {
             })
             .collect();
         assert_eq!(changed, vec![false, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn a_write_that_was_not_applied_keeps_change_detection() {
+        let read = |id: &str| PromptReply {
+            blocks: vec![],
+            tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
+        };
+        for outcome in [WriteOutcome::NotSent, WriteOutcome::Unknown] {
+            let mut p = scripted(vec![
+                read("c1"),
+                PromptReply {
+                    blocks: vec![],
+                    tool_calls: vec![call(
+                        "c2",
+                        "write_file",
+                        r#"{"path":"/w/a.txt","content":"new"}"#,
+                    )],
+                },
+                read("c3"),
+                PromptReply {
+                    blocks: vec![text("done")],
+                    tool_calls: vec![],
+                },
+            ]);
+            p.write_outcome = outcome.clone();
+            p.read_versions = VecDeque::from([[1; 7], [2; 7]]);
+            let mut t = Transcript::new("conv", "go");
+            let budget = Budget {
+                max_steps: 8,
+                max_tool_calls_per_step: 2,
+            };
+            drive(&mut p, &mut t, &budget).await;
+            let text = tool_text(&t.turns()[6]);
+            let json = text
+                .split_once("\n\nsteps remaining: ")
+                .unwrap()
+                .0
+                .to_string();
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(v["changed"], true, "{outcome:?}");
+        }
     }
 
     #[tokio::test]

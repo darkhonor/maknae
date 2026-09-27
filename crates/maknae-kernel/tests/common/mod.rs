@@ -645,7 +645,20 @@ async fn read_with(
     let fd = std::os::fd::AsFd::as_fd(held);
     let target = std::path::Path::new(path);
     let read = match window {
-        None => maknae_io::read_held_file(fd, target, grant.limits.max_bytes).map(|b| (b, None)),
+        None => maknae_io::read_held_page(
+            fd,
+            target,
+            maknae_io::PageWindow {
+                offset_line: 1,
+                limit_lines: u32::MAX,
+                column: 0,
+            },
+            grant.limits.max_bytes,
+        )
+        .map(|mut p| {
+            let bytes = std::mem::take(&mut p.content);
+            (bytes, Some(p))
+        }),
         Some(w) => maknae_io::read_held_page(fd, target, w, grant.limits.max_bytes).map(|mut p| {
             let bytes = std::mem::take(&mut p.content);
             (bytes, Some(p))

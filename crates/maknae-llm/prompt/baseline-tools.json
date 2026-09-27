@@ -36,7 +36,7 @@
     "type": "function",
     "function": {
       "name": "write_file",
-      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file first if you need its current contents. Returns applied, or outcome unknown.",
+      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file first if you need its current contents, every page until `eof` is true. Returns applied, or outcome unknown.",
       "parameters": {
         "type": "object",
         "properties": {

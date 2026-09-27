@@ -8,7 +8,7 @@
 //! First, the write lane driven here is the REPLACEMENT lane and only that:
 //! `FixturePlane::write` sends `WriteMode::Existing`, and replaces the file
 //! itself after a `MutationAttempt` grant, and `FixturePlane::read` reads after
-//! a `MutationAttempt` grant through `maknae_io::read_held_file`. The CREATE
+//! a `MutationAttempt` grant through `maknae_io::read_held_page`. The CREATE
 //! lane — `WriteMode::CreateExclusive`, a `MutationAttempt` grant,
 //! `mutation::execute` — is never driven against the brain from here (#241);
 //! its coverage lives where the lane lives, in `bins/maknae`'s `mutation`
