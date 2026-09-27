@@ -19,6 +19,8 @@
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
+#[cfg(any(target_os = "macos", test))]
+mod keychain_write;
 pub mod vault_ops;
 
 use clap::{ArgGroup, Args, Subcommand};
@@ -48,15 +50,20 @@ pub enum EnrollError {
         passwd_name: String,
     },
     /// A file read/write failed.
-    Io { path: PathBuf, source: String },
+    Io {
+        path: PathBuf,
+        source: String,
+    },
     /// A passwd/group lookup or `chown` failed.
     Owner(String),
     /// A `maknae-vault` operation failed (Vault client build, RoleID read,
     /// SecretID mint/destroy, CA-chain fetch).
     Vault(maknae_vault::VaultError),
-    /// An external command (`usermod`, `systemd-creds`, `sudo`, `restorecon`,
-    /// `id`) failed to spawn or exited non-zero.
-    Command { program: String, detail: String },
+    /// An external command failed to spawn or exited non-zero.
+    Command {
+        program: String,
+        detail: String,
+    },
     /// The operator-context helper landed at the wrong euid/egid.
     HelperContextMismatch {
         expected_uid: u32,
@@ -69,7 +76,10 @@ pub enum EnrollError {
     /// groups proves a capability the real CLI won't have").
     HelperStillPrivileged,
     /// The re-exec'd helper reported a verb-level failure.
-    HelperFailed { verb: &'static str, detail: String },
+    HelperFailed {
+        verb: &'static str,
+        detail: String,
+    },
     /// The post-drop capability probe (systemd-creds `--user`/Keychain round
     /// trip) failed.
     Probe(String),
@@ -77,10 +87,12 @@ pub enum EnrollError {
     /// Linux this is a real root `systemd-creds encrypt --with-key=tpm2` ->
     /// `decrypt` round-trip (the same mechanism the step-5 daemon seal uses —
     /// version-agnostic, unlike the `systemd-analyze has-tpm2` verb which is
-    /// absent on RHEL 9's systemd 252, #93); on macOS it is SEP detection.
-    /// Checked before the operator-context CLI probe so a missing daemon TPM/SEP
-    /// surfaces clearly rather than as a confusing subprocess failure.
-    HrotUnavailable { detail: String },
+    /// absent on RHEL 9's systemd 252, #93). Checked before the operator-context
+    /// CLI probe so a missing daemon TPM surfaces clearly rather than as a
+    /// confusing subprocess failure.
+    HrotUnavailable {
+        detail: String,
+    },
     /// No Vault token was supplied (`--token-file` absent/empty and the
     /// interactive prompt returned empty).
     MissingToken,
@@ -91,16 +103,39 @@ pub enum EnrollError {
     /// `--vault-addr`.
     InvalidVaultMount(String),
     /// The reachability probe (spec §4.1 step 1) could not reach Vault.
-    VaultUnreachable { addr: String, detail: String },
+    VaultUnreachable {
+        addr: String,
+        detail: String,
+    },
     /// The fetched issuer chain was empty/malformed, or omitted the root with
     /// no `--ca-dir` root override available.
     InvalidCaChain(String),
     /// State (enroll-state.yaml / the helper's job payload) failed to parse.
     State(String),
-    /// The macOS SEP daemon-credential seal (spec §6.2) is not implemented
-    /// this increment — a documented, flagged stub (spec §11: "SEP key ACL for
-    /// a launchd daemon — prototyped early in PR-J1"). Never faked.
-    MacosSepUnimplemented,
+    #[cfg(any(target_os = "macos", test))]
+    SecretIdShape,
+    /// A `security` keychain operation (delete/add/verify) failed or landed
+    /// the item somewhere other than the System keychain.
+    #[cfg(target_os = "macos")]
+    Keychain {
+        op: &'static str,
+        detail: String,
+    },
+    #[cfg(target_os = "macos")]
+    NotDeveloperIdSigned {
+        binary: String,
+        reason: String,
+    },
+    #[cfg(target_os = "macos")]
+    NotRootInstalled {
+        path: String,
+        detail: String,
+    },
+    #[cfg(target_os = "macos")]
+    NotInstalled {
+        path: String,
+    },
+    PlaintextOptOutOnMacos,
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
     /// anything new or overwriting `enroll-state.yaml`, so the still-live old
@@ -108,7 +143,10 @@ pub enum EnrollError {
     /// retry. Round-1 review Important #1: a swallowed destroy failure here
     /// followed by an unconditional state-file overwrite is exactly the
     /// orphaned-accessor leak class the brief calls out.
-    RotateDestroyFailed { mount: String, detail: String },
+    RotateDestroyFailed {
+        mount: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for EnrollError {
@@ -160,10 +198,31 @@ impl std::fmt::Display for EnrollError {
             }
             EnrollError::InvalidCaChain(msg) => write!(f, "{msg}"),
             EnrollError::State(msg) => write!(f, "{msg}"),
-            EnrollError::MacosSepUnimplemented => write!(
+            #[cfg(any(target_os = "macos", test))]
+            EnrollError::SecretIdShape => write!(
                 f,
-                "macOS SEP daemon-credential sealing is not implemented yet (spec §6.2, §11) — \
-                 refusing rather than writing an unsealed credential"
+                "the minted SecretID is not a lowercase UUID — refusing to hand it to the keychain"
+            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::Keychain { op, detail } => write!(f, "keychain {op} failed: {detail}"),
+            #[cfg(target_os = "macos")]
+            EnrollError::NotDeveloperIdSigned { binary, reason } => write!(
+                f,
+                "{binary} is not a Developer ID release build of this team ({reason}); the keychain item would trust it (ADR-0018 decision 6)"
+            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::NotRootInstalled { path, detail } => write!(
+                f,
+                "{path} could be replaced by a non-root user ({detail}); the keychain item would trust whatever sits there"
+            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::NotInstalled { path } => write!(
+                f,
+                "{path} is not installed — install the Maknae package first"
+            ),
+            EnrollError::PlaintextOptOutOnMacos => write!(
+                f,
+                "--insecure-plaintext-secret does not apply on macOS: every supported Mac has the System keychain (ADR-0018 decision 6)"
             ),
             EnrollError::RotateDestroyFailed { mount, detail } => write!(
                 f,
@@ -495,6 +554,13 @@ fn build_daemon_yaml(
                 artifact_write::yaml_map(vec![("socket_path", Yaml::String(sp.to_string()))]),
             ));
         }
+        top.push((
+            "egress",
+            artifact_write::yaml_map(vec![(
+                "socket_path",
+                Yaml::String("/usr/local/var/run/maknae-egress/egress.sock".to_string()),
+            )]),
+        ));
     }
     artifact_write::emit_yaml(artifact_write::yaml_map(top))
 }
@@ -561,9 +627,9 @@ fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String 
 /// `mechanism` MUST be exactly the token `posture::sealed_posture` expects
 /// for the sealed source it will be compared against
 /// (`posture::MECHANISM_TPM2` = `"tpm2"` for the Linux
-/// `CredentialsDirectory` source, `posture::MECHANISM_SEP` = `"sep"` for the
-/// macOS `SepSealed` source) — the caller passes exactly one of those two
-/// literals, matching the daemon's own constants.
+/// `CredentialsDirectory` source, `posture::MECHANISM_KEYCHAIN` = `"keychain"`
+/// for the macOS `Keychain` source) — the caller passes exactly one of those
+/// two literals, matching the daemon's own constants.
 fn build_posture_yaml(mechanism: &str, target: &str) -> String {
     let sealed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -777,20 +843,12 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
 /// false), and it proves the same TPM binding the step-5 daemon seal uses,
 /// pre-mint (§4.1). It is NOT the operator `--user` CLI seal probe — that is a
 /// separate surface in helper.rs (#73 owns its el9 residual).
-fn detect_hrot_capability(macos: bool, verbose: bool) -> bool {
-    if macos {
-        let apple_silicon = std::env::consts::ARCH == "aarch64";
-        if verbose {
-            eprintln!("SEP heuristic (Apple Silicon arch check): {apple_silicon}");
-        }
-        apple_silicon
-    } else {
-        let ok = tpm2_seal_roundtrip(verbose);
-        if verbose {
-            eprintln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
-        }
-        ok
+fn detect_hrot_capability(verbose: bool) -> bool {
+    let ok = tpm2_seal_roundtrip(verbose);
+    if verbose {
+        eprintln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
     }
+    ok
 }
 
 // ============================================================================
@@ -1065,21 +1123,6 @@ async fn seal_secret_linux(
     Ok(())
 }
 
-/// Both sealed planes (the daemon's and, since #240b, the deputy's) refuse
-/// here for the same reason; the deputy's custody on macOS is #227's.
-fn seal_secret_macos(_secret: &Zeroizing<String>, _out_path: &Path) -> Result<(), EnrollError> {
-    // TODO(spec §6.2/§11): SEP envelope encryption — a non-exportable EC key
-    // with an access policy usable by `_maknae`, ECIES-encrypting the
-    // SecretID. Flagged as a real, unresolved risk in the spec itself ("SEP
-    // key ACL for a launchd daemon — prototyped early in PR-J1"); not
-    // attempted this increment. Refuses rather than writing an unsealed
-    // daemon credential — never faked. The CLI-side Keychain seal (§6.3,
-    // `helper.rs::seal_cli_secret_keychain`) IS implemented for real: it has
-    // none of the launchd-daemon ACL complexity (an ordinary per-user
-    // Keychain item, not a system-daemon-readable one).
-    Err(EnrollError::MacosSepUnimplemented)
-}
-
 // ============================================================================
 // Rollback / rotate (spec §4.1: "any failure after step 3 destroys the
 // just-minted accessors"; "re-enroll destroys the accessors in the existing
@@ -1262,6 +1305,41 @@ fn grant_egress_traversal(verbose: bool) {
     }
 }
 
+const EGRESS_TRAVERSAL_ACE: &str = "user:_maknae-egress allow list,search";
+
+fn grant_egress_traversal_macos(verbose: bool) {
+    let set = std::process::Command::new("/bin/chmod")
+        .args(["+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"])
+        .output();
+    if verbose {
+        eprintln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
+    }
+    match std::process::Command::new("/bin/ls")
+        .args(["-led", "/etc/maknae"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            if !ace_present(&String::from_utf8_lossy(&o.stdout)) {
+                let why = match set {
+                    Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                    Err(e) => e.to_string(),
+                };
+                eprintln!("maknae enroll: /etc/maknae does not carry `{EGRESS_TRAVERSAL_ACE}` ({why}); the egress deputy cannot open its bounds file until it does");
+            }
+        }
+        Ok(o) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it", o.status),
+        Err(e) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({e}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it"),
+    }
+}
+
+fn ace_present(ls_led: &str) -> bool {
+    ls_led.lines().any(|l| {
+        l.trim().split_once(": ").is_some_and(|(i, ace)| {
+            i.chars().all(|c| c.is_ascii_digit()) && ace == EGRESS_TRAVERSAL_ACE
+        })
+    })
+}
+
 const LEGACY_HOME_ACL_USER: &str = "_maknae";
 const LEGACY_INCLUDE: &str = "/etc/apparmor.d/local/usr.bin.maknaed";
 const LEGACY_INCLUDE_SIGNATURE: &str =
@@ -1404,24 +1482,53 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
 
     check_vault_reachable(&args.vault_addr)?;
 
-    // spec §4.1 step 1's two-tier HRoT gate, two DISJOINT surfaces:
-    //  1. the DAEMON seal capability (here): a hard gate that exercises the real
-    //     root `systemd-creds --with-key=tpm2` round-trip — the same mechanism
-    //     the step-5 daemon seal uses, proven pre-mint;
-    //  2. the OPERATOR CLI seal capability (the `--user` probe below): a separate
-    //     surface that can't be seen from here.
-    // Both must pass; this gate fails fast so a missing daemon TPM/SEP surfaces
-    // clearly rather than as a confusing subprocess failure inside the probe.
-    if !detect_hrot_capability(macos, args.verbose) {
+    // Daemon-surface gate, pre-mint: Linux's TPM2 round-trip; macOS's release checks.
+    #[cfg(target_os = "macos")]
+    let mut release_team = String::new();
+    if macos {
+        if args.insecure_plaintext_secret {
+            eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+            return Err(EnrollError::PlaintextOptOutOnMacos);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let checked = async {
+                let me = std::env::current_exe().map_err(|e| EnrollError::Command {
+                    program: "current_exe".to_string(),
+                    detail: e.to_string(),
+                })?;
+                keychain_write::check_install_path(&me)?;
+                let team = keychain_write::own_team().await?;
+                for (bin, plane) in [
+                    (
+                        keychain_write::DAEMON_BINARY,
+                        maknae_vault::KeychainPlane::Daemon,
+                    ),
+                    (
+                        keychain_write::EGRESS_BINARY,
+                        maknae_vault::KeychainPlane::Egress,
+                    ),
+                ] {
+                    keychain_write::check_install_path(Path::new(bin))?;
+                    keychain_write::verify_release(bin, plane, &team).await?;
+                }
+                Ok::<String, EnrollError>(team)
+            }
+            .await;
+            match checked {
+                Ok(team) => release_team = team,
+                Err(e) => {
+                    eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+                    return Err(e);
+                }
+            }
+        }
+    } else if !detect_hrot_capability(args.verbose) {
         eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
         return Err(EnrollError::HrotUnavailable {
-            detail: if macos {
-                "no Secure Enclave detected (Apple Silicon required)".to_string()
-            } else {
-                "daemon TPM2 seal round-trip failed (systemd-creds --with-key=tpm2) \
-                 — no usable TPM2 for the daemon credential"
-                    .to_string()
-            },
+            detail: "daemon TPM2 seal round-trip failed (systemd-creds --with-key=tpm2) \
+                     — no usable TPM2 for the daemon credential"
+                .to_string(),
         });
     }
 
@@ -1545,6 +1652,8 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         &operator,
         &cli_dir,
         macos,
+        #[cfg(target_os = "macos")]
+        &release_team,
         &daemon_role_id,
         &cli_role_id,
         &egress_role_id,
@@ -1573,6 +1682,7 @@ async fn finish_enrollment(
     operator: &Operator,
     cli_dir: &Path,
     macos: bool,
+    #[cfg(target_os = "macos")] release_team: &str,
     daemon_role_id: &str,
     cli_role_id: &str,
     egress_role_id: &str,
@@ -1611,13 +1721,13 @@ async fn finish_enrollment(
     // `target` is the sealed daemon secret's own row path — the single source
     // of truth `artifact_table` already computes (reused again below at the
     // actual seal step), never a second hardcoded copy of
-    // `maknaed-secret-id.cred`/`.sep` that could drift from it.
+    // `maknaed-secret-id.cred` that could drift from it.
     let sealed_row = table
         .iter()
         .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
         .expect("artifact_table always emits exactly one SealedDaemonSecret row");
     let posture_yaml = build_posture_yaml(
-        if macos { "sep" } else { "tpm2" },
+        if macos { "keychain" } else { "tpm2" },
         &sealed_row.path.to_string_lossy(),
     );
 
@@ -1659,9 +1769,8 @@ async fn finish_enrollment(
         );
     }
 
-    // Only the rows `write_artifacts` can fill from `contents` — the sealed-
-    // secret placeholder row is excluded (produced by the seal step below);
-    // CLI rows are excluded (the operator-context helper's job, step 7).
+    // Only the rows `write_artifacts` can fill from `contents` — CLI rows are
+    // excluded (the operator-context helper's job, step 7).
     let daemon_rows: Vec<_> = table
         .iter()
         .filter(|a| {
@@ -1679,7 +1788,21 @@ async fn finish_enrollment(
     // `sealed_row` was already looked up above (posture-marker `target`) —
     // reused here rather than re-derived, so both consumers share one lookup.
     if macos {
-        seal_secret_macos(daemon_secret, &sealed_row.path)?;
+        #[cfg(target_os = "macos")]
+        {
+            keychain_write::seal_secret_macos(
+                daemon_secret,
+                maknae_vault::KeychainPlane::Daemon,
+                keychain_write::DAEMON_BINARY,
+                release_team,
+            )
+            .await?;
+            artifact_write::write_file(
+                sealed_row,
+                maknae_vault::pointer_document(maknae_vault::KeychainPlane::Daemon).as_bytes(),
+                &resolver,
+            )?;
+        }
     } else {
         seal_secret_linux(
             daemon_secret,
@@ -1688,17 +1811,30 @@ async fn finish_enrollment(
             args.verbose,
         )
         .await?;
+        artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
     }
-    artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
 
     // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
-    // The same mechanism under the name maknae-egress.service loads.
     let egress_sealed_row = table
         .iter()
         .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
         .expect("artifact_table always emits exactly one SealedEgressSecret row");
     if macos {
-        seal_secret_macos(egress_secret, &egress_sealed_row.path)?;
+        #[cfg(target_os = "macos")]
+        {
+            keychain_write::seal_secret_macos(
+                egress_secret,
+                maknae_vault::KeychainPlane::Egress,
+                keychain_write::EGRESS_BINARY,
+                release_team,
+            )
+            .await?;
+            artifact_write::write_file(
+                egress_sealed_row,
+                maknae_vault::pointer_document(maknae_vault::KeychainPlane::Egress).as_bytes(),
+                &resolver,
+            )?;
+        }
     } else {
         seal_secret_linux(
             egress_secret,
@@ -1707,8 +1843,8 @@ async fn finish_enrollment(
             args.verbose,
         )
         .await?;
+        artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
     }
-    artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
 
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
@@ -1747,13 +1883,15 @@ async fn finish_enrollment(
             detail: e.to_string(),
         })?;
 
-    // ---- Step 7b: Linux only, root context — enroll IS root under sudo -------
-    // Enroll grants the daemon nothing on the home and removes what an earlier
-    // enroll granted; the deputy gets its /etc/maknae traversal entry. Both are
-    // WARN-on-failure: enrollment establishes identity and must not hinge on them.
+    // ---- Step 7b: root context — enroll IS root under sudo -------
+    // Enroll grants the daemon nothing on the home; the deputy gets its
+    // /etc/maknae traversal entry. Both are WARN-on-failure: enrollment
+    // establishes identity and must not hinge on them.
     if !macos {
         revoke_legacy_home_access(&operator.home, args.verbose);
         grant_egress_traversal(args.verbose);
+    } else {
+        grant_egress_traversal_macos(args.verbose);
     }
 
     // ---- Step 8: posture summary -------------------------------------------
@@ -1762,8 +1900,22 @@ async fn finish_enrollment(
     Ok(format!(
         "{summary}\n{}\n{}\n{}",
         msg(locale, MsgId::EnrollReloginNote),
-        msg(locale, MsgId::EnrollEgressBoundsHint),
-        msg(locale, MsgId::EnrollEnableDaemonHint),
+        msg(
+            locale,
+            if macos {
+                MsgId::EnrollEgressBoundsHintMacos
+            } else {
+                MsgId::EnrollEgressBoundsHint
+            }
+        ),
+        msg(
+            locale,
+            if macos {
+                MsgId::EnrollEnableDaemonHintMacos
+            } else {
+                MsgId::EnrollEnableDaemonHint
+            }
+        ),
     ))
 }
 
@@ -2269,6 +2421,24 @@ mod tests {
         );
         assert!(macos.contains("transport"));
         assert!(macos.contains("socket_path"));
+        assert!(macos.contains("/usr/local/var/run/maknae-egress/egress.sock"));
+        assert!(!linux.contains("egress"));
+    }
+
+    #[test]
+    fn the_egress_traversal_ace_is_read_back_exactly() {
+        assert!(ace_present(" 0: user:_maknae-egress allow list,search"));
+        assert!(ace_present(
+            "drwxr-x---+ 3 root wheel 96 Oct  1 10:00 /etc/maknae\n 1: user:_maknae-egress allow list,search\n"
+        ));
+        for bad in [
+            "user:_maknae-egress allow list,search",
+            " 0: user:_maknae-egress allow list",
+            " 0: user:_maknae-egress deny list,search",
+            " 0: user:nobody allow list,search",
+        ] {
+            assert!(!ace_present(bad), "{bad:?}");
+        }
     }
 
     fn section<'a>(v: &'a maknae_config::Value, name: &str) -> Option<&'a maknae_config::Value> {
@@ -2390,17 +2560,10 @@ mod tests {
     }
 
     #[test]
-    fn build_posture_yaml_mechanism_literal_matches_daemon_constants() {
-        // `bins/maknae` cannot depend on `maknae-kernel` (bin/lib layering),
-        // so the two literals this crate's call site passes ("tpm2" for the
-        // Linux CredentialsDirectory source, "sep" for the macOS SepSealed
-        // source) are pinned here directly against
-        // `maknae_kernel::posture::MECHANISM_TPM2`/`MECHANISM_SEP`'s exact
-        // values (asserted by name, not by import) — a drift in either
-        // literal silently downgrades every healthy sealed boot to
-        // `Unverified`.
+    fn posture_yaml_serializes_the_mechanism_token() {
+        // Checks serialization only; bins/maknae cannot depend on maknae-kernel, so it cannot test the reader.
         assert!(build_posture_yaml("tpm2", "t").contains("mechanism: tpm2"));
-        assert!(build_posture_yaml("sep", "t").contains("mechanism: sep"));
+        assert!(build_posture_yaml("keychain", "t").contains("mechanism: keychain"));
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED

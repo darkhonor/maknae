@@ -67,6 +67,8 @@ pub enum MsgId {
     EnrollEgressBoundsHint,
     /// Pointer to the operator's own `systemctl enable --now maknaed` act.
     EnrollEnableDaemonHint,
+    EnrollEgressBoundsHintMacos,
+    EnrollEnableDaemonHintMacos,
     /// A pre-existing `enroll-state.yaml` was found — rotating (spec §4.1,
     /// unconditional-rotate semantics on re-enroll).
     EnrollRotating,
@@ -116,6 +118,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollReloginNote,
     MsgId::EnrollEgressBoundsHint,
     MsgId::EnrollEnableDaemonHint,
+    MsgId::EnrollEgressBoundsHintMacos,
+    MsgId::EnrollEnableDaemonHintMacos,
     MsgId::EnrollRotating,
     MsgId::EnrollRotatePreviousDestroyed,
     MsgId::EnrollRollbackDestroyed,
@@ -285,6 +289,8 @@ mod tests {
                 | MsgId::EnrollReloginNote
                 | MsgId::EnrollEgressBoundsHint
                 | MsgId::EnrollEnableDaemonHint
+                | MsgId::EnrollEgressBoundsHintMacos
+                | MsgId::EnrollEnableDaemonHintMacos
                 | MsgId::EnrollRotating
                 | MsgId::EnrollRotatePreviousDestroyed
                 | MsgId::EnrollRollbackDestroyed
@@ -293,7 +299,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 31;
+        const VARIANT_COUNT: usize = 33;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

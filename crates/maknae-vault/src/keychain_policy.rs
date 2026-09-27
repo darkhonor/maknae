@@ -79,6 +79,13 @@ pub fn parse_pointer(doc: &Value, plane: KeychainPlane) -> Result<KeychainItem, 
     })
 }
 
+pub fn pointer_document(plane: KeychainPlane) -> String {
+    format!(
+        "keychain: {SYSTEM_KEYCHAIN}\nservice: {}\naccount: {KEYCHAIN_ACCOUNT}\n",
+        plane.service()
+    )
+}
+
 pub fn gate(euid: u32, expected_uid: Option<u32>, plane: KeychainPlane) -> Result<(), VaultError> {
     match expected_uid {
         Some(uid) if uid == euid => Ok(()),
@@ -193,6 +200,20 @@ mod tests {
                 parse_pointer(&d, KeychainPlane::Daemon),
                 Err(VaultError::KeychainPointer(_))
             ));
+        }
+    }
+
+    #[test]
+    fn the_written_pointer_is_the_one_the_reader_accepts() {
+        for plane in [KeychainPlane::Daemon, KeychainPlane::Egress] {
+            let doc = maknae_config::load_str(&pointer_document(plane)).unwrap();
+            assert_eq!(
+                parse_pointer(&doc, plane).unwrap(),
+                KeychainItem {
+                    service: plane.service(),
+                    account: KEYCHAIN_ACCOUNT
+                }
+            );
         }
     }
 
