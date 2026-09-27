@@ -53,6 +53,7 @@ mod dir;
 pub mod error;
 pub mod mutation;
 pub mod normalize;
+mod page;
 mod strategy;
 mod syscall;
 mod walk;
@@ -71,10 +72,12 @@ pub use delegated::{
 };
 pub use error::{IoError, IoKind};
 pub use mutation::{
-    read_held_file, replace_held_file, verify_mutation_directory, DirectoryCursor, EffectState,
-    MutationDirectory, MutationEffect, MutationEffectKind, MutationFailure, MutationRequired,
+    read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
+    EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,
+    MutationFailure, MutationRequired,
 };
 pub use normalize::normalize;
+pub use page::{read_page, Page, PageNext, PageWindow};
 /// Re-exported as a convenience so consumers need no `zeroize` pin of their own.
 pub use zeroize::Zeroizing;
 

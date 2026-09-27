@@ -64,6 +64,7 @@ files = [
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
+  "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions. Corrected 2026-09-06 (#126):
   # current measurements are macOS 97/97 and Linux 116/116, both 100.00%.
   # The earlier 87/87 and 107/107 figures described the promotion revision,
