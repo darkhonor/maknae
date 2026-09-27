@@ -65,8 +65,8 @@ pub enum ContentKind {
     /// The maknae intermediate CA, split from the fetched issuer chain.
     IntCa,
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
-    /// Linux, the SEP-encrypted blob on macOS. Produced by the seal step (an
-    /// external command / SEP call), not a literal byte copy — `artifact_write`
+    /// Linux, the keychain pointer on macOS. Produced by the seal step (an
+    /// external command), not a literal byte copy — `artifact_write`
     /// applies ownership/mode to an already-written file for this row.
     SealedDaemonSecret,
     /// The sealed CLI SecretID — user-scoped `systemd-creds` `.cred` (Linux
@@ -115,7 +115,7 @@ fn row(path: PathBuf, owner: Owner, mode: u32, content: ContentKind) -> Artifact
 /// enroll run. `cli_dir` is the already-resolved CLI config directory (passwd-
 /// derived home ∥ `--cli-dir`, spec §4.1's path-resolution rule — this function
 /// does not resolve it itself, keeping it pure). `macos` selects the platform
-/// branch (SEP ciphertext vs. `systemd-creds` `.cred`; Keychain vs. `.cred` for
+/// branch (keychain pointer vs. `systemd-creds` `.cred`; Keychain vs. `.cred` for
 /// the CLI; the `transport` section written into the daemon's `maknae.yaml`).
 /// `insecure_plaintext` adds the opt-out degraded-plaintext row.
 pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> Vec<Artifact> {
@@ -196,16 +196,14 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
 
     if macos {
         rows.push(row(
-            etc.join("private/maknaed-secret-id.sep"),
+            maknae_vault::daemon_keychain_pointer(etc),
             Owner::RootMaknaeGroup,
             0o640,
             ContentKind::SealedDaemonSecret,
         ));
-        // A placeholder like the daemon's (on a packaged macOS host enroll
-        // refuses at the daemon's SEP seal; #227 designs macOS custody) — but
-        // under the DEPUTY's group, never the daemon's.
         rows.push(row(
-            etc.join("private/maknae-egress-secret-id.sep"),
+            etc.join("egress")
+                .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
             Owner::RootMaknaeEgressGroup,
             0o640,
             ContentKind::SealedEgressSecret,
@@ -352,10 +350,10 @@ mod tests {
             PathBuf::from("/etc/maknae/egress/maknae-egress-approle-id"),
             PathBuf::from("/etc/maknae/egress/vault-ca.crt"),
             PathBuf::from("/etc/maknae/private"),
-            PathBuf::from("/etc/maknae/private/maknaed-secret-id.sep"),
-            PathBuf::from("/etc/maknae/private/maknae-egress-secret-id.sep"),
+            PathBuf::from("/etc/maknae/private/maknaed-secret-id.keychain"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
+            PathBuf::from("/etc/maknae/egress/maknae-egress-secret-id.keychain"),
             cli_dir.to_path_buf(),
             cli_dir.join("tls"),
             cli_dir.join("maknae.yaml"),
@@ -429,7 +427,7 @@ mod tests {
                 )
             );
             let sealed = if macos {
-                row("/etc/maknae/private/maknae-egress-secret-id.sep")
+                row("/etc/maknae/egress/maknae-egress-secret-id.keychain")
             } else {
                 row("/etc/maknae/private/maknae-egress-secret-id.cred")
             };
@@ -540,10 +538,25 @@ mod tests {
             .unwrap();
         assert_eq!(
             m.path,
-            Path::new("/etc/maknae/private/maknaed-secret-id.sep")
+            Path::new("/etc/maknae/private/maknaed-secret-id.keychain")
         );
         assert_eq!(m.owner, Owner::RootMaknaeGroup);
         assert_eq!(m.mode, 0o640);
+    }
+
+    #[test]
+    fn the_macos_pointer_rows_are_where_the_readers_look() {
+        let t = artifact_table(Path::new("/Users/op/.maknae"), true, false);
+        let find = |k| t.iter().find(|a| a.content == k).unwrap().path.clone();
+        assert_eq!(
+            find(ContentKind::SealedDaemonSecret),
+            maknae_vault::daemon_keychain_pointer(Path::new("/etc/maknae"))
+        );
+        assert_eq!(
+            find(ContentKind::SealedEgressSecret),
+            Path::new("/etc/maknae/egress")
+                .join(maknae_vault::KeychainPlane::Egress.pointer_file())
+        );
     }
 
     #[test]

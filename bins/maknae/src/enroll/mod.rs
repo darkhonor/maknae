@@ -101,10 +101,10 @@ pub enum EnrollError {
     State(String),
     #[cfg(any(target_os = "macos", test))]
     SecretIdShape,
-    /// The macOS SEP daemon-credential seal (spec §6.2) is not implemented
-    /// this increment — a documented, flagged stub (spec §11: "SEP key ACL for
-    /// a launchd daemon — prototyped early in PR-J1"). Never faked.
-    MacosSepUnimplemented,
+    /// A `security` keychain operation (delete/add/verify) failed or landed
+    /// the item somewhere other than the System keychain.
+    #[cfg(target_os = "macos")]
+    Keychain { op: &'static str, detail: String },
     /// Rotate's PRE-MINT cleanup (spec §4.1) could not destroy every
     /// previously-recorded accessor — FATAL: enroll aborts before minting
     /// anything new or overwriting `enroll-state.yaml`, so the still-live old
@@ -169,11 +169,8 @@ impl std::fmt::Display for EnrollError {
                 f,
                 "the minted SecretID is not a lowercase UUID — refusing to hand it to the keychain"
             ),
-            EnrollError::MacosSepUnimplemented => write!(
-                f,
-                "macOS SEP daemon-credential sealing is not implemented yet (spec §6.2, §11) — \
-                 refusing rather than writing an unsealed credential"
-            ),
+            #[cfg(target_os = "macos")]
+            EnrollError::Keychain { op, detail } => write!(f, "keychain {op} failed: {detail}"),
             EnrollError::RotateDestroyFailed { mount, detail } => write!(
                 f,
                 "rotate: could not destroy every accessor from the previous enrollment on mount \
@@ -570,9 +567,9 @@ fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String 
 /// `mechanism` MUST be exactly the token `posture::sealed_posture` expects
 /// for the sealed source it will be compared against
 /// (`posture::MECHANISM_TPM2` = `"tpm2"` for the Linux
-/// `CredentialsDirectory` source, `posture::MECHANISM_SEP` = `"sep"` for the
-/// macOS `SepSealed` source) — the caller passes exactly one of those two
-/// literals, matching the daemon's own constants.
+/// `CredentialsDirectory` source, `posture::MECHANISM_KEYCHAIN` = `"keychain"`
+/// for the macOS `Keychain` source) — the caller passes exactly one of those
+/// two literals, matching the daemon's own constants.
 fn build_posture_yaml(mechanism: &str, target: &str) -> String {
     let sealed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1072,21 +1069,6 @@ async fn seal_secret_linux(
     }
     artifact_write::maybe_restorecon(out_path);
     Ok(())
-}
-
-/// Both sealed planes (the daemon's and, since #240b, the deputy's) refuse
-/// here for the same reason; the deputy's custody on macOS is #227's.
-fn seal_secret_macos(_secret: &Zeroizing<String>, _out_path: &Path) -> Result<(), EnrollError> {
-    // TODO(spec §6.2/§11): SEP envelope encryption — a non-exportable EC key
-    // with an access policy usable by `_maknae`, ECIES-encrypting the
-    // SecretID. Flagged as a real, unresolved risk in the spec itself ("SEP
-    // key ACL for a launchd daemon — prototyped early in PR-J1"); not
-    // attempted this increment. Refuses rather than writing an unsealed
-    // daemon credential — never faked. The CLI-side Keychain seal (§6.3,
-    // `helper.rs::seal_cli_secret_keychain`) IS implemented for real: it has
-    // none of the launchd-daemon ACL complexity (an ordinary per-user
-    // Keychain item, not a system-daemon-readable one).
-    Err(EnrollError::MacosSepUnimplemented)
 }
 
 // ============================================================================
@@ -1626,7 +1608,7 @@ async fn finish_enrollment(
         .find(|a| a.content == artifact_table::ContentKind::SealedDaemonSecret)
         .expect("artifact_table always emits exactly one SealedDaemonSecret row");
     let posture_yaml = build_posture_yaml(
-        if macos { "sep" } else { "tpm2" },
+        if macos { "keychain" } else { "tpm2" },
         &sealed_row.path.to_string_lossy(),
     );
 
@@ -1688,7 +1670,20 @@ async fn finish_enrollment(
     // `sealed_row` was already looked up above (posture-marker `target`) —
     // reused here rather than re-derived, so both consumers share one lookup.
     if macos {
-        seal_secret_macos(daemon_secret, &sealed_row.path)?;
+        #[cfg(target_os = "macos")]
+        {
+            keychain_write::seal_secret_macos(
+                daemon_secret,
+                maknae_vault::KeychainPlane::Daemon,
+                keychain_write::DAEMON_BINARY,
+            )
+            .await?;
+            artifact_write::write_file(
+                sealed_row,
+                maknae_vault::pointer_document(maknae_vault::KeychainPlane::Daemon).as_bytes(),
+                &resolver,
+            )?;
+        }
     } else {
         seal_secret_linux(
             daemon_secret,
@@ -1697,8 +1692,8 @@ async fn finish_enrollment(
             args.verbose,
         )
         .await?;
+        artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
     }
-    artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
 
     // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
     // The same mechanism under the name maknae-egress.service loads.
@@ -1707,7 +1702,20 @@ async fn finish_enrollment(
         .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
         .expect("artifact_table always emits exactly one SealedEgressSecret row");
     if macos {
-        seal_secret_macos(egress_secret, &egress_sealed_row.path)?;
+        #[cfg(target_os = "macos")]
+        {
+            keychain_write::seal_secret_macos(
+                egress_secret,
+                maknae_vault::KeychainPlane::Egress,
+                keychain_write::EGRESS_BINARY,
+            )
+            .await?;
+            artifact_write::write_file(
+                egress_sealed_row,
+                maknae_vault::pointer_document(maknae_vault::KeychainPlane::Egress).as_bytes(),
+                &resolver,
+            )?;
+        }
     } else {
         seal_secret_linux(
             egress_secret,
@@ -1716,8 +1724,8 @@ async fn finish_enrollment(
             args.verbose,
         )
         .await?;
+        artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
     }
-    artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
 
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
@@ -2402,14 +2410,14 @@ mod tests {
     fn build_posture_yaml_mechanism_literal_matches_daemon_constants() {
         // `bins/maknae` cannot depend on `maknae-kernel` (bin/lib layering),
         // so the two literals this crate's call site passes ("tpm2" for the
-        // Linux CredentialsDirectory source, "sep" for the macOS SepSealed
-        // source) are pinned here directly against
-        // `maknae_kernel::posture::MECHANISM_TPM2`/`MECHANISM_SEP`'s exact
-        // values (asserted by name, not by import) — a drift in either
+        // Linux CredentialsDirectory source, "keychain" for the macOS
+        // Keychain source) are pinned here directly against
+        // `maknae_kernel::posture::MECHANISM_TPM2`/`MECHANISM_KEYCHAIN`'s
+        // exact values (asserted by name, not by import) — a drift in either
         // literal silently downgrades every healthy sealed boot to
         // `Unverified`.
         assert!(build_posture_yaml("tpm2", "t").contains("mechanism: tpm2"));
-        assert!(build_posture_yaml("sep", "t").contains("mechanism: sep"));
+        assert!(build_posture_yaml("keychain", "t").contains("mechanism: keychain"));
     }
 
     // ---- round-1 review Important #2: rotate destroys against the RECORDED

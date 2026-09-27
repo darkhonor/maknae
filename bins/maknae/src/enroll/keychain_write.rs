@@ -122,6 +122,79 @@ pub(crate) fn check_runtime_and_entitlements(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) async fn run(program: &str, args: &[&str]) -> Result<std::process::Output, EnrollError> {
+    tokio::process::Command::new(program)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| EnrollError::Command {
+            program: program.to_string(),
+            detail: e.to_string(),
+        })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn seal_secret_macos(
+    secret: &Zeroizing<String>,
+    plane: KeychainPlane,
+    binary: &'static str,
+) -> Result<(), EnrollError> {
+    use tokio::io::AsyncWriteExt;
+    validate_secret_id(secret)?;
+    let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
+    let io = |e: std::io::Error| EnrollError::Command {
+        program: SECURITY.to_string(),
+        detail: e.to_string(),
+    };
+
+    let del = run(SECURITY, &delete_args(plane)).await?;
+    if !matches!(del.status.code(), Some(0) | Some(44)) {
+        return Err(EnrollError::Keychain {
+            op: "delete",
+            detail: stderr(&del),
+        });
+    }
+
+    let mut child = tokio::process::Command::new(SECURITY)
+        .arg("-i")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(io)?;
+    {
+        let cmd = add_command(secret, plane, binary);
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io(std::io::Error::other("no stdin pipe")))?;
+        stdin.write_all(cmd.as_bytes()).await.map_err(io)?;
+    }
+    let add = child.wait_with_output().await.map_err(io)?;
+    if !add.status.success() {
+        return Err(EnrollError::Keychain {
+            op: "add",
+            detail: stderr(&add),
+        });
+    }
+
+    let find = run(SECURITY, &find_args(plane)).await?;
+    if !find.status.success() {
+        return Err(EnrollError::Keychain {
+            op: "verify",
+            detail: stderr(&find),
+        });
+    }
+    match parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) {
+        Some(k) if k == SYSTEM_KEYCHAIN => Ok(()),
+        other => Err(EnrollError::Keychain {
+            op: "verify",
+            detail: format!("the item landed in {other:?}, not {SYSTEM_KEYCHAIN}"),
+        }),
+    }
+}
+
 pub(crate) fn embedded_requirement_is_strong(display: &str, identifier: &str, team: &str) -> bool {
     let canonical = |t: &str| {
         format!(
