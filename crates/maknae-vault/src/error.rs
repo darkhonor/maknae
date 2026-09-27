@@ -88,6 +88,9 @@ pub enum VaultError {
     /// read (an external unseal helper — `systemd-creds`, SEP, Keychain — failed,
     /// or is not yet implemented on this platform/build).
     CredentialSource(String),
+    WrongAccount { expected: &'static str, euid: u32 },
+    KeychainPointer(String),
+    Keychain { status: i32 },
 }
 
 impl std::fmt::Display for VaultError {
@@ -138,6 +141,21 @@ impl std::fmt::Display for VaultError {
             VaultError::PeerIdentity(e) => write!(f, "peer plane identity rejected: {e:?}"),
             VaultError::Operator(msg) => write!(f, "operator Vault operation failed: {msg}"),
             VaultError::CredentialSource(msg) => write!(f, "credential source failed: {msg}"),
+            VaultError::WrongAccount { expected, euid } => write!(
+                f,
+                "refusing the keychain read: running as uid {euid}, not as {expected}"
+            ),
+            VaultError::KeychainPointer(msg) => write!(f, "keychain pointer: {msg}"),
+            VaultError::Keychain { status: -25293 } => write!(
+                f,
+                "keychain read refused (-25293): the keychain is locked, or this binary is not the \
+                 Developer ID-signed one the item was enrolled for (an ad-hoc or re-signed build)"
+            ),
+            VaultError::Keychain { status: -25300 } => write!(
+                f,
+                "no keychain item (-25300): this plane is not enrolled; run `sudo maknae enroll`"
+            ),
+            VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
         }
     }
 }
@@ -167,9 +185,20 @@ mod tests {
             VaultError::PeerIdentity(crate::VerifyError::NoUriSan),
             VaultError::Operator("issuer/default/json: connection refused".into()),
             VaultError::CredentialSource("no daemon SecretID source configured".into()),
+            VaultError::WrongAccount { expected: "_maknae", euid: 501 },
+            VaultError::KeychainPointer("names /tmp/x.keychain".into()),
+            VaultError::Keychain { status: -25308 },
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
         }
+    }
+
+    #[test]
+    fn the_acl_refusal_names_the_ad_hoc_case() {
+        let m = format!("{}", VaultError::Keychain { status: -25293 });
+        assert!(m.contains("ad-hoc") && m.contains("locked"), "{m}");
+        let m = format!("{}", VaultError::Keychain { status: -25300 });
+        assert!(m.contains("maknae enroll"), "{m}");
     }
 }
