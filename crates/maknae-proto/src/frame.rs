@@ -2,14 +2,100 @@
 use crate::error::ProtoFrameError;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameClass {
+    Control = 1,
+    Attempt = 2,
+    Prompt = 3,
+}
+
+impl TryFrom<u8> for FrameClass {
+    type Error = ProtoFrameError;
+    fn try_from(b: u8) -> Result<Self, Self::Error> {
+        match b {
+            1 => Ok(FrameClass::Control),
+            2 => Ok(FrameClass::Attempt),
+            3 => Ok(FrameClass::Prompt),
+            other => Err(ProtoFrameError::UnknownClass(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCaps {
+    pub control: usize,
+    pub attempt: usize,
+    pub prompt: usize,
+}
+
+impl FrameCaps {
+    pub fn cap(&self, class: FrameClass) -> usize {
+        match class {
+            FrameClass::Control => self.control,
+            FrameClass::Attempt => self.attempt,
+            FrameClass::Prompt => self.prompt,
+        }
+    }
+}
+
+pub const CONTROL_REQUEST_MAX: usize = 1024;
+pub const CONTROL_RESPONSE_MAX: usize = 65536;
+pub const ATTEMPT_REQUEST_MAX: usize = 65536;
+
+fn frame_len(body: &[u8]) -> Result<u32, ProtoFrameError> {
+    u32::try_from(body.len()).map_err(|_| ProtoFrameError::Oversize {
+        declared: body.len(),
+        max: u32::MAX as usize,
+    })
+}
+
+pub async fn write_classed_frame<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    class: FrameClass,
+    body: &[u8],
+) -> Result<(), ProtoFrameError> {
+    let mut header = [0u8; 5];
+    header[..4].copy_from_slice(&frame_len(body)?.to_be_bytes());
+    header[4] = class as u8;
+    w.write_all(&header)
+        .await
+        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
+    w.write_all(body)
+        .await
+        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
+    w.flush()
+        .await
+        .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
+    Ok(())
+}
+
+pub async fn read_classed_frame_zeroizing<R: AsyncRead + Unpin>(
+    r: &mut R,
+    caps: &FrameCaps,
+) -> Result<(FrameClass, zeroize::Zeroizing<Vec<u8>>), ProtoFrameError> {
+    let mut header = [0u8; 5];
+    r.read_exact(&mut header)
+        .await
+        .map_err(|_| ProtoFrameError::Truncated)?;
+    let class = FrameClass::try_from(header[4])?;
+    let declared = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let max = caps.cap(class);
+    if declared > max {
+        return Err(ProtoFrameError::Oversize { declared, max });
+    }
+    let mut body = zeroize::Zeroizing::new(vec![0u8; declared]);
+    r.read_exact(&mut body)
+        .await
+        .map_err(|_| ProtoFrameError::Truncated)?;
+    Ok((class, body))
+}
+
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     w: &mut W,
     body: &[u8],
 ) -> Result<(), ProtoFrameError> {
-    let len = u32::try_from(body.len()).map_err(|_| ProtoFrameError::Oversize {
-        declared: body.len(),
-        max: u32::MAX as usize,
-    })?;
+    let len = frame_len(body)?;
     w.write_all(&len.to_be_bytes())
         .await
         .map_err(|e| ProtoFrameError::Io(e.to_string()))?;
@@ -156,6 +242,88 @@ mod tests {
         let mut w = FailingWriter::fail_flush();
         assert!(matches!(
             write_frame(&mut w, b"x").await,
+            Err(ProtoFrameError::Io(_))
+        ));
+    }
+
+    fn caps(control: usize) -> FrameCaps {
+        FrameCaps {
+            control,
+            attempt: 65536,
+            prompt: 1 << 20,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_classed_frame_round_trips() {
+        let mut buf = Vec::new();
+        write_classed_frame(&mut buf, FrameClass::Attempt, b"abc")
+            .await
+            .unwrap();
+        assert_eq!(&buf[..5], &[0, 0, 0, 3, 2]);
+        let (class, body) = read_classed_frame_zeroizing(&mut &buf[..], &caps(1024))
+            .await
+            .unwrap();
+        assert_eq!((class, &body[..]), (FrameClass::Attempt, &b"abc"[..]));
+    }
+
+    #[tokio::test]
+    async fn over_its_class_cap_is_refused_before_the_body_is_read() {
+        let mut bytes: &[u8] = &[0, 0, 0, 5, 1, b'x'];
+        assert_eq!(
+            read_classed_frame_zeroizing(&mut bytes, &caps(4))
+                .await
+                .unwrap_err(),
+            ProtoFrameError::Oversize {
+                declared: 5,
+                max: 4
+            }
+        );
+        assert_eq!(bytes, &[b'x']);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_class_byte_is_refused_before_the_body_is_read() {
+        for bad in [0u8, 4, 255] {
+            let frame = [0, 0, 0, 1, bad, b'x'];
+            let mut bytes: &[u8] = &frame;
+            assert_eq!(
+                read_classed_frame_zeroizing(&mut bytes, &caps(1024))
+                    .await
+                    .unwrap_err(),
+                ProtoFrameError::UnknownClass(bad)
+            );
+            assert_eq!(bytes, &[b'x']);
+        }
+    }
+
+    #[test]
+    fn the_fixed_caps_by_value() {
+        assert_eq!(
+            (
+                CONTROL_REQUEST_MAX,
+                CONTROL_RESPONSE_MAX,
+                ATTEMPT_REQUEST_MAX
+            ),
+            (1024, 65536, 65536)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_classed_write_surfaces_io_errors() {
+        let mut w = FailingWriter::fail_write(1);
+        assert!(matches!(
+            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
+            Err(ProtoFrameError::Io(_))
+        ));
+        let mut w = FailingWriter::fail_write(2);
+        assert!(matches!(
+            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
+            Err(ProtoFrameError::Io(_))
+        ));
+        let mut w = FailingWriter::fail_flush();
+        assert!(matches!(
+            write_classed_frame(&mut w, FrameClass::Control, b"x").await,
             Err(ProtoFrameError::Io(_))
         ));
     }

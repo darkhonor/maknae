@@ -31,10 +31,11 @@ impl std::fmt::Display for ProtoCodecError {
 }
 impl std::error::Error for ProtoCodecError {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProtoFrameError {
     Oversize { declared: usize, max: usize },
     Truncated,
+    UnknownClass(u8),
     Io(String),
 }
 impl std::fmt::Display for ProtoFrameError {
@@ -44,6 +45,7 @@ impl std::fmt::Display for ProtoFrameError {
                 write!(f, "frame oversize: declared {declared} > max {max}")
             }
             ProtoFrameError::Truncated => write!(f, "frame truncated"),
+            ProtoFrameError::UnknownClass(b) => write!(f, "frame class unknown: {b}"),
             ProtoFrameError::Io(e) => write!(f, "frame io: {e}"),
         }
     }
