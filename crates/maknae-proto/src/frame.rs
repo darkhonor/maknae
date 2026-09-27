@@ -30,6 +30,13 @@ pub struct FrameCaps {
 }
 
 impl FrameCaps {
+    pub fn responses(prompt: usize) -> Self {
+        Self {
+            control: CONTROL_RESPONSE_MAX,
+            attempt: ATTEMPT_RESPONSE_MAX,
+            prompt,
+        }
+    }
     pub fn cap(&self, class: FrameClass) -> usize {
         match class {
             FrameClass::Control => self.control,
@@ -91,6 +98,18 @@ pub async fn read_frame_zeroizing<R: AsyncRead + Unpin>(
         .await
         .map_err(|_| ProtoFrameError::Truncated)?;
     Ok((class, body))
+}
+
+pub async fn read_frame_of_class<R: AsyncRead + Unpin>(
+    r: &mut R,
+    expected: FrameClass,
+    caps: &FrameCaps,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoFrameError> {
+    let (got, body) = read_frame_zeroizing(r, caps).await?;
+    if got != expected {
+        return Err(ProtoFrameError::UnexpectedClass { expected, got });
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -262,6 +281,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((class, &got[..]), (FrameClass::Control, &payload[..]));
+    }
+    #[test]
+    fn response_caps_are_the_fixed_caps_and_the_prompt_cap() {
+        let c = FrameCaps::responses(70_000);
+        assert_eq!(
+            (c.control, c.attempt, c.prompt),
+            (CONTROL_RESPONSE_MAX, ATTEMPT_RESPONSE_MAX, 70_000)
+        );
+    }
+    #[tokio::test]
+    async fn a_frame_of_the_expected_class_is_read() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        bounded(write_frame(&mut a, FrameClass::Attempt, b"ack"))
+            .await
+            .unwrap();
+        let got = bounded(read_frame_of_class(
+            &mut b,
+            FrameClass::Attempt,
+            &caps(1024),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(&got[..], b"ack");
+    }
+    #[tokio::test]
+    async fn an_empty_frame_of_another_class_is_refused() {
+        let (mut a, mut b) = tokio::io::duplex(64);
+        bounded(write_frame(&mut a, FrameClass::Control, b""))
+            .await
+            .unwrap();
+        let only_attempt = FrameCaps {
+            control: 0,
+            attempt: 1024,
+            prompt: 0,
+        };
+        let err = bounded(read_frame_of_class(
+            &mut b,
+            FrameClass::Attempt,
+            &only_attempt,
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ProtoFrameError::UnexpectedClass {
+                expected: FrameClass::Attempt,
+                got: FrameClass::Control
+            }
+        );
+    }
+    #[tokio::test]
+    async fn a_prompt_frame_is_read_and_classed() {
+        let (mut a, mut b) = tokio::io::duplex(64);
+        bounded(write_frame(&mut a, FrameClass::Prompt, b"p"))
+            .await
+            .unwrap();
+        let (class, _) = bounded(read_frame_zeroizing(&mut b, &caps(1024)))
+            .await
+            .unwrap();
+        assert_eq!(class, FrameClass::Prompt);
     }
     #[tokio::test]
     async fn oversize_fails_before_alloc() {

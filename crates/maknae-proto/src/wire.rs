@@ -615,6 +615,10 @@ pub enum RespResult {
     Err(ProtoError),
 }
 
+pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
+    class_of(verb) == declared
+}
+
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
         Verb::SessionPrompt { .. } => FrameClass::Prompt,
@@ -1712,5 +1716,18 @@ mod class_tests {
     #[test]
     fn the_attempt_response_cap_by_value() {
         assert_eq!(ATTEMPT_RESPONSE_MAX, 524_288);
+    }
+
+    #[test]
+    fn admits_only_the_verbs_own_class() {
+        for (verb, class) in every_verb() {
+            for declared in [FrameClass::Control, FrameClass::Attempt, FrameClass::Prompt] {
+                assert_eq!(
+                    admits(declared, &verb),
+                    declared == class,
+                    "{verb:?} as {declared:?}"
+                );
+            }
+        }
     }
 }

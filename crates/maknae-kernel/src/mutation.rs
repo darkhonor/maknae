@@ -563,8 +563,9 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
     loop {
         let result = tokio::time::timeout_at(
             deadline,
-            maknae_proto::read_frame_zeroizing(
+            maknae_proto::read_frame_of_class(
                 stream,
+                maknae_proto::FrameClass::Attempt,
                 &maknae_proto::FrameCaps {
                     control: 0,
                     attempt: caps.request,
@@ -574,9 +575,7 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         )
         .await;
         let report = match result {
-            Ok(Ok((maknae_proto::FrameClass::Attempt, bytes))) => {
-                maknae_proto::decode_mutation_report(&bytes).ok()
-            }
+            Ok(Ok(bytes)) => maknae_proto::decode_mutation_report(&bytes).ok(),
             _ => None,
         };
         let Some(report) = report else {

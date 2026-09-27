@@ -631,6 +631,7 @@ One name below, `UnknownRole`, is `maknae-authz-basic`'s rather than the config 
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
 | **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, `provider`, `egress` and `vault`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block; and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
+| `transport.prompt_max_bytes` outside 65536..=1048576 (default 65536; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
 
 ---
 

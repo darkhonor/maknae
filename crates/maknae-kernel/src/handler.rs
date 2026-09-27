@@ -235,8 +235,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
 /// same rationale family as GROUP_LOOKUP_TIMEOUT). Elapse → Deny (fail
 /// closed). 5s: §10.5's orphan-accumulation arithmetic assumes this value;
 /// the VALUE is pinned by a T1 test here because the binding site in run.rs
-/// is mutation-excluded orchestration. Degenerate configs that shrink the
-/// frame budget to 0 are fail-closed by design, not a bug.
+/// is mutation-excluded orchestration.
 pub const AUTHZ_DECIDE_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 
 /// The bound on `subject.user`, re-exported for the identity suite.

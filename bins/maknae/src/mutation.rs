@@ -650,8 +650,9 @@ async fn report<S: AsyncRead + AsyncWrite + Unpin>(
         proto::write_frame(stream, proto::FrameClass::Attempt, &body)
             .await
             .map_err(|e| e.to_string())?;
-        let (class, bytes) = proto::read_frame_zeroizing(
+        let bytes = proto::read_frame_of_class(
             stream,
+            proto::FrameClass::Attempt,
             &proto::FrameCaps {
                 control: 0,
                 attempt: proto::ATTEMPT_RESPONSE_MAX,
@@ -660,9 +661,6 @@ async fn report<S: AsyncRead + AsyncWrite + Unpin>(
         )
         .await
         .map_err(|e| e.to_string())?;
-        if class != proto::FrameClass::Attempt {
-            return Err("unexpected frame class".into());
-        }
         let ack = proto::decode_mutation_ack(&bytes).map_err(|e| e.to_string())?;
         if ack.id != id || ack.next_index != index {
             return Err("mutation acknowledgment correlation mismatch".into());
@@ -2045,6 +2043,25 @@ mod tests {
             .is_err());
             peer.await.unwrap();
         }
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let peer = tokio::spawn(async move {
+            read_frame(&mut server, 65536).await.unwrap();
+            proto::write_frame(&mut server, proto::FrameClass::Control, b"")
+                .await
+                .unwrap();
+        });
+        assert!(report(
+            &mut client,
+            proto::ATTEMPT_REQUEST_MAX,
+            Instant::now() + Duration::from_secs(1),
+            message.clone(),
+            g.id,
+            0
+        )
+        .await
+        .unwrap_err()
+        .contains("frame class unexpected"));
+        peer.await.unwrap();
         let (mut client, server) = tokio::io::duplex(65536);
         assert!(report(
             &mut client,

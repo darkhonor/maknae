@@ -40,9 +40,9 @@ use maknae_audit_append::{
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
-    class_of, decode_request, encode_response, read_frame_zeroizing, write_frame, FrameCaps,
-    FrameClass, Payload, RespResult, Response, Verb, ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX,
-    CONTROL_RESPONSE_MAX, PROTOCOL_VERSION,
+    admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
+    FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
+    PROTOCOL_VERSION,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -666,7 +666,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     };
-    if class_of(&request.verb) != class {
+    if !admits(class, &request.verb) {
         emit_request_deny(
             &emit,
             &host,
@@ -678,7 +678,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq.next(),
             "decode",
-            "frame class mismatch",
+            &format!(
+                "frame class mismatch: declared {class:?}, {} is {:?}",
+                verb_to_action(&request.verb),
+                class_of(&request.verb)
+            ),
             &au3_1,
         )
         .await;
@@ -1869,7 +1873,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if bytes.len() > response_cap(cfg, class) {
+    if bytes.len() > FrameCaps::responses(cfg.prompt_max_bytes).cap(class) {
         refuse_oversize_bounded(
             stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role,
             session_id, seq, action, au3_1,
@@ -1916,14 +1920,6 @@ fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCap
         control: CONTROL_REQUEST_MAX,
         attempt: attempt_caps.request,
         prompt: cfg.prompt_max_bytes,
-    }
-}
-
-fn response_cap(cfg: &TransportConfig, class: FrameClass) -> usize {
-    match class {
-        FrameClass::Control => CONTROL_RESPONSE_MAX,
-        FrameClass::Attempt => ATTEMPT_RESPONSE_MAX,
-        FrameClass::Prompt => cfg.prompt_max_bytes,
     }
 }
 

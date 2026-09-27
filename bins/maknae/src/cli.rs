@@ -22,8 +22,7 @@
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
 use maknae_proto::{
-    class_of, read_frame_zeroizing, write_frame, FrameCaps, ATTEMPT_REQUEST_MAX,
-    ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX, CONTROL_RESPONSE_MAX,
+    class_of, read_frame_of_class, write_frame, FrameCaps, ATTEMPT_REQUEST_MAX, CONTROL_REQUEST_MAX,
 };
 use maknae_proto::{
     decode_response, encode_request_zeroizing, Payload, Request, RespResult, PROTOCOL_VERSION,
@@ -193,11 +192,7 @@ impl From<Verb> for maknae_proto::Verb {
 }
 
 fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
-    FrameCaps {
-        control: CONTROL_RESPONSE_MAX,
-        attempt: ATTEMPT_RESPONSE_MAX,
-        prompt: transport.prompt_max_bytes,
-    }
+    FrameCaps::responses(transport.prompt_max_bytes)
 }
 
 async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
@@ -205,13 +200,9 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
     class: maknae_proto::FrameClass,
     caps: &FrameCaps,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let (got, body) = read_frame_zeroizing(stream, caps)
+    read_frame_of_class(stream, class, caps)
         .await
-        .map_err(|e| e.to_string())?;
-    if got != class {
-        return Err("unexpected frame class".into());
-    }
-    Ok(body)
+        .map_err(|e| e.to_string())
 }
 
 fn request_from_input(
@@ -674,7 +665,7 @@ mod tests {
             })),
         };
         let body = maknae_proto::encode_response(&reply).unwrap();
-        assert!(body.len() > CONTROL_RESPONSE_MAX);
+        assert!(body.len() > maknae_proto::CONTROL_RESPONSE_MAX);
         let transport = maknae_config::TransportConfig {
             prompt_max_bytes: 1 << 20,
             ..Default::default()
@@ -691,7 +682,7 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), body.len());
         let narrow = FrameCaps {
-            prompt: CONTROL_RESPONSE_MAX,
+            prompt: maknae_proto::CONTROL_RESPONSE_MAX,
             ..response_caps(&transport)
         };
         assert!(read_reply(&mut &bytes[..], prompt, &narrow)
@@ -707,7 +698,7 @@ mod tests {
             read_reply(&mut &control[..], prompt, &wide)
                 .await
                 .unwrap_err(),
-            "unexpected frame class"
+            "frame class unexpected: Control, expected Prompt"
         );
     }
 

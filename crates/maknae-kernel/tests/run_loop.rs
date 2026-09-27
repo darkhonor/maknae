@@ -715,7 +715,13 @@ async fn a_control_frame_over_one_kib_is_refused_unread() {
 async fn a_ping_declared_as_a_prompt_is_refused_and_recorded() {
     let (recs, responded) = serve_raw(raw_frame(3, &ping_frame_bytes()), default_cfg()).await;
     assert!(!responded);
-    assert!(denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+    assert!(
+        denied_with(
+            &recs,
+            "frame class mismatch: declared Prompt, liveness.ping is Control"
+        ),
+        "{recs:#?}"
+    );
 }
 
 #[tokio::test]
@@ -753,8 +759,11 @@ async fn a_prompt_class_frame_uses_the_prompt_cap() {
     let mut cfg = default_cfg();
     cfg.prompt_max_bytes = 1 << 20;
     let (recs, _) = serve_raw(raw_frame(3, &body), cfg).await;
-    assert!(!denied_with(&recs, "frame oversize"), "{recs:#?}");
-    assert!(!denied_with(&recs, "frame class mismatch"), "{recs:#?}");
+    assert!(
+        recs.iter()
+            .any(|r| r.event == "request" && r.action == "session.prompt"),
+        "{recs:#?}"
+    );
     let (recs, responded) = serve_raw(raw_frame(3, &body), default_cfg()).await;
     assert!(!responded);
     assert!(denied_with(&recs, "frame oversize"), "{recs:#?}");

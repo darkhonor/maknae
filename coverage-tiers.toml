@@ -552,7 +552,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_GRANT_MAX_BYTES). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_GRANT_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
