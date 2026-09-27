@@ -774,6 +774,22 @@ mod tests {
                 let failed =
                     read_held_page_with(fd.as_fd(), &p, w, 64, |_| Err(nix::errno::Errno::EIO));
                 assert_eq!(failed.unwrap_err().state, EffectState::NoEffect);
+                let mut calls = 0;
+                let second = read_held_page_with(fd.as_fd(), &p, w, 64, |f| {
+                    calls += 1;
+                    if calls == 2 {
+                        return Err(nix::errno::Errno::EIO);
+                    }
+                    syscall::fstat(f)
+                });
+                assert_eq!(second.unwrap_err().state, EffectState::NoEffect);
+                let dir = root(&d);
+                assert_eq!(
+                    read_held_page(held(&dir).as_fd(), &dir, w, 64)
+                        .unwrap_err()
+                        .state,
+                    EffectState::NoEffect
+                );
             },
         );
     }

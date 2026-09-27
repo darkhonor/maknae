@@ -126,19 +126,22 @@ fn page_json(page: &ReadPage) -> Zeroizing<String> {
         eof: page.eof,
         changed: page.changed,
     };
+    match json_exact(&view) {
+        Some(json) => json,
+        None => Zeroizing::new(READ_UNAVAILABLE.to_string()),
+    }
+}
+
+fn json_exact<T: serde::Serialize>(view: &T) -> Option<Zeroizing<String>> {
     let mut count = Count(0);
-    if serde_json::to_writer(&mut count, &view).is_err() {
-        return Zeroizing::new(READ_UNAVAILABLE.to_string());
-    }
+    serde_json::to_writer(&mut count, view).ok()?;
     let mut buf = Zeroizing::new(Vec::with_capacity(count.0 + SUFFIX_HEADROOM));
-    if serde_json::to_writer(&mut *buf, &view).is_err() {
-        return Zeroizing::new(READ_UNAVAILABLE.to_string());
-    }
+    serde_json::to_writer(&mut *buf, view).ok()?;
     match String::from_utf8(std::mem::take(&mut *buf)) {
-        Ok(s) => Zeroizing::new(s),
+        Ok(s) => Some(Zeroizing::new(s)),
         Err(e) => {
             drop(Zeroizing::new(e.into_bytes()));
-            Zeroizing::new(READ_UNAVAILABLE.to_string())
+            None
         }
     }
 }
@@ -308,6 +311,29 @@ mod tests {
         assert_eq!(v["content"], serde_json::Value::Null);
         assert_eq!(v["binary"], 3);
         assert_eq!(v["next"], serde_json::json!({"line": 42, "column": 3}));
+    }
+    #[test]
+    fn a_serializer_failure_on_either_pass_yields_nothing() {
+        struct FailsOn(std::cell::Cell<u32>, u32);
+        impl serde::Serialize for FailsOn {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                if self.0.get() == self.1 {
+                    return Err(serde::ser::Error::custom("refused"));
+                }
+                s.serialize_str("ok")
+            }
+        }
+        assert!(json_exact(&FailsOn(std::cell::Cell::new(0), 1)).is_none());
+        assert!(json_exact(&FailsOn(std::cell::Cell::new(0), 2)).is_none());
+        assert_eq!(
+            json_exact(&FailsOn(std::cell::Cell::new(0), 9))
+                .unwrap()
+                .as_str(),
+            "\"ok\""
+        );
+        use std::io::Write;
+        assert!(Count(0).flush().is_ok());
     }
     #[test]
     fn a_page_from_a_changed_file_says_so() {
