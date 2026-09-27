@@ -644,6 +644,7 @@ async fn read_with(
     };
     let fd = std::os::fd::AsFd::as_fd(held);
     let target = std::path::Path::new(path);
+    let deadline = std::time::Instant::now() + Duration::from_millis(grant.limits.deadline_ms);
     let read = match window {
         None => maknae_io::read_held_page(
             fd,
@@ -654,15 +655,18 @@ async fn read_with(
                 column: 0,
             },
             grant.limits.max_bytes,
+            deadline,
         )
         .map(|mut p| {
             let bytes = std::mem::take(&mut p.content);
             (bytes, Some(p))
         }),
-        Some(w) => maknae_io::read_held_page(fd, target, w, grant.limits.max_bytes).map(|mut p| {
-            let bytes = std::mem::take(&mut p.content);
-            (bytes, Some(p))
-        }),
+        Some(w) => maknae_io::read_held_page(fd, target, w, grant.limits.max_bytes, deadline).map(
+            |mut p| {
+                let bytes = std::mem::take(&mut p.content);
+                (bytes, Some(p))
+            },
+        ),
     };
     match read {
         Ok((bytes, page)) => {

@@ -622,14 +622,14 @@ why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a bod
 
 [[exception]]
 path = "crates/maknae-io/src/mutation.rs"
-anchor = "nix::unistd::read(self.0, buf).map_err"
+anchor = "nix::unistd::read(self.fd, buf).map_err"
 why = "read(2) on a freshly reopened, pinned regular file fails only on a device error (EIO); pure errno passthrough with no decision. read_page's own error handling is proven with a failing reader in page.rs"
 
 [[exception]]
 path = "crates/maknae-io/src/mutation.rs"
-anchor = "let page = crate::page::read_page(&mut HeldReader(&fd), window, cap as usize).map_err(|e| {"
+anchor = "_ => io_error("
 end_anchor = "nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)),"
-why = "maps a read(2) device error (see the HeldReader exception) to a no-effect failure; unreachable without a failing device. The no-effect mapping itself is proven by the fstat-seam tests"
+why = "maps a read(2) device error (see the HeldReader exception) to a no-effect failure; unreachable without a failing device. The deadline arm beside it is tested, and the no-effect mapping itself is proven by the fstat-seam tests"
 
 [[exception]]
 path = "crates/maknae-agent/src/render.rs"

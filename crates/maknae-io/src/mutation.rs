@@ -297,11 +297,17 @@ pub fn read_held_file(
     crate::anchor::read_checked_fd(&fd, expected, &required).map_err(no_effect(expected))
 }
 
-struct HeldReader<'f>(&'f OwnedFd);
+struct HeldReader<'f> {
+    fd: &'f OwnedFd,
+    deadline: Instant,
+}
 
 impl std::io::Read for HeldReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        nix::unistd::read(self.0, buf).map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        if Instant::now() >= self.deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        nix::unistd::read(self.fd, buf).map_err(|e| std::io::Error::from_raw_os_error(e as i32))
     }
 }
 
@@ -348,8 +354,9 @@ pub fn read_held_page(
     expected: &Path,
     window: crate::PageWindow,
     cap: u64,
+    deadline: Instant,
 ) -> Result<crate::Page, MutationFailure> {
-    read_held_page_with(held, expected, window, cap, syscall::fstat)
+    read_held_page_with(held, expected, window, cap, deadline, syscall::fstat)
 }
 
 fn read_held_page_with(
@@ -357,6 +364,7 @@ fn read_held_page_with(
     expected: &Path,
     window: crate::PageWindow,
     cap: u64,
+    deadline: Instant,
     mut fstat: impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
 ) -> Result<crate::Page, MutationFailure> {
     let pinned = pin(held, expected, &SINGLE_LINK_REGULAR)?;
@@ -364,11 +372,17 @@ fn read_held_page_with(
     bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR).map_err(no_effect(expected))?;
     let mut stat = |fd: &OwnedFd| fstat(fd).map_err(|e| no_effect(expected)(io_error(e, expected)));
     let before = stat(&fd)?;
-    let page = crate::page::read_page(&mut HeldReader(&fd), window, cap as usize).map_err(|e| {
-        no_effect(expected)(io_error(
-            nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)),
-            expected,
-        ))
+    let mut reader = HeldReader { fd: &fd, deadline };
+    let page = crate::page::read_page(&mut reader, window, cap as usize).map_err(|e| {
+        no_effect(expected)(match e.kind() {
+            std::io::ErrorKind::TimedOut => IoError::DeadlineElapsed {
+                path: expected.to_path_buf(),
+            },
+            _ => io_error(
+                nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)),
+                expected,
+            ),
+        })
     })?;
     let after = stat(&fd)?;
     if FileVersion::of(&before) != FileVersion::of(&after) {
@@ -572,6 +586,9 @@ mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{Seek, SeekFrom};
     use std::os::unix::fs::{symlink, PermissionsExt};
+    fn far() -> Instant {
+        Instant::now() + std::time::Duration::from_secs(60)
+    }
     fn held(p: &Path) -> OwnedFd {
         crate::open_path_for_delegation(p).unwrap()
     }
@@ -723,7 +740,7 @@ mod tests {
                     limit_lines: 1,
                     column: 0,
                 };
-                let page = read_held_page(fd.as_fd(), &p, w, 64).unwrap();
+                let page = read_held_page(fd.as_fd(), &p, w, 64, far()).unwrap();
                 assert_eq!(
                     (&page.content[..], page.start, page.lines),
                     (&b"two\n"[..], 4, Some((2, 2)))
@@ -748,7 +765,7 @@ mod tests {
                 };
                 for field in 0..7 {
                     let mut calls = 0;
-                    let changed = read_held_page_with(fd.as_fd(), &p, w, 64, |f| {
+                    let changed = read_held_page_with(fd.as_fd(), &p, w, 64, far(), |f| {
                         calls += 1;
                         let mut s = syscall::fstat(f)?;
                         if calls == 2 {
@@ -771,11 +788,12 @@ mod tests {
                     );
                     assert_eq!(e.state, EffectState::NoEffect);
                 }
-                let failed =
-                    read_held_page_with(fd.as_fd(), &p, w, 64, |_| Err(nix::errno::Errno::EIO));
+                let failed = read_held_page_with(fd.as_fd(), &p, w, 64, far(), |_| {
+                    Err(nix::errno::Errno::EIO)
+                });
                 assert_eq!(failed.unwrap_err().state, EffectState::NoEffect);
                 let mut calls = 0;
-                let second = read_held_page_with(fd.as_fd(), &p, w, 64, |f| {
+                let second = read_held_page_with(fd.as_fd(), &p, w, 64, far(), |f| {
                     calls += 1;
                     if calls == 2 {
                         return Err(nix::errno::Errno::EIO);
@@ -785,10 +803,36 @@ mod tests {
                 assert_eq!(second.unwrap_err().state, EffectState::NoEffect);
                 let dir = root(&d);
                 assert_eq!(
-                    read_held_page(held(&dir).as_fd(), &dir, w, 64)
+                    read_held_page(held(&dir).as_fd(), &dir, w, 64, far())
                         .unwrap_err()
                         .state,
                     EffectState::NoEffect
+                );
+            },
+        );
+    }
+    #[test]
+    fn a_page_read_past_its_deadline_stops_with_nothing() {
+        crate::testutil::isolated(
+            "mutation::tests::a_page_read_past_its_deadline_stops_with_nothing",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let p = root(&d).join("deadline-sentinel");
+                std::fs::write(&p, b"one\ntwo\n").unwrap();
+                let w = crate::PageWindow {
+                    offset_line: 1,
+                    limit_lines: 9,
+                    column: 0,
+                };
+                let e = read_held_page(held(&p).as_fd(), &p, w, 64, Instant::now()).unwrap_err();
+                assert!(matches!(e.source, IoError::DeadlineElapsed { .. }), "{e:?}");
+                assert_eq!(e.state, EffectState::NoEffect);
+                let later = Instant::now() + std::time::Duration::from_secs(60);
+                assert_eq!(
+                    &read_held_page(held(&p).as_fd(), &p, w, 64, later)
+                        .unwrap()
+                        .content[..],
+                    b"one\ntwo\n"
                 );
             },
         );
@@ -820,9 +864,13 @@ mod tests {
                     limit_lines: 1,
                     column: 0,
                 };
-                let first = read_held_page(fd.as_fd(), &p, w, 64).unwrap().version;
+                let first = read_held_page(fd.as_fd(), &p, w, 64, far())
+                    .unwrap()
+                    .version;
                 assert_eq!(
-                    read_held_page(fd.as_fd(), &p, w, 64).unwrap().version,
+                    read_held_page(fd.as_fd(), &p, w, 64, far())
+                        .unwrap()
+                        .version,
                     first
                 );
                 use std::io::Write;
@@ -832,7 +880,9 @@ mod tests {
                     .unwrap()
                     .write_all(b"three\n")
                     .unwrap();
-                let later = read_held_page(fd.as_fd(), &p, w, 64).unwrap().version;
+                let later = read_held_page(fd.as_fd(), &p, w, 64, far())
+                    .unwrap()
+                    .version;
                 assert_ne!(later, first);
                 assert_eq!(first.key()[..2], later.key()[..2]);
             },

@@ -480,7 +480,13 @@ impl Worker {
                     column: page.column,
                 };
                 let cap = self.grant.limits.max_bytes.min(CLIENT_PAGE_MAX);
-                match maknae_io::read_held_page(held.as_fd(), Path::new(&path), window, cap) {
+                match maknae_io::read_held_page(
+                    held.as_fd(),
+                    Path::new(&path),
+                    window,
+                    cap,
+                    self.deadline,
+                ) {
                     Ok(pg) => {
                         let len = pg.content.len() as u64;
                         let effect = EffectEntry {
