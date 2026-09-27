@@ -46,14 +46,13 @@ pub struct PostureMarker {
 /// The mechanism token a [`CredentialSource::CredentialsDirectory`] boot expects
 /// its marker to attest (Linux `systemd-creds`, TPM2-key-pinned per spec §6.1).
 pub const MECHANISM_TPM2: &str = "tpm2";
-/// The mechanism token a [`CredentialSource::Keychain`] boot expects its marker
-/// to attest (macOS Secure Enclave).
-pub const MECHANISM_SEP: &str = "sep";
+pub const MECHANISM_KEYCHAIN: &str = "keychain";
 
 /// The daemon's honestly-stated boot credential posture (spec §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Posture {
     HrotSealed,
+    CodeBound,
     PlaintextDegraded,
     Unverified,
 }
@@ -63,6 +62,7 @@ impl Posture {
     pub fn as_str(&self) -> &'static str {
         match self {
             Posture::HrotSealed => "hrot_sealed",
+            Posture::CodeBound => "code_bound",
             Posture::PlaintextDegraded => "plaintext_degraded",
             Posture::Unverified => "unverified",
         }
@@ -81,6 +81,8 @@ impl Posture {
 ///   sealed kind AND whose `target` matches `expected_target` (the deterministic
 ///   sealed-credential path this boot's config implies — computed by the caller,
 ///   `run.rs`) → [`Posture::HrotSealed`].
+/// - The keychain source with a matching marker → [`Posture::CodeBound`] (#76:
+///   bound to the signed binary, not to hardware).
 /// - A sealed source with a MISSING marker, one whose `mechanism` does not match,
 ///   OR one whose `target` does not match `expected_target` →
 ///   [`Posture::Unverified`] (covers a missing attestation, a contradicting
@@ -105,9 +107,14 @@ pub fn determine(
     match source {
         CredentialSource::PlaintextPath => Posture::PlaintextDegraded,
         CredentialSource::CredentialsDirectory => {
-            sealed_posture(marker, MECHANISM_TPM2, expected_target)
+            sealed_posture(marker, MECHANISM_TPM2, expected_target, Posture::HrotSealed)
         }
-        CredentialSource::Keychain => sealed_posture(marker, MECHANISM_SEP, expected_target),
+        CredentialSource::Keychain => sealed_posture(
+            marker,
+            MECHANISM_KEYCHAIN,
+            expected_target,
+            Posture::CodeBound,
+        ),
     }
 }
 
@@ -115,11 +122,10 @@ fn sealed_posture(
     marker: Option<&PostureMarker>,
     expected_mechanism: &str,
     expected_target: &str,
+    sealed: Posture,
 ) -> Posture {
     match marker {
-        Some(m) if m.mechanism == expected_mechanism && m.target == expected_target => {
-            Posture::HrotSealed
-        }
+        Some(m) if m.mechanism == expected_mechanism && m.target == expected_target => sealed,
         _ => Posture::Unverified,
     }
 }
@@ -170,7 +176,7 @@ mod tests {
         assert_eq!(
             determine(
                 CredentialSource::CredentialsDirectory,
-                Some(&marker(MECHANISM_SEP)),
+                Some(&marker(MECHANISM_KEYCHAIN)),
                 EXPECTED_TARGET
             ),
             Posture::Unverified
@@ -193,19 +199,19 @@ mod tests {
     }
 
     #[test]
-    fn sep_sealed_with_matching_marker_is_hrot_sealed() {
+    fn keychain_with_matching_marker_is_code_bound() {
         assert_eq!(
             determine(
                 CredentialSource::Keychain,
-                Some(&marker(MECHANISM_SEP)),
+                Some(&marker(MECHANISM_KEYCHAIN)),
                 EXPECTED_TARGET
             ),
-            Posture::HrotSealed
+            Posture::CodeBound
         );
     }
 
     #[test]
-    fn sep_sealed_with_missing_marker_is_unverified() {
+    fn keychain_with_missing_marker_is_unverified() {
         assert_eq!(
             determine(CredentialSource::Keychain, None, EXPECTED_TARGET),
             Posture::Unverified
@@ -213,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn sep_sealed_with_mismatched_marker_is_unverified() {
+    fn keychain_with_a_tpm2_marker_is_unverified() {
         assert_eq!(
             determine(
                 CredentialSource::Keychain,
@@ -225,16 +231,20 @@ mod tests {
     }
 
     #[test]
-    fn sep_sealed_with_matching_mechanism_but_wrong_target_is_unverified() {
-        // Mirrors the CredentialsDirectory regression pin above for the SEP branch.
+    fn keychain_with_matching_mechanism_but_wrong_target_is_unverified() {
         assert_eq!(
             determine(
                 CredentialSource::Keychain,
-                Some(&marker(MECHANISM_SEP)),
-                "/etc/maknae/private/some-other-secret-id.sep"
+                Some(&marker(MECHANISM_KEYCHAIN)),
+                "/etc/maknae/private/some-other-secret-id.keychain"
             ),
             Posture::Unverified
         );
+    }
+
+    #[test]
+    fn the_code_bound_token() {
+        assert_eq!(Posture::CodeBound.as_str(), "code_bound");
     }
 
     #[test]

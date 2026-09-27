@@ -3132,7 +3132,7 @@ async fn boot_after_sink(
     // failure refuses boot (#265 C2).
     //
     // `expected_target` is the deterministic sealed-credential path THIS boot's
-    // config implies — `<config_dir>/private/maknaed-secret-id.{cred,sep}`, the
+    // config implies — `<config_dir>/private/maknaed-secret-id.{cred,keychain}`, the
     // SAME path enroll's `artifact_table` writes to (bins/maknae's
     // `artifact_table.rs`) and the systemd unit's `LoadCredentialEncrypted=`
     // pins (spec §9.6) — computed here from the same `config_dir` base every
@@ -3144,9 +3144,9 @@ async fn boot_after_sink(
         maknae_vault::CredentialSourceKind::CredentialsDirectory => {
             config_dir.join("private").join("maknaed-secret-id.cred")
         }
-        maknae_vault::CredentialSourceKind::Keychain => {
-            config_dir.join("private").join("maknaed-secret-id.sep")
-        }
+        maknae_vault::CredentialSourceKind::Keychain => config_dir
+            .join("private")
+            .join(maknae_vault::KeychainPlane::Daemon.pointer_file()),
         // Unused by `determine` for the plaintext branch (it ignores both the
         // marker and the target unconditionally) — an empty path is fine.
         maknae_vault::CredentialSourceKind::PlaintextPath => PathBuf::new(),
@@ -4318,18 +4318,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn enroll_writer_sep_fixture_determines_hrot_sealed() {
-        // The macOS mirror: `build_posture_yaml("sep", ...)`'s output must
-        // determine HrotSealed for a Keychain boot.
-        let fixture = "---\nmechanism: sep\ntarget: /etc/maknae/private/maknaed-secret-id.sep\ntimestamp: \"1786563711\"\n";
+    fn enroll_writer_keychain_fixture_determines_code_bound() {
+        let fixture = "---\nmechanism: keychain\ntarget: /etc/maknae/private/maknaed-secret-id.keychain\ntimestamp: \"1786563711\"\n";
         let value = maknae_config::load_str(fixture).unwrap();
         let marker = parse_posture_marker(&value);
         let posture = crate::posture::determine(
             crate::posture::CredentialSource::Keychain,
             marker.as_ref(),
-            "/etc/maknae/private/maknaed-secret-id.sep",
+            "/etc/maknae/private/maknaed-secret-id.keychain",
         );
-        assert_eq!(posture, crate::posture::Posture::HrotSealed);
+        assert_eq!(posture, crate::posture::Posture::CodeBound);
     }
 
     #[test]
