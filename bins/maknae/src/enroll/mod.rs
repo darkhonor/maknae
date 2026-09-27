@@ -19,6 +19,8 @@
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
+#[cfg(any(target_os = "macos", test))]
+mod keychain_write;
 pub mod vault_ops;
 
 use clap::{ArgGroup, Args, Subcommand};
@@ -97,6 +99,8 @@ pub enum EnrollError {
     InvalidCaChain(String),
     /// State (enroll-state.yaml / the helper's job payload) failed to parse.
     State(String),
+    #[cfg(any(target_os = "macos", test))]
+    SecretIdShape,
     /// The macOS SEP daemon-credential seal (spec §6.2) is not implemented
     /// this increment — a documented, flagged stub (spec §11: "SEP key ACL for
     /// a launchd daemon — prototyped early in PR-J1"). Never faked.
@@ -160,6 +164,11 @@ impl std::fmt::Display for EnrollError {
             }
             EnrollError::InvalidCaChain(msg) => write!(f, "{msg}"),
             EnrollError::State(msg) => write!(f, "{msg}"),
+            #[cfg(any(target_os = "macos", test))]
+            EnrollError::SecretIdShape => write!(
+                f,
+                "the minted SecretID is not a lowercase UUID — refusing to hand it to the keychain"
+            ),
             EnrollError::MacosSepUnimplemented => write!(
                 f,
                 "macOS SEP daemon-credential sealing is not implemented yet (spec §6.2, §11) — \

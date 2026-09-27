@@ -598,6 +598,10 @@ why = "thin OperatorClient call wrappers; the one pure piece (split_ca_chain) ca
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification + systemd-creds/Keychain subprocess/FFI I/O; the pure id-G parser carries real unit tests, the seal/probe I/O is T3 like the rest of this crate's HRoT-sealing call sites"
 
+[[t3]]
+path = "bins/maknae/src/enroll/keychain_write.rs"
+why = "#76: enroll's keychain write and release-build checks — /usr/bin/security and /usr/bin/codesign subprocess I/O on macOS; the command builder, SecretID shape, keychain-line, requirement, team and runtime/entitlement checks carry real unit tests on every target, T3 like the rest of this crate"
+
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +
 # dispatch decision logic is lib.rs (T1).
