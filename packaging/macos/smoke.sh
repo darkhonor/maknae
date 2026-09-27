@@ -28,6 +28,13 @@ phase1() {
             || { echo "REFUSED: $t not installed; phase 1 cannot attest its checks." >&2; exit 2; }
     done
 
+    # packaged-binaries.sh sets -e; this script counts failures instead.
+    . "$REPO/ci/gates/packaged-binaries.sh"; set +e
+    . "$HERE/signing-lib.sh"
+    local BINS
+    BINS="$(packaged_binaries "$REPO")" && [ -n "$BINS" ] \
+        || { echo "REFUSED: the packaged-binaries manifest could not be read." >&2; exit 2; }
+
     for f in "$HERE"/*.plist "$HERE"/*.entitlements; do
         plutil -lint "$f" >/dev/null 2>&1 && ok "plutil -lint $(basename "$f")" \
                                           || fail "plutil -lint $(basename "$f")"
@@ -41,7 +48,8 @@ phase1() {
         && ok "macOS 26 floor" || fail "macOS 26 floor MISSING"
 
     for s in "$HERE/scripts/preinstall" "$HERE/scripts/postinstall" \
-             "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh"; do
+             "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh" \
+             "$HERE/signing-lib.sh"; do
         bash -n "$s" 2>/dev/null && ok "bash -n $(basename "$s")" || fail "bash -n $(basename "$s")"
         shellcheck -S warning "$s" >/dev/null 2>&1 && ok "shellcheck $(basename "$s")" \
                                                    || fail "shellcheck $(basename "$s")"
@@ -58,10 +66,30 @@ phase1() {
         '')  fail "no runtime-dir install line found in preinstall" ;;
         *)   fail "runtime dir not -g \"\$OPERATOR_GID\" — D1's premise is broken: $rt_line" ;;
     esac
+    ert_line="$(grep -E '^install -d .*/usr/local/var/run/maknae-egress$' "$HERE/scripts/preinstall" || true)"
+    case "$ert_line" in
+        *'-o "$EGRESS_UID" -g "$MAKNAE_GID"'*) ok "deputy runtime dir is _maknae-egress:_maknae" ;;
+        '')  fail "no deputy runtime-dir install line found in preinstall" ;;
+        *)   fail "deputy runtime dir not -o \"\$EGRESS_UID\" -g \"\$MAKNAE_GID\": $ert_line" ;;
+    esac
+    elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
+    case "$elog_line" in
+        *'-m 0750 -o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress 0750" ;;
+        '')  fail "no deputy log-dir install line found in preinstall" ;;
+        *)   fail "deputy log dir not -m 0750 -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
+    esac
+
+    "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
+        && ok "every entitlements file is empty" \
+        || fail "an entitlements file declares entitlements (ADR-0018 decision 6)"
 
     grep -q 'launchctl disable' "$HERE/scripts/postinstall" \
         && ok "postinstall disables the job by default" \
         || fail "postinstall does NOT disable — an unenrolled install will respawn-loop"
+    grep -qxF 'EGRESS_LABEL="io.maknae.maknae-egress"' "$HERE/scripts/postinstall" \
+        && grep -qF 'launchctl disable "system/$EGRESS_LABEL"' "$HERE/scripts/postinstall" \
+        && ok "postinstall disables the deputy job by default" \
+        || fail "postinstall does NOT disable the deputy — an unenrolled install will respawn-loop it"
     grep -q 'usr/local/share/maknae/defaults' "$HERE/build-pkg.sh" \
         && ok "config defaults staged outside /etc" \
         || fail "config staged into /etc — upgrades would clobber enrollment"
@@ -70,7 +98,7 @@ phase1() {
         || fail "no install_name_tool — an unresolved @rpath can load SOME OTHER libcrypto"
 
     local B="$REPO/target/aarch64-apple-darwin/release"
-    for b in maknaed maknae; do
+    for b in $BINS; do
         if [ ! -x "$B/$b" ]; then fail "no built $b to inspect"; continue; fi
         # CAPTURE, then match — never `cmd | grep -q` under `set -o pipefail`.
         # `grep -q` exits on the FIRST match and SIGPIPEs the writer, so pipefail
@@ -91,6 +119,10 @@ phase1() {
                                                        || fail "codesign --verify $b"
         codesign -d --entitlements - "$B/$b" >/dev/null 2>&1 && ok "entitlements readable on $b" \
                                                              || fail "entitlements unreadable on $b"
+        signed_entitlements_empty "$B/$b" && ok "$b was signed with no entitlements" \
+                                          || fail "$b carries signed entitlements, or none could be read"
+        signed_hardened_runtime "$B/$b" && ok "$b was signed with Hardened Runtime" \
+                                        || fail "$b was signed without Hardened Runtime, or its signature could not be read"
         local cs; cs="$(codesign -dv "$B/$b" 2>&1)"
         case "$cs" in
             *"Identifier=io.maknae.$b"*) ok "$b carries Identifier=io.maknae.$b" ;;
@@ -121,10 +153,10 @@ phase1() {
         && ok "build-pkg.sh can productsign the distribution" \
         || fail "no productsign — the .pkg cannot carry a Developer ID Installer signature"
 
-    # Team ID CONSISTENCY across ALL THREE loaded objects, including the DYLIB.
+    # Team ID CONSISTENCY across EVERY loaded object, including the DYLIB.
     #
     # The executables alone are not enough, and this is the whole failure mode: if the
-    # dylib-signing line in build-pkg.sh is deleted or regresses while both executables
+    # dylib-signing line in build-pkg.sh is deleted or regresses while the executables
     # stay Developer ID signed, every static assertion above still passes and the
     # installed binaries die at launch with the measured "different Team IDs" (rc 134).
     # install_name_tool has already invalidated the dylib's signature by that point, so
@@ -136,14 +168,14 @@ phase1() {
     #
     # Holds in BOTH modes, so it never passes on nothing: codesign reports the literal
     # "not set" for ad-hoc, a real identity reports the Team ID, and a MIX is the defect.
-    local tid_d tid_c tid_l
+    local tid_d tid_b tid_l tids=""
     tid_d="$(codesign -dv --verbose=4 "$B/maknaed" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-    tid_c="$(codesign -dv --verbose=4 "$B/maknae"  2>&1 | sed -n 's/^TeamIdentifier=//p')"
-    if [ "$tid_d" = "$tid_c" ]; then
-        ok "maknaed and maknae agree on Team ID ($tid_d)"
-    else
-        fail "Team ID MISMATCH between executables: maknaed='$tid_d' maknae='$tid_c'"
-    fi
+    for b in $BINS; do
+        tid_b="$(codesign -dv --verbose=4 "$B/$b" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+        tids="$tids $b='$tid_b'"
+        [ "$tid_b" = "$tid_d" ] && ok "$b agrees with maknaed on Team ID ($tid_b)" \
+                                || fail "Team ID MISMATCH between executables: maknaed='$tid_d' $b='$tid_b'"
+    done
 
     if [ -n "$PKG" ]; then
         local xf dylib
@@ -152,11 +184,13 @@ phase1() {
             dylib="$(find "$xf/full" -name 'libaws_lc_fips_*_crypto.dylib' -type f 2>/dev/null | head -1)"
             if [ -n "$dylib" ]; then
                 tid_l="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-                if [ "$tid_l" = "$tid_d" ] && [ "$tid_l" = "$tid_c" ]; then
-                    ok "the PACKAGED FIPS dylib carries the same Team ID as both executables ($tid_l)"
+                if [ "$tid_l" = "$tid_d" ]; then
+                    ok "the PACKAGED FIPS dylib carries the same Team ID as every executable ($tid_l)"
                 else
-                    fail "Team ID MISMATCH — library validation WILL fail at launch (rc 134): dylib='$tid_l' maknaed='$tid_d' maknae='$tid_c'"
+                    fail "Team ID MISMATCH — library validation WILL fail at launch (rc 134): dylib='$tid_l'$tids"
                 fi
+                signed_entitlements_empty "$dylib" && ok "the packaged FIPS dylib was signed with no entitlements" \
+                    || fail "the packaged FIPS dylib carries signed entitlements, or none could be read"
                 # Hardened Runtime on the dylib too: library validation is what makes the
                 # Team ID load-bearing, and it is the runtime flag that enables it.
                 #
@@ -168,12 +202,8 @@ phase1() {
                 # the Team ID assertion above under a false name. That is the same defect
                 # class this block exists to close, so it is recorded rather than quietly
                 # corrected.
-                local cdflags
-                cdflags="$(codesign -dv --verbose=4 "$dylib" 2>&1 | sed -n 's/.*flags=\([^ ]*\).*/\1/p' | head -1)"
-                case "$cdflags" in
-                    *runtime*) ok "the packaged FIPS dylib carries Hardened Runtime ($cdflags)" ;;
-                    *) fail "the packaged FIPS dylib is NOT hardened ($cdflags) — library validation is not enforced on it" ;;
-                esac
+                signed_hardened_runtime "$dylib" && ok "the packaged FIPS dylib carries Hardened Runtime" \
+                    || fail "the packaged FIPS dylib is NOT hardened, or its signature could not be read — library validation is not enforced on it"
             else
                 fail "no libaws_lc_fips_*_crypto.dylib in the package payload — the FIPS module is not shipped"
             fi
@@ -221,7 +251,9 @@ phase1() {
             printf '%s\n' \
                 "./Library" "./Library/LaunchDaemons" \
                 "./Library/LaunchDaemons/${LABEL}.plist" \
+                "./Library/LaunchDaemons/io.maknae.maknae-egress.plist" \
                 "./usr" "./usr/local" "./usr/local/bin" "./usr/local/bin/maknaed" \
+                "./usr/local/bin/maknae-egress" \
                 "./usr/local/lib" "./usr/local/lib/maknae" \
                 "./usr/local/lib/maknae/FIPSDYLIB" \
                 "./usr/local/share" "./usr/local/share/maknae" \
@@ -331,7 +363,29 @@ REFUSE
     dis2="$(launchctl print-disabled system 2>/dev/null)"
     case "$dis2" in
         *"\"$LABEL\" => disabled"*) ok "upgrade left the job disabled" ;;
-        *) ok "upgrade did not force-disable the job" ;;
+        *) fail "the job is NOT disabled after an ordinary upgrade" ;;
+    esac
+    case "$dis2" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade left the deputy job disabled" ;;
+        *) fail "the deputy job is NOT disabled after an ordinary upgrade" ;;
+    esac
+    launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *'"io.maknae.maknae-egress" => enabled'*) ok "the deputy job was enabled before the no-deputy upgrade" ;;
+        *) fail "launchctl enable did not take — the no-deputy upgrade leg cannot prove its disable" ;;
+    esac
+    rm -f /Library/LaunchDaemons/io.maknae.maknae-egress.plist
+    [ ! -e /Library/LaunchDaemons/io.maknae.maknae-egress.plist ] \
+        && ok "the deputy plist is absent before the no-deputy upgrade" \
+        || fail "the deputy plist is still present — the no-deputy upgrade leg is not exercised"
+    installer -pkg "$PKG" -target / >/dev/null && ok "upgrade from a package without the deputy succeeded" \
+                                               || fail "upgrade from a package without the deputy failed"
+    [ -e /Library/LaunchDaemons/io.maknae.maknae-egress.plist ] \
+        && ok "the no-deputy upgrade installed the deputy plist" \
+        || fail "the no-deputy upgrade did not install the deputy plist"
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "upgrade from a package without the deputy disabled it" ;;
+        *) fail "upgrade from a package without the deputy left it enabled — it would start unenrolled at boot" ;;
     esac
 
     # REPLACEMENT: delete the installer-created _maknae-egress and recreate it under
@@ -365,6 +419,8 @@ REFUSE
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
+    check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
+    check_mode "drwxr-x--- root _maknae-egress"    /usr/local/var/log/maknae-egress
 
     # The INSTALLED binary must actually run — the property no build-host check can
     # establish, because cargo injects DYLD_* and the installer does not.
@@ -377,6 +433,10 @@ REFUSE
     case "$dis" in
         *"\"$LABEL\" => disabled"*) ok "job is disabled by default" ;;
         *) fail "job is NOT disabled — boot would respawn-loop it" ;;
+    esac
+    case "$dis" in
+        *'"io.maknae.maknae-egress" => disabled'*) ok "deputy job is disabled by default" ;;
+        *) fail "deputy job is NOT disabled — boot would respawn-loop it" ;;
     esac
 
     echo "  -- chflags: uappnd is set; probing whether sappnd is survivable --"
@@ -455,10 +515,55 @@ PROBE
     launchctl disable "system/$LABEL" 2>/dev/null || :
 
     # --- uninstall, asserted --------------------------------------------------
+    # Planted: phase 2 never enrolls, so an absence check would pass on nothing.
+    local svc
+    for svc in io.maknae.maknaed io.maknae.maknae-egress; do
+        security add-generic-password -U -a secret-id -s "$svc" -T "/usr/local/bin/${svc#io.maknae.}" \
+            -w smoke-sentinel /Library/Keychains/System.keychain \
+            && ok "planted $svc keychain item" || fail "could not plant $svc keychain item"
+    done
+    chmod +a "user:_maknae-egress allow list,search" /etc/maknae \
+        && ok "planted the deputy's /etc/maknae ACE" || fail "could not plant the ACE"
     "$HERE/uninstall.sh" >/dev/null && ok "uninstall.sh ran" || fail "uninstall.sh failed"
     [ ! -e /usr/local/bin/maknaed ] && ok "binary removed" || fail "binary still present"
     [ ! -e "/Library/LaunchDaemons/${LABEL}.plist" ] && ok "plist removed" || fail "plist still present"
     [ ! -e /usr/local/lib/maknae ] && ok "FIPS dylib removed" || fail "FIPS dylib still present"
+    local src
+    for svc in io.maknae.maknaed io.maknae.maknae-egress; do
+        src=0
+        security find-generic-password -a secret-id -s "$svc" /Library/Keychains/System.keychain \
+            >/dev/null 2>&1 || src=$?
+        if [ ! -f /Library/Keychains/System.keychain ]; then
+            fail "no System keychain file, so exit $src proves nothing about $svc"
+        elif [ "$src" -eq 44 ]; then
+            ok "$svc keychain item removed"
+        else
+            fail "$svc keychain item: find exited $src (want 44)"
+        fi
+    done
+    [ -d /etc/maknae ] && ok "config RETAINED (correct)" || fail "uninstall removed /etc/maknae"
+    local led lrc=0
+    led="$(ls -led /etc/maknae 2>/dev/null)" || lrc=$?
+    if [ "$lrc" -ne 0 ]; then
+        fail "ls -led /etc/maknae exited $lrc; the deputy's ACE cannot be checked"
+    else
+        case "$led" in
+            *_maknae-egress*) fail "the deputy's ACE is still on /etc/maknae" ;;
+            *) ok "the deputy's ACE is gone from /etc/maknae" ;;
+        esac
+    fi
+    local gone
+    for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
+                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+        [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
+    done
+    local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"
+    for svc in "$LABEL" io.maknae.maknae-egress; do
+        case "$dis3" in
+            *"\"$svc\" => disabled"*) fail "$svc left disabled in the launchd database" ;;
+            *) ok "$svc has no stale disable" ;;
+        esac
+    done
     # The administrator's replacement must SURVIVE uninstall — that is the whole
     # point of declining the ownership claim above.
     if dscl . -read /Users/_maknae-egress >/dev/null 2>&1; then

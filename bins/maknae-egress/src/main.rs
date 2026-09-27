@@ -53,10 +53,11 @@ fn main() {
     let mut bounds_path = PathBuf::from(BOUNDS_PATH);
     while let Some(a) = args.next() {
         match a.as_str() {
-            // Development only. The shipped unit socket-activates and passes
-            // no bind path; a packaging test asserts that.
+            // The Linux dev/harness path AND the macOS launchd job's path
+            // (#76); the shipped Linux unit socket-activates and passes no
+            // bind path, a packaging test asserts that.
             "--bind" => bind = args.next().map(PathBuf::from),
-            // Development only, likewise — and it relocates the whole
+            // Development only — and it relocates the whole
             // credential set: the RoleID and the Vault CA are read from
             // `egress/` BESIDE the bounds file, not from a fixed path.
             "--bounds" => bounds_path = args.next().map(PathBuf::from).unwrap_or(bounds_path),
@@ -147,10 +148,17 @@ fn main() {
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
         Ok(None) => match bind {
-            Some(p) => match listen::bind_path(&p) {
-                Ok(l) => l,
-                Err(e) => fail(e),
-            },
+            Some(p) => {
+                let kernel_gid = match nix::unistd::Group::from_name(KERNEL_USER) {
+                    Ok(Some(g)) => g.gid,
+                    Ok(None) => fail(format!("no such group '{KERNEL_USER}'")),
+                    Err(e) => fail(format!("cannot resolve group '{KERNEL_USER}': {e}")),
+                };
+                match listen::bind_gated(&rt, &p, kernel_gid) {
+                    Ok(l) => l,
+                    Err(e) => fail(e),
+                }
+            }
             None => fail("no socket from the init system and no --bind path"),
         },
         Err(e) => fail(e),
@@ -331,5 +339,27 @@ mod tests {
             .expect("ExecStart=");
         assert!(!exec.contains("--bind"), "{exec}");
         assert!(!exec.contains("--bounds"), "{exec}");
+    }
+
+    #[test]
+    fn the_macos_job_binds_the_socket_the_daemon_is_told_about() {
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknae-egress.plist");
+        let args: Vec<&str> = plist
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .and_then(|s| s.split("</array>").next())
+            .expect("ProgramArguments")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("<string>")?.strip_suffix("</string>"))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "/usr/local/bin/maknae-egress",
+                "--bind",
+                maknae_config::MACOS_EGRESS_SOCKET_PATH
+            ]
+        );
+        assert!(plist.contains("<key>UserName</key>\n  <string>_maknae-egress</string>"));
     }
 }

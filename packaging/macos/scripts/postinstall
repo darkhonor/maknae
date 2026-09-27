@@ -37,6 +37,52 @@ verify() {   # $1=what  $2=expected  $3=actual
     }
 }
 
+# --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------
+# `man launchd` FILES: /Library/LaunchDaemons = "System-wide daemons provided by
+# the administrator" — it is SCANNED AT BOOT. Merely declining to `bootstrap` is
+# therefore NOT the macOS equivalent of the rpm's preset-disabled default: with
+# RunAtLoad + KeepAlive{SuccessfulExit:false} and no StartLimitBurst equivalent, a
+# fresh UNENROLLED install would become a permanent 5-second respawn loop from the
+# next reboot. `launchctl disable` writes the external disabled database
+# (launchd.plist(5) Disabled: "this state is kept externally"), which survives
+# reboot and is reversed by `launchctl enable`.
+#
+# FRESH ONLY. packaging/deb/postinst:64-80 draws exactly this line: "DO NOT
+# auto-enable or start on fresh install", then "On UPGRADE ... restart ONLY if the
+# daemon was running ... PRESERVING the operator's enabled/running state."
+# Disabling unconditionally would write a reboot-surviving disable on every
+# upgrade, so an enrolled, enabled, running host would keep serving until its next
+# reboot and then silently never start again.
+#
+# Operator flow: install -> `sudo maknae enroll` ->
+# `sudo launchctl enable system/io.maknae.maknaed` ->
+# `sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist`.
+KIND_FILE="/usr/local/var/db/maknae/.install-kind"
+KIND="$(sed -n 1p "$KIND_FILE" 2>/dev/null || echo fresh)"
+WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
+EGRESS_WAS_LOADED="$(sed -n 3p "$KIND_FILE" 2>/dev/null || echo false)"
+EGRESS_PLIST_EXISTED="$(sed -n 4p "$KIND_FILE" 2>/dev/null || echo false)"
+rm -f "$KIND_FILE"
+disabled_state() {
+    case "$(launchctl print-disabled system 2>/dev/null)" in
+        *"\"$1\" => disabled"*) echo disabled ;;
+        *) echo "not disabled" ;;
+    esac
+}
+DISABLE_MAKNAED=false; DISABLE_EGRESS=false
+if [ "$KIND" = "fresh" ]; then DISABLE_MAKNAED=true; fi
+# The deputy follows the same rule, and is also disabled on an upgrade from a
+# package that did not ship it: its plist is new in /Library/LaunchDaemons and
+# would otherwise start, unenrolled, at the next boot.
+EGRESS_LABEL="io.maknae.maknae-egress"
+if [ "$KIND" = "fresh" ] || [ "$EGRESS_PLIST_EXISTED" != "true" ]; then
+    DISABLE_EGRESS=true
+fi
+[ "$DISABLE_MAKNAED" = false ] || launchctl disable "system/$LABEL" 2>/dev/null || :
+[ "$DISABLE_EGRESS" = false ] || launchctl disable "system/$EGRESS_LABEL" 2>/dev/null || :
+[ "$DISABLE_MAKNAED" = false ] || verify "launchctl disable $LABEL" disabled "$(disabled_state "$LABEL")"
+[ "$DISABLE_EGRESS" = false ] || verify "launchctl disable $EGRESS_LABEL" disabled "$(disabled_state "$EGRESS_LABEL")"
+
 install -d -m 0750 -o 0 -g "$MGID" "$ETC"
 for f in authz.yaml maknae.yaml; do
     if [ ! -e "$ETC/$f" ]; then
@@ -95,37 +141,20 @@ case "$(stat -f '%Sf' "$AUDIT")" in
        exit 1 ;;
 esac
 
-# --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------
-# `man launchd` FILES: /Library/LaunchDaemons = "System-wide daemons provided by
-# the administrator" — it is SCANNED AT BOOT. Merely declining to `bootstrap` is
-# therefore NOT the macOS equivalent of the rpm's preset-disabled default: with
-# RunAtLoad + KeepAlive{SuccessfulExit:false} and no StartLimitBurst equivalent, a
-# fresh UNENROLLED install would become a permanent 5-second respawn loop from the
-# next reboot. `launchctl disable` writes the external disabled database
-# (launchd.plist(5) Disabled: "this state is kept externally"), which survives
-# reboot and is reversed by `launchctl enable`.
-#
-# FRESH ONLY. packaging/deb/postinst:64-80 draws exactly this line: "DO NOT
-# auto-enable or start on fresh install", then "On UPGRADE ... restart ONLY if the
-# daemon was running ... PRESERVING the operator's enabled/running state."
-# Disabling unconditionally would write a reboot-surviving disable on every
-# upgrade, so an enrolled, enabled, running host would keep serving until its next
-# reboot and then silently never start again.
-#
-# Operator flow: install -> `sudo maknae enroll` ->
-# `sudo launchctl enable system/io.maknae.maknaed` ->
-# `sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist`.
-KIND_FILE="/usr/local/var/db/maknae/.install-kind"
-KIND="$(sed -n 1p "$KIND_FILE" 2>/dev/null || echo fresh)"
-WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
-rm -f "$KIND_FILE"
-if [ "$KIND" = "fresh" ]; then
-    launchctl disable "system/$LABEL" 2>/dev/null || :
-elif [ "$WAS_LOADED" = "true" ]; then
+if [ "$DISABLE_MAKNAED" = false ] && [ "$WAS_LOADED" = "true" ]; then
     # Upgrade of a running daemon: the payload replaced the file but the live
     # process still holds the old inode. Restart it onto the new binary, exactly as
     # the deb's `systemctl try-restart` does.
-    launchctl kickstart -k "system/$LABEL" 2>/dev/null || :
+    launchctl kickstart -k "system/$LABEL" || {
+        echo "maknae: could not restart $LABEL onto the new binary — the old process may still be running" >&2
+        exit 1
+    }
+fi
+if [ "$DISABLE_EGRESS" = false ] && [ "$EGRESS_WAS_LOADED" = "true" ]; then
+    launchctl kickstart -k "system/$EGRESS_LABEL" || {
+        echo "maknae: could not restart $EGRESS_LABEL onto the new binary — the old process may still be running" >&2
+        exit 1
+    }
 fi
 
 exit 0

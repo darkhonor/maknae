@@ -4011,6 +4011,83 @@ else
   fi
 fi
 
+# ---- entitlements-empty (#76, ADR-0018 decision 6) ---------------------------
+ee="$here/entitlements-empty.sh"
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "neg-skip: [entitlements-empty/*, signed-entitlements-empty/*, signed-hardened-runtime/*] not Darwin; plutil(1) and codesign(1) are macOS tools"
+  skipped=$((skipped+11))
+else
+  ee_entitled="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_entitled" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
+EOF
+  expect_reject_because "entitlements-empty/an-entitled-build-is-refused" "declares entitlements" \
+    "$ee" "$ee_entitled"
+
+  ee_emptykey="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_emptykey" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key></key>
+    <true/>
+</dict>
+</plist>
+EOF
+  expect_reject_because "entitlements-empty/an-empty-key-is-refused" "declares entitlements" \
+    "$ee" "$ee_emptykey"
+
+  ee_unreadable="$(mktemp "$NC_TMP/XXXXXX")"
+  printf 'not a plist\n' > "$ee_unreadable"
+  expect_reject_because "entitlements-empty/an-unreadable-file-is-refused" "not a readable plist" \
+    "$ee" "$ee_unreadable"
+
+  ee_empty="$(mktemp "$NC_TMP/XXXXXX")"
+  cat > "$ee_empty" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>
+EOF
+  expect_accept "entitlements-empty/an-empty-set-passes" "entitlements-empty: ok" \
+    "$ee" "$ee_empty"
+
+  expect_accept "entitlements-empty/the-shipped-files-pass" "entitlements-empty: ok" \
+    "$ee" "$repo_root/packaging/macos/"*.entitlements
+
+  # signing-lib.sh's read-back of a SIGNED binary's entitlements.
+  see() { bash -c 'source "$1"; signed_entitlements_empty "$2" || { echo "FAIL: entitled"; exit 1; }; echo "signed-ok"' \
+    _ "$repo_root/packaging/macos/signing-lib.sh" "$1"; }
+  see_bin="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$see_bin"
+  codesign -f -s - --entitlements "$ee_entitled" "$see_bin" 2>/dev/null
+  expect_reject_because "signed-entitlements-empty/an-entitled-binary-is-refused" "entitled" see "$see_bin"
+  see_clean="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$see_clean"
+  codesign -f -s - --entitlements "$ee_empty" "$see_clean" 2>/dev/null
+  expect_accept "signed-entitlements-empty/an-empty-set-passes" "signed-ok" see "$see_clean"
+  expect_reject_because "signed-entitlements-empty/a-missing-binary-is-refused" "entitled" \
+    see "$NC_TMP/no-such-binary"
+
+  shr() { bash -c 'source "$1"; signed_hardened_runtime "$2" || { echo "FAIL: not hardened"; exit 1; }; echo "hardened-ok"' \
+    _ "$repo_root/packaging/macos/signing-lib.sh" "$1"; }
+  shr_plain="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$shr_plain"
+  codesign -f -s - "$shr_plain" 2>/dev/null
+  expect_reject_because "signed-hardened-runtime/a-signature-without-runtime-is-refused" "not hardened" shr "$shr_plain"
+  shr_hard="$(mktemp "$NC_TMP/XXXXXX")"; cp /usr/bin/true "$shr_hard"
+  codesign -f -s - --options runtime "$shr_hard" 2>/dev/null
+  expect_accept "signed-hardened-runtime/a-runtime-signature-passes" "hardened-ok" shr "$shr_hard"
+  expect_reject_because "signed-hardened-runtime/a-missing-binary-is-refused" "not hardened" \
+    shr "$NC_TMP/no-such-binary"
+fi
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to

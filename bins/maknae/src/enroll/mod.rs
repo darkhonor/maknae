@@ -558,7 +558,7 @@ fn build_daemon_yaml(
             "egress",
             artifact_write::yaml_map(vec![(
                 "socket_path",
-                Yaml::String("/usr/local/var/run/maknae-egress/egress.sock".to_string()),
+                Yaml::String(maknae_config::MACOS_EGRESS_SOCKET_PATH.to_string()),
             )]),
         ));
     }
@@ -2421,7 +2421,7 @@ mod tests {
         );
         assert!(macos.contains("transport"));
         assert!(macos.contains("socket_path"));
-        assert!(macos.contains("/usr/local/var/run/maknae-egress/egress.sock"));
+        assert!(macos.contains(maknae_config::MACOS_EGRESS_SOCKET_PATH));
         assert!(!linux.contains("egress"));
     }
 

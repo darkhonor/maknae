@@ -48,7 +48,7 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 ///
 /// **Must be called from within a Tokio runtime** — `tokio::net::UnixListener::bind`
 /// registers with the reactor and panics ("there is no reactor running") otherwise.
-pub(crate) fn bind_listener(
+pub fn bind_listener(
     path: &Path,
     group: Option<nix::unistd::Gid>,
 ) -> Result<tokio::net::UnixListener, VaultError> {
