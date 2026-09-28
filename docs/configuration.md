@@ -563,8 +563,11 @@ egress:
 - **`socket_path`** — the Unix socket the deputy accepts on. Linux packaging creates it by
   socket activation at the default path; on macOS the deputy binds
   `/usr/local/var/run/maknae-egress/egress.sock` itself (its launchd job's `--bind`), and
-  enroll writes that path here and the daemon's own `transport.socket_path`. A non-string
-  or empty value refuses boot (`InvalidEgress`).
+  enroll writes that path here, beside the daemon's own `transport.socket_path`
+  (`/usr/local/var/run/maknae/maknaed.sock`). So on macOS `/etc/maknae/maknae.yaml` already
+  has an `egress:` block: put `deadline_ms` under it, because a second `egress:` key
+  refuses the whole file with `duplicate config key 'egress' at LINE:COL`. A non-string or
+  empty value refuses boot (`InvalidEgress`).
 - **`deadline_ms`** — the kernel's outer bound on one send to the deputy. It replaced
   `transport.read_timeout_ms` in that role: five seconds was a frame read timeout, never a
   provider deadline. The default exceeds the deputy's worst-case wall time on one request
@@ -608,12 +611,15 @@ egress:
   by name if the account does not exist or cannot be looked up — the macOS package creates
   it (`preinstall`). With no provider the backend is `Unavailable`, the account is never
   looked up, and the section is parsed but idle. Whether the deputy's socket exists is
-  checked per request (`egress backend not ready` in the trail), not at boot: the socket unit and the daemon start independently —
-  and **nothing enables the socket unit for you**: `sudo systemctl enable --now
-  maknae-egress.socket` once `egress-bounds.yaml` is complete (on macOS, `sudo launchctl
-  enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system
-  /Library/LaunchDaemons/io.maknae.maknae-egress.plist`), or every permitted prompt is
-  refused as not ready (the install READMEs and enroll's closing hint carry the step).
+  checked per request (`egress backend not ready` in the trail), not at boot: the socket
+  unit and the daemon start independently — and **nothing enables the socket unit for
+  you**: `sudo systemctl enable --now maknae-egress.socket` once `egress-bounds.yaml` is
+  complete, or every permitted prompt is refused as not ready (the install READMEs and
+  enroll's closing hint carry the step). On macOS, a job that is not yet loaded is started
+  with `sudo launchctl enable system/io.maknae.maknae-egress && sudo launchctl bootstrap
+  system /Library/LaunchDaemons/io.maknae.maknae-egress.plist`; a second `bootstrap` of a
+  loaded job errors, so [first-provider step 5](first-provider.md#5-start)'s loop checks
+  first and restarts a loaded job instead.
 - Both keys are disclosed by `admin.config.show`; neither is a credential.
 
 ## 7. Accepted YAML
