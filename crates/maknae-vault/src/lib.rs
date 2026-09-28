@@ -58,6 +58,8 @@ pub use egress::{
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+#[cfg(target_os = "macos")]
+pub use keychain::read_cli_secret_from;
 pub use keychain_policy::{
     daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainItem,
     KeychainPlane, CLI_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,

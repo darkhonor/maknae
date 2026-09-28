@@ -29,12 +29,16 @@ static KEYCHAIN_READ: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(target_os = "macos")]
 fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<String>, VaultError> {
-    read_item_in(Some(keychain), item)
+    use security_framework::os::macos::keychain::SecKeychain;
+    read_item_in(|| SecKeychain::open(keychain), item)
 }
 
 #[cfg(target_os = "macos")]
 fn read_item_in(
-    keychain: Option<&Path>,
+    open: impl FnOnce() -> Result<
+        security_framework::os::macos::keychain::SecKeychain,
+        security_framework::base::Error,
+    >,
     item: &KeychainItem,
 ) -> Result<Zeroizing<String>, VaultError> {
     use security_framework::os::macos::keychain::SecKeychain;
@@ -42,10 +46,7 @@ fn read_item_in(
     let status = |e: security_framework::base::Error| VaultError::Keychain { status: e.code() };
     let _serial = KEYCHAIN_READ.lock().unwrap_or_else(|e| e.into_inner());
     let _no_ui = SecKeychain::disable_user_interaction().map_err(status)?;
-    let kc = keychain
-        .map(SecKeychain::open)
-        .unwrap_or_else(SecKeychain::default)
-        .map_err(status)?;
+    let kc = open().map_err(status)?;
     let (password, _) =
         find_generic_password(Some(&[kc]), item.service, item.account).map_err(status)?;
     let raw = Zeroizing::new(password.to_vec());
@@ -54,15 +55,19 @@ fn read_item_in(
     Ok(Zeroizing::new(text.trim().to_string()))
 }
 
+// The default keychain is the one the enroll helper adds the CLI item to.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
-    read_cli_secret_in(None)
+    use security_framework::os::macos::keychain::SecKeychain;
+    read_item_in(SecKeychain::default, &crate::CLI_KEYCHAIN_ITEM)
 }
 
-// `None` is the default keychain, the one the enroll helper adds the CLI item to.
+/// The CLI's own read, on a named keychain: enroll verifies the item it just added with it.
 #[cfg(target_os = "macos")]
-fn read_cli_secret_in(keychain: Option<&Path>) -> Result<Zeroizing<String>, VaultError> {
-    read_item_in(keychain, &crate::CLI_KEYCHAIN_ITEM)
+pub fn read_cli_secret_from(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+) -> Result<Zeroizing<String>, VaultError> {
+    read_item_in(|| Ok(keychain.clone()), &crate::CLI_KEYCHAIN_ITEM)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -241,8 +246,9 @@ mod tests {
     fn the_cli_item_is_read_by_its_service_and_account() {
         let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
         let kc = scratch_with_cli_item(Some("sentinel-cli-t76"));
+        let open = security_framework::os::macos::keychain::SecKeychain::open(&kc.path).unwrap();
         assert_eq!(
-            read_cli_secret_in(Some(&kc.path)).unwrap().as_str(),
+            read_cli_secret_from(&open).unwrap().as_str(),
             "sentinel-cli-t76"
         );
     }
@@ -251,8 +257,9 @@ mod tests {
     fn an_unenrolled_cli_is_named() {
         let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
         let kc = scratch_with_cli_item(None);
+        let open = security_framework::os::macos::keychain::SecKeychain::open(&kc.path).unwrap();
         assert!(matches!(
-            read_cli_secret_in(Some(&kc.path)),
+            read_cli_secret_from(&open),
             Err(VaultError::Keychain { status: -25300 })
         ));
     }

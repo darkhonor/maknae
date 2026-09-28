@@ -388,43 +388,61 @@ fn add_cli_item_in(
 }
 
 #[cfg(target_os = "macos")]
+fn clear_cli_item_in(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+) -> Result<(), EnrollError> {
+    use security_framework::item::{ItemClass, ItemSearchOptions};
+    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
+    cli_item_cleared(
+        ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .keychains(std::slice::from_ref(keychain))
+            .service(item.service)
+            .account(item.account)
+            .delete(),
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn verify_cli_item_in(
     keychain: &security_framework::os::macos::keychain::SecKeychain,
     secret: &Zeroizing<String>,
 ) -> Result<(), EnrollError> {
-    use security_framework::os::macos::passwords::find_generic_password;
-    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
-    let (password, _) = find_generic_password(
-        Some(std::slice::from_ref(keychain)),
-        item.service,
-        item.account,
-    )
-    .map_err(|e| keychain_failure("verify", e))?;
-    let read_back = Zeroizing::new(password.to_vec());
-    if read_back.as_slice() != secret.as_bytes() {
+    let read_back =
+        maknae_vault::read_cli_secret_from(keychain).map_err(|e| EnrollError::Keychain {
+            op: "verify",
+            detail: e.to_string(),
+        })?;
+    if read_back.as_str() != secret.as_str() {
         return Err(EnrollError::Keychain {
             op: "verify",
-            detail: "the item read back is not the SecretID just added".to_string(),
+            detail: "the CLI's read of the item is not the SecretID just added".to_string(),
         });
     }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
+fn seal_cli_secret_in(
+    keychain: &security_framework::os::macos::keychain::SecKeychain,
+    secret: &Zeroizing<String>,
+) -> Result<(), EnrollError> {
+    clear_cli_item_in(keychain)?;
+    add_cli_item_in(keychain, secret)?;
+    verify_cli_item_in(keychain, secret)
+}
+
+#[cfg(target_os = "macos")]
 fn seal_cli_secret_keychain(secret: &Zeroizing<String>, verbose: bool) -> Result<(), EnrollError> {
     use security_framework::os::macos::keychain::SecKeychain;
-    use security_framework::passwords::delete_generic_password;
-    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
     if verbose {
         eprintln!(
             "keychain: replace generic password service={}",
-            item.service
+            maknae_vault::CLI_KEYCHAIN_ITEM.service
         );
     }
-    cli_item_cleared(delete_generic_password(item.service, item.account))?;
-    let default = SecKeychain::default().map_err(|e| keychain_failure("add", e))?;
-    add_cli_item_in(&default, secret)?;
-    verify_cli_item_in(&default, secret)
+    let default = SecKeychain::default().map_err(|e| keychain_failure("open default", e))?;
+    seal_cli_secret_in(&default, secret)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -457,6 +475,7 @@ mod tests {
             let _ = std::process::Command::new("/usr/bin/security")
                 .arg("delete-keychain")
                 .arg(&self.path)
+                .stderr(std::process::Stdio::null())
                 .status();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -465,11 +484,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn scratch_keychain(tag: &str) -> ScratchKeychain {
         let dir = std::env::temp_dir().join(format!("maknae-t76-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
         let kc = ScratchKeychain {
             path: dir.join("t76-helper.keychain"),
             dir,
         };
+        drop(ScratchKeychain {
+            path: kc.path.clone(),
+            dir: kc.dir.clone(),
+        });
+        std::fs::create_dir_all(&kc.dir).unwrap();
         let p = kc.path.to_str().unwrap();
         for args in [
             ["create-keychain", "-p", "t76", p],
@@ -528,6 +551,49 @@ mod tests {
             got => panic!("a mismatched read-back must refuse, got {got:?}"),
         }
         verify_cli_item_in(&kc, &added).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_seal_replaces_an_existing_cli_item() {
+        use security_framework::os::macos::keychain::SecKeychain;
+        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = scratch_keychain("seal");
+        let bystander = scratch_keychain("bystander");
+        let kc = SecKeychain::open(&scratch.path).unwrap();
+        let other = SecKeychain::open(&bystander.path).unwrap();
+        let item = maknae_vault::CLI_KEYCHAIN_ITEM;
+        for k in [&kc, &other] {
+            k.add_generic_password(item.service, item.account, b"sentinel-seal-old-t76")
+                .unwrap();
+        }
+        let new = Zeroizing::new("sentinel-seal-new-t76".to_string());
+        seal_cli_secret_in(&kc, &new).unwrap();
+        assert_eq!(
+            maknae_vault::read_cli_secret_from(&kc).unwrap().as_str(),
+            "sentinel-seal-new-t76"
+        );
+        assert_eq!(
+            maknae_vault::read_cli_secret_from(&other).unwrap().as_str(),
+            "sentinel-seal-old-t76"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_seal_the_cli_would_read_differently_is_refused() {
+        use security_framework::os::macos::keychain::SecKeychain;
+        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = scratch_keychain("trim");
+        let kc = SecKeychain::open(&scratch.path).unwrap();
+        let padded = Zeroizing::new("sentinel-seal-padded-t76\n".to_string());
+        match seal_cli_secret_in(&kc, &padded) {
+            Err(EnrollError::Keychain {
+                op: "verify",
+                detail,
+            }) => assert!(!detail.contains("sentinel"), "{detail}"),
+            got => panic!("a seal the CLI reads back differently must refuse, got {got:?}"),
+        }
     }
 
     #[cfg(target_os = "macos")]

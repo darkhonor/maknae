@@ -167,13 +167,13 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Keychain { status: -25300 } => write!(
                 f,
-                "no keychain item (-25300): this plane is not enrolled; run `sudo maknae enroll`"
+                "no keychain item (-25300): not enrolled; run `sudo maknae enroll`"
             ),
             VaultError::Keychain { status: -25308 } => write!(
                 f,
                 "keychain read needs user interaction, which is disabled (-25308): the calling \
-                 program is not one the item trusts, in a context that cannot prompt (a daemon); \
-                 run the Developer ID-signed build the item was enrolled for"
+                 program is not one the item trusts, in a context that cannot prompt (measured: a \
+                 launchd daemon); run the Developer ID-signed build the item was enrolled for"
             ),
             VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
         }

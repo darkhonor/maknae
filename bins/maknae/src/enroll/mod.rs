@@ -115,7 +115,7 @@ pub enum EnrollError {
     #[cfg(any(target_os = "macos", test))]
     SecretIdShape,
     /// A keychain operation (delete/add/verify) failed: on a plane's System
-    /// keychain item, or on the operator's CLI item in their login keychain.
+    /// keychain item, or on the operator's CLI item in their default keychain.
     /// For a plane item it also covers an add that landed elsewhere.
     #[cfg(target_os = "macos")]
     Keychain {
