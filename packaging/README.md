@@ -16,8 +16,9 @@ shipped `/etc/maknae` config defaults.
 | `sign.sh` | Checksums (`SHA256SUMS`) + optional GPG signing (see [Verifying artifacts](#verifying-artifacts)). |
 | `isolation-contract.md` | Normative isolation contract (property × profile). |
 
-**Scope this release:** Linux only. macOS packaging (#76), OCI images (#81), and the
-Compose/Podman profile are deferred.
+**Scope this release:** Linux (deb, rpm) and macOS on Apple Silicon (a `.pkg`,
+`packaging/macos/`; its install is pending the macOS acceptance run (#76)). OCI images (#81) and
+the Compose/Podman profile are deferred.
 
 ---
 
@@ -28,6 +29,7 @@ Compose/Podman profile are deferred.
 | Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
 | RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
 | RHEL / Rocky 9 | 252 | SELinux | **Packaging + daemon-seal only** — operator `enroll` deferred to #73 (see [RHEL 9 caveat](#rhel-9-caveat)) |
+| macOS 26, Apple Silicon | — (launchd) | none | **Packaging built** — `.pkg` builds and passes smoke phase 1 on the `macos-26` runner; install → enroll → serve pending the macOS acceptance run (#76). See [packaging/macos/README.md](macos/README.md) |
 
 ---
 
@@ -189,7 +191,8 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
 - **Daemon TCP `bind`** — the `.te` grants `maknaed_t` `self:tcp_socket bind` +
   generic-node bind (needed by the Vault client connect as proven on Rocky 10);
   tightening this egress-only daemon to drop listen-capability is future hardening.
-- **macOS / OCI / Compose-Podman** — deferred (#76 / #81 / TBD).
+- **OCI / Compose-Podman** — deferred (#81 / TBD). macOS's platform deltas are stated in
+  [packaging/macos/README.md](macos/README.md).
 
 ## Shipping the audit trail to a SIEM
 
