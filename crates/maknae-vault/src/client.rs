@@ -334,8 +334,8 @@ impl PlaneClient {
     ///   path when `$CREDENTIALS_DIRECTORY` is set — that env var, when present,
     ///   ALWAYS wins here, never falling through to a CLI-shaped order.
     /// - `Plane::Cli` → [`resolve_cli_secret_source`]: a user-scoped `systemd-creds`
-    ///   file (if present in `dir`) → the macOS Keychain → the residual plaintext
-    ///   file in `dir`.
+    ///   file (if present in `dir`), else the macOS Keychain on macOS, else the
+    ///   residual plaintext file in `dir` — one source per platform; no fallthrough.
     ///
     /// `dir` still supplies the non-section credential files (AppRole id / the
     /// resolved SecretID source / CA pins / Vault CA), read from disk, not the

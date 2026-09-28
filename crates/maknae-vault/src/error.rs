@@ -171,11 +171,9 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Keychain { status: -25308 } => write!(
                 f,
-                "keychain read needs user interaction, which is disabled (-25308): the keychain \
-                 is locked, or this binary is not on the item's access list; for `maknae`, \
-                 unlock the login keychain, run it from a console session, or re-run \
-                 `sudo maknae enroll` after a rebuild; for a daemon, run \
-                 the Developer ID-signed build the item was enrolled for"
+                "keychain read needs user interaction, which is disabled (-25308): the calling \
+                 program is not one the item trusts, in a context that cannot prompt (a daemon); \
+                 run the Developer ID-signed build the item was enrolled for"
             ),
             VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
         }
@@ -232,9 +230,9 @@ mod tests {
         let m = format!("{}", VaultError::Keychain { status: -25308 });
         assert!(
             m.contains("-25308")
-                && m.contains("console session")
                 && m.contains("Developer ID")
-                && m.contains("maknae enroll"),
+                && !m.contains("console session")
+                && !m.contains("locked"),
             "{m}"
         );
     }

@@ -23,6 +23,7 @@ pub(crate) fn read_plane_secret(
     )
 }
 
+// The only permitted toggler of user interaction: its guard re-enables it unconditionally.
 #[cfg(target_os = "macos")]
 static KEYCHAIN_READ: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -58,7 +59,7 @@ pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
     read_cli_secret_in(None)
 }
 
-// `None` is the default keychain: the helper's `SecItemAdd` names none, so it wrote there.
+// `None` is the default keychain, the one the enroll helper adds the CLI item to.
 #[cfg(target_os = "macos")]
 fn read_cli_secret_in(keychain: Option<&Path>) -> Result<Zeroizing<String>, VaultError> {
     read_item_in(keychain, &crate::CLI_KEYCHAIN_ITEM)
