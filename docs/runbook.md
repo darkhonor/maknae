@@ -542,7 +542,7 @@ sudo maknae enroll \
 ```
 
 - **`--vault-addr`** must be `https://` and carry an explicit port.
-- **CA:** give exactly one of `--vault-ca` or `--ca-dir`.
+- **CA:** give exactly one of `--vault-ca` or `--ca-dir`. The `--vault-ca` bundle must hold every certificate needed to anchor Vault's server certificate, and each certificate in it is a trust anchor: if Vault serves only its leaf, include the issuing intermediate as well as the root.
 - **Operator token:** you are prompted for it; `--token-file <path>` reads it from a file instead. `VAULT_TOKEN` is scrubbed from the environment and ignored.
 - **Run it through `sudo`.** Bare root is refused, because enroll takes the operator's identity from `SUDO_UID`/`SUDO_USER`.
 - **Run it from an unconfined session.** On SELinux, `sudo su -l <operator>` from an account mapped to `staff_u` lands in `sysadm_r:sysadm_t`, which is denied `/dev/tpmrm0`, and enroll's seal check fails with `no hardware root of trust available`. Run enroll from a session whose `id -Z` shows `unconfined_u`, such as a direct login as an operator on the default `unconfined_u` mapping. An operator mapped to a confined SELinux user is not supported for enrollment.
