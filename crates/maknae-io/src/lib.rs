@@ -74,7 +74,7 @@ pub use error::{IoError, IoKind};
 pub use mutation::{
     read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
     EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,
-    MutationFailure, MutationRequired,
+    MutationFailure, MutationRequired, WriteBase,
 };
 pub use normalize::normalize;
 pub use page::{read_page, Page, PageNext, PageWindow};

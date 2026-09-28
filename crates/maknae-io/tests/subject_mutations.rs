@@ -173,6 +173,7 @@ fn credential_helper() {
             file.as_fd(),
             &project.join("existing"),
             b"written-by-subject-reopen",
+            maknae_io::WriteBase::Any,
         )
         .unwrap();
         let e = maknae_io::replace_held_file(
@@ -181,6 +182,7 @@ fn credential_helper() {
                 .as_fd(),
             &project.join("locked"),
             b"x",
+            maknae_io::WriteBase::Any,
         )
         .unwrap_err();
         assert_eq!(e.state, maknae_io::EffectState::NoEffect);
@@ -201,6 +203,7 @@ fn credential_helper() {
             file.as_fd(),
             &project.join("existing"),
             b"service-forbidden",
+            maknae_io::WriteBase::Any,
         )
         .unwrap_err();
         assert_eq!(e.state, maknae_io::EffectState::NoEffect);

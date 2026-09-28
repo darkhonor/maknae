@@ -525,8 +525,13 @@ impl Worker {
                     Ok(p) => p,
                     Err(s) => return *s,
                 };
-                match maknae_io::replace_held_file(held.as_fd(), Path::new(&path), &bytes.0) {
-                    Ok(()) => Step {
+                match maknae_io::replace_held_file(
+                    held.as_fd(),
+                    Path::new(&path),
+                    &bytes.0,
+                    maknae_io::WriteBase::Any,
+                ) {
+                    Ok(_) => Step {
                         effect: Some(EffectEntry {
                             path,
                             effect: ReportedEffect::ReplacedFile,

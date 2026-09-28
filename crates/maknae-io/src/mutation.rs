@@ -67,6 +67,7 @@ pub enum MutationEffectKind {
 pub struct MutationEffect {
     pub path: PathBuf,
     pub kind: MutationEffectKind,
+    pub version: Option<FileVersion>,
 }
 
 /// Owns an incremental directory stream, not a collected tree or a shared offset.
@@ -264,14 +265,61 @@ fn bound_to(
     same_path(&syscall::fd_path(fd).map_err(at(expected))?, expected)
 }
 
+/// What a replacement must find before it writes (#388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteBase {
+    Any,
+    Unread,
+    Version(FileVersion),
+}
+
+/// Replace a held file's bytes. The base is checked on the descriptor being
+/// written, after the ordinary refusals; the written version is `None` only when
+/// the final `fstat` fails, the bytes being written and synced by then.
 pub fn replace_held_file(
     held: BorrowedFd<'_>,
     expected: &Path,
     bytes: &[u8],
-) -> Result<(), MutationFailure> {
+    base: WriteBase,
+) -> Result<Option<FileVersion>, MutationFailure> {
+    replace_held_file_with(held, expected, bytes, base, syscall::fstat)
+}
+
+fn replace_held_file_with(
+    held: BorrowedFd<'_>,
+    expected: &Path,
+    bytes: &[u8],
+    base: WriteBase,
+    mut fstat: impl FnMut(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
+) -> Result<Option<FileVersion>, MutationFailure> {
     let pinned = pin(held, expected, &SINGLE_LINK_REGULAR)?;
     let fd = syscall::reopen_writable(&held, expected).map_err(|e| reopen_failure(e, expected))?;
     let check = || bound_to(&fd, &pinned, expected, &SINGLE_LINK_REGULAR);
+    let stale = || {
+        failure(
+            expected,
+            EffectState::NoEffect,
+            IoError::StaleBase {
+                path: expected.to_path_buf(),
+            },
+        )
+    };
+    match base {
+        WriteBase::Any => {}
+        WriteBase::Unread => {
+            check().map_err(no_effect(expected))?;
+            return Err(stale());
+        }
+        WriteBase::Version(b) => {
+            check().map_err(no_effect(expected))?;
+            let st = fstat(&fd)
+                .map_err(at(expected))
+                .map_err(no_effect(expected))?;
+            if !FileVersion::of(&st).same_content(&b) {
+                return Err(stale());
+            }
+        }
+    }
     replace_bytes(
         &fd,
         expected,
@@ -279,7 +327,8 @@ pub fn replace_held_file(
         check,
         syscall::write_at,
         syscall::fsync_fd,
-    )
+    )?;
+    Ok(fstat(&fd).ok().map(|st| FileVersion::of(&st)))
 }
 
 pub fn read_held_file(
@@ -336,6 +385,27 @@ impl FileVersion {
             ctime_nsec: s.st_ctime_nsec as i64,
         }
     }
+    pub fn from_key(k: [i64; 7]) -> Self {
+        Self {
+            dev: k[0] as u64,
+            ino: k[1] as u64,
+            size: k[2],
+            mtime: k[3],
+            mtime_nsec: k[4],
+            ctime: k[5],
+            ctime_nsec: k[6],
+        }
+    }
+    /// ctime is left out: it moves on `chmod`, xattr writes and overlayfs
+    /// copy-up, none of which change the content (#388).
+    pub fn same_content(&self, other: &Self) -> bool {
+        self.dev == other.dev
+            && self.ino == other.ino
+            && self.size == other.size
+            && self.mtime == other.mtime
+            && self.mtime_nsec == other.mtime_nsec
+    }
+    /// `maknae-agent`'s `same_content` compares these indices; keep the order.
     pub fn key(&self) -> [i64; 7] {
         [
             self.dev as i64,
@@ -451,26 +521,31 @@ impl MutationDirectory {
         leaf: &str,
         bytes: &[u8],
     ) -> Result<MutationEffect, MutationFailure> {
-        self.create_exclusive_with(leaf, |fd, path| {
-            replace_bytes(
-                fd,
-                path,
-                bytes,
-                || {
-                    self.reverify(&self.path)?;
-                    let actual = syscall::fd_path(fd).map_err(at(path))?;
-                    same_path(&actual, path)
-                },
-                syscall::write_at,
-                syscall::fsync_fd,
-            )
-        })
+        self.create_exclusive_with(
+            leaf,
+            |fd, path| {
+                replace_bytes(
+                    fd,
+                    path,
+                    bytes,
+                    || {
+                        self.reverify(&self.path)?;
+                        let actual = syscall::fd_path(fd).map_err(at(path))?;
+                        same_path(&actual, path)
+                    },
+                    syscall::write_at,
+                    syscall::fsync_fd,
+                )
+            },
+            syscall::fstat,
+        )
     }
 
     fn create_exclusive_with(
         &self,
         leaf: &str,
         write: impl FnOnce(&OwnedFd, &Path) -> Result<(), MutationFailure>,
+        fstat: impl FnOnce(&OwnedFd) -> nix::Result<nix::sys::stat::FileStat>,
     ) -> Result<MutationEffect, MutationFailure> {
         let path = self.child_path(leaf).map_err(no_effect(&self.path))?;
         self.check_deadline(&path)?;
@@ -487,6 +562,7 @@ impl MutationDirectory {
         Ok(MutationEffect {
             path,
             kind: MutationEffectKind::CreatedFile,
+            version: fstat(&fd).ok().map(|st| FileVersion::of(&st)),
         })
     }
 
@@ -498,6 +574,7 @@ impl MutationDirectory {
         Ok(MutationEffect {
             path,
             kind: MutationEffectKind::CreatedDirectory,
+            version: None,
         })
     }
 
@@ -515,6 +592,7 @@ impl MutationDirectory {
         Ok(MutationEffect {
             path,
             kind: MutationEffectKind::DeletedEntry,
+            version: None,
         })
     }
 
@@ -604,11 +682,11 @@ mod tests {
                 shared.seek(SeekFrom::Start(9)).unwrap();
                 let before = syscall::stat_path(&p).unwrap();
                 let fd = held(&p);
-                replace_held_file(fd.as_fd(), &p, b"new").unwrap();
+                replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any).unwrap();
                 assert_eq!(std::fs::read(&p).unwrap(), b"new");
                 assert_eq!(shared.stream_position().unwrap(), 9);
                 assert!(same_object(&before, &syscall::stat_path(&p).unwrap()));
-                replace_held_file(fd.as_fd(), &p, b"").unwrap();
+                replace_held_file(fd.as_fd(), &p, b"", WriteBase::Any).unwrap();
                 assert!(std::fs::read(&p).unwrap().is_empty());
             },
         );
@@ -617,28 +695,205 @@ mod tests {
     fn held_replacement_refuses_directories_links_and_moved_objects_without_effect() {
         let d = tempfile::tempdir().unwrap();
         let dir = root(&d);
-        let e = replace_held_file(held(&dir).as_fd(), &dir, b"bad").unwrap_err();
+        let e = replace_held_file(held(&dir).as_fd(), &dir, b"bad", WriteBase::Any).unwrap_err();
         assert_eq!(e.state, EffectState::NoEffect);
         assert!(matches!(e.source, IoError::NotRegularFile { .. }), "{e:?}");
         let p = dir.join("linked-sentinel");
         std::fs::write(&p, b"untouched").unwrap();
         std::fs::hard_link(&p, dir.join("second-name")).unwrap();
-        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
         assert!(matches!(e.source, IoError::MultiplyLinked { .. }), "{e:?}");
         std::fs::remove_file(dir.join("second-name")).unwrap();
         let fd = held(&p);
         std::fs::rename(&p, dir.join("moved")).unwrap();
-        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
         assert_eq!(e.state, EffectState::NoEffect);
         assert!(
             matches!(e.source, IoError::MutationPathChanged { .. }),
             "{e:?}"
         );
         std::fs::write(&p, b"newcomer").unwrap();
-        let e = replace_held_file(fd.as_fd(), &p, b"bad").unwrap_err();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
         assert_eq!(e.state, EffectState::NoEffect);
         assert_eq!(std::fs::read(&p).unwrap(), b"newcomer");
         assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
+    }
+    fn version(p: &Path) -> FileVersion {
+        FileVersion::of(&syscall::stat_path(p).unwrap())
+    }
+    #[test]
+    fn a_matching_base_replaces_and_returns_the_written_version() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("matching-base-sentinel");
+        std::fs::write(&p, b"old").unwrap();
+        let base = version(&p);
+        let written = replace_held_file(held(&p).as_fd(), &p, b"newer!", WriteBase::Version(base))
+            .unwrap()
+            .expect("the written version");
+        assert_eq!(std::fs::read(&p).unwrap(), b"newer!");
+        assert_eq!(written, version(&p));
+        assert!(!written.same_content(&base));
+    }
+    #[test]
+    fn a_base_whose_file_grew_is_refused_with_no_effect() {
+        // Every "changed" fixture changes the length: two same-size writes can
+        // share a coarse-clock timestamp tick and leave the version identical.
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("grown-base-sentinel");
+        std::fs::write(&p, b"old").unwrap();
+        let base = version(&p);
+        std::fs::write(&p, b"edited out of band").unwrap();
+        let e = replace_held_file(
+            held(&p).as_fd(),
+            &p,
+            b"stale content",
+            WriteBase::Version(base),
+        )
+        .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(matches!(e.source, IoError::StaleBase { .. }), "{e:?}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"edited out of band");
+    }
+    #[test]
+    fn an_unread_base_refuses_an_existing_file_with_no_effect() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("unread-base-sentinel");
+        std::fs::write(&p, b"never read").unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"blind", WriteBase::Unread).unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(matches!(e.source, IoError::StaleBase { .. }), "{e:?}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"never read");
+    }
+    #[test]
+    fn an_unread_base_keeps_the_ordinary_refusals() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = root(&d);
+        let p = dir.join("linked-unread-sentinel");
+        std::fs::write(&p, b"untouched").unwrap();
+        std::fs::hard_link(&p, dir.join("second-name")).unwrap();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad", WriteBase::Unread).unwrap_err();
+        assert!(matches!(e.source, IoError::MultiplyLinked { .. }), "{e:?}");
+        std::fs::remove_file(dir.join("second-name")).unwrap();
+        let fd = held(&p);
+        std::fs::rename(&p, dir.join("moved")).unwrap();
+        let e = replace_held_file(fd.as_fd(), &p, b"bad", WriteBase::Unread).unwrap_err();
+        assert!(
+            matches!(e.source, IoError::MutationPathChanged { .. }),
+            "{e:?}"
+        );
+        assert_eq!(std::fs::read(dir.join("moved")).unwrap(), b"untouched");
+    }
+    #[test]
+    fn a_ctime_only_change_does_not_refuse() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("ctime-only-sentinel");
+        std::fs::write(&p, b"content").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let base = version(&p);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let now = version(&p);
+        assert_ne!(
+            (now.ctime, now.ctime_nsec),
+            (base.ctime, base.ctime_nsec),
+            "precondition: chmod must move ctime"
+        );
+        assert_eq!((now.mtime, now.mtime_nsec), (base.mtime, base.mtime_nsec));
+        replace_held_file(held(&p).as_fd(), &p, b"rewritten", WriteBase::Version(base)).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"rewritten");
+    }
+    #[test]
+    fn same_content_compares_everything_but_ctime() {
+        let base = FileVersion {
+            dev: 1,
+            ino: 2,
+            size: 3,
+            mtime: 4,
+            mtime_nsec: 5,
+            ctime: 6,
+            ctime_nsec: 7,
+        };
+        assert!(base.same_content(&base));
+        let changed: [fn(&mut FileVersion); 5] = [
+            |v| v.dev += 1,
+            |v| v.ino += 1,
+            |v| v.size += 1,
+            |v| v.mtime += 1,
+            |v| v.mtime_nsec += 1,
+        ];
+        for (i, change) in changed.iter().enumerate() {
+            let mut v = base;
+            change(&mut v);
+            assert!(!base.same_content(&v), "field {i}");
+        }
+        let ignored: [fn(&mut FileVersion); 2] = [|v| v.ctime += 1, |v| v.ctime_nsec += 1];
+        for change in ignored {
+            let mut v = base;
+            change(&mut v);
+            assert!(base.same_content(&v));
+        }
+    }
+    #[test]
+    fn from_key_inverts_key() {
+        let v = FileVersion {
+            dev: u64::MAX,
+            ino: 9,
+            size: -1,
+            mtime: 4,
+            mtime_nsec: 5,
+            ctime: 6,
+            ctime_nsec: 7,
+        };
+        assert_eq!(FileVersion::from_key(v.key()), v);
+    }
+    #[test]
+    fn a_failed_post_write_fstat_is_ok_none_with_the_bytes_written() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("post-fstat-sentinel");
+        std::fs::write(&p, b"old").unwrap();
+        let got = replace_held_file_with(held(&p).as_fd(), &p, b"written", WriteBase::Any, |_| {
+            Err(nix::errno::Errno::EIO)
+        })
+        .unwrap();
+        assert_eq!(got, None);
+        assert_eq!(std::fs::read(&p).unwrap(), b"written");
+    }
+    #[test]
+    fn a_failed_post_create_fstat_is_a_created_file_with_no_version() {
+        let d = tempfile::tempdir().unwrap();
+        let effect = directory(&d)
+            .create_exclusive_with(
+                "post-fstat-created",
+                |fd, path| {
+                    replace_bytes(
+                        fd,
+                        path,
+                        b"kept",
+                        || Ok(()),
+                        syscall::write_at,
+                        syscall::fsync_fd,
+                    )
+                },
+                |_| Err(nix::errno::Errno::EIO),
+            )
+            .unwrap();
+        assert_eq!(effect.version, None);
+        assert_eq!(effect.kind, MutationEffectKind::CreatedFile);
+        assert_eq!(
+            std::fs::read(d.path().join("post-fstat-created")).unwrap(),
+            b"kept"
+        );
+    }
+    #[test]
+    fn create_exclusive_returns_the_created_files_version() {
+        let d = tempfile::tempdir().unwrap();
+        let effect = directory(&d)
+            .create_exclusive("created-version", b"fresh")
+            .unwrap();
+        assert_eq!(
+            effect.version,
+            Some(version(&d.path().join("created-version")))
+        );
     }
     #[test]
     fn identity_is_device_and_inode_together() {
@@ -669,7 +924,7 @@ mod tests {
         let p = root(&d).join("read-only-sentinel");
         std::fs::write(&p, b"untouched").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let e = replace_held_file(held(&p).as_fd(), &p, b"bad").unwrap_err();
+        let e = replace_held_file(held(&p).as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
         assert_eq!(e.state, EffectState::NoEffect);
         assert!(
             matches!(
@@ -703,7 +958,7 @@ mod tests {
                 std::fs::write(&p, b"old").unwrap();
                 let fd = held(&p);
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
-                let result = replace_held_file(fd.as_fd(), &p, b"new");
+                let result = replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any);
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
                 result.unwrap();
                 assert_eq!(std::fs::read(&p).unwrap(), b"new");
@@ -1250,30 +1505,38 @@ mod tests {
                 let d = tempfile::tempdir().unwrap();
                 let dir = directory(&d);
                 let error = dir
-                    .create_exclusive_with("failed-write", |fd, path| {
-                        replace_bytes(
-                            fd,
-                            path,
-                            b"new",
-                            || Ok(()),
-                            |_, _, _| Err(nix::errno::Errno::EIO),
-                            syscall::fsync_fd,
-                        )
-                    })
+                    .create_exclusive_with(
+                        "failed-write",
+                        |fd, path| {
+                            replace_bytes(
+                                fd,
+                                path,
+                                b"new",
+                                || Ok(()),
+                                |_, _, _| Err(nix::errno::Errno::EIO),
+                                syscall::fsync_fd,
+                            )
+                        },
+                        syscall::fstat,
+                    )
                     .unwrap_err();
                 assert_eq!(error.state, EffectState::Partial);
                 assert_eq!(std::fs::read(d.path().join("failed-write")).unwrap(), b"");
                 let error = dir
-                    .create_exclusive_with("failed-sync", |fd, path| {
-                        replace_bytes(
-                            fd,
-                            path,
-                            b"present",
-                            || Ok(()),
-                            syscall::write_at,
-                            |_| Err(nix::errno::Errno::EIO),
-                        )
-                    })
+                    .create_exclusive_with(
+                        "failed-sync",
+                        |fd, path| {
+                            replace_bytes(
+                                fd,
+                                path,
+                                b"present",
+                                || Ok(()),
+                                syscall::write_at,
+                                |_| Err(nix::errno::Errno::EIO),
+                            )
+                        },
+                        syscall::fstat,
+                    )
                     .unwrap_err();
                 assert_eq!(error.state, EffectState::DurabilityUnknown);
                 assert_eq!(
