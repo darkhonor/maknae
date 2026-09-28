@@ -17,7 +17,7 @@
 //! worst (systemd may root-own the credentials directory in a way this process's
 //! uid doesn't "own" by our check).
 use crate::client::read_secret_credential;
-use crate::keychain::read_plane_secret;
+use crate::keychain::{read_plane_secret, OpenedKeychain};
 use crate::secret_source::{CliSecretSource, DaemonSecretSource, EgressSecretSource};
 use crate::{KeychainPlane, VaultError};
 use std::path::Path;
@@ -105,11 +105,15 @@ pub(crate) fn read_egress_secret(
 }
 
 /// Read the CLI's SecretID from an already-resolved source. Same single-source
-/// contract as [`read_daemon_secret`].
-pub(crate) fn read_cli_secret(src: &CliSecretSource) -> Result<Zeroizing<String>, VaultError> {
+/// contract as [`read_daemon_secret`]. Production passes
+/// [`crate::keychain::default_keychain`] as `open_keychain`.
+pub(crate) fn read_cli_secret(
+    src: &CliSecretSource,
+    open_keychain: impl FnOnce() -> OpenedKeychain,
+) -> Result<Zeroizing<String>, VaultError> {
     match src {
         CliSecretSource::UserCreds(path) => read_systemd_creds_user(path),
-        CliSecretSource::Keychain => crate::keychain::read_cli_secret(),
+        CliSecretSource::Keychain => crate::keychain::read_cli_secret_in(open_keychain),
         CliSecretSource::ResidualFile(path) => read_secret_credential(path).map(Zeroizing::new),
     }
 }
@@ -176,11 +180,18 @@ mod tests {
         );
     }
 
+    fn no_keychain() -> OpenedKeychain {
+        unreachable!("only the keychain arm opens a keychain")
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn keychain_read_fails_closed() {
         assert!(matches!(
-            read_cli_secret(&CliSecretSource::Keychain),
+            read_cli_secret(
+                &CliSecretSource::Keychain,
+                crate::keychain::default_keychain
+            ),
             Err(VaultError::CredentialSource(_))
         ));
     }
@@ -188,9 +199,23 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_macos_keychain_arm_reads_the_keychain() {
-        if let Err(VaultError::CredentialSource(m)) = read_cli_secret(&CliSecretSource::Keychain) {
-            panic!("the keychain arm refused without reading the keychain: {m}");
-        }
+        use crate::keychain::tests::{scratch_with_cli_item, KEYCHAIN_UI};
+        use security_framework::os::macos::keychain::SecKeychain;
+        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
+
+        let enrolled = scratch_with_cli_item(Some("sentinel-secret-io-t76"));
+        let got = read_cli_secret(&CliSecretSource::Keychain, || {
+            SecKeychain::open(&enrolled.path)
+        });
+        assert_eq!(got.unwrap().as_str(), "sentinel-secret-io-t76");
+
+        let unenrolled = scratch_with_cli_item(None);
+        assert!(matches!(
+            read_cli_secret(&CliSecretSource::Keychain, || SecKeychain::open(
+                &unenrolled.path
+            )),
+            Err(VaultError::Keychain { status: -25300 })
+        ));
     }
 
     // ---- plaintext branches: gate enforced --------------------------------------
@@ -219,7 +244,7 @@ mod tests {
         let p = tmpfile("cli-plain-open", "cli-secret", 0o644);
         let src = CliSecretSource::ResidualFile(p.clone());
         assert!(matches!(
-            read_cli_secret(&src),
+            read_cli_secret(&src, no_keychain),
             Err(VaultError::InsecureCredential { .. })
         ));
         let _ = std::fs::remove_file(&p);
@@ -229,7 +254,10 @@ mod tests {
     fn cli_residual_branch_accepts_owner_only() {
         let p = tmpfile("cli-plain-secure", "cli-secret", 0o600);
         let src = CliSecretSource::ResidualFile(p.clone());
-        assert_eq!(read_cli_secret(&src).unwrap().as_str(), "cli-secret");
+        assert_eq!(
+            read_cli_secret(&src, no_keychain).unwrap().as_str(),
+            "cli-secret"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -244,6 +272,6 @@ mod tests {
         let src = CliSecretSource::UserCreds(std::path::PathBuf::from(
             "/nonexistent/maknae-secret-id.cred",
         ));
-        assert!(read_cli_secret(&src).is_err());
+        assert!(read_cli_secret(&src, no_keychain).is_err());
     }
 }

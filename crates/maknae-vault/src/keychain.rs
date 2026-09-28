@@ -55,11 +55,27 @@ fn read_item_in(
     Ok(Zeroizing::new(text.trim().to_string()))
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) type OpenedKeychain =
+    Result<security_framework::os::macos::keychain::SecKeychain, security_framework::base::Error>;
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) type OpenedKeychain = ();
+
 // The default keychain is the one the enroll helper adds the CLI item to.
 #[cfg(target_os = "macos")]
-pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
-    use security_framework::os::macos::keychain::SecKeychain;
-    read_item_in(SecKeychain::default, &crate::CLI_KEYCHAIN_ITEM)
+pub(crate) fn default_keychain() -> OpenedKeychain {
+    security_framework::os::macos::keychain::SecKeychain::default()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn default_keychain() -> OpenedKeychain {}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn read_cli_secret_in(
+    open: impl FnOnce() -> OpenedKeychain,
+) -> Result<Zeroizing<String>, VaultError> {
+    read_item_in(open, &crate::CLI_KEYCHAIN_ITEM)
 }
 
 /// The CLI's own read, on a named keychain: enroll verifies the item it just added with it.
@@ -67,11 +83,13 @@ pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
 pub fn read_cli_secret_from(
     keychain: &security_framework::os::macos::keychain::SecKeychain,
 ) -> Result<Zeroizing<String>, VaultError> {
-    read_item_in(|| Ok(keychain.clone()), &crate::CLI_KEYCHAIN_ITEM)
+    read_cli_secret_in(|| Ok(keychain.clone()))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
+pub(crate) fn read_cli_secret_in(
+    _open: impl FnOnce() -> OpenedKeychain,
+) -> Result<Zeroizing<String>, VaultError> {
     Err(VaultError::CredentialSource(
         "the keychain source exists only on macOS".to_string(),
     ))
@@ -132,15 +150,15 @@ pub(crate) fn observe_pointer(
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::process::Command;
     use std::sync::Mutex;
 
-    static KEYCHAIN_UI: Mutex<()> = Mutex::new(());
+    pub(crate) static KEYCHAIN_UI: Mutex<()> = Mutex::new(());
 
-    struct Scratch {
-        path: PathBuf,
+    pub(crate) struct Scratch {
+        pub(crate) path: PathBuf,
         _dir: tempfile::TempDir,
     }
 
@@ -212,7 +230,7 @@ mod tests {
         ));
     }
 
-    fn scratch_with_cli_item(secret: Option<&str>) -> Scratch {
+    pub(crate) fn scratch_with_cli_item(secret: Option<&str>) -> Scratch {
         let dir = tempfile::tempdir().unwrap();
         let kc = Scratch {
             path: dir.path().join("t76-cli.keychain"),

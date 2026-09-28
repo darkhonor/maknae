@@ -341,6 +341,16 @@ impl PlaneClient {
     /// resolved SecretID source / CA pins / Vault CA), read from disk, not the
     /// document.
     pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
+        Self::from_document_opening(doc, dir, plane, crate::keychain::default_keychain)
+    }
+
+    /// [`Self::from_document`], with the keychain the CLI plane reads named by the caller.
+    pub(crate) fn from_document_opening(
+        doc: &Document,
+        dir: &Path,
+        plane: Plane,
+        open_keychain: impl FnOnce() -> crate::keychain::OpenedKeychain,
+    ) -> Result<Self, VaultError> {
         // Parsed here (in addition to inside from_document_with_secret) ONLY to
         // reach `insecure_plaintext_secret_path` before the secret_id is resolved —
         // vault_config_from_document is a pure in-memory parse of the
@@ -371,7 +381,7 @@ impl PlaneClient {
                     cli_dir_has_user_creds(dir),
                     cfg!(target_os = "macos"),
                 )?;
-                let secret = read_cli_secret(&src)?;
+                let secret = read_cli_secret(&src, open_keychain)?;
                 (secret, CredentialSourceKind::from(&src))
             }
         };
@@ -1106,17 +1116,26 @@ mod tests {
 
     /// The other half of the regression guard: with `$CREDENTIALS_DIRECTORY`
     /// STILL populated (same env as the first test), `Plane::Cli` must NOT read
-    /// it — proving the two planes do not share a resolver. Tolerant of platform
-    /// (the CLI's own order differs by `cfg!(target_os = "macos")`): on a
-    /// non-macOS build with no user-creds file it falls through to the residual
-    /// plaintext file (`PlaintextPath`); on macOS it reads the operator's default
-    /// Keychain (#76). Either outcome proves non-use of the Kernel's
-    /// `$CREDENTIALS_DIRECTORY` value — a regression that shared the resolver
-    /// would instead return `Ok` with `CredentialSourceKind::CredentialsDirectory`
-    /// and the KERNEL secret value, matching neither arm below.
+    /// it — proving the two planes do not share a resolver. The CLI's own order
+    /// differs by platform: on macOS it reads a scratch keychain holding a
+    /// sentinel (#76), elsewhere the residual plaintext file. A regression that
+    /// shared the resolver would land on `CredentialsDirectory` with the KERNEL
+    /// secret value instead.
     #[test]
     fn cli_dispatch_ignores_credentials_directory_uses_cli_order() {
         let _g = ENV_LOCK.lock().unwrap();
+        #[cfg(target_os = "macos")]
+        let _serial = crate::keychain::tests::KEYCHAIN_UI
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        #[cfg(target_os = "macos")]
+        let enrolled = crate::keychain::tests::scratch_with_cli_item(Some("cli-keychain-value"));
+        #[cfg(target_os = "macos")]
+        let open_keychain =
+            || security_framework::os::macos::keychain::SecKeychain::open(&enrolled.path);
+        #[cfg(not(target_os = "macos"))]
+        let open_keychain = crate::keychain::default_keychain;
+
         let fx = DispatchFixture::new("cli-order", "");
         let creds_dir =
             std::env::temp_dir().join(format!("mv-dispatch-cli-creds-{}", std::process::id()));
@@ -1134,26 +1153,18 @@ mod tests {
 
         std::env::set_var("CREDENTIALS_DIRECTORY", &creds_dir);
         let doc = fx.doc();
-        let result = PlaneClient::from_document(&doc, &fx.0, Plane::Cli);
+        let result = PlaneClient::from_document_opening(&doc, &fx.0, Plane::Cli, open_keychain);
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let _ = std::fs::remove_dir_all(&creds_dir);
 
-        let expected = if cfg!(target_os = "macos") {
-            CredentialSourceKind::Keychain
+        let (kind, secret) = if cfg!(target_os = "macos") {
+            (CredentialSourceKind::Keychain, "cli-keychain-value")
         } else {
-            CredentialSourceKind::PlaintextPath
+            (CredentialSourceKind::PlaintextPath, "cli-secret-value")
         };
-        match result {
-            Ok(client) => assert_eq!(
-                client.secret_source(),
-                expected,
-                "the CLI order must land on its own source, not the kernel's $CREDENTIALS_DIRECTORY"
-            ),
-            Err(VaultError::Keychain { .. }) if cfg!(target_os = "macos") => {
-                // No trusted item in this runner's default keychain; $CREDENTIALS_DIRECTORY would have succeeded.
-            }
-            Err(e) => panic!("unexpected error proving the CLI plane uses its own order: {e:?}"),
-        }
+        let client = result.expect("the CLI order resolves to its own source");
+        assert_eq!(client.secret_source(), kind);
+        assert_eq!(client.auth.secret_id.as_str(), secret);
     }
 
     /// #76: the daemon's keychain pointer is found under private/ and wins over the plaintext arm.
