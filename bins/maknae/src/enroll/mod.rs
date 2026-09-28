@@ -570,8 +570,9 @@ fn build_cli_yaml(
     vault_addr: &str,
     approle_mount: &str,
     pki_int_mount: &str,
+    macos: bool,
 ) -> String {
-    artifact_write::emit_yaml(artifact_write::yaml_map(vec![
+    let mut top = vec![
         (
             "core",
             artifact_write::yaml_map(vec![(
@@ -587,7 +588,17 @@ fn build_cli_yaml(
                 ("pki_int_mount", Yaml::String(pki_int_mount.to_string())),
             ]),
         ),
-    ]))
+    ];
+    if macos {
+        top.push((
+            "transport",
+            artifact_write::yaml_map(vec![(
+                "socket_path",
+                Yaml::String(maknae_config::MACOS_DAEMON_SOCKET_PATH.to_string()),
+            )]),
+        ));
+    }
+    artifact_write::emit_yaml(artifact_write::yaml_map(top))
 }
 
 fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String {
@@ -1704,7 +1715,7 @@ async fn finish_enrollment(
     };
 
     let jsonl_path = "/var/log/maknae/audit.jsonl";
-    let socket_path = macos.then_some("/usr/local/var/run/maknae/maknaed.sock");
+    let socket_path = macos.then_some(maknae_config::MACOS_DAEMON_SOCKET_PATH);
 
     let daemon_yaml = build_daemon_yaml(
         &args.deployment_id,
@@ -2373,7 +2384,7 @@ mod tests {
 
     #[test]
     fn build_cli_yaml_round_trips_and_carries_both_mounts() {
-        let text = build_cli_yaml("dev-01", "https://v.example:8200", "am", "pm");
+        let text = build_cli_yaml("dev-01", "https://v.example:8200", "am", "pm", false);
         let v = maknae_config::load_str(&text).unwrap();
         // vault section present with both mounts ALWAYS persisted (spec §4.1) —
         // parsed through the real `vault_config_from_document`-adjacent shape
@@ -2416,13 +2427,59 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             true,
-            Some("/usr/local/var/run/maknae/maknaed.sock"),
+            Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
         );
         assert!(macos.contains("transport"));
         assert!(macos.contains("socket_path"));
         assert!(macos.contains(maknae_config::MACOS_EGRESS_SOCKET_PATH));
         assert!(!linux.contains("egress"));
+    }
+
+    #[test]
+    fn the_macos_cli_dials_the_socket_the_daemon_binds() {
+        let op = Operator {
+            uid: 501,
+            gid: 20,
+            name: "ops".to_string(),
+            home: PathBuf::from("/Users/ops"),
+        };
+        let socket = |text: String| {
+            let v = maknae_config::load_str(&text).unwrap();
+            maknae_config::transport_from_section(section(&v, "transport"))
+                .unwrap()
+                .socket_path
+        };
+        let daemon = socket(build_daemon_yaml(
+            "dev-01",
+            "https://v.example:8200",
+            "am",
+            "pm",
+            None,
+            "/var/log/maknae/audit.jsonl",
+            true,
+            Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
+            &op,
+        ));
+        let cli = |macos| {
+            socket(build_cli_yaml(
+                "dev-01",
+                "https://v.example:8200",
+                "am",
+                "pm",
+                macos,
+            ))
+        };
+
+        assert_eq!(
+            cli(true),
+            PathBuf::from(maknae_config::MACOS_DAEMON_SOCKET_PATH)
+        );
+        assert_eq!(cli(true), daemon);
+        assert_eq!(
+            cli(false),
+            maknae_config::TransportConfig::default().socket_path
+        );
     }
 
     #[test]

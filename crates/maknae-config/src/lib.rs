@@ -85,7 +85,8 @@ pub use provider::{
     MAX_KEY_FIELD_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES, PROVIDER_SECTION,
 };
 pub use transport::{
-    transport_from_section, TransportConfig, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+    transport_from_section, TransportConfig, MACOS_DAEMON_SOCKET_PATH, TRANSPORT_SECTION,
+    TRANSPORT_TIMEOUT_MS_MAX,
 };
 pub use value::Value;
 

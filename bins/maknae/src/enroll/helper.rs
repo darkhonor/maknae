@@ -262,6 +262,7 @@ fn provision(job: ProvisionJob, verbose: bool) -> Result<(), EnrollError> {
         &job.vault_addr,
         &job.approle_mount,
         &job.pki_int_mount,
+        job.macos,
     );
 
     let mut contents = std::collections::BTreeMap::new();
