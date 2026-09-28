@@ -231,6 +231,14 @@ for pair in "/usr/local/var/run/maknae-egress:$EGRESS_UID $MAKNAE_GID 750" \
     [ "$got" = "$want" ] || { echo "maknae: $d is '$got', expected '$want' — refusing" >&2; exit 1; }
 done
 
+for pair in "/usr/local/var/log/maknae/maknaed.err:$MAKNAE_UID" \
+            "/usr/local/var/log/maknae-egress/maknae-egress.err:$EGRESS_UID"; do
+    f="${pair%%:*}"; u="${pair#*:}"
+    if [ -L "$f" ] || { [ -e "$f" ] && [ "$(stat -f %u "$f")" != "$u" ]; }; then
+        rm -f "$f"
+    fi
+done
+
 # Hand the install kind to postinstall (pkg scripts share no environment).
 printf '%s\n%s\n%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" "$EGRESS_WAS_LOADED" "$EGRESS_PLIST_EXISTED" \
     > "$RECEIPT_DIR/.install-kind"

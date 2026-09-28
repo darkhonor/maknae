@@ -359,8 +359,13 @@ REFUSE
             && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
     done
 
+    touch /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err
     installer -pkg "$PKG" -target / >/dev/null && ok "upgrade install (2nd pass) succeeded" \
                                                || fail "upgrade install failed"
+    for f in /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err; do
+        [ ! -e "$f" ] && ok "upgrade removed the root-owned $f" \
+                      || fail "upgrade left the root-owned $f — launchd could not open it as the job user"
+    done
     for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
             && ok "after ordinary upgrade: $k still true (provenance preserved)" \
@@ -489,6 +494,20 @@ REFUSE
 
     launchctl bootout "system/${LABEL}" 2>/dev/null || :
     restore; trap - EXIT INT TERM
+    [ "$(stat -f %Su /usr/local/var/log/maknae/maknaed.err 2>/dev/null)" = "_maknae" ] \
+        && ok "launchd opened /usr/local/var/log/maknae/maknaed.err as _maknae" || fail "/usr/local/var/log/maknae/maknaed.err is not owned by _maknae"
+
+    launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
+    launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist 2>/dev/null || :
+    sleep 3
+    local ecode
+    ecode="$(launchctl print system/io.maknae.maknae-egress 2>/dev/null | awk '/last exit code/ {print $NF}')"
+    [ "$ecode" != "78" ] && ok "deputy spawned under launchd (last exit code = ${ecode:-<none>})" \
+                         || fail "deputy exit 78: launchd could not open its StandardErrorPath"
+    [ "$(stat -f %Su /usr/local/var/log/maknae-egress/maknae-egress.err 2>/dev/null)" = "_maknae-egress" ] \
+        && ok "launchd opened /usr/local/var/log/maknae-egress/maknae-egress.err as _maknae-egress" || fail "/usr/local/var/log/maknae-egress/maknae-egress.err is not owned by _maknae-egress"
+    launchctl bootout system/io.maknae.maknae-egress 2>/dev/null || :
+    launchctl disable system/io.maknae.maknae-egress 2>/dev/null || :
     # Assert the PROPERTY, not a file comparison. `cmp -s ... || ok` printed ok on
     # BOTH paths — after a successful restore the backup is gone so cmp exits 2, and
     # after a FAILED restore the files differ so cmp exits 1. Nothing could fail it.
@@ -561,7 +580,8 @@ PROBE
     fi
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
-                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
+                /usr/local/var/run/maknae /usr/local/var/log/maknae; do
         [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
     done
     local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"

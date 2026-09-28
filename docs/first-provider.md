@@ -188,7 +188,7 @@ The intent is written before the action, every time. `content_length` on each pr
 
 ## When it does not work
 
-Where a row below names `systemctl` or `journalctl`, it also gives the macOS form. The daemon writes to `/usr/local/var/log/maknae/maknaed.err` (`sudo tail /usr/local/var/log/maknae/maknaed.err`) and the deputy to `/usr/local/var/log/maknae-egress/maknae-egress.err`. `sudo` is required: their directories are `root:_maknae 0750` and `root:_maknae-egress 0750`, and the operator is in neither group.
+Where a row below names `systemctl` or `journalctl`, it also gives the macOS form. The daemon writes to `/usr/local/var/log/maknae/maknaed.err` (`sudo tail /usr/local/var/log/maknae/maknaed.err`) and the deputy to `/usr/local/var/log/maknae-egress/maknae-egress.err`. `sudo` is required: their directories are `_maknae:_maknae 0750` and `_maknae-egress:_maknae-egress 0750`, and the operator is in neither group.
 
 | What you see | Why | Fix |
 |---|---|---|
