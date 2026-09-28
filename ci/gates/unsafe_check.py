@@ -17,6 +17,9 @@ CHAR_LITERAL = re.compile(
 RAW_START = re.compile(r'[bc]?r(#*)"')
 MACRO_EXPORT = re.compile(r"\bmacro_export\b")
 MACRO_RULES = re.compile(r"\bmacro_rules\s*!")
+INNER_ATTR = re.compile(r"#\s*!")
+UNSAFE_CODE = re.compile(r"\bunsafe_code\b")
+LOOSENING = re.compile(r"\b(?:allow|expect|warn)\b")
 ATTR_START = re.compile(r"#\s*!?\s*\[")
 PATH_ATTR = re.compile(r"\s*path\s*=")
 CFG_ATTR = re.compile(r"\s*cfg_attr\b")
@@ -264,7 +267,12 @@ def main(argv):
         except (OSError, UnicodeDecodeError) as e:
             fails.append(f"{rel}: cannot be read ({e}); it was not scanned")
             continue
+        rel_owner = owner(rel)
+        for match in MACRO_EXPORT.finditer(masked):
+            fails.append(f"{rel}:{line_of(masked, match.start())}: macro_export in {rel_owner or 'the repository'}; an exported macro's unsafe escapes forbid in every consumer (ADR-0027)")
         for start, body in attributes(masked):
+            if rel_owner == sys_crate and INNER_ATTR.match(masked, start) and UNSAFE_CODE.search(body) and LOOSENING.search(body):
+                fails.append(f"{rel}:{line_of(masked, start)}: inner attribute loosens unsafe_code in {sys_crate}; only items may allow it (ADR-0027)")
             if "$" in body:
                 fails.append(f"{rel}:{line_of(masked, start)}: macro fragment in attribute position; it can spell #[path] (ADR-0027)")
             if PATH_ATTR.match(body) or (CFG_ATTR.match(body) and CFG_ATTR_PATH.search(body)):
@@ -276,9 +284,7 @@ def main(argv):
         for match in PUB_REEXPORT.finditer(masked):
             if SYS_TOKEN.search(match.group(0)):
                 fails.append(f"{rel}:{line_of(masked, match.start())}: re-exports maknae_sys past SYS_CONSUMER_ALLOW (ADR-0027)")
-        if owner(rel) == sys_crate:
-            for match in MACRO_EXPORT.finditer(masked):
-                fails.append(f"{rel}:{line_of(masked, match.start())}: macro_export in {sys_crate}; an exported macro would carry its unsafe past the safe surface (ADR-0027)")
+        if rel_owner == sys_crate:
             for match in MACRO_RULES.finditer(masked):
                 fails.append(f"{rel}:{line_of(masked, match.start())}: macro_rules! in {sys_crate}; it may define no macro (ADR-0027)")
             continue

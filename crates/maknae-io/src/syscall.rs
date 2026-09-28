@@ -253,7 +253,16 @@ pub(crate) fn linux_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std:
 pub(crate) fn macos_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std::path::PathBuf>> {
     maknae_sys::full_path(path)
         .map(Ok)
-        .map_err(|e| nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)))
+        .or_else(macos_full_path_error)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_full_path_error(e: std::io::Error) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    let errno = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO));
+    match errno {
+        nix::errno::Errno::EIO | nix::errno::Errno::ENAMETOOLONG => Ok(Err(errno)),
+        other => Err(other),
+    }
 }
 
 pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {
@@ -816,5 +825,39 @@ mod tests {
     fn fd_path_refuses_a_descriptor_without_a_filesystem_path() {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         assert_eq!(fd_path(&socket).unwrap_err(), nix::errno::Errno::EBADF);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn classify_full_path_error(e: std::io::Error) -> Result<nix::errno::Errno, nix::errno::Errno> {
+        match super::macos_full_path_error(e) {
+            Ok(Err(inner)) => Ok(inner),
+            Ok(Ok(p)) => panic!("an error became a path: {p:?}"),
+            Err(outer) => Err(outer),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reply_parse_errno_is_a_kernel_path_failure() {
+        for errno in [nix::libc::EIO, nix::libc::ENAMETOOLONG] {
+            let got = classify_full_path_error(std::io::Error::from_raw_os_error(errno));
+            assert_eq!(got, Ok(nix::errno::Errno::from_raw(errno)));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kernel_lookup_errno_is_an_open_class_failure() {
+        for errno in [nix::libc::EACCES, nix::libc::ENOENT, nix::libc::ENOTDIR] {
+            let got = classify_full_path_error(std::io::Error::from_raw_os_error(errno));
+            assert_eq!(got, Err(nix::errno::Errno::from_raw(errno)));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_error_without_an_errno_is_eio() {
+        let got = classify_full_path_error(std::io::Error::other("no errno"));
+        assert_eq!(got, Ok(nix::errno::Errno::EIO));
     }
 }

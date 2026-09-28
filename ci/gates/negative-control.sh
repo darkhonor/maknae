@@ -4733,6 +4733,45 @@ expect_reject_because "unsafe-confinement/a-bare-path-is-not-read-as-a-root" \
 expect_reject_because "unsafe-confinement/root-without-a-directory-is-refused" \
   "FAIL: unsafe-confinement: --root needs a directory" "$here/unsafe-confinement.sh" --root
 
+uc_me="$(uc_fixture)"
+mkdir -p "$uc_me/crates/a/src" "$uc_me/crates/b/src"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-sys", "crates/maknae-io", "crates/a", "crates/b"]\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_me/Cargo.toml"
+printf '[package]\nname = "a"\nversion = "0.0.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n' > "$uc_me/crates/a/Cargo.toml"
+printf '[package]\nname = "b"\nversion = "0.0.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n\n[dependencies]\na = { path = "../a" }\n' > "$uc_me/crates/b/Cargo.toml"
+printf '#[macro_export]\nmacro_rules! rd {\n    ($p:expr) => {\n        unsafe { *$p }\n    };\n}\n' > "$uc_me/crates/a/src/lib.rs"
+printf 'pub fn x() -> u8 {\n    let v = 7u8;\n    a::rd!(&v as *const u8)\n}\n' > "$uc_me/crates/b/src/lib.rs"
+git -C "$uc_me" add -A
+expect_reject_because "unsafe-confinement/macro-export-in-any-member-is-refused" \
+  "crates/a/src/lib.rs:1: macro_export in a" "$here/unsafe-confinement.sh" --root "$uc_me"
+
+uc_mec="$(uc_io_source <<'EOF'
+#[cfg_attr(all(), macro_export)]
+macro_rules! m {
+    () => {};
+}
+EOF
+)"
+expect_reject_because "unsafe-confinement/macro-export-through-cfg_attr-in-a-member-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: macro_export in maknae-io" "$here/unsafe-confinement.sh" --root "$uc_mec"
+
+uc_ia1="$(uc_fixture)"
+{ printf '#![allow(unsafe_code)]\n'; cat "$uc_ia1/crates/maknae-sys/src/lib.rs"; } > "$uc_ia1/lib.rs.new"
+mv "$uc_ia1/lib.rs.new" "$uc_ia1/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-inner-allow-unsafe_code-is-refused" \
+  "crates/maknae-sys/src/lib.rs:1: inner attribute loosens unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ia1"
+
+uc_ia2="$(uc_fixture)"
+{ printf '#![cfg_attr(all(), expect(unsafe_code))]\n'; cat "$uc_ia2/crates/maknae-sys/src/lib.rs"; } > "$uc_ia2/lib.rs.new"
+mv "$uc_ia2/lib.rs.new" "$uc_ia2/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-inner-cfg_attr-expect-unsafe_code-is-refused" \
+  "crates/maknae-sys/src/lib.rs:1: inner attribute loosens unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ia2"
+
+uc_ia3="$(uc_fixture)"
+{ printf '#![deny(unsafe_code)]\n'; cat "$uc_ia3/crates/maknae-sys/src/lib.rs"; } > "$uc_ia3/lib.rs.new"
+mv "$uc_ia3/lib.rs.new" "$uc_ia3/crates/maknae-sys/src/lib.rs"
+expect_accept "unsafe-confinement/sys-inner-deny-unsafe_code-passes" "unsafe-confinement: ok" \
+  "$here/unsafe-confinement.sh" --root "$uc_ia3"
+
 ul_fixture() {
   local d
   d="$(mktemp -d -p "$NC_TMP")"
