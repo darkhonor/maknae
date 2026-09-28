@@ -752,7 +752,9 @@ Since #388 the agent replaces an existing file only if it has read that file in 
 
 ### 13. Custody check (manual)
 
-The custody assertion is **not built** (ADR-0023, ADR-0026). Check it by hand:
+The custody assertion is **not built** (ADR-0023, ADR-0026). Check it by hand.
+
+**On Linux:**
 
 ```bash
 id                                                   # the operator: in maknae, not _maknae or _maknae-egress
@@ -777,17 +779,17 @@ sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "REA
 **On macOS**, run this from a console session:
 
 ```bash
-id
+id                                                   # the operator: in maknae, not _maknae or _maknae-egress
 sudo stat -f '%Su:%Sg %Lp %N' /etc/maknae /etc/maknae/private /etc/maknae/egress \
   /etc/maknae/private/maknaed-secret-id.keychain /etc/maknae/egress/maknae-egress-secret-id.keychain \
   /etc/maknae/egress/maknae-egress-approle-id
 ls -led /etc/maknae
-sudo -u _maknae security find-generic-password -s io.maknae.maknae-egress -a secret-id -w /Library/Keychains/System.keychain; echo "exit $?"
-security find-generic-password -s io.maknae.maknaed -a secret-id -w /Library/Keychains/System.keychain; echo "exit $?"
+sudo -u _maknae security find-generic-password -s io.maknae.maknae-egress -a secret-id -w /Library/Keychains/System.keychain >/dev/null; echo "exit $?"
+security find-generic-password -s io.maknae.maknaed -a secret-id -w /Library/Keychains/System.keychain >/dev/null; echo "exit $?"
 ```
 
 - **Expected owners and modes:** `/etc/maknae` and `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; `maknaed-secret-id.keychain` `root:_maknae 640`; `maknae-egress-secret-id.keychain` and the RoleID `root:_maknae-egress 640`; `ls -led` shows one ACL entry, `user:_maknae-egress allow list,search`.
-- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). An administrator who approves it reads the item (ADR-0018 decision 6). The same "does not cover" note applies.
+- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). **Deny both dialogs:** an administrator who approves one reads that plane's Vault SecretID (ADR-0018 decision 6); `>/dev/null` keeps it off the terminal. If one was approved, rotate it with `sudo maknae enroll`. The same "does not cover" note applies.
 
 ### 14. SELinux
 
