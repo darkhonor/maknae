@@ -654,7 +654,7 @@ rm -f ~/projects/maknae-242/output.txt
 
 **Do not create `output.txt`.** The kernel decides the write and records its intent; the CLI creates the file under your own permissions and reports the outcome. The kernel does not read or write your files (ADR-0009, #365).
 
-Before any re-run of step 10, repeat `rm -f ~/projects/maknae-242/output.txt`. A second write to the same file takes the replace lane (`mutation.operation:"WriteExisting"`).
+Before any re-run of step 10, repeat `rm -f ~/projects/maknae-242/output.txt`. A second write to the same file takes the replace lane (`mutation.operation:"WriteExisting"`), and since #388 the agent may replace only a file it has read (§12b): a re-run without the `rm` meets an `output.txt` this conversation never read, so the trail shows a first `fs.write` ending `ReportedPathChanged` with no effect, then an `fs.read` of `output.txt`, then the write that lands.
 
 ### 9. Start
 
@@ -736,6 +736,19 @@ Every read is paged: each page is its own decided, recorded `fs.read` attempt of
 - **A file that changes.** Maknae does not lock the file: Unix locks are advisory and a held lock would hang your own tools. A file written while a page is read refuses that page (`PathChanged`, nothing released). A file that changes between pages, edited in place or replaced, stops `maknae read` with `file changed during the read`, and the agent sees `"changed": true` and reads again. Detection rests on size and timestamps, so a same-size edit within one timestamp tick is not seen.
 - **Practical ceiling.** Each page rescans the file from the start, and each page is its own connection with about four audit records, so a very large file is slow; past roughly 6 GB, one page exceeds the default 5 s `read_timeout_ms`.
 - **The agent.** `read_file` takes `offset`, `limit` (default 2000 lines) and `column`, and returns the page as JSON with the file's text only in `content`. The loop's prompt cap follows `provider.context_tokens` (about 768 KB for a 128,000-token window), so a full 64 KiB page fits alongside the rest of the conversation.
+
+### 12b. Read before write
+
+Since #388 the agent replaces an existing file only if it has read that file in this conversation and the file has not changed since — Claude Code's rule. A new file needs no read.
+
+- **What the model is told.** `not written — the file exists and you have not read it; read it first, then write`, or `not written — the file changed since you read it; read it again, then write`. Nothing was written in either case; the model reads, then writes again. A path the policy refuses is still answered `outcome unknown` and never "read it first": the check runs only after the kernel grants the attempt.
+- **What changes count.** The device, inode, size and modification time. A change to permissions or extended attributes alone (`chmod`, `restorecon`) does not refuse a write. A same-size edit within one timestamp tick is not seen, as for paged reads (§12a).
+- **The agent's own writes.** An applied write records the written file's version, so the agent may write the same file again without reading it.
+- **The trail.** A refused replacement has its `fs.write` intent, as every write does, and a completion with `ReportedPathChanged` and no effect. Since #388 that completion can mean "the agent had not read the file, or it changed since", not only a race. The agent's user sees it only in the model's answer and the trail; nothing is printed to the terminal.
+- **Try it.** `printf 'keep me\n' > ~/projects/maknae-242/existing.txt`, then `maknae agent "Replace $HOME/projects/maknae-242/existing.txt with the word hello."` It exits `0` either way, and what the trail shows depends on the model. A model that follows the `write_file` description reads first: an `fs.read`, then one applied `fs.write`. A model that writes blind is refused: an `fs.write` ending `ReportedPathChanged`, then the `fs.read`, then the applied `fs.write`. To see the refusal regardless of the model, edit the file between the agent's read and its write (the "changed since you read it" case).
+- **`maknae write` is not checked.** A human may replace a file without reading it, as before.
+- **Write-permitted, read-denied paths.** If your policy — or the file's own mode, such as `0200` — lets the subject write a path but not read it, the agent cannot replace an existing file there: it is told to read first, and the read is refused. That answer also tells the model a file exists at that path. The shipped policy keeps its read and write denies symmetric; a file mode can still do it.
+- **A refused write still opens the file for writing.** The check runs after the ordinary refusals, which need the file opened for writing, so a tool watching for write-closes (an IDE, a build watcher) sees one, although the bytes, size and modification time are unchanged.
 
 ### 13. Custody check (manual)
 

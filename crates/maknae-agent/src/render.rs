@@ -1,8 +1,11 @@
-//! Outcome → the text the model sees. `NOT_AUTHORIZED`, `APPLIED` and
-//! `OUTCOME_UNKNOWN` are HALF OF A CONTRACT: the other half is
-//! `crates/maknae-llm/prompt/core-prompt.txt`, which tells the model that
-//! refusals say "Not authorized" and that a write comes back "applied, or
-//! outcome unknown". Duplicated here by contract, never by linkage.
+//! Outcome → the text the model sees. `NOT_AUTHORIZED` and `OUTCOME_UNKNOWN` are
+//! HALF OF A CONTRACT with `crates/maknae-llm/prompt/core-prompt.txt`, which
+//! tells the model that refusals say "Not authorized" and that a write whose
+//! outcome is unknown must not be retried. `APPLIED`, `NOT_WRITTEN_STALE` and
+//! `NOT_WRITTEN_UNREAD` are the same kind of contract with `write_file`'s
+//! description in `baseline-tools.json`, which names each result (#388: write
+//! results live in the tool's description, the core prompt keeps only the rules
+//! that hold for every tool). Duplicated here by contract, never by linkage.
 //! `READ_UNAVAILABLE` and `tool error:` are renderer-only: the prompt does not
 //! promise them, and they describe transport and argument faults, not
 //! decisions.
@@ -18,6 +21,8 @@ pub enum ToolOutcome {
     ReadRefused,
     ReadUnavailable,
     WriteApplied,
+    WriteStale,
+    WriteUnread,
     WriteUnknown,
     WriteNotSent,
     BadCall(String),
@@ -45,6 +50,8 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::ReadRefused => f.write_str("ReadRefused"),
             ToolOutcome::ReadUnavailable => f.write_str("ReadUnavailable"),
             ToolOutcome::WriteApplied => f.write_str("WriteApplied"),
+            ToolOutcome::WriteStale => f.write_str("WriteStale"),
+            ToolOutcome::WriteUnread => f.write_str("WriteUnread"),
             ToolOutcome::WriteUnknown => f.write_str("WriteUnknown"),
             ToolOutcome::WriteNotSent => f.write_str("WriteNotSent"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
@@ -56,6 +63,10 @@ pub const NOT_AUTHORIZED: &str = "Not authorized";
 pub const APPLIED: &str = "applied";
 /// The prompt's own clause, in full.
 pub const OUTCOME_UNKNOWN: &str = "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again";
+pub const NOT_WRITTEN_STALE: &str =
+    "not written — the file changed since you read it; read it again, then write";
+pub const NOT_WRITTEN_UNREAD: &str =
+    "not written — the file exists and you have not read it; read it first, then write";
 pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
@@ -186,8 +197,9 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         // allocates at exactly `len`, so `render`'s suffix `push_str`
         // reallocates and frees each of these buffers. What it frees is a
         // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
-        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`
-        // — never the `.rodata` original, which is not freed at all, so
+        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`,
+        // `NOT_WRITTEN_STALE`, `NOT_WRITTEN_UNREAD` — never the `.rodata`
+        // original, which is not freed at all, so
         // nothing secret is freed and headroom would buy nothing. One arm is
         // different, and is the reason this is written down: `BadCall(why)`
         // formats router-authored text that can
@@ -199,6 +211,8 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::ReadRefused => Zeroizing::new(NOT_AUTHORIZED.to_string()),
         ToolOutcome::ReadUnavailable => Zeroizing::new(READ_UNAVAILABLE.to_string()),
         ToolOutcome::WriteApplied => Zeroizing::new(APPLIED.to_string()),
+        ToolOutcome::WriteStale => Zeroizing::new(NOT_WRITTEN_STALE.to_string()),
+        ToolOutcome::WriteUnread => Zeroizing::new(NOT_WRITTEN_UNREAD.to_string()),
         ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
         ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
@@ -231,8 +245,9 @@ mod tests {
     use super::*;
     #[test]
     fn the_strings_the_compiled_prompt_promises_are_exact() {
-        // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt
-        // (this crate must never link maknae-llm). Wording changes there change here.
+        // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt and
+        // write_file's description in baseline-tools.json (this crate must never
+        // link maknae-llm). Wording changes there change here.
         assert_eq!(
             render(&ToolOutcome::ReadRefused, 3).as_str(),
             "Not authorized\n\nsteps remaining: 3"
@@ -243,6 +258,14 @@ mod tests {
         );
         assert_eq!(render(&ToolOutcome::WriteUnknown, 1).as_str(),
             "outcome unknown — the write may have happened: do not retry it, do not assume the previous contents survived, and do not touch that file again\n\nsteps remaining: 1");
+        assert_eq!(
+            render(&ToolOutcome::WriteStale, 4).as_str(),
+            "not written — the file changed since you read it; read it again, then write\n\nsteps remaining: 4"
+        );
+        assert_eq!(
+            render(&ToolOutcome::WriteUnread, 5).as_str(),
+            "not written — the file exists and you have not read it; read it first, then write\n\nsteps remaining: 5"
+        );
     }
     #[test]
     fn the_renderer_only_strings_are_exact() {
@@ -357,6 +380,8 @@ mod tests {
             ToolOutcome::ReadRefused,
             ToolOutcome::ReadUnavailable,
             ToolOutcome::WriteApplied,
+            ToolOutcome::WriteStale,
+            ToolOutcome::WriteUnread,
             ToolOutcome::WriteUnknown,
             ToolOutcome::WriteNotSent,
         ] {
@@ -392,6 +417,8 @@ mod tests {
             (ToolOutcome::ReadRefused, "ReadRefused"),
             (ToolOutcome::ReadUnavailable, "ReadUnavailable"),
             (ToolOutcome::WriteApplied, "WriteApplied"),
+            (ToolOutcome::WriteStale, "WriteStale"),
+            (ToolOutcome::WriteUnread, "WriteUnread"),
             (ToolOutcome::WriteUnknown, "WriteUnknown"),
             (ToolOutcome::WriteNotSent, "WriteNotSent"),
         ] {

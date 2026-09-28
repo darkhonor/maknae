@@ -68,6 +68,11 @@ pub enum IoError {
     MutationPathChanged {
         path: PathBuf,
     },
+    /// The file is not the version the caller based its write on, or the
+    /// caller has not read it (#388).
+    StaleBase {
+        path: PathBuf,
+    },
     /// A recursive descent encountered a different filesystem device.
     DifferentFilesystem {
         path: PathBuf,
@@ -169,6 +174,13 @@ impl std::fmt::Display for IoError {
             }
             Self::MutationPathChanged { path } => {
                 write!(f, "mutation path changed: {}", path.display())
+            }
+            Self::StaleBase { path } => {
+                write!(
+                    f,
+                    "not the version the write was based on: {}",
+                    path.display()
+                )
             }
             Self::DifferentFilesystem { path } => {
                 write!(f, "different filesystem refused: {}", path.display())

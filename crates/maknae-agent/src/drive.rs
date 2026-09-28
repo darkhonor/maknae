@@ -4,7 +4,7 @@
 //! nothing here fails closed against a hostile loop, and nothing here claims
 //! to. The kernel decides every verb this asks for.
 use crate::budget::{Gate, Meter, Notice};
-use crate::plane::{Plane, PlaneError, ReadOutcome, WriteOutcome};
+use crate::plane::{same_content, Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
 use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
 use crate::transcript::Transcript;
@@ -191,17 +191,29 @@ pub async fn drive<P: Plane>(
                             ReadOutcome::Content(mut p) => {
                                 p.changed = seen
                                     .insert(path.clone(), p.version)
-                                    .is_some_and(|prev| prev != p.version);
+                                    .is_some_and(|prev| !same_content(&prev, &p.version));
                                 ToolOutcome::ReadContent(p)
                             }
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
                         },
                         Ok(ToolRequest::Write { path, content, .. }) => {
-                            match plane.write(transcript.conversation(), &path, &content).await {
-                                WriteOutcome::Applied => {
+                            let basis = seen.get(&path).map_or(ReadBasis::Unread, |v| ReadBasis::Read(*v));
+                            match plane.write(transcript.conversation(), &path, &content, basis).await {
+                                WriteOutcome::Applied(Some(v)) => {
+                                    seen.insert(path.clone(), v);
+                                    ToolOutcome::WriteApplied
+                                }
+                                WriteOutcome::Applied(None) => {
                                     seen.remove(&path);
                                     ToolOutcome::WriteApplied
+                                }
+                                WriteOutcome::Stale => {
+                                    seen.remove(&path);
+                                    match basis {
+                                        ReadBasis::Read(_) => ToolOutcome::WriteStale,
+                                        ReadBasis::Unread => ToolOutcome::WriteUnread,
+                                    }
                                 }
                                 WriteOutcome::Unknown => ToolOutcome::WriteUnknown,
                                 WriteOutcome::NotSent => ToolOutcome::WriteNotSent,
@@ -310,6 +322,7 @@ mod tests {
         replies: VecDeque<Result<PromptReply, PlaneError>>,
         reads: Vec<String>,
         writes: Vec<(String, String, Vec<u8>)>,
+        bases: Vec<ReadBasis>,
         prompts: usize,
         read_outcome: ReadOutcome,
         read_versions: VecDeque<[i64; 7]>,
@@ -335,8 +348,9 @@ mod tests {
                 (other, _) => other,
             }
         }
-        async fn write(&mut self, conv: &str, p: &str, c: &[u8]) -> WriteOutcome {
+        async fn write(&mut self, conv: &str, p: &str, c: &[u8], basis: ReadBasis) -> WriteOutcome {
             self.writes.push((conv.into(), p.into(), c.to_vec()));
+            self.bases.push(basis);
             self.write_outcome.clone()
         }
     }
@@ -345,6 +359,7 @@ mod tests {
             replies: replies.into_iter().map(Ok).collect(),
             reads: vec![],
             writes: vec![],
+            bases: vec![],
             prompts: 0,
             read_outcome: ReadOutcome::Content(ReadPage {
                 content: Zeroizing::new(b"file body".to_vec()),
@@ -357,12 +372,12 @@ mod tests {
                 changed: false,
             }),
             read_versions: VecDeque::new(),
-            write_outcome: WriteOutcome::Applied,
+            write_outcome: WriteOutcome::Applied(None),
         }
     }
 
     #[tokio::test]
-    async fn a_page_from_a_changed_file_is_flagged_and_the_agents_own_write_clears_it() {
+    async fn a_page_from_a_changed_file_is_flagged_and_the_agents_own_write_refreshes_it() {
         let read = |id: &str| PromptReply {
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
@@ -389,6 +404,7 @@ mod tests {
             },
         ]);
         p.read_versions = VecDeque::from([[1; 7], [1; 7], [2; 7], [3; 7]]);
+        p.write_outcome = WriteOutcome::Applied(Some([3; 7]));
         let mut t = Transcript::new("conv", "go");
         let budget = Budget {
             max_steps: 8,
@@ -410,6 +426,156 @@ mod tests {
             })
             .collect();
         assert_eq!(changed, vec![false, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn a_change_after_the_agents_own_write_is_flagged() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "write_file", WRITE_A),
+            one("c3", "read_file", READ_A),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7], [4; 7]]);
+        p.write_outcome = WriteOutcome::Applied(Some([3; 7]));
+        let t = run(&mut p).await;
+        assert!(changed_at(&t, 6));
+    }
+
+    fn one(id: &str, name: &str, args: &str) -> PromptReply {
+        PromptReply {
+            blocks: vec![],
+            tool_calls: vec![call(id, name, args)],
+            usage: None,
+        }
+    }
+    fn done() -> PromptReply {
+        PromptReply {
+            blocks: vec![text("done")],
+            tool_calls: vec![],
+            usage: None,
+        }
+    }
+    const READ_A: &str = r#"{"path":"/w/a.txt"}"#;
+    const WRITE_A: &str = r#"{"path":"/w/a.txt","content":"new"}"#;
+    async fn run(p: &mut Scripted) -> Transcript {
+        let mut t = Transcript::new("conv", "go");
+        let budget = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 2,
+        };
+        drive_unmetered(p, &mut t, &budget).await;
+        t
+    }
+    fn changed_at(t: &Transcript, i: usize) -> bool {
+        let text = tool_text(&t.turns()[i]);
+        let json = text
+            .split_once("\n\nsteps remaining: ")
+            .unwrap()
+            .0
+            .to_string();
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["changed"]
+            .as_bool()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_write_after_a_read_sends_the_read_version_and_an_unread_write_sends_unread() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "write_file", WRITE_A),
+            one("c3", "write_file", r#"{"path":"/w/b.txt","content":"new"}"#),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7]]);
+        p.write_outcome = WriteOutcome::Applied(None);
+        run(&mut p).await;
+        assert_eq!(p.bases, vec![ReadBasis::Read([1; 7]), ReadBasis::Unread]);
+    }
+
+    #[tokio::test]
+    async fn a_stale_write_tells_the_model_to_read_again_and_an_unread_one_to_read_first() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "write_file", WRITE_A),
+            one("c3", "write_file", r#"{"path":"/w/b.txt","content":"new"}"#),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7]]);
+        p.write_outcome = WriteOutcome::Stale;
+        let t = run(&mut p).await;
+        assert!(
+            tool_text(&t.turns()[4]).starts_with(crate::render::NOT_WRITTEN_STALE),
+            "{}",
+            tool_text(&t.turns()[4])
+        );
+        assert!(
+            tool_text(&t.turns()[6]).starts_with(crate::render::NOT_WRITTEN_UNREAD),
+            "{}",
+            tool_text(&t.turns()[6])
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agents_own_write_refreshes_its_record_so_a_second_write_passes() {
+        let mut p = scripted(vec![
+            one("c1", "write_file", WRITE_A),
+            one("c2", "write_file", WRITE_A),
+            done(),
+        ]);
+        p.write_outcome = WriteOutcome::Applied(Some([5; 7]));
+        run(&mut p).await;
+        assert_eq!(p.bases, vec![ReadBasis::Unread, ReadBasis::Read([5; 7])]);
+    }
+
+    #[tokio::test]
+    async fn a_write_whose_version_is_unknown_forgets_the_record() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "write_file", WRITE_A),
+            one("c3", "write_file", WRITE_A),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7]]);
+        p.write_outcome = WriteOutcome::Applied(None);
+        run(&mut p).await;
+        assert_eq!(p.bases, vec![ReadBasis::Read([1; 7]), ReadBasis::Unread]);
+    }
+
+    #[tokio::test]
+    async fn the_read_after_a_stale_refusal_is_not_flagged_and_bases_the_next_write() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "write_file", WRITE_A),
+            one("c3", "read_file", READ_A),
+            one("c4", "write_file", WRITE_A),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[1; 7], [2; 7]]);
+        p.write_outcome = WriteOutcome::Stale;
+        let t = run(&mut p).await;
+        assert!(!changed_at(&t, 6));
+        assert_eq!(
+            p.bases,
+            vec![ReadBasis::Read([1; 7]), ReadBasis::Read([2; 7])]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ctime_only_difference_is_not_flagged_changed_and_an_mtime_one_is() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            one("c2", "read_file", READ_A),
+            one("c3", "read_file", READ_A),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([
+            [1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 9, 9],
+            [1, 1, 1, 9, 1, 9, 9],
+        ]);
+        let t = run(&mut p).await;
+        assert_eq!((changed_at(&t, 4), changed_at(&t, 6)), (false, true));
     }
 
     #[tokio::test]

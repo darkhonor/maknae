@@ -64,6 +64,7 @@ async fn replace_as_subject(
         std::os::fd::AsFd::as_fd(held),
         std::path::Path::new(path),
         bytes,
+        maknae_io::WriteBase::Any,
     )
     .unwrap();
     send_report(
@@ -253,8 +254,13 @@ async fn failed_progress_append_withholds_the_ack_and_claims_no_rollback() {
     let (mut client, task, held) =
         replace_start(&fx, &target, b"new-sentinel", records.clone(), None).await;
     let grant = granted(&mut client).await;
-    maknae_io::replace_held_file(std::os::fd::AsFd::as_fd(&held), &target, b"new-sentinel")
-        .unwrap();
+    maknae_io::replace_held_file(
+        std::os::fd::AsFd::as_fd(&held),
+        &target,
+        b"new-sentinel",
+        maknae_io::WriteBase::Any,
+    )
+    .unwrap();
     send_report(
         &mut client,
         &MutationReport::Batch {

@@ -4,7 +4,7 @@
 use crate::cli::{send_verb, write_request, SentOutcome};
 use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadOutcome, ReadPage, WriteOutcome};
+use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_agent::transcript::Transcript;
 use maknae_config::Value;
 use maknae_proto::{Payload, Turn, Verb};
@@ -175,10 +175,34 @@ pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
 /// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
 /// before `send_verb` is ever called. `armed` does not enter the write
 /// decision: every non-`Applied` write is already `Unknown`.
+///
+/// **Amended 2026-09-28 (#388):** one non-applied completion is certain, not
+/// guessed — `stale`, set only when the client's read-before-write check refused
+/// the attempt before any write syscall and the no-effect completion was
+/// acknowledged. It is `Stale`; every other non-applied completion stays
+/// `Unknown`.
 pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
     match sent {
-        Ok(SentOutcome::WriteDone { applied: true }) => WriteOutcome::Applied,
+        Ok(SentOutcome::WriteDone {
+            applied: true,
+            version,
+            ..
+        }) => WriteOutcome::Applied(version),
+        Ok(SentOutcome::WriteDone {
+            applied: false,
+            stale: true,
+            ..
+        }) => WriteOutcome::Stale,
         _ => WriteOutcome::Unknown,
+    }
+}
+
+/// The loop's knowledge of a file, as the client's write check (#388). The
+/// loop never sends `Unchecked`: that is `maknae write`'s, for a human.
+pub fn check_for(basis: ReadBasis) -> crate::mutation::WriteCheck {
+    match basis {
+        ReadBasis::Unread => crate::mutation::WriteCheck::Unread,
+        ReadBasis::Read(k) => crate::mutation::WriteCheck::Read(k),
     }
 }
 
@@ -249,7 +273,17 @@ impl Plane for RealPlane<'_> {
         {
             return Err(PlaneError::FrameTooLarge);
         }
-        prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
+        prompt_outcome(
+            send_verb(
+                verb,
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                self.transport,
+                self.client,
+                self.ca,
+            )
+            .await,
+        )
     }
     async fn read(
         &mut self,
@@ -265,6 +299,7 @@ impl Plane for RealPlane<'_> {
                     page: Some(page),
                 },
                 None,
+                crate::mutation::WriteCheck::Unchecked,
                 self.transport,
                 self.client,
                 self.ca,
@@ -272,7 +307,13 @@ impl Plane for RealPlane<'_> {
             .await,
         )
     }
-    async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
+    async fn write(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        content: &[u8],
+        basis: ReadBasis,
+    ) -> WriteOutcome {
         // The prompt-budget refusal is LOCAL and pre-send — nothing left
         // the process, nothing is on the trail, the file is untouched.
         let Ok((verb, content)) = write_request(
@@ -283,7 +324,17 @@ impl Plane for RealPlane<'_> {
         ) else {
             return WriteOutcome::NotSent;
         };
-        write_outcome(send_verb(verb, Some(content), self.transport, self.client, self.ca).await)
+        write_outcome(
+            send_verb(
+                verb,
+                Some(content),
+                check_for(basis),
+                self.transport,
+                self.client,
+                self.ca,
+            )
+            .await,
+        )
     }
 }
 
@@ -530,18 +581,79 @@ mod tests {
         ));
     }
     #[test]
+    fn the_loops_basis_becomes_the_clients_check() {
+        use crate::mutation::WriteCheck;
+        assert_eq!(check_for(ReadBasis::Unread), WriteCheck::Unread);
+        assert_eq!(check_for(ReadBasis::Read([4; 7])), WriteCheck::Read([4; 7]));
+    }
+    #[test]
+    fn the_loops_same_content_agrees_with_the_file_versions() {
+        let base = maknae_io::FileVersion {
+            dev: 1,
+            ino: 2,
+            size: 3,
+            mtime: 4,
+            mtime_nsec: 5,
+            ctime: 6,
+            ctime_nsec: 7,
+        };
+        let changed: [fn(&mut maknae_io::FileVersion); 7] = [
+            |v| v.dev += 1,
+            |v| v.ino += 1,
+            |v| v.size += 1,
+            |v| v.mtime += 1,
+            |v| v.mtime_nsec += 1,
+            |v| v.ctime += 1,
+            |v| v.ctime_nsec += 1,
+        ];
+        for (i, change) in changed.iter().enumerate() {
+            let mut v = base;
+            change(&mut v);
+            assert_eq!(
+                maknae_agent::plane::same_content(&base.key(), &v.key()),
+                base.same_content(&v),
+                "field {i}"
+            );
+        }
+    }
+    #[test]
     fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
         // ADR-0023 d4: the wire cannot distinguish uncertain from refused
-        // on the write lane, so only a clean `applied: true` may claim
-        // certainty. `NotSent` is absent by construction — it is decided from
-        // `write_request`'s `Err`, before `send_verb` is called.
+        // on the write lane, so only a clean `applied: true` — and, since #388,
+        // a client-decided `stale` refusal — may claim certainty. `NotSent` is
+        // absent by construction: it is decided from `write_request`'s `Err`,
+        // before `send_verb` is called.
         use maknae_proto::{Payload, ProtoErrCode};
         assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone { applied: true })),
-            WriteOutcome::Applied
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: true,
+                stale: false,
+                version: None
+            })),
+            WriteOutcome::Applied(None)
         );
         assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone { applied: false })),
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: true,
+                stale: false,
+                version: Some([2; 7])
+            })),
+            WriteOutcome::Applied(Some([2; 7]))
+        );
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: false,
+                stale: true,
+                version: None
+            })),
+            WriteOutcome::Stale
+        );
+        assert_eq!(
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                version: None
+            })),
             WriteOutcome::Unknown
         );
         assert_eq!(
@@ -700,7 +812,11 @@ mod tests {
             ReadOutcome::Unavailable
         );
         assert_eq!(
-            read_outcome(Ok(SentOutcome::WriteDone { applied: true })),
+            read_outcome(Ok(SentOutcome::WriteDone {
+                applied: true,
+                stale: false,
+                version: None
+            })),
             ReadOutcome::Unavailable
         );
         assert_eq!(

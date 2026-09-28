@@ -225,7 +225,13 @@ impl Plane for FixturePlane {
             _ => ReadOutcome::Unavailable,
         }
     }
-    async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
+    async fn write(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        content: &[u8],
+        _basis: maknae_agent::plane::ReadBasis,
+    ) -> WriteOutcome {
         use maknae_proto::{
             EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
         };
@@ -251,51 +257,56 @@ impl Plane for FixturePlane {
             .ok()
             .and_then(|b| maknae_proto::decode_response(&b).ok());
         let applied = match (response.map(|r| r.result), held.as_ref()) {
-            (Some(RespResult::Ok(Payload::MutationAttempt(grant))), Some(held)) => match &grant
-                .scope
-            {
-                MutationScope::Exact {
-                    path,
-                    effect: ReportedEffect::ReplacedFile,
-                } => {
-                    maknae_io::replace_held_file(held.as_fd(), std::path::Path::new(path), content)
+            (Some(RespResult::Ok(Payload::MutationAttempt(grant))), Some(held)) => {
+                match &grant.scope {
+                    MutationScope::Exact {
+                        path,
+                        effect: ReportedEffect::ReplacedFile,
+                    } => {
+                        maknae_io::replace_held_file(
+                            held.as_fd(),
+                            std::path::Path::new(path),
+                            content,
+                            maknae_io::WriteBase::Any,
+                        )
                         .is_ok()
-                        && acked(
-                            &mut client,
-                            MutationReport::Batch {
-                                id: grant.id,
-                                first_index: 0,
-                                effects: vec![EffectEntry {
-                                    path: path.clone(),
-                                    effect: ReportedEffect::ReplacedFile,
-                                    length: None,
-                                    range: None,
-                                    lines: None,
-                                }],
-                            },
-                            1,
-                        )
-                        .await
-                        && acked(
-                            &mut client,
-                            MutationReport::Finished {
-                                id: grant.id,
-                                next_index: 1,
-                                outcome: ReportedFinish::Success,
-                                stopped_at: None,
-                            },
-                            1,
-                        )
-                        .await
+                            && acked(
+                                &mut client,
+                                MutationReport::Batch {
+                                    id: grant.id,
+                                    first_index: 0,
+                                    effects: vec![EffectEntry {
+                                        path: path.clone(),
+                                        effect: ReportedEffect::ReplacedFile,
+                                        length: None,
+                                        range: None,
+                                        lines: None,
+                                    }],
+                                },
+                                1,
+                            )
+                            .await
+                            && acked(
+                                &mut client,
+                                MutationReport::Finished {
+                                    id: grant.id,
+                                    next_index: 1,
+                                    outcome: ReportedFinish::Success,
+                                    stopped_at: None,
+                                },
+                                1,
+                            )
+                            .await
+                    }
+                    _ => false,
                 }
-                _ => false,
-            },
+            }
             _ => false,
         };
         drop(client);
         task.await.unwrap();
         if applied {
-            WriteOutcome::Applied
+            WriteOutcome::Applied(None)
         } else {
             WriteOutcome::Unknown
         }

@@ -1010,9 +1010,9 @@ mod tests {
         // `capability` rows are DELIBERATELY excluded, and this is the reason
         // rather than an oversight: they are the bare words `Read` and
         // `Write`, which appear legitimately in both artifacts ("Read the file
-        // first if you need its current contents", "A write comes back
-        // applied"). Matching them would fail immediately and for the wrong
-        // reason. `grantable` rows are the same names as `action` rows.
+        // before replacing it", "A write whose outcome is unknown"). Matching
+        // them would fail immediately and for the wrong reason. `grantable` rows are
+        // the same names as `action` rows.
         let verbs: Vec<&str> = MANIFEST
             .lines()
             .filter(|l| !l.starts_with('#'))
