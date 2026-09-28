@@ -1,9 +1,11 @@
-//! Outcome → the text the model sees. `NOT_AUTHORIZED`, `APPLIED`,
-//! `OUTCOME_UNKNOWN`, `NOT_WRITTEN_STALE` and `NOT_WRITTEN_UNREAD` are HALF OF A
-//! CONTRACT: the other half is `crates/maknae-llm/prompt/core-prompt.txt`, which
-//! tells the model that refusals say "Not authorized" and that a write comes
-//! back "applied, not written, or outcome unknown" (the "not written" results
-//! since #388). Duplicated here by contract, never by linkage.
+//! Outcome → the text the model sees. `NOT_AUTHORIZED` and `OUTCOME_UNKNOWN` are
+//! HALF OF A CONTRACT with `crates/maknae-llm/prompt/core-prompt.txt`, which
+//! tells the model that refusals say "Not authorized" and that a write whose
+//! outcome is unknown must not be retried. `APPLIED`, `NOT_WRITTEN_STALE` and
+//! `NOT_WRITTEN_UNREAD` are the same kind of contract with `write_file`'s
+//! description in `baseline-tools.json`, which names each result (#388: write
+//! results live in the tool's description, the core prompt keeps only the rules
+//! that hold for every tool). Duplicated here by contract, never by linkage.
 //! `READ_UNAVAILABLE` and `tool error:` are renderer-only: the prompt does not
 //! promise them, and they describe transport and argument faults, not
 //! decisions.
@@ -243,8 +245,9 @@ mod tests {
     use super::*;
     #[test]
     fn the_strings_the_compiled_prompt_promises_are_exact() {
-        // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt
-        // (this crate must never link maknae-llm). Wording changes there change here.
+        // Duplicated BY CONTRACT with crates/maknae-llm/prompt/core-prompt.txt and
+        // write_file's description in baseline-tools.json (this crate must never
+        // link maknae-llm). Wording changes there change here.
         assert_eq!(
             render(&ToolOutcome::ReadRefused, 3).as_str(),
             "Not authorized\n\nsteps remaining: 3"
