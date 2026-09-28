@@ -262,6 +262,7 @@ files = [
   "crates/maknae-agent/src/drive.rs",
   "crates/maknae-agent/src/budget.rs",
   "crates/maknae-sys/src/reply.rs",
+  "crates/maknae-sys/src/macos.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -674,8 +675,12 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
 
-# [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
+# [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
+[[env_bound_override]]
+path = "crates/maknae-sys/src/macos.rs"
+env_bound = "target_os:macos"
+why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
 
 [[t3]]
 path = "crates/maknae-io/src/testutil.rs"

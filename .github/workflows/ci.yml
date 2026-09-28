@@ -252,7 +252,7 @@ jobs:
         if: steps.mutants-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Native syscall mutation filter fixtures
-        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ')
+        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-sys ')
         run: python3 ci/gates/tests/mutation-platform/run.py
       - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
         env:
@@ -400,3 +400,13 @@ jobs:
           n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
           [ "$n" -ge 15 ] || { echo "FAIL: expected the delegated suite, saw $n tests"; exit 1; }
           echo "delegated suite present on macOS: $n tests"
+      - name: clippy the one unsafe crate where its unsafe code compiles (ADR-0027)
+        run: cargo clippy --locked -p maknae-sys --all-targets -- -D warnings
+      - name: Confirm the maknae-sys macOS suite actually ran
+        run: |
+          set -euo pipefail
+          out="$(cargo test --locked -p maknae-sys --lib macos -- --list)"
+          printf '%s\n' "$out"
+          n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
+          [ "$n" -ge 8 ] || { echo "FAIL: expected the maknae-sys macOS suite, saw $n tests"; exit 1; }
+          echo "maknae-sys macOS suite present: $n tests"

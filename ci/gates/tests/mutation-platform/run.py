@@ -15,6 +15,10 @@ INVENTORY = subprocess.check_output([
     "crates/maknae-io/src/syscall.rs", "--list",
 ], cwd=ROOT, text=True).splitlines()
 assert INVENTORY, "empty mutation inventory is not assurance"
+SYS_INVENTORY = subprocess.check_output([
+    "cargo", "mutants", "--no-config", "-p", "maknae-sys", "--list",
+], cwd=ROOT, text=True).splitlines()
+assert SYS_INVENTORY, "empty maknae-sys mutation inventory is not assurance"
 
 
 class PlatformSelection(unittest.TestCase):
@@ -62,6 +66,21 @@ class PlatformSelection(unittest.TestCase):
                 self.assertNotEqual(altered, mutant)
                 self.assertIsNone(re.search(regex, altered))
 
+    def test_maknae_sys_platform_file_is_excluded_only_where_inactive(self):
+        linux, darwin = self.exclusion("Linux"), self.exclusion("Darwin")
+        macos_file = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/macos.rs:")]
+        portable = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/reply.rs:")]
+        self.assertTrue(macos_file)
+        self.assertTrue(portable)
+        self.assertEqual(len(macos_file) + len(portable), len(SYS_INVENTORY))
+        for mutant in macos_file:
+            self.assertRegex(mutant, linux)
+            self.assertNotRegex(mutant, darwin)
+            self.assertNotRegex(mutant.replace("src/macos.rs:", "src/other.rs:"), linux)
+        for mutant in portable:
+            self.assertNotRegex(mutant, linux)
+            self.assertNotRegex(mutant, darwin)
+
     def test_unknown_fails(self):
         result = subprocess.run(["bash", str(SCRIPT), "Plan9"], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
@@ -103,7 +122,7 @@ class PlatformSelection(unittest.TestCase):
                            mutant.rsplit(" in ", 1)[0] + " in future_flags"):
                 self.assertFalse(any(re.search(pattern, nearby) for pattern in patterns))
 
-    def test_gate_passes_native_filter_as_one_argument(self):
+    def gate_argv(self, crate):
         # The real gate, with its documented injection fixture interface. This
         # proves CLI wiring, independently of what the filter script prints.
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +130,7 @@ class PlatformSelection(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             (root / "coverage-tiers.toml").write_text(
-                '[t1]\nmutants_crates = ["maknae-io"]\n'
+                f'[t1]\nmutants_crates = ["{crate}"]\n'
             )
             recorder = tools / "cargo"
             # Record the argv AND emit the outcomes.json the gate now reads: it
@@ -137,24 +156,31 @@ class PlatformSelection(unittest.TestCase):
             env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
                        MUTATION_ARGS=str(arguments), COVERAGE_TIERS_JSON=str(root / "unused"),
                        COVERAGE_TIERS_FILELIST=str(root / "unused"),
-                       COVERAGE_TIERS_CRATE_DIRS="maknae-io=crates/maknae-io")
+                       COVERAGE_TIERS_CRATE_DIRS=f"{crate}=crates/{crate}")
             result = subprocess.run([
                 "bash", str(ROOT / "ci/gates/coverage-tiers.sh"), "--root", str(root),
-                "--injection", "--mutants", "maknae-io",
+                "--injection", "--mutants", crate,
             ], env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
             # `--output` is the gate's, not the platform filter's: each crate
             # gets its own results dir so the run can be JUDGED afterwards
             # (#301), and so one crate's outcomes.json does not overwrite the
             # next one's. Asserted by position like the rest of the argv, with
             # the path checked separately because it is root-dependent.
             argv = arguments.read_text().splitlines()
-            self.assertEqual(argv[:3], ["mutants", "--package", "maknae-io"])
+            self.assertEqual(argv[:3], ["mutants", "--package", crate])
             self.assertEqual(argv[3], "--output")
-            self.assertEqual(argv[4], str(root / "target" / "mutants-maknae-io"))
-            self.assertEqual(argv[5:], ["--exclude-re", expected,
-                                        "--minimum-test-timeout", "60"])
+            self.assertEqual(argv[4], str(root / "target" / f"mutants-{crate}"))
+            return argv[5:]
+
+    def test_gate_passes_native_filter_as_one_argument(self):
+        expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
+        self.assertEqual(self.gate_argv("maknae-io"),
+                         ["--exclude-re", expected, "--minimum-test-timeout", "60"])
+
+    def test_gate_passes_the_native_filter_to_maknae_sys(self):
+        expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
+        self.assertEqual(self.gate_argv("maknae-sys"), ["--exclude-re", expected])
 
 
 if __name__ == "__main__":
