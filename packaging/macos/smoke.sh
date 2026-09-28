@@ -74,9 +74,15 @@ phase1() {
     esac
     elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
     case "$elog_line" in
-        *'-m 0750 -o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress 0750" ;;
+        *'-m 0750 -o "$EGRESS_UID" -g "$EGRESS_GID"'*) ok "deputy log dir is _maknae-egress:_maknae-egress 0750" ;;
         '')  fail "no deputy log-dir install line found in preinstall" ;;
-        *)   fail "deputy log dir not -m 0750 -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
+        *)   fail "deputy log dir not -m 0750 -o \"\$EGRESS_UID\" -g \"\$EGRESS_GID\": $elog_line" ;;
+    esac
+    dlog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae$' "$HERE/scripts/preinstall" | tr -s ' ')"
+    case "$dlog_line" in
+        *'-m 0750 -o "$MAKNAE_UID" -g "$MAKNAE_GID"'*) ok "daemon log dir is _maknae:_maknae 0750" ;;
+        '')  fail "no daemon log-dir install line found in preinstall" ;;
+        *)   fail "daemon log dir not -m 0750 -o \"\$MAKNAE_UID\" -g \"\$MAKNAE_GID\": $dlog_line" ;;
     esac
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
@@ -420,7 +426,8 @@ REFUSE
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
-    check_mode "drwxr-x--- root _maknae-egress"    /usr/local/var/log/maknae-egress
+    check_mode "drwxr-x--- _maknae _maknae"  /usr/local/var/log/maknae
+    check_mode "drwxr-x--- _maknae-egress _maknae-egress" /usr/local/var/log/maknae-egress
 
     # The INSTALLED binary must actually run — the property no build-host check can
     # establish, because cargo injects DYLD_* and the installer does not.
@@ -498,7 +505,7 @@ REFUSE
     # ever FAIL. Prove the property directly, as the daemon's own uid, applying
     # exactly what socket.rs:111/:119 apply.
     local mgid; mgid="$(dscl . -read /Groups/maknae PrimaryGroupID | awk '{print $2}')"
-    sudo -u _maknae /usr/bin/python3 - "$mgid" <<'PROBE'
+    (cd / && sudo -u _maknae /usr/bin/python3 - "$mgid") <<'PROBE'
 import os, socket, sys
 os.chdir("/usr/local/var/run/maknae")   # AF_UNIX paths cap at 104 bytes
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
