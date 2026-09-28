@@ -774,6 +774,21 @@ sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "REA
   - The runtime credential exists only once the deputy has started. Run `maknae agent` once, and confirm `runtime credential present` before reading its `test -r` line.
 - **What this check does not cover:** the operator's own `maknae-enroll` token can mint a `maknae-egress` SecretID in Vault. That lies outside the file-custody claim; state it alongside the result.
 
+**On macOS**, run this from a console session:
+
+```bash
+id
+sudo stat -f '%Su:%Sg %Lp %N' /etc/maknae /etc/maknae/private /etc/maknae/egress \
+  /etc/maknae/private/maknaed-secret-id.keychain /etc/maknae/egress/maknae-egress-secret-id.keychain \
+  /etc/maknae/egress/maknae-egress-approle-id
+ls -led /etc/maknae
+sudo -u _maknae security find-generic-password -s io.maknae.maknae-egress -a secret-id -w /Library/Keychains/System.keychain; echo "exit $?"
+security find-generic-password -s io.maknae.maknaed -a secret-id -w /Library/Keychains/System.keychain; echo "exit $?"
+```
+
+- **Expected owners and modes:** `/etc/maknae` and `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; `maknaed-secret-id.keychain` `root:_maknae 640`; `maknae-egress-secret-id.keychain` and the RoleID `root:_maknae-egress 640`; `ls -led` shows one ACL entry, `user:_maknae-egress allow list,search`.
+- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). An administrator who approves it reads the item (ADR-0018 decision 6). The same "does not cover" note applies.
+
 ### 14. SELinux
 
 ```bash

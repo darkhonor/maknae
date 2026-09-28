@@ -31,7 +31,7 @@ images (#81) and the Compose/Podman profile are deferred.
 | Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
 | RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
 | RHEL / Rocky 9 | 252 | SELinux | **Packaging + daemon-seal only** — operator `enroll` deferred to #73 (see [RHEL 9 caveat](#rhel-9-caveat)) |
-| macOS 26, Apple Silicon | — (launchd) | none | **Full — install → enroll → serve, PROVEN LIVE** on a notarized Developer ID package — smoke phase 1 on the `macos-26` runner, smoke phase 2 with 0 failures, and the first-provider walkthrough passed. See [packaging/macos/README.md](macos/README.md) |
+| macOS 26, Apple Silicon | — (launchd) | none | **Full — install → enroll → serve, PROVEN LIVE** on a notarized Developer ID package — smoke phase 1 on the `macos-26` runner, smoke phase 2 with 0 failures, and the first-provider walkthrough passed with `transport.read_timeout_ms: 60000` (#413). See [packaging/macos/README.md](macos/README.md) |
 
 ---
 
