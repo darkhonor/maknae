@@ -36,7 +36,7 @@
     "type": "function",
     "function": {
       "name": "write_file",
-      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file first if you need its current contents, every page until `eof` is true. Returns applied, or outcome unknown.",
+      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file before replacing it, every page until `eof` is true if you need all of its contents; a write to an existing file you have not read, or that changed since you read it, is not written. Returns applied, not written, or outcome unknown.",
       "parameters": {
         "type": "object",
         "properties": {

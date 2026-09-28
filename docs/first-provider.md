@@ -169,6 +169,8 @@ cat ~/projects/hello/output.txt
 
 The answer arrives with exit `0`. A stop prints `maknae agent: stopped: …` and exits `2`.
 
+To run it again, first `rm ~/projects/hello/output.txt`. The agent may replace only a file it has read in the same conversation, so a re-run that meets the first run's `output.txt` is told to read it first: it reads it, then writes, and §7 shows one extra `fs.read` and one `fs.write` ending `ReportedPathChanged` with no effect.
+
 ## 7. See what it did
 
 ```bash
