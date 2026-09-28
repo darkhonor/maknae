@@ -112,6 +112,10 @@ because signing the executables alone produces an artifact that only fails once 
 
 ## The isolation delta, stated
 
+**The recommended production host is Rocky Linux 10 or RHEL 10 with TPM 2.0.** It gives the
+strongest posture: a TPM-sealed bootstrap credential, SELinux and systemd confinement. macOS is
+supported, with the deltas below.
+
 macOS has **no seccomp equivalent**, so the systemd `SystemCallFilter=` half of the Linux
 profile has no counterpart. That is a genuine platform fact and is recorded as a delta in the
 isolation contract. **"We have not tested it there" is not a delta** — it is an unmet
