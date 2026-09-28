@@ -44,7 +44,7 @@ no entitlements and a strong embedded designated requirement before writing (`ve
 The CLI's own SecretID is separate: a file-based (legacy) item in the operator's default keychain
 (usually login: service `maknae-cli`, account `maknae-secret-id`) — not Data Protection, not
 covered by decision 6 (#116 removes it). `uninstall.sh` deletes only the two plane items
-(`uninstall.sh:61-70`), exiting non-zero if either remains (`uninstall.sh:64,125-127`); its
+(`uninstall.sh:61-71`), exiting non-zero if either remains (`uninstall.sh:64,125-127`); its
 root-path run is pending the macOS acceptance run (#76). Remove the CLI item yourself:
 `security delete-generic-password -s maknae-cli -a maknae-secret-id`.
 
@@ -190,17 +190,19 @@ back (`build-pkg.sh:10-19,140-148`). With an identity set, the build also refuse
 `.entitlements` files before signing (`build-pkg.sh:149-152`). `payload-xattr-clean` passes only in
 two measured contexts — a launchd-spawned process, or the `macos-26` GitHub Actions runner — and
 refuses an interactive local build on a SIP-enabled host (`com.apple.provenance`)
-(`payload-xattr-clean.sh:36-40`). That is where the gate passes, not where a **signed** package
-comes from: today only a launchd-spawned process on a build host that holds the identities can
-produce one. The release workflow runs on the runner, which holds no signing secrets, so it builds
-ad-hoc and runs `smoke.sh phase1` (`release.yml:123-128`, `build-pkg.sh:236-240`).
+(`payload-xattr-clean.sh:36-40`). These are the build's constraints, not a procedure: **the
+repository documents no procedure for producing a Developer ID-signed package outside the
+maintainer's build host, and no signed release exists yet.** The release workflow runs on the
+runner, which holds no signing secrets, so it builds ad-hoc and runs `smoke.sh phase1`
+(`release.yml:123-128`, `build-pkg.sh:236-240`).
 
 ## Verification status
 
-CI verifies macOS in two layers, neither of which is a substitute for the other:
+CI verifies macOS in three layers, none of which is a substitute for another:
 
 1. **Cross-compile check** (`darwin-cross`, on the Linux runner) — checks every workspace member for `aarch64-apple-darwin` and names what the Linux host cannot build (the SDK crates), the supported Apple Silicon target. No hosted Mac is needed. It caught `RecvFlags::CMSG_CLOEXEC` not existing on darwin, which meant `maknae-io::recv_delegated` did not compile there at all. The corresponding `FD_CLOEXEC` handling must be checked on the supported platform.
 2. **Native test run** (`darwin-native`, on the `macos-26` hosted runner) — executes `cargo test --locked --workspace`: the **whole** workspace, SDK crates included, with the unified-log round-trip a hard failure. This is what turned "written" into "verified" for ADR-0009's `F_GETPATH` lane. It runs whenever Rust is affected (docs-only changes skip it). *(Corrected 2026-09-11, #198: this said the native lane ran "the suites for the crates that build without a macOS SDK" and ran only when "a covered crate or one of its dependencies" changed — both were true while it inherited the cross-check's hand list, and both are now false.)*
+3. **Package smoke** (`release.yml`'s `macos-package` job, on the `macos-26` hosted runner) — builds the ad-hoc `.pkg` and runs `smoke.sh phase1` against it (`release.yml:138-141`), on a `v*` tag or a manual dispatch; it does not run on pull requests. Phase 2 (install, boot, uninstall as root) runs in none of these layers.
 
 **Corrected 2026-09-11 (#198).** This paragraph said `maknae-vault` and everything above it were covered by neither lane and rested on manual Wrathion runs. That was true while `darwin-native` inherited the cross-check's SDK-free list; it now tests the **whole workspace** — the `macos-26` runner has the SDK, and GitHub's billing doc is explicit that standard hosted runners, macOS included, are free on public repositories. What remains true: `aws-lc-fips-sys` and `ring` cannot be **cross-checked from Linux** *(corrected 2026-09-19, #320: the SDK-blocked set is `aws-lc-sys` and `aws-lc-fips-sys` — `ring` is no longer in the graph on any target, though the gate still matches it by name, harmlessly)* (their build scripts need the SDK), so the cross-check lane runs the check per member and reports what the Linux host cannot build, by name, on every run, and the native lane is the only CI evidence for them. Separately and more importantly:
 whether `aws-lc-fips` is FIPS-140-3 **validated** on macOS arm64 — as opposed to merely

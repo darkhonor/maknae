@@ -2,7 +2,8 @@
 
 This directory builds Linux packages (checksummed; optionally GPG-signed — the
 default build is UNSIGNED, see [Verifying artifacts](#verifying-artifacts)) that install the `maknaed` trust-plane
-daemon and the `maknae` operator CLI, the hardened systemd unit, the MAC policies
+daemon, the `maknae` operator CLI and the `maknae-egress` egress deputy, their hardened systemd
+units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the MAC policies
 (SELinux on RHEL/Rocky, AppArmor on Debian), the fapolicyd trust fragment, and the
 shipped `/etc/maknae` config defaults. `packaging/macos/` builds the Apple Silicon `.pkg` under its own
 lifecycle; see [packaging/macos/README.md](macos/README.md) for the macOS lifecycle: config
@@ -11,7 +12,7 @@ defaults first-install-only, both jobs ship `launchctl disable`d, and the operat
 
 | Layout | Purpose |
 |---|---|
-| `common/` | Shared assets both formats install (unit, sysusers, SELinux `.te`/`.fc`, AppArmor, fapolicyd trust, shipped `authz.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
+| `common/` | Shared assets both formats install (units, sysusers, SELinux `.te`/`.fc`, AppArmor, fapolicyd trust, shipped `authz.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
 | `rpm/` | `maknae.spec` + `build-rpm.sh` → `dist/maknae-<ver>-1.<dist>.x86_64.rpm` (RHEL/Rocky). |
 | `deb/` | `control` + maintainer scripts + AppArmor profile + `build-deb.sh` → `dist/maknae_<ver>-1_amd64.deb` (Debian). |
 | `sign.sh` | Checksums (`SHA256SUMS`) + optional GPG signing (see [Verifying artifacts](#verifying-artifacts)). |
