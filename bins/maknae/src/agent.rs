@@ -177,7 +177,7 @@ pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
 /// decision: every non-`Applied` write is already `Unknown`.
 pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
     match sent {
-        Ok(SentOutcome::WriteDone { applied: true }) => WriteOutcome::Applied,
+        Ok(SentOutcome::WriteDone { applied: true, .. }) => WriteOutcome::Applied,
         _ => WriteOutcome::Unknown,
     }
 }
@@ -249,7 +249,17 @@ impl Plane for RealPlane<'_> {
         {
             return Err(PlaneError::FrameTooLarge);
         }
-        prompt_outcome(send_verb(verb, None, self.transport, self.client, self.ca).await)
+        prompt_outcome(
+            send_verb(
+                verb,
+                None,
+                crate::mutation::WriteCheck::Unchecked,
+                self.transport,
+                self.client,
+                self.ca,
+            )
+            .await,
+        )
     }
     async fn read(
         &mut self,
@@ -265,6 +275,7 @@ impl Plane for RealPlane<'_> {
                     page: Some(page),
                 },
                 None,
+                crate::mutation::WriteCheck::Unchecked,
                 self.transport,
                 self.client,
                 self.ca,
@@ -283,7 +294,17 @@ impl Plane for RealPlane<'_> {
         ) else {
             return WriteOutcome::NotSent;
         };
-        write_outcome(send_verb(verb, Some(content), self.transport, self.client, self.ca).await)
+        write_outcome(
+            send_verb(
+                verb,
+                Some(content),
+                crate::mutation::WriteCheck::Unchecked,
+                self.transport,
+                self.client,
+                self.ca,
+            )
+            .await,
+        )
     }
 }
 
@@ -537,11 +558,19 @@ mod tests {
         // `write_request`'s `Err`, before `send_verb` is called.
         use maknae_proto::{Payload, ProtoErrCode};
         assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone { applied: true })),
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: true,
+                stale: false,
+                version: None
+            })),
             WriteOutcome::Applied
         );
         assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone { applied: false })),
+            write_outcome(Ok(SentOutcome::WriteDone {
+                applied: false,
+                stale: false,
+                version: None
+            })),
             WriteOutcome::Unknown
         );
         assert_eq!(
@@ -700,7 +729,11 @@ mod tests {
             ReadOutcome::Unavailable
         );
         assert_eq!(
-            read_outcome(Ok(SentOutcome::WriteDone { applied: true })),
+            read_outcome(Ok(SentOutcome::WriteDone {
+                applied: true,
+                stale: false,
+                version: None
+            })),
             ReadOutcome::Unavailable
         );
         assert_eq!(

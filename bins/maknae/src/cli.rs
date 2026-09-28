@@ -346,7 +346,16 @@ async fn round_trip(
                     page: Some(p),
                 };
                 async move {
-                    match send_verb(v, None, transport, client, ca).await? {
+                    match send_verb(
+                        v,
+                        None,
+                        crate::mutation::WriteCheck::Unchecked,
+                        transport,
+                        client,
+                        ca,
+                    )
+                    .await?
+                    {
                         SentOutcome::ReadDone { read } => Ok(read),
                         SentOutcome::Refused { code, message, .. } => {
                             eprintln!("maknae: daemon refused: {code:?}: {message}");
@@ -360,7 +369,16 @@ async fn round_trip(
         )
         .await;
     }
-    match send_verb(request_verb, content, transport, client, ca).await? {
+    match send_verb(
+        request_verb,
+        content,
+        crate::mutation::WriteCheck::Unchecked,
+        transport,
+        client,
+        ca,
+    )
+    .await?
+    {
         SentOutcome::Payload(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
             // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
@@ -369,7 +387,7 @@ async fn round_trip(
             print_payload_for_verb(verb, payload)?;
             Ok(true)
         }
-        SentOutcome::WriteDone { applied } => Ok(applied),
+        SentOutcome::WriteDone { applied, .. } => Ok(applied),
         SentOutcome::ReadDone { read: Some(r) } => {
             // Raw bytes, no trailing newline, no lossy conversion — a
             // non-UTF-8 file is legal content.
@@ -405,7 +423,15 @@ pub(crate) enum SentOutcome {
     Payload(maknae_proto::Payload),
     /// A mutation reached a terminal state. `applied` is true ONLY for a client-reported
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.
-    WriteDone { applied: bool },
+    ///
+    /// `stale` (#388): the client's own read-before-write check refused it before
+    /// any write syscall, so it is certain nothing was written. `version` is the
+    /// written file's, when known.
+    WriteDone {
+        applied: bool,
+        stale: bool,
+        version: Option<[i64; 7]>,
+    },
     /// A read attempt ended; `read` is `Some` only after an acknowledged client-reported `Success`.
     ReadDone {
         read: Option<crate::mutation::ReadResult>,
@@ -424,6 +450,7 @@ pub(crate) enum SentOutcome {
 pub(crate) async fn send_verb(
     request_verb: maknae_proto::Verb,
     content: Option<maknae_proto::Bytes>,
+    check: crate::mutation::WriteCheck,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
@@ -453,7 +480,7 @@ pub(crate) async fn send_verb(
     //
     // Armed AFTER the handshake, deliberately: the handshake's own writes would
     // otherwise consume the descriptor.
-    let prepared = crate::mutation::prepare(request_verb.clone(), content);
+    let prepared = crate::mutation::prepare_checked(request_verb.clone(), content, check);
     let mut armed = true;
     if let Some(prepared) = &prepared {
         if let Some(error) = prepared.preparation_error() {
@@ -538,10 +565,14 @@ pub(crate) async fn send_verb(
                 .await?;
                 return Ok(SentOutcome::ReadDone { read });
             }
-            let applied =
+            let end =
                 crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
                     .await?;
-            Ok(SentOutcome::WriteDone { applied })
+            Ok(SentOutcome::WriteDone {
+                applied: end.applied,
+                stale: end.stale,
+                version: end.version,
+            })
         }
         RespResult::Ok(payload) => Ok(SentOutcome::Payload(payload)),
         RespResult::Err(e) => Ok(SentOutcome::Refused {
@@ -1268,6 +1299,13 @@ mod tests {
         ca: &maknae_vault::CaBundle,
     ) {
         fn s<T: Send>(_: T) {}
-        s(send_verb(maknae_proto::Verb::Ping, None, t, c, ca));
+        s(send_verb(
+            maknae_proto::Verb::Ping,
+            None,
+            crate::mutation::WriteCheck::Unchecked,
+            t,
+            c,
+            ca,
+        ));
     }
 }

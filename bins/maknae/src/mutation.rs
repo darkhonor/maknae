@@ -17,12 +17,33 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// What an existing file must be before a replace writes it (#388). The
+/// agent's loop sends `Unread` or `Read`; `maknae write` sends `Unchecked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCheck {
+    Unchecked,
+    Unread,
+    Read([i64; 7]),
+}
+impl WriteCheck {
+    fn base(self) -> maknae_io::WriteBase {
+        match self {
+            WriteCheck::Unchecked => maknae_io::WriteBase::Any,
+            WriteCheck::Unread => maknae_io::WriteBase::Unread,
+            WriteCheck::Read(k) => {
+                maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k))
+            }
+        }
+    }
+}
+
 pub struct PreparedMutation {
     request: proto::Verb,
     content: Option<proto::Bytes>,
     fd: Option<OwnedFd>,
     error: Option<String>,
     components: Vec<String>,
+    check: WriteCheck,
 }
 impl PreparedMutation {
     pub fn request(&self) -> &proto::Verb {
@@ -60,9 +81,15 @@ fn split(path: &str) -> io::Result<(PathBuf, String)> {
 
 /// Opening evidence never creates, truncates, removes or publishes anything.
 /// An open failure retains the request so the daemon can audit its refusal.
-pub fn prepare(
+#[cfg(test)]
+pub fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
+    prepare_checked(request, content, WriteCheck::Unchecked)
+}
+
+pub fn prepare_checked(
     mut request: proto::Verb,
     content: Option<proto::Bytes>,
+    check: WriteCheck,
 ) -> Option<PreparedMutation> {
     let mut components = Vec::new();
     let opened = match &mut request {
@@ -135,6 +162,7 @@ pub fn prepare(
         fd,
         error,
         components,
+        check,
     })
 }
 
@@ -308,6 +336,7 @@ enum Work {
         held: OwnedFd,
         path: PathBuf,
         bytes: proto::Bytes,
+        check: WriteCheck,
     },
     Create {
         parent: MutationDirectory,
@@ -337,6 +366,8 @@ struct Worker {
     seen: HashSet<String>,
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
     page: Option<PageMeta>,
+    stale: bool,
+    version: Option<maknae_io::FileVersion>,
 }
 struct Step {
     effect: Option<EffectEntry>,
@@ -354,6 +385,7 @@ fn io_finish(error: &IoError) -> ReportedFinish {
     match error {
         IoError::NonUtf8Component { .. } => ReportedFinish::UnsupportedName,
         IoError::MutationPathChanged { .. } => ReportedFinish::PathChanged,
+        IoError::StaleBase { .. } => ReportedFinish::PathChanged,
         IoError::DeadlineElapsed { .. } => ReportedFinish::LimitReached,
         IoError::TargetTooLarge { .. } => ReportedFinish::LimitReached,
         IoError::SizeChanged { .. } => ReportedFinish::PathChanged,
@@ -520,7 +552,12 @@ impl Worker {
                     Err(e) => error_step(e, ReportedEffect::ReadFile, path),
                 }
             }
-            Work::Replace { held, path, bytes } => {
+            Work::Replace {
+                held,
+                path,
+                bytes,
+                check,
+            } => {
                 let path = match self.reserve(&path, ReportedEffect::ReplacedFile, 1) {
                     Ok(p) => p,
                     Err(s) => return *s,
@@ -529,19 +566,25 @@ impl Worker {
                     held.as_fd(),
                     Path::new(&path),
                     &bytes.0,
-                    maknae_io::WriteBase::Any,
+                    check.base(),
                 ) {
-                    Ok(_) => Step {
-                        effect: Some(EffectEntry {
-                            path,
-                            effect: ReportedEffect::ReplacedFile,
-                            length: None,
-                            range: None,
-                            lines: None,
-                        }),
-                        finish: Some((ReportedFinish::Success, None)),
-                    },
-                    Err(e) => error_step(e, ReportedEffect::ReplacedFile, path),
+                    Ok(version) => {
+                        self.version = version;
+                        Step {
+                            effect: Some(EffectEntry {
+                                path,
+                                effect: ReportedEffect::ReplacedFile,
+                                length: None,
+                                range: None,
+                                lines: None,
+                            }),
+                            finish: Some((ReportedFinish::Success, None)),
+                        }
+                    }
+                    Err(e) => {
+                        self.stale = matches!(e.source, IoError::StaleBase { .. });
+                        error_step(e, ReportedEffect::ReplacedFile, path)
+                    }
                 }
             }
             Work::Create {
@@ -558,16 +601,19 @@ impl Worker {
                     Err(s) => return *s,
                 };
                 match parent.create_exclusive(&leaf, &bytes.0) {
-                    Ok(_) => Step {
-                        effect: Some(EffectEntry {
-                            path,
-                            effect: ReportedEffect::CreatedFile,
-                            length: None,
-                            range: None,
-                            lines: None,
-                        }),
-                        finish: Some((ReportedFinish::Success, None)),
-                    },
+                    Ok(created) => {
+                        self.version = created.version;
+                        Step {
+                            effect: Some(EffectEntry {
+                                path,
+                                effect: ReportedEffect::CreatedFile,
+                                length: None,
+                                range: None,
+                                lines: None,
+                            }),
+                            finish: Some((ReportedFinish::Success, None)),
+                        }
+                    }
                     Err(e) => error_step(e, ReportedEffect::CreatedFile, path),
                 }
             }
@@ -794,7 +840,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: &mut S,
     cfg: &TransportConfig,
     request_started: Instant,
-) -> Result<bool, String> {
+) -> Result<WriteEnd, String> {
     run_attempt(
         prepared,
         grant,
@@ -804,7 +850,11 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
         request_started,
     )
     .await
-    .map(|(success, _, _)| success)
+    .map(|a| WriteEnd {
+        applied: a.success,
+        stale: a.stale,
+        version: a.version.map(|v| v.key()),
+    })
 }
 pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepared: PreparedMutation,
@@ -823,7 +873,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         request_started,
     )
     .await
-    .map(|(success, content, page)| match (success, content, page) {
+    .map(|a| match (a.success, a.content, a.page) {
         (true, Some(content), Some(page)) => Some(ReadResult {
             content,
             label,
@@ -832,11 +882,22 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         _ => None,
     })
 }
-type Attempted = (
-    bool,
-    Option<maknae_io::Zeroizing<Vec<u8>>>,
-    Option<PageMeta>,
-);
+struct Attempted {
+    success: bool,
+    content: Option<maknae_io::Zeroizing<Vec<u8>>>,
+    page: Option<PageMeta>,
+    stale: bool,
+    version: Option<maknae_io::FileVersion>,
+}
+
+/// A write attempt's end: `stale` is true only when the #388 check refused it,
+/// before any write syscall; `version` is the written file's, when known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteEnd {
+    pub applied: bool,
+    pub stale: bool,
+    pub version: Option<[i64; 7]>,
+}
 async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     prepared: PreparedMutation,
     grant: MutationGrant,
@@ -895,6 +956,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     bytes: prepared
                         .content
                         .ok_or_else(|| "write content missing".to_string())?,
+                    check: prepared.check,
                 },
                 _ => return Err("unexpected mutation operation".into()),
             },
@@ -948,6 +1010,8 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             seen: HashSet::new(),
             content: None,
             page: None,
+            stale: false,
+            version: None,
         })
     });
     let mut worker = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), initialize)
@@ -987,17 +1051,19 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .await?;
             if outcome != ReportedFinish::Success && reading {
                 eprintln!("read not performed: {outcome:?}");
-            } else if outcome != ReportedFinish::Success {
+            } else if outcome != ReportedFinish::Success && !next.stale {
                 eprintln!(
                     "mutation stopped: {outcome:?}; {} effect(s) reported",
                     next.next_index
                 );
             }
-            return Ok((
-                outcome == ReportedFinish::Success,
-                next.content.take(),
-                next.page.take(),
-            ));
+            return Ok(Attempted {
+                success: outcome == ReportedFinish::Success,
+                content: next.content.take(),
+                page: next.page.take(),
+                stale: next.stale,
+                version: next.version,
+            });
         }
         worker = next;
     }
@@ -1128,7 +1194,7 @@ mod tests {
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
         let result = run_attempt(prepared, grant, &mut client, &cfg, cap, Instant::now())
             .await
-            .map(|(success, _, _)| success);
+            .map(|a| a.success);
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1140,7 +1206,9 @@ mod tests {
     ) -> (Result<bool, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
-        let result = execute(prepared, grant, &mut client, &cfg, request_started).await;
+        let result = execute(prepared, grant, &mut client, &cfg, request_started)
+            .await
+            .map(|end| end.applied);
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1625,6 +1693,186 @@ mod tests {
         assert!(malformed.preparation_error().is_some());
         assert!(prepare(proto::Verb::Ping, None).is_none());
     }
+    async fn acknowledged_end(
+        prepared: PreparedMutation,
+        grant: MutationGrant,
+    ) -> (Result<WriteEnd, String>, Vec<MutationReport>) {
+        let cfg = TransportConfig::default();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
+        let result = execute(prepared, grant, &mut client, &cfg, Instant::now()).await;
+        drop(client);
+        (result, receiver.await.unwrap())
+    }
+    fn checked_write(path: String, check: WriteCheck) -> PreparedMutation {
+        prepare_checked(
+            write(path),
+            Some(proto::Bytes::new(zeroize::Zeroizing::new(
+                b"agent bytes".to_vec(),
+            ))),
+            check,
+        )
+        .unwrap()
+    }
+    fn key_of(path: &str) -> [i64; 7] {
+        maknae_io::FileVersion::of(&nix::sys::stat::stat(path).unwrap()).key()
+    }
+    fn replace_grant(path: &str) -> MutationGrant {
+        grant(MutationScope::Exact {
+            path: path.to_string(),
+            effect: ReportedEffect::ReplacedFile,
+        })
+    }
+    fn create_grant(path: &str) -> MutationGrant {
+        grant(MutationScope::Exact {
+            path: path.to_string(),
+            effect: ReportedEffect::CreatedFile,
+        })
+    }
+    fn stopped_path_changed_with_no_effect(reports: &[MutationReport]) -> bool {
+        matches!(
+            reports,
+            [MutationReport::Finished {
+                next_index: 0,
+                outcome: ReportedFinish::PathChanged,
+                ..
+            }]
+        )
+    }
+    #[tokio::test]
+    async fn an_unread_check_refuses_an_existing_file_leaving_it_intact() {
+        let d = Fixture::new();
+        let path = d.path("unread-check-sentinel");
+        std::fs::write(&path, b"the user's bytes").unwrap();
+        let (end, reports) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Unread),
+            replace_grant(&path),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.stale, "{end:?}");
+        assert!(stopped_path_changed_with_no_effect(&reports), "{reports:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"the user's bytes");
+    }
+    #[tokio::test]
+    async fn a_stale_read_check_refuses_and_a_fresh_one_replaces() {
+        let d = Fixture::new();
+        let path = d.path("read-check-sentinel");
+        std::fs::write(&path, b"first").unwrap();
+        let read = key_of(&path);
+        std::fs::write(&path, b"edited out of band").unwrap();
+        let (end, reports) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Read(read)),
+            replace_grant(&path),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && end.stale, "{end:?}");
+        assert!(stopped_path_changed_with_no_effect(&reports), "{reports:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"edited out of band");
+        let fresh = key_of(&path);
+        let (end, _) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Read(fresh)),
+            replace_grant(&path),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(end.applied && !end.stale, "{end:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"agent bytes");
+        assert_eq!(end.version, Some(key_of(&path)));
+    }
+    #[tokio::test]
+    async fn an_unchecked_write_replaces_an_existing_file() {
+        let d = Fixture::new();
+        let path = d.path("unchecked-sentinel");
+        std::fs::write(&path, b"never read by anyone").unwrap();
+        let (end, _) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Unchecked),
+            replace_grant(&path),
+        )
+        .await;
+        assert!(end.unwrap().applied);
+        assert_eq!(std::fs::read(&path).unwrap(), b"agent bytes");
+    }
+    #[tokio::test]
+    async fn unread_and_read_checks_create_an_absent_file() {
+        let d = Fixture::new();
+        for (name, check) in [
+            ("created-unread", WriteCheck::Unread),
+            ("created-read", WriteCheck::Read([9; 7])),
+        ] {
+            let path = d.path(name);
+            let (end, _) =
+                acknowledged_end(checked_write(path.clone(), check), create_grant(&path)).await;
+            let end = end.unwrap();
+            assert!(end.applied && !end.stale, "{name}: {end:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"agent bytes");
+            assert_eq!(end.version, Some(key_of(&path)), "{name}");
+        }
+    }
+    #[tokio::test]
+    async fn a_renamed_target_with_an_unread_check_is_path_changed_not_stale() {
+        let d = Fixture::new();
+        let path = d.path("unread-rename-sentinel");
+        std::fs::write(&path, b"moved bytes").unwrap();
+        let prepared = checked_write(path.clone(), WriteCheck::Unread);
+        std::fs::rename(&path, d.path("unread-moved")).unwrap();
+        let (end, reports) = acknowledged_end(prepared, replace_grant(&path)).await;
+        let end = end.unwrap();
+        assert!(!end.applied && !end.stale, "{end:?}");
+        assert!(stopped_path_changed_with_no_effect(&reports), "{reports:?}");
+    }
+    #[tokio::test]
+    async fn a_read_only_target_with_an_unread_check_is_os_refused_not_stale() {
+        if nix::unistd::geteuid().is_root() {
+            panic!("a_read_only_target_with_an_unread_check_is_os_refused_not_stale: running as root, which writes a 0400 file and voids the premise; run as an unprivileged user");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let d = Fixture::new();
+        let path = d.path("unread-read-only-sentinel");
+        std::fs::write(&path, b"read only").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let (end, reports) = acknowledged_end(
+            checked_write(path.clone(), WriteCheck::Unread),
+            replace_grant(&path),
+        )
+        .await;
+        let end = end.unwrap();
+        assert!(!end.applied && !end.stale, "{end:?}");
+        assert!(
+            matches!(
+                &reports[..],
+                [MutationReport::Finished {
+                    outcome: ReportedFinish::OsRefused,
+                    ..
+                }]
+            ),
+            "{reports:?}"
+        );
+    }
+    #[test]
+    fn prepare_checked_carries_the_check_into_the_prepared_mutation() {
+        let d = Fixture::new();
+        let path = d.path("prepared-check");
+        for check in [
+            WriteCheck::Unchecked,
+            WriteCheck::Unread,
+            WriteCheck::Read([3; 7]),
+        ] {
+            assert_eq!(checked_write(path.clone(), check).check, check);
+        }
+        assert_eq!(prepare_write(path).unwrap().check, WriteCheck::Unchecked);
+    }
+    #[test]
+    fn the_check_maps_to_its_base() {
+        let k = [1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(WriteCheck::Unchecked.base(), maknae_io::WriteBase::Any);
+        assert_eq!(WriteCheck::Unread.base(), maknae_io::WriteBase::Unread);
+        assert_eq!(
+            WriteCheck::Read(k).base(),
+            maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k))
+        );
+    }
     #[tokio::test]
     async fn exclusive_collision_preserves_intervening_sentinel() {
         let d = Fixture::new();
@@ -1958,7 +2206,7 @@ mod tests {
         let bytes = read_frame(&mut server, 65536).await.unwrap();
         let terminal = proto::decode_mutation_report(&bytes).unwrap();
         write_frame(&mut server, &ack).await.unwrap();
-        assert_eq!(task.await.unwrap(), Ok(false));
+        assert_eq!(task.await.unwrap().map(|end| end.applied), Ok(false));
         assert_eq!(std::fs::read(&paths[1]).unwrap(), b"intervening preserved");
         assert!(matches!(
             terminal,
@@ -2539,6 +2787,8 @@ mod tests {
             seen: HashSet::new(),
             content: None,
             page: None,
+            stale: false,
+            version: None,
         }
     }
     #[test]
