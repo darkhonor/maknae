@@ -359,21 +359,35 @@ fn seal_cli_secret_linux(
 }
 
 #[cfg(target_os = "macos")]
+fn cli_item_cleared(
+    deleted: Result<(), security_framework::base::Error>,
+) -> Result<(), EnrollError> {
+    match deleted {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == -25300 => Ok(()),
+        Err(e) => Err(EnrollError::Keychain {
+            op: "delete",
+            detail: format!("status {}: {e}", e.code()),
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn seal_cli_secret_keychain(secret: &Zeroizing<String>, verbose: bool) -> Result<(), EnrollError> {
+    use security_framework::passwords::{delete_generic_password, set_generic_password};
+    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
     if verbose {
         eprintln!(
-            "keychain: set generic password service={}",
-            maknae_vault::CLI_KEYCHAIN_ITEM.service
+            "keychain: replace generic password service={}",
+            item.service
         );
     }
-    security_framework::passwords::set_generic_password(
-        maknae_vault::CLI_KEYCHAIN_ITEM.service,
-        maknae_vault::CLI_KEYCHAIN_ITEM.account,
-        secret.as_bytes(),
-    )
-    .map_err(|e| EnrollError::Command {
-        program: "keychain".to_string(),
-        detail: e.to_string(),
+    cli_item_cleared(delete_generic_password(item.service, item.account))?;
+    set_generic_password(item.service, item.account, secret.as_bytes()).map_err(|e| {
+        EnrollError::Command {
+            program: "keychain".to_string(),
+            detail: e.to_string(),
+        }
     })
 }
 
@@ -391,6 +405,22 @@ fn seal_cli_secret_keychain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_an_absent_cli_item_clears_quietly() {
+        use security_framework::base::Error;
+        assert!(cli_item_cleared(Ok(())).is_ok());
+        assert!(cli_item_cleared(Err(Error::from_code(-25300))).is_ok());
+        assert!(matches!(
+            cli_item_cleared(Err(Error::from_code(-25308))),
+            Err(EnrollError::Keychain { op: "delete", .. })
+        ));
+        assert!(matches!(
+            cli_item_cleared(Err(Error::from_code(-25293))),
+            Err(EnrollError::Keychain { op: "delete", .. })
+        ));
+    }
 
     #[test]
     #[cfg(not(target_os = "linux"))]
