@@ -11,8 +11,9 @@
 //! **Privilege descent (spec §4.1, no `unsafe`):** every step that must run AS
 //! the operator (the pre-mint capability probe, the post-mint CLI provisioning)
 //! is re-exec'd via `sudo -u $SUDO_USER` with `XDG_RUNTIME_DIR=/run/user/$SUDO_UID`
-//! pinned ([`run_helper`]) — never an in-process uid drop (the workspace forbids
-//! `unsafe`, and `nix` cfg-gates the direct drop APIs off Apple targets anyway).
+//! pinned ([`run_helper`]) — never an in-process uid drop (`unsafe` is forbidden
+//! outside `maknae-sys`, ADR-0027, and `nix` cfg-gates the direct drop APIs off
+//! Apple targets anyway).
 //! Root performs every privileged mutation FIRST; its last act is spawning the
 //! final operator-context child and reporting — monotonic descent by flow order.
 

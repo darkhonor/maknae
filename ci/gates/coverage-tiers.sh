@@ -436,11 +436,13 @@ if [ "$mutants_mode" != "" ]; then
     while IFS= read -r feat; do
       [ -n "$feat" ] && extra_mutants_flags+=(--features "$feat")
     done < <(toml_mutants_features_for "$cname")
-    if [ "$cname" = "maknae-io" ]; then
+    if [ "$cname" = "maknae-io" ] || [ "$cname" = "maknae-sys" ]; then
       if ! native_exclusion="$(bash "$here/mutation-platform.sh")"; then
         fail "cannot select native syscall mutants"; continue
       fi
       extra_mutants_flags+=(--exclude-re "$native_exclusion")
+    fi
+    if [ "$cname" = "maknae-io" ]; then
       # #238: eight independent five-second subprocess watchdogs reject a
       # nonadvancing write loop. With two libtest threads the suite takes ~23s
       # to fail, so the default 20s mutant timeout killed it before libtest could

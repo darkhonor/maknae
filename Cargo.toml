@@ -20,6 +20,7 @@ members = [
   "crates/maknae-spif-compile",
   "crates/maknae-subject-ctx",
   "crates/maknae-subject-ctx-mint",
+  "crates/maknae-sys",
   "crates/maknae-vault",
   "bins/maknae-egress",
   "bins/maknaed",

@@ -15,14 +15,17 @@ use std::path::Path;
 
 // Unique implementation names let the mutation gate exclude only code absent
 // from the native build. Aliases preserve the callers' platform-neutral API.
-#[cfg(target_os = "macos")]
-pub(crate) use macos_fd_path as fd_path;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use portable_probe_openat2 as probe_openat2;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) use unsupported_fd_path as fd_path;
 #[cfg(target_os = "linux")]
-pub(crate) use {linux_fd_path as fd_path, linux_probe_openat2 as probe_openat2};
+pub(crate) use {
+    linux_dir_kernel_form as dir_kernel_form, linux_fd_path as fd_path,
+    linux_probe_openat2 as probe_openat2,
+};
+#[cfg(target_os = "macos")]
+pub(crate) use {macos_dir_kernel_form as dir_kernel_form, macos_fd_path as fd_path};
 
 /// Widen `mode_t` to `u32`. The cast is load-bearing on darwin, where `mode_t` is
 /// `u16`, and a no-op on Linux, where it is already `u32` -- so `unnecessary_cast`
@@ -239,6 +242,26 @@ pub(crate) fn macos_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn unsupported_fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
     Err(nix::errno::Errno::ENOSYS)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    open_mutation_directory(path).map(|fd| fd_path(&fd))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    maknae_sys::full_path(path)
+        .map(Ok)
+        .or_else(macos_full_path_error)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_full_path_error(e: std::io::Error) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    match e.raw_os_error() {
+        Some(raw) => Err(nix::errno::Errno::from_raw(raw)),
+        None => Ok(Err(nix::errno::Errno::EIO)),
+    }
 }
 
 pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {
@@ -801,5 +824,39 @@ mod tests {
     fn fd_path_refuses_a_descriptor_without_a_filesystem_path() {
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         assert_eq!(fd_path(&socket).unwrap_err(), nix::errno::Errno::EBADF);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn classify_full_path_error(e: std::io::Error) -> Result<nix::errno::Errno, nix::errno::Errno> {
+        match super::macos_full_path_error(e) {
+            Ok(Err(inner)) => Ok(inner),
+            Ok(Ok(p)) => panic!("an error became a path: {p:?}"),
+            Err(outer) => Err(outer),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_parser_error_without_an_errno_is_a_kernel_path_failure() {
+        let got = classify_full_path_error(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed getattrlist reply",
+        ));
+        assert_eq!(got, Ok(nix::errno::Errno::EIO));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_kernel_errno_is_an_open_class_failure() {
+        for errno in [
+            nix::libc::EACCES,
+            nix::libc::ENOENT,
+            nix::libc::ENOTDIR,
+            nix::libc::EIO,
+            nix::libc::ENAMETOOLONG,
+        ] {
+            let got = classify_full_path_error(std::io::Error::from_raw_os_error(errno));
+            assert_eq!(got, Err(nix::errno::Errno::from_raw(errno)));
+        }
     }
 }

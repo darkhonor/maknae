@@ -663,9 +663,10 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
 /// this: `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so
 /// the trust plane must not depend on the CLI having written a canonical value.
 ///
-/// The resolver is `maknae_io::resolve_dir`, which is the SAME mechanism
-/// `verify_delegated` uses to name a delegated descriptor, so the confinement
-/// root and the kernel-reported path agree by CONSTRUCTION. Operators keep
+/// The resolver is `maknae_io::resolve_dir`, which returns the form
+/// `verify_delegated` names a delegated descriptor by (the same resolver on
+/// Linux; on macOS `getattrlist`, pinned byte for byte to `F_GETPATH`), so the
+/// confinement root and the kernel-reported path agree. Operators keep
 /// writing `~`: it now expands from the resolved home, which is the point --
 /// nobody should need to know whether their home is NFS-mounted to write policy.
 ///

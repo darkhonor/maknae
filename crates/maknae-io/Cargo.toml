@@ -9,10 +9,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 # NOT optional: Cargo does not apply [workspace.lints] to a member that omits this,
-# and the workspace sets `unsafe_code = "forbid"`. Omitting it would silently exempt
-# the one crate holding raw syscall wrappers from the project's headline memory-safety
-# control, and no CI gate checks for it (p1-manifest-lint.sh covers only
-# resolver/default-members/privileged deps).
+# and the workspace sets `unsafe_code = "forbid"`. ci/gates/unsafe-confinement.sh
+# fails any member other than maknae-sys that omits it (ADR-0027).
 [lints]
 workspace = true
 
@@ -38,11 +36,12 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       `ControlMessageOwned::ScmRights(Vec<RawFd>)` yields BARE RawFds whose conversion
 #       to OwnedFd/BorrowedFd is `unsafe` in every form std offers. rustix's
 #       `RecvAncillaryMessage::ScmRights(AncillaryIter<'_, OwnedFd>)` yields OWNED
-#       descriptors safely. Without it the only paths were introducing the workspace's
-#       first unsafe block into precisely the crate AGENTS.md holds up as the minimal-TCB
-#       I/O primitive, or holding bare RawFds with hand-rolled close-on-drop — the exact
-#       leak-on-the-refusal-path hazard ADR-0009 names. `default-features = false` keeps
-#       it to "std" + "net"; the fs/process/thread/event APIs are not compiled in.
+#       descriptors safely. Without it the only paths were an `unsafe` block in precisely
+#       the crate AGENTS.md holds up as the minimal-TCB I/O primitive, where the workspace
+#       forbids it (ADR-0027 confines `unsafe` to maknae-sys), or holding bare RawFds with
+#       hand-rolled close-on-drop — the exact leak-on-the-refusal-path hazard ADR-0009
+#       names. `default-features = false` keeps it to "std" + "net"; the
+#       fs/process/thread/event APIs are not compiled in.
 #       Already resolved at 1.1.4 in Cargo.lock (transitively via tempfile), so this
 #       promotes a vetted edge rather than widening the graph.
 #       HELD AT 1.1.4 (2026-09-23). 1.1.5 does not compile under exactly the
@@ -63,6 +62,9 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "net
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+maknae-sys = { path = "../maknae-sys" }
 
 [dev-dependencies]
 # Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.

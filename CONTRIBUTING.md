@@ -65,6 +65,8 @@ cd maknae
 cargo build --workspace
 ```
 
+On macOS a debug binary links the FIPS dylib by `@rpath` with no `LC_RPATH`, so run it with `cargo run` (or through `cargo test`), not as `./target/debug/<bin>`; packaged binaries pin the dylib by absolute path.
+
 ## The pre-push gate
 
 CI (`.github/workflows/ci.yml`) classifies every PR and main push with `ci/affected.py`. Source changes run the complete `build-and-gate` coverage contract; the mutation job selects complete affected packages, including reverse dependencies, while both Darwin jobs run against the whole workspace (#198). Explicitly allowlisted documentation-only changes skip Rust builds, coverage, mutation, and Darwin runners. The lightweight job always runs external-authority and isolation-contract lint, including on documentation-only updates. The allowlist covers the existing packaging READMEs and isolation contract, deployment README, and hook README as well as root/design/docs prose; unknown Markdown fixtures and packaging configuration are still build inputs. Unknown inputs or missing history select all; unreadable selection authority fails. **Run the applicable checks locally before you push.** *"CI will run it"* is not a substitute: a CI failure is something you should have caught before pushing, and the gates are cheap warm.
@@ -111,6 +113,7 @@ For source changes, run the applicable heavier gates before pushing (derive the 
 ```bash
 cargo deny --locked check
 ci/gates/p1-manifest-lint.sh
+ci/gates/unsafe-confinement.sh
 ci/gates/p2-invert-tree.sh
 ci/gates/p2-artifact-witness.sh
 ci/gates/build-invocation-lint.sh

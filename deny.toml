@@ -1,8 +1,12 @@
 # cargo-deny >= 0.19 required — the scope-valued `unmaintained = "all"` is rejected by 0.17.x
 # (validated against 0.19.8; CI pins ^0.19 to match).
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
+
 [advisories]
 unmaintained = "all"          # spec §5/§6: escalate archived/unmaintained deps to error, incl. transitive
 yanked = "deny"
+unsound = "all"
 
 [bans]
 multiple-versions = "warn"
@@ -30,8 +34,8 @@ deny = [
 ]
 
 [licenses]
-# OpenSSL: AWS-LC (aws-lc-fips-sys). CDLA-Permissive-2.0: a data crate in the vaultrs tree.
-allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL", "CDLA-Permissive-2.0"]
+# OpenSSL: AWS-LC (aws-lc-fips-sys).
+allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL"]
 confidence-threshold = 0.9
 
 [sources]

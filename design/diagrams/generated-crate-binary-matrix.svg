@@ -1,8 +1,8 @@
-<svg width="786" height="996" viewBox="0 0 786 996" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="786" height="1018" viewBox="0 0 786 1018" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae crate to binary dependency matrix</title>
   <desc>Which workspace crates and key external dependencies each Maknae binary can reach through its resolved dependency graph, with the cells a CI gate refuses marked as UML stereotypes. Source-level reachability, not linker retention.</desc>
-  <rect x="0" y="0" width="786" height="996" fill="#FFFFFF"/>
-<rect x="24" y="24" width="738" height="932" rx="16" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+  <rect x="0" y="0" width="786" height="1018" fill="#FFFFFF"/>
+<rect x="24" y="24" width="738" height="954" rx="16" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
   <text x="44" y="52" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#2C2C2A">Crate × binary dependency reachability, and what the gates refuse</text>
   <text x="44" y="72" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Source-level reachability from cargo's resolve graph (host triple, normal-kind edges) — NOT proof the linker retained the crate.</text>
   <text x="44" y="88" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">«» denotes a UML stereotype. A refused cell is refused by gate P1's per-consumer allowlist, not merely absent today.</text>
@@ -144,76 +144,82 @@
   <text x="554.0" y="563" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#B3452F">✕</text>
   <text x="564.0" y="563" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«gate:P1»</text>
   <text x="684.0" y="563" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#534AB7">●</text>
-  <text x="48" y="584" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-vault</text>
+  <text x="48" y="584" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-sys</text>
   <text x="312.0" y="585" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="585" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="585" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="585" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="44" y="616" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">key external dependencies</text>
-  <rect x="40" y="622" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="636" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-fips-sys</text>
-  <text x="312.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="436.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="560.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
-  <text x="684.0" y="637" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="48" y="658" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-rs</text>
+  <rect x="40" y="592" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="606" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">maknae-vault</text>
+  <text x="312.0" y="607" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="607" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="560.0" y="607" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="684.0" y="607" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="44" y="638" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A">key external dependencies</text>
+  <rect x="40" y="644" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="658" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-fips-sys</text>
   <text x="312.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="659" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <rect x="40" y="666" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="680" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">nix</text>
+  <text x="48" y="680" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">aws-lc-rs</text>
   <text x="312.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="681" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="48" y="702" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rcgen</text>
+  <rect x="40" y="688" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="702" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">nix</text>
   <text x="312.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="703" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <rect x="40" y="710" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="724" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustix</text>
+  <text x="48" y="724" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rcgen</text>
   <text x="312.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="725" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="48" y="746" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustls</text>
+  <rect x="40" y="732" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="746" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustix</text>
   <text x="312.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="747" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <rect x="40" y="754" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="768" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio</text>
+  <text x="48" y="768" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">rustls</text>
   <text x="312.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="769" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="48" y="790" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio-rustls</text>
+  <rect x="40" y="776" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="790" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio</text>
   <text x="312.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="791" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <rect x="40" y="798" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="812" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">vaultrs</text>
+  <text x="48" y="812" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">tokio-rustls</text>
   <text x="312.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="813" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="48" y="834" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">yaml-rust2</text>
+  <rect x="40" y="820" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="834" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">vaultrs</text>
   <text x="312.0" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <rect x="40" y="842" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">zeroize</text>
+  <text x="48" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">yaml-rust2</text>
   <text x="312.0" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="436.0" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
   <text x="560.0" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
   <text x="684.0" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
-  <text x="44" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">● reachable</text>
-  <text x="130" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● reachable (privileged)</text>
-  <text x="285" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#B3452F">✕ refused by gate</text>
-  <text x="410" y="890" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not reachable</text>
-  <text x="24" y="980" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + cargo metadata · inputs at 622d484 · 2026-09-26</text><text x="762" y="980" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+  <rect x="40" y="864" width="706" height="22" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="878" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="400" fill="#2C2C2A">zeroize</text>
+  <text x="312.0" y="879" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="436.0" y="879" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="560.0" y="879" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#C9C7C0">·</text>
+  <text x="684.0" y="879" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#0F6E56">●</text>
+  <text x="44" y="912" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#0F6E56">● reachable</text>
+  <text x="130" y="912" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#534AB7">● reachable (privileged)</text>
+  <text x="285" y="912" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#B3452F">✕ refused by gate</text>
+  <text x="410" y="912" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">· not reachable</text>
+  <text x="24" y="1002" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">generated from ci/gates/lib.sh + cargo metadata · inputs at 69b7594f · 2026-09-28</text><text x="762" y="1002" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

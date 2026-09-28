@@ -65,10 +65,7 @@ files = [
   "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/page.rs",
-  # Raw T1 syscall coverage, with no exceptions. Corrected 2026-09-06 (#126):
-  # current measurements are macOS 97/97 and Linux 116/116, both 100.00%.
-  # The earlier 87/87 and 107/107 figures described the promotion revision,
-  # before fd_path and the shared directory opener; they are not current counts.
+  # Raw T1 syscall coverage, with no exceptions.
   "crates/maknae-io/src/syscall.rs",
   "crates/maknae-io/src/walk.rs",
   "crates/maknae-io/src/strategy.rs",
@@ -261,6 +258,8 @@ files = [
   "crates/maknae-agent/src/render.rs",
   "crates/maknae-agent/src/drive.rs",
   "crates/maknae-agent/src/budget.rs",
+  "crates/maknae-sys/src/reply.rs",
+  "crates/maknae-sys/src/macos.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -269,7 +268,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -623,7 +622,7 @@ why = "declaration-only string-table match arms, no decision logic (precedent: m
 path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
-why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by #![forbid(unsafe_code)]). Provably-unreachable in practice — every caller bounds a body by its frame class cap (at most 1 MiB), never by this defensive cap. write_frame's Io error paths (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
+why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by the workspace's unsafe_code forbid). Provably-unreachable in practice — every caller bounds a body by its frame class cap (at most 1 MiB), never by this defensive cap. write_frame's Io error paths (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
 
 [[exception]]
 path = "crates/maknae-io/src/mutation.rs"
@@ -673,8 +672,12 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
 
-# [[env_bound_override]] — §9 discriminator (none at adoption). t1/t2 only;
+# [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
+[[env_bound_override]]
+path = "crates/maknae-sys/src/macos.rs"
+env_bound = "target_os:macos"
+why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
 
 [[t3]]
 path = "crates/maknae-io/src/testutil.rs"
@@ -687,6 +690,10 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 [[t3]]
 path = "crates/maknae-io/src/error.rs"
 why = "IoError/IoKind enums with Display only (there is no From impl, despite what an earlier version of this line said); no decision logic"
+
+[[t3]]
+path = "crates/maknae-sys/src/lib.rs"
+why = "module declarations and the macOS re-export only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #

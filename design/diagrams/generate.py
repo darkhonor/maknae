@@ -43,7 +43,7 @@ KEY_EXTERNALS = {
     "tokio-rustls": "TLS over the UDS",
     "aws-lc-fips-sys": "FIPS 140-3 module",
     "aws-lc-rs": "FIPS provider",
-    "rustix": "safe SCM_RIGHTS (zero-unsafe)",
+    "rustix": "safe SCM_RIGHTS (owned descriptors)",
     "nix": "syscall surface",
     "zeroize": "secret hygiene",
     "vaultrs": "Vault client",
