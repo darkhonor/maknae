@@ -83,11 +83,31 @@ impl std::fmt::Debug for ReadOutcome {
 /// exceeds the frame bound, judged before a byte leaves the process): nothing
 /// is on the trail and the file is untouched, so "may have happened" would be
 /// false.
+///
+/// **Amended 2026-09-28 (#388):** `Stale` is certain too, not a guess. The
+/// client's read-before-write check refused it inside the granted attempt
+/// before any write syscall, and the no-effect completion was acknowledged.
+/// `Applied` carries the written file's version key when the client could read
+/// it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
-    Applied,
+    Applied(Option<[i64; 7]>),
+    Stale,
     Unknown,
     NotSent,
+}
+
+/// What the loop knows of a file it is about to replace (#388).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadBasis {
+    Unread,
+    Read([i64; 7]),
+}
+
+/// Whether two version keys describe the same content: device, inode, size and
+/// mtime (indices 0..=4 of `maknae_io::FileVersion::key`), never ctime.
+pub fn same_content(a: &[i64; 7], b: &[i64; 7]) -> bool {
+    a[..5] == b[..5]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +140,7 @@ pub trait Plane {
         conversation: &str,
         path: &str,
         content: &[u8],
+        basis: ReadBasis,
     ) -> impl Future<Output = WriteOutcome> + Send;
 }
 
@@ -153,7 +174,9 @@ mod tests {
             }
         }
         let writes = [
-            WriteOutcome::Applied,
+            WriteOutcome::Applied(None),
+            WriteOutcome::Applied(Some([1; 7])),
+            WriteOutcome::Stale,
             WriteOutcome::Unknown,
             WriteOutcome::NotSent,
         ];
@@ -163,7 +186,10 @@ mod tests {
                 assert_eq!(a == b, i == j);
             }
         }
-        assert!(format!("{:?}{:?}{:?}", writes[0], writes[1], writes[2]).contains("NotSent"));
+        assert_eq!(
+            format!("{writes:?}"),
+            "[Applied(None), Applied(Some([1, 1, 1, 1, 1, 1, 1])), Stale, Unknown, NotSent]"
+        );
         let errs = [
             PlaneError::FrameTooLarge,
             PlaneError::Transport("t".into()),
@@ -204,5 +230,15 @@ mod tests {
         // The other two arms of the hand-written impl are T1 regions too.
         assert_eq!(format!("{:?}", ReadOutcome::Refused), "Refused");
         assert_eq!(format!("{:?}", ReadOutcome::Unavailable), "Unavailable");
+    }
+    #[test]
+    fn same_content_compares_every_index_but_ctime() {
+        let base = [1, 2, 3, 4, 5, 6, 7];
+        assert!(same_content(&base, &base));
+        for i in 0..7 {
+            let mut other = base;
+            other[i] += 1;
+            assert_eq!(same_content(&base, &other), i >= 5, "index {i}");
+        }
     }
 }

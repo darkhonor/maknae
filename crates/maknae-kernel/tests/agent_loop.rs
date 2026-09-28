@@ -225,7 +225,13 @@ impl Plane for FixturePlane {
             _ => ReadOutcome::Unavailable,
         }
     }
-    async fn write(&mut self, conversation: &str, path: &str, content: &[u8]) -> WriteOutcome {
+    async fn write(
+        &mut self,
+        conversation: &str,
+        path: &str,
+        content: &[u8],
+        _basis: maknae_agent::plane::ReadBasis,
+    ) -> WriteOutcome {
         use maknae_proto::{
             EffectEntry, MutationReport, MutationScope, ReportedEffect, ReportedFinish,
         };
@@ -300,7 +306,7 @@ impl Plane for FixturePlane {
         drop(client);
         task.await.unwrap();
         if applied {
-            WriteOutcome::Applied
+            WriteOutcome::Applied(None)
         } else {
             WriteOutcome::Unknown
         }
