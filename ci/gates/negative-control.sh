@@ -4803,6 +4803,61 @@ EOF
 expect_reject_because "unsafe-confinement/a-raw-macro_export-is-refused" \
   "crates/maknae-io/src/lib.rs:1: macro_export in maknae-io" "$here/unsafe-confinement.sh" --root "$uc_rme"
 
+uc_tp1="$(uc_fixture)"
+printf '#[macro_export] macro_rules! read_pointer { ($p:expr) => { unsafe { *$p } }; }\n' > "$uc_tp1/crates/maknae-sys/src/api.inc"
+printf '\n[lib]\npath = "src/api.inc"\n' >> "$uc_tp1/crates/maknae-sys/Cargo.toml"
+git -C "$uc_tp1" add -A
+expect_reject_because "unsafe-confinement/a-non-rs-lib-path-is-not-scanned" \
+  "maknae-sys: target maknae_sys source" "$here/unsafe-confinement.sh" --root "$uc_tp1"
+expect_reject_because "unsafe-confinement/a-non-rs-lib-path-in-the-manifest-is-refused" \
+  "crates/maknae-sys/Cargo.toml: [lib] path src/api.inc is not a .rs file" "$here/unsafe-confinement.sh" --root "$uc_tp1"
+
+uc_tp2="$(uc_fixture)"
+printf 'pub fn u() {}\n' > "$uc_tp2/crates/maknae-io/src/untracked_lib.rs"
+printf '\n[lib]\npath = "src/untracked_lib.rs"\n' >> "$uc_tp2/crates/maknae-io/Cargo.toml"
+git -C "$uc_tp2" add crates/maknae-io/Cargo.toml
+expect_reject_because "unsafe-confinement/an-untracked-rs-target-is-not-scanned" \
+  "maknae-io: target maknae_io source" "$here/unsafe-confinement.sh" --root "$uc_tp2"
+
+uc_tp3="$(uc_fixture)"
+printf 'fn main() {}\n' > "$uc_tp3/crates/maknae-io/src/main.txt"
+printf '\n[[bin]]\nname = "b"\npath = "src/main.txt"\n' >> "$uc_tp3/crates/maknae-io/Cargo.toml"
+git -C "$uc_tp3" add -A
+expect_reject_because "unsafe-confinement/a-non-rs-bin-path-is-refused" \
+  "crates/maknae-io/Cargo.toml: [[bin]] b path src/main.txt is not a .rs file" "$here/unsafe-confinement.sh" --root "$uc_tp3"
+
+for uc_table in test example bench; do
+  uc_tpt="$(uc_fixture)"
+  printf 'fn main() {}\n' > "$uc_tpt/crates/maknae-io/t.txt"
+  printf '\n[[%s]]\nname = "t"\npath = "t.txt"\n' "$uc_table" >> "$uc_tpt/crates/maknae-io/Cargo.toml"
+  git -C "$uc_tpt" add -A
+  expect_reject_because "unsafe-confinement/a-non-rs-$uc_table-path-is-refused" \
+    "crates/maknae-io/Cargo.toml: [[$uc_table]] t path t.txt is not a .rs file" "$here/unsafe-confinement.sh" --root "$uc_tpt"
+done
+
+uc_tp4="$(uc_fixture)"
+printf 'fn main() {}\n' > "$uc_tp4/crates/maknae-io/build.txt"
+printf '[package]\nname = "maknae-io"\nversion = "0.0.0"\nedition = "2021"\nbuild = "build.txt"\n\n[lints]\nworkspace = true\n\n[dependencies]\nmaknae-sys = { path = "../maknae-sys" }\n' > "$uc_tp4/crates/maknae-io/Cargo.toml"
+git -C "$uc_tp4" add -A
+expect_reject_because "unsafe-confinement/a-non-rs-build-script-path-is-refused" \
+  "crates/maknae-io/Cargo.toml: package.build path build.txt is not a .rs file" "$here/unsafe-confinement.sh" --root "$uc_tp4"
+
+uc_tp5="$(uc_fixture)"
+mkdir -p "$uc_tp5/tools/x/src"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-sys", "crates/maknae-io"]\nexclude = ["tools/x"]\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_tp5/Cargo.toml"
+printf '[package]\nname = "x"\nversion = "0.0.0"\nedition = "2021"\n\n[lib]\npath = "src/lib.inc"\n' > "$uc_tp5/tools/x/Cargo.toml"
+printf 'pub fn x() {}\n' > "$uc_tp5/tools/x/src/lib.inc"
+git -C "$uc_tp5" add -A
+expect_reject_because "unsafe-confinement/a-non-rs-lib-path-on-an-excluded-crate-is-refused" \
+  "tools/x/Cargo.toml: [lib] path src/lib.inc is not a .rs file" "$here/unsafe-confinement.sh" --root "$uc_tp5"
+
+uc_tp6="$(uc_fixture)"
+git -C "$uc_tp6" mv crates/maknae-io/src/lib.rs crates/maknae-io/src/lib.RS
+printf '\n[lib]\npath = "src/lib.RS"\n' >> "$uc_tp6/crates/maknae-io/Cargo.toml"
+git -C "$uc_tp6" add -A
+expect_accept "unsafe-confinement/an-upper-case-rs-target-path-passes" "unsafe-confinement: ok" \
+  "$here/unsafe-confinement.sh" --root "$uc_tp6"
+
 ul_fixture() {
   local d
   d="$(mktemp -d -p "$NC_TMP")"

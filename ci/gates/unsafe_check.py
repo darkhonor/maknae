@@ -182,6 +182,23 @@ def declares_proc_macro(manifest):
     )
 
 
+def manifest_source_paths(manifest):
+    found = []
+    lib = manifest.get("lib")
+    if isinstance(lib, dict) and "path" in lib:
+        found.append(("[lib]", lib["path"]))
+    for table in ("bin", "test", "example", "bench"):
+        entries = manifest.get(table)
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict) and "path" in entry:
+                    found.append((f"[[{table}]] {entry.get('name', '?')}", entry["path"]))
+    package = manifest.get("package")
+    if isinstance(package, dict) and isinstance(package.get("build"), str):
+        found.append(("package.build", package["build"]))
+    return found
+
+
 def load_toml(path, what, fails):
     try:
         return tomllib.loads(Path(path).read_text(encoding="utf-8"))
@@ -221,6 +238,7 @@ def main(argv):
 
     names = set()
     package_dirs = {}
+    target_sources = []
     for pkg in packages:
         name = pkg["name"]
         names.add(name)
@@ -235,6 +253,7 @@ def main(argv):
         if not edition.isdigit() or int(edition) < MIN_EDITION:
             fails.append(f"{name}: edition {edition} is below {MIN_EDITION}; the token scan lexes {MIN_EDITION} or later")
         for target in pkg.get("targets", []):
+            target_sources.append((name, target.get("name"), target.get("src_path", "")))
             target_edition = str(target.get("edition", ""))
             if not target_edition.isdigit() or int(target_edition) < MIN_EDITION:
                 fails.append(f"{name}: target {target.get('name')} edition {target_edition} is below {MIN_EDITION}; the token scan lexes {MIN_EDITION} or later")
@@ -270,6 +289,9 @@ def main(argv):
         parsed = load_toml(root / rel, rel, fails)
         if parsed is not None and declares_proc_macro(parsed):
             fails.append(f"{rel}: declares a proc-macro crate; no tracked crate may be one, member or not (ADR-0027)")
+        for where, source in manifest_source_paths(parsed or {}):
+            if not str(source).lower().endswith(".rs"):
+                fails.append(f"{rel}: {where} path {source} is not a .rs file; the scan reads only .rs files (ADR-0027)")
 
     for rel in configs:
         parsed = load_toml(root / rel, rel, fails)
@@ -278,9 +300,11 @@ def main(argv):
                 fails.append(f"{rel}: {finding}; lint levels come only from manifests (ADR-0027)")
 
     scanned = 0
+    examined = set()
     for rel in files:
         try:
             masked = mask_noncode((root / rel).read_text(encoding="utf-8"))
+            examined.add((root / rel).resolve())
         except (OSError, UnicodeDecodeError) as e:
             fails.append(f"{rel}: cannot be read ({e}); it was not scanned")
             continue
@@ -312,6 +336,9 @@ def main(argv):
             fails.append(f"{rel}:{line_of(masked, match.start())}: unsafe outside {sys_label}")
     if scanned == 0:
         fails.append(f"git ls-files listed ZERO .rs files outside {sys_label}; no source was examined")
+    for name, target, source in target_sources:
+        if Path(source).resolve() not in examined:
+            fails.append(f"{name}: target {target} source {source} is not a scanned .rs file (ADR-0027)")
 
     for f in fails:
         print(f"FAIL: {f}")
