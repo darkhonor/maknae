@@ -21,8 +21,11 @@ ATTR_START = re.compile(r"#\s*!?\s*\[")
 PATH_ATTR = re.compile(r"\s*path\s*=")
 CFG_ATTR = re.compile(r"\s*cfg_attr\b")
 CFG_ATTR_PATH = re.compile(r"[(,]\s*path\s*=")
-INCLUDE = re.compile(r"\binclude\s*!")
-REEXPORT = re.compile(r"\bpub\s+(?:use\s+\{?\s*(?:::\s*)?|extern\s+crate\s+)maknae_sys\b")
+INCLUDE = re.compile(r"\binclude\b")
+RAW_PATH = re.compile(r"\br#path\b")
+ATTR_FRAGMENT = re.compile(r"#\s*!?\s*\[\s*\$")
+PUB_REEXPORT = re.compile(r"\bpub\s+(?:use|extern\s+crate)\b[^;]*")
+SYS_TOKEN = re.compile(r"\bmaknae_sys\b")
 CARGO_CONFIG = re.compile(r"(?:^|/)\.cargo/config(?:\.toml)?$", re.IGNORECASE)
 BUILD_DOORS = {"rustc", "rustc-wrapper", "rustc-workspace-wrapper"}
 ENV_DOORS = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC"}
@@ -119,11 +122,13 @@ def config_findings(value, where):
 
 
 def lint_flag(token):
-    return token.startswith(("--cap-lints", "-A", "--allow", "-C"))
+    return token.startswith(("--cap-lints", "-A", "--allow", "-C", "--config"))
 
 
 def config_doors(parsed):
     found = []
+    if "include" in parsed:
+        found.append("sets include; an included config is not checked")
     build = parsed.get("build")
     if isinstance(build, dict):
         for key in build:
@@ -135,7 +140,7 @@ def config_doors(parsed):
             tokens = value.split() if isinstance(value, str) else [str(t) for t in value] if isinstance(value, list) else []
             for token in tokens:
                 if lint_flag(token):
-                    found.append(f"alias.{name} passes a lint flag ({token})")
+                    found.append(f"alias.{name} passes a refused flag ({token})")
     env = parsed.get("env")
     if isinstance(env, dict):
         for key in env:
@@ -197,6 +202,9 @@ def main(argv):
         if not edition.isdigit() or int(edition) < MIN_EDITION:
             fails.append(f"{name}: edition {edition} is below {MIN_EDITION}; the token scan lexes {MIN_EDITION} or later")
         for target in pkg.get("targets", []):
+            target_edition = str(target.get("edition", ""))
+            if not target_edition.isdigit() or int(target_edition) < MIN_EDITION:
+                fails.append(f"{name}: target {target.get('name')} edition {target_edition} is below {MIN_EDITION}; the token scan lexes {MIN_EDITION} or later")
             if "proc-macro" in target.get("kind", []):
                 fails.append(f"{name}: target {target.get('name')} is a proc-macro; a macro would carry unsafe past unsafe_code (ADR-0027)")
         if name == sys_crate:
@@ -241,10 +249,15 @@ def main(argv):
         for start, body in attributes(masked):
             if PATH_ATTR.match(body) or (CFG_ATTR.match(body) and CFG_ATTR_PATH.search(body)):
                 fails.append(f"{rel}:{line_of(masked, start)}: #[path] attribute; it compiles a file the scan does not list (ADR-0027)")
+        for match in RAW_PATH.finditer(masked):
+            fails.append(f"{rel}:{line_of(masked, match.start())}: #[path] attribute (r#path); it compiles a file the scan does not list (ADR-0027)")
+        for match in ATTR_FRAGMENT.finditer(masked):
+            fails.append(f"{rel}:{line_of(masked, match.start())}: macro fragment in attribute position; it can spell #[path] (ADR-0027)")
         for match in INCLUDE.finditer(masked):
-            fails.append(f"{rel}:{line_of(masked, match.start())}: include! macro; it compiles a file the scan does not list (ADR-0027)")
-        for match in REEXPORT.finditer(masked):
-            fails.append(f"{rel}:{line_of(masked, match.start())}: re-exports maknae_sys past SYS_CONSUMER_ALLOW (ADR-0027)")
+            fails.append(f"{rel}:{line_of(masked, match.start())}: include identifier; include! or a route to it compiles a file the scan does not list (ADR-0027)")
+        for match in PUB_REEXPORT.finditer(masked):
+            if SYS_TOKEN.search(match.group(0)):
+                fails.append(f"{rel}:{line_of(masked, match.start())}: re-exports maknae_sys past SYS_CONSUMER_ALLOW (ADR-0027)")
         if owner(rel) == sys_crate:
             for match in MACRO_EXPORT.finditer(masked):
                 fails.append(f"{rel}:{line_of(masked, match.start())}: macro_export in {sys_crate}; an exported macro would carry its unsafe past the safe surface (ADR-0027)")

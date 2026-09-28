@@ -4491,7 +4491,7 @@ include!("imp.inc");
 EOF
 )"
 expect_reject_because "unsafe-confinement/include-is-refused" \
-  "crates/maknae-io/src/lib.rs:1: include! macro" "$here/unsafe-confinement.sh" "$uc_in"
+  "crates/maknae-io/src/lib.rs:1: include identifier" "$here/unsafe-confinement.sh" "$uc_in"
 
 uc_hl="$(uc_io_source <<'EOF'
 #[doc = include_str!("lib.rs")]
@@ -4556,11 +4556,11 @@ done
 for uc_flag in -A -Aunsafe_code --allow --cap-lints -C; do
   uc_fa="$(printf '[alias]\nb2 = "rustc -- %s unsafe_code"\n' "$uc_flag" | uc_config .cargo config.toml)"
   expect_reject_because "unsafe-confinement/f-alias-string-$uc_flag" \
-    ".cargo/config.toml: alias.b2 passes a lint flag ($uc_flag)" "$here/unsafe-confinement.sh" "$uc_fa"
+    ".cargo/config.toml: alias.b2 passes a refused flag ($uc_flag)" "$here/unsafe-confinement.sh" "$uc_fa"
 done
 uc_fl="$(printf '[alias]\nb3 = ["clippy", "--", "--allow", "unsafe_code"]\n' | uc_config .cargo config.toml)"
 expect_reject_because "unsafe-confinement/f-alias-list" \
-  ".cargo/config.toml: alias.b3 passes a lint flag (--allow)" "$here/unsafe-confinement.sh" "$uc_fl"
+  ".cargo/config.toml: alias.b3 passes a refused flag (--allow)" "$here/unsafe-confinement.sh" "$uc_fl"
 
 for uc_env in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
   uc_fe="$(printf '[env]\n%s = "x"\n' "$uc_env" | uc_config .cargo config.toml)"
@@ -4579,6 +4579,104 @@ uc_nogit="$(mktemp -d -p "$NC_TMP")"
 uc_outside_git() { (cd "$uc_nogit" && GIT_CEILING_DIRECTORIES="$(dirname "$uc_nogit")" "$here/unsafe-confinement.sh"); }
 expect_reject_because "unsafe-confinement/outside-git-without-a-root-is-refused" \
   "FAIL: unsafe-confinement: not inside a git work tree" uc_outside_git
+
+uc_mf1="$(uc_io_source <<'EOF'
+macro_rules! m { ($m:meta) => { #[$m] mod imp; }; }
+m!(path = "imp.inc");
+EOF
+)"
+expect_reject_because "unsafe-confinement/a-meta-fragment-in-attribute-position-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: macro fragment in attribute position" "$here/unsafe-confinement.sh" "$uc_mf1"
+
+uc_mf2="$(uc_io_source <<'EOF'
+macro_rules! m { ($a:ident) => { #[$a = "imp.inc"] mod imp; }; }
+m!(path);
+EOF
+)"
+expect_reject_because "unsafe-confinement/an-ident-fragment-in-attribute-position-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: macro fragment in attribute position" "$here/unsafe-confinement.sh" "$uc_mf2"
+
+uc_mf3="$(uc_io_source <<'EOF'
+mod imp {
+    #![$x]
+}
+EOF
+)"
+expect_reject_because "unsafe-confinement/an-inner-attribute-fragment-is-refused" \
+  "crates/maknae-io/src/lib.rs:2: macro fragment in attribute position" "$here/unsafe-confinement.sh" "$uc_mf3"
+
+uc_rp1="$(uc_io_source <<'EOF'
+#[r#path = "imp.inc"]
+mod imp;
+EOF
+)"
+expect_reject_because "unsafe-confinement/a-raw-path-attribute-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: #[path] attribute (r#path)" "$here/unsafe-confinement.sh" "$uc_rp1"
+
+uc_rp2="$(uc_io_source <<'EOF'
+#[cfg_attr(all(), r#path = "imp.inc")]
+mod imp;
+EOF
+)"
+expect_reject_because "unsafe-confinement/a-raw-path-inside-cfg_attr-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: #[path] attribute (r#path)" "$here/unsafe-confinement.sh" "$uc_rp2"
+
+uc_ia="$(uc_io_source <<'EOF'
+use core::include as inc;
+inc!("imp.inc");
+EOF
+)"
+expect_reject_because "unsafe-confinement/an-aliased-include-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: include identifier" "$here/unsafe-confinement.sh" "$uc_ia"
+
+uc_im="$(uc_io_source <<'EOF'
+macro_rules! i { ($m:ident) => { $m!("imp.inc"); }; }
+i!(include);
+EOF
+)"
+expect_reject_because "unsafe-confinement/include-passed-through-a-macro-is-refused" \
+  "crates/maknae-io/src/lib.rs:2: include identifier" "$here/unsafe-confinement.sh" "$uc_im"
+
+uc_ir="$(uc_io_source <<'EOF'
+r#include!("imp.inc");
+EOF
+)"
+expect_reject_because "unsafe-confinement/a-raw-include-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: include identifier" "$here/unsafe-confinement.sh" "$uc_ir"
+
+uc_ci1="$(printf 'include = ["../ci/extra.toml"]\n' | uc_config .cargo config.toml)"
+expect_reject_because "unsafe-confinement/f-a-config-include-list-is-refused" \
+  ".cargo/config.toml: sets include" "$here/unsafe-confinement.sh" "$uc_ci1"
+
+uc_ci2="$(printf '[[include]]\npath = "../ci/extra.toml"\n' | uc_config .cargo config.toml)"
+expect_reject_because "unsafe-confinement/f-a-config-include-table-is-refused" \
+  ".cargo/config.toml: sets include" "$here/unsafe-confinement.sh" "$uc_ci2"
+
+uc_fc="$(printf '[alias]\nx = "check --config build.rustc-wrapper=w.sh"\n' | uc_config .cargo config.toml)"
+expect_reject_because "unsafe-confinement/f-alias-config-flag" \
+  ".cargo/config.toml: alias.x passes a refused flag (--config)" "$here/unsafe-confinement.sh" "$uc_fc"
+
+uc_rl1="$(uc_io_source <<'EOF'
+pub use {core::convert, maknae_sys::f};
+EOF
+)"
+expect_reject_because "unsafe-confinement/re-export-later-in-a-list" \
+  "crates/maknae-io/src/lib.rs:1: re-exports maknae_sys" "$here/unsafe-confinement.sh" "$uc_rl1"
+
+uc_rl2="$(uc_io_source <<'EOF'
+pub use {
+    core::{convert, hint},
+    maknae_sys::f,
+};
+EOF
+)"
+expect_reject_because "unsafe-confinement/re-export-in-a-multi-line-nested-list" \
+  "crates/maknae-io/src/lib.rs:1: re-exports maknae_sys" "$here/unsafe-confinement.sh" "$uc_rl2"
+
+uc_te="$(uc_fixture)"
+printf '\n[lib]\nedition = "2018"\n' >> "$uc_te/crates/maknae-io/Cargo.toml"
+expect_reject_because "unsafe-confinement/a-target-edition-below-2021-is-refused" \
+  "maknae-io: target maknae_io edition 2018 is below 2021" "$here/unsafe-confinement.sh" "$uc_te"
 
 ul_fixture() {
   local d
