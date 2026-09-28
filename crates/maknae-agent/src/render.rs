@@ -195,8 +195,8 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         // allocates at exactly `len`, so `render`'s suffix `push_str`
         // reallocates and frees each of these buffers. What it frees is a
         // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
-        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`
-        // — never the `.rodata` original, which is not freed at all, so
+        // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`,
+        // `NOT_WRITTEN_STALE`, `NOT_WRITTEN_UNREAD` — never the `.rodata` original, which is not freed at all, so
         // nothing secret is freed and headroom would buy nothing. One arm is
         // different, and is the reason this is written down: `BadCall(why)`
         // formats router-authored text that can

@@ -885,6 +885,24 @@ mod tests {
         );
     }
     #[test]
+    fn a_failed_pre_write_fstat_is_an_ordinary_refusal_never_stale() {
+        let d = tempfile::tempdir().unwrap();
+        let p = root(&d).join("pre-fstat-sentinel");
+        std::fs::write(&p, b"kept").unwrap();
+        let base = version(&p);
+        let e = replace_held_file_with(
+            held(&p).as_fd(),
+            &p,
+            b"not written",
+            WriteBase::Version(base),
+            |_| Err(nix::errno::Errno::EIO),
+        )
+        .unwrap_err();
+        assert_eq!(e.state, EffectState::NoEffect);
+        assert!(matches!(e.source, IoError::Io { .. }), "{e:?}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"kept");
+    }
+    #[test]
     fn create_exclusive_returns_the_created_files_version() {
         let d = tempfile::tempdir().unwrap();
         let effect = directory(&d)

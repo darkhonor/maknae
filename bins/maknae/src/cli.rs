@@ -587,7 +587,7 @@ pub(crate) async fn send_verb(
 /// prompt budget [`request_from_input`] applies to stdin; the request carries only the length.
 ///
 /// The mode is `Existing` — what `maknae write` sends too — because
-/// [`crate::mutation::prepare`] overrides it at open time (`CreateExclusive` on a
+/// [`crate::mutation::prepare_checked`] overrides it at open time (`CreateExclusive` on a
 /// `NotFound`), so BOTH write lanes are reachable from this one constructor.
 pub(crate) fn write_request(
     path: String,

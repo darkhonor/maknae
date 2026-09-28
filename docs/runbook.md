@@ -747,6 +747,8 @@ Since #388 the agent replaces an existing file only if it has read that file in 
 - **The trail.** A refused replacement has its `fs.write` intent, as every write does, and a completion with `ReportedPathChanged` and no effect. Since #388 that completion can mean "the agent had not read the file, or it changed since", not only a race. The agent's user sees it only in the model's answer and the trail; nothing is printed to the terminal.
 - **Try it.** `printf 'keep me\n' > ~/projects/maknae-242/existing.txt`, then `maknae agent "Replace $HOME/projects/maknae-242/existing.txt with the word hello."` The agent is told to read first, reads the file, writes it, and exits `0`; the trail shows the refused `fs.write`, the `fs.read` and the applied `fs.write`.
 - **`maknae write` is not checked.** A human may replace a file without reading it, as before.
+- **Write-permitted, read-denied paths.** If your policy lets the subject write a path but not read it, the agent cannot replace an existing file there: it is told to read first, and the read is refused. That answer also tells the model a file exists at that path. The shipped policy keeps its read and write denies symmetric.
+- **A refused write still opens the file for writing.** The check runs after the ordinary refusals, which need the file opened for writing, so a tool watching for write-closes (an IDE, a build watcher) sees one, although the bytes, size and modification time are unchanged.
 
 ### 13. Custody check (manual)
 
