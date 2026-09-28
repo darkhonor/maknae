@@ -789,7 +789,7 @@ security find-generic-password -s io.maknae.maknaed -a secret-id -w /Library/Key
 ```
 
 - **Expected owners and modes:** `/etc/maknae` and `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; `maknaed-secret-id.keychain` `root:_maknae 640`; `maknae-egress-secret-id.keychain` and the RoleID `root:_maknae-egress 640`; `ls -led` shows one ACL entry, `user:_maknae-egress allow list,search`.
-- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). **Deny both dialogs:** an administrator who approves one reads that plane's Vault SecretID (ADR-0018 decision 6); `>/dev/null` keeps it off the terminal. If one was approved, rotate it with `sudo maknae enroll`. The same "does not cover" note applies.
+- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). **Deny both dialogs:** an administrator who approves one reads that plane's Vault SecretID (ADR-0018 decision 6); `>/dev/null` keeps it off the terminal. If one was approved, rotate it by running step 3's `sudo maknae enroll` again with the same arguments. The same "does not cover" note applies.
 
 ### 14. SELinux
 
