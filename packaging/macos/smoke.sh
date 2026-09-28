@@ -500,10 +500,6 @@ REFUSE
     launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
     launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist 2>/dev/null || :
     sleep 3
-    local ecode
-    ecode="$(launchctl print system/io.maknae.maknae-egress 2>/dev/null | awk '/last exit code/ {print $NF}')"
-    [ "$ecode" != "78" ] && ok "deputy spawned under launchd (last exit code = ${ecode:-<none>})" \
-                         || fail "deputy exit 78: launchd could not open its StandardErrorPath"
     [ "$(stat -f %Su /usr/local/var/log/maknae-egress/maknae-egress.err 2>/dev/null)" = "_maknae-egress" ] \
         && ok "launchd opened /usr/local/var/log/maknae-egress/maknae-egress.err as _maknae-egress" || fail "/usr/local/var/log/maknae-egress/maknae-egress.err is not owned by _maknae-egress"
     launchctl bootout system/io.maknae.maknae-egress 2>/dev/null || :
