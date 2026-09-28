@@ -81,11 +81,6 @@ fn split(path: &str) -> io::Result<(PathBuf, String)> {
 
 /// Opening evidence never creates, truncates, removes or publishes anything.
 /// An open failure retains the request so the daemon can audit its refusal.
-#[cfg(test)]
-pub fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
-    prepare_checked(request, content, WriteCheck::Unchecked)
-}
-
 pub fn prepare_checked(
     mut request: proto::Verb,
     content: Option<proto::Bytes>,
@@ -1071,6 +1066,9 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
+        prepare_checked(request, content, WriteCheck::Unchecked)
+    }
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Fixture(PathBuf);

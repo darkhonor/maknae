@@ -1011,7 +1011,8 @@ mod tests {
         // rather than an oversight: they are the bare words `Read` and
         // `Write`, which appear legitimately in both artifacts ("Read the file
         // before replacing it", "A write comes back applied"). Matching them
-        // would fail immediately and for the wrong reason. `grantable` rows are the same names as `action` rows.
+        // would fail immediately and for the wrong reason. `grantable` rows are
+        // the same names as `action` rows.
         let verbs: Vec<&str> = MANIFEST
             .lines()
             .filter(|l| !l.starts_with('#'))
