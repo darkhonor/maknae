@@ -121,9 +121,11 @@ that operator's login. Without this grant, `maknae enroll` 403s on every
 AppRole/PKI call it makes.
 
 Provisioning and at-rest protection of these SecretIDs is the job of **`maknae enroll`**
-(ADR-0018): the daemon's bootstrap SecretID is sealed at rest and decrypted only into
+(ADR-0018): the daemon's bootstrap SecretID is protected at rest and decrypted only into
 memory at startup: on Linux a `_maknae`-owned credential **sealed to TPM 2.0**; on macOS a
-root-held System-keychain item that only the signed daemon can read (ADR-0018 decision 6).
+System-keychain item, under that keychain's root-held key, that only the signed daemon can
+read (an administrator can approve a read in a console session, and root can decrypt it
+off the host — ADR-0018 decision 6).
 The CLI SecretID is operator-owned. **Response-wrapping** (`-wrap-ttl`) is retained only
 where a SecretID crosses an **untrusted delivery channel** (e.g. remote AppRole
 provisioning to another host), not for local bootstrap credentials. (The Kubernetes path

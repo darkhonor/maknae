@@ -8,7 +8,7 @@
 
 > **Amendment (2026-08-22, via [ADR-0004](ADR-0004-modular-authorization-architecture.md) — Accepted).** Where the Scope boundary and References below defer engine selection to "the Cedar spike, ADR-0003," read that as **ADR-0004**: the concrete authorization architecture is the policy-agnostic `maknae-security` seam with pluggable `maknae-authz-*` backends, which *realize* this ADR's RBAC/ABAC vocabulary and deny-overrides composition. Cedar is one *optional* backend (`maknae-authz-cedar`), not a pending spike; ADR-0003 is superseded.
 
-> **Amendment (2026-09-28, via [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md) decision 6).** On macOS the bootstrap credential is a System-keychain item bound to the signed binary under a root-held key, not a Secure Enclave seal. The trust-anchor row and the bare-metal consequence below are amended in place.
+> **Amendment (2026-09-28, via [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md) decision 6).** On macOS the bootstrap credential is a System-keychain item bound to the signed binary under a root-held key, not a Secure Enclave seal. The trust-anchor row and the bare-metal consequence below are amended in place. Their "Hardware root of trust" label, its "hardware" locus, and the claim "the bare-metal path requires a hardware root of trust" hold on Linux; on macOS the credential is code-bound (decision 6), not hardware-rooted.
 
 ## Context
 
