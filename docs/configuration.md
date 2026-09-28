@@ -603,7 +603,7 @@ egress:
   may be written to the journal, outside the trail's never-the-content rule. Treat the
   deputy's journal as holding conversation content, and limit who can read it (on Linux,
   root and the `systemd-journal`, `adm` and — on Enterprise Linux — `wheel` groups; on
-  macOS, root and the `_maknae-egress` group, through the file's `root:_maknae-egress
+  macOS, root and the `_maknae-egress` group, through the file's `_maknae-egress:_maknae-egress
   0750` directory). A journal forwarded to syslog (`/var/log/messages` through rsyslog's
   `imjournal`) or to a remote collector carries the content too.
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves

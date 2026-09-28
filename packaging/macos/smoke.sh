@@ -74,9 +74,15 @@ phase1() {
     esac
     elog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae-egress$' "$HERE/scripts/preinstall" | tr -s ' ')"
     case "$elog_line" in
-        *'-m 0750 -o 0 -g "$EGRESS_GID"'*) ok "deputy log dir is root:_maknae-egress 0750" ;;
+        *'-m 0750 -o "$EGRESS_UID" -g "$EGRESS_GID"'*) ok "deputy log dir is _maknae-egress:_maknae-egress 0750" ;;
         '')  fail "no deputy log-dir install line found in preinstall" ;;
-        *)   fail "deputy log dir not -m 0750 -o 0 -g \"\$EGRESS_GID\": $elog_line" ;;
+        *)   fail "deputy log dir not -m 0750 -o \"\$EGRESS_UID\" -g \"\$EGRESS_GID\": $elog_line" ;;
+    esac
+    dlog_line="$(grep -E '^install -d .*/usr/local/var/log/maknae$' "$HERE/scripts/preinstall" | tr -s ' ')"
+    case "$dlog_line" in
+        *'-m 0750 -o "$MAKNAE_UID" -g "$MAKNAE_GID"'*) ok "daemon log dir is _maknae:_maknae 0750" ;;
+        '')  fail "no daemon log-dir install line found in preinstall" ;;
+        *)   fail "daemon log dir not -m 0750 -o \"\$MAKNAE_UID\" -g \"\$MAKNAE_GID\": $dlog_line" ;;
     esac
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
@@ -353,8 +359,19 @@ REFUSE
             && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
     done
 
+    rm -f /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err
+    touch /usr/local/var/log/maknae/maknaed.err
+    ln -s /nonexistent /usr/local/var/log/maknae-egress/maknae-egress.err
+    [ "$(stat -f '%HT %u' /usr/local/var/log/maknae/maknaed.err 2>/dev/null)" = "Regular File 0" ] \
+        && [ -L /usr/local/var/log/maknae-egress/maknae-egress.err ] \
+        && ok "planted a root-owned maknaed.err and a symlinked maknae-egress.err" \
+        || fail "could not plant the .err fixtures, so the upgrade cleanup is untested"
     installer -pkg "$PKG" -target / >/dev/null && ok "upgrade install (2nd pass) succeeded" \
                                                || fail "upgrade install failed"
+    for f in /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err; do
+        [ ! -e "$f" ] && [ ! -L "$f" ] && ok "upgrade removed the planted $f" \
+                      || fail "upgrade left the planted $f — launchd could not open it as the job user"
+    done
     for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
             && ok "after ordinary upgrade: $k still true (provenance preserved)" \
@@ -420,7 +437,8 @@ REFUSE
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
-    check_mode "drwxr-x--- root _maknae-egress"    /usr/local/var/log/maknae-egress
+    check_mode "drwxr-x--- _maknae _maknae"  /usr/local/var/log/maknae
+    check_mode "drwxr-x--- _maknae-egress _maknae-egress" /usr/local/var/log/maknae-egress
 
     # The INSTALLED binary must actually run — the property no build-host check can
     # establish, because cargo injects DYLD_* and the installer does not.
@@ -482,6 +500,16 @@ REFUSE
 
     launchctl bootout "system/${LABEL}" 2>/dev/null || :
     restore; trap - EXIT INT TERM
+    [ "$(stat -f %Su /usr/local/var/log/maknae/maknaed.err 2>/dev/null)" = "_maknae" ] \
+        && ok "launchd opened /usr/local/var/log/maknae/maknaed.err as _maknae" || fail "/usr/local/var/log/maknae/maknaed.err is not owned by _maknae"
+
+    launchctl enable system/io.maknae.maknae-egress 2>/dev/null || :
+    launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist 2>/dev/null || :
+    sleep 3
+    [ "$(stat -f %Su /usr/local/var/log/maknae-egress/maknae-egress.err 2>/dev/null)" = "_maknae-egress" ] \
+        && ok "launchd opened /usr/local/var/log/maknae-egress/maknae-egress.err as _maknae-egress" || fail "/usr/local/var/log/maknae-egress/maknae-egress.err is not owned by _maknae-egress"
+    launchctl bootout system/io.maknae.maknae-egress 2>/dev/null || :
+    launchctl disable system/io.maknae.maknae-egress 2>/dev/null || :
     # Assert the PROPERTY, not a file comparison. `cmp -s ... || ok` printed ok on
     # BOTH paths — after a successful restore the backup is gone so cmp exits 2, and
     # after a FAILED restore the files differ so cmp exits 1. Nothing could fail it.
@@ -498,7 +526,7 @@ REFUSE
     # ever FAIL. Prove the property directly, as the daemon's own uid, applying
     # exactly what socket.rs:111/:119 apply.
     local mgid; mgid="$(dscl . -read /Groups/maknae PrimaryGroupID | awk '{print $2}')"
-    sudo -u _maknae /usr/bin/python3 - "$mgid" <<'PROBE'
+    (cd / && sudo -u _maknae /usr/bin/python3 - "$mgid") <<'PROBE'
 import os, socket, sys
 os.chdir("/usr/local/var/run/maknae")   # AF_UNIX paths cap at 104 bytes
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -554,7 +582,8 @@ PROBE
     fi
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
-                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
+                /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
+                /usr/local/var/run/maknae /usr/local/var/log/maknae; do
         [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
     done
     local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"

@@ -67,9 +67,7 @@
   <!-- No journald equivalent. AU-3 records reach the unified log via the #222
        syslog(3) appender; this catches failures BEFORE the audit sink opens (a
        config parse error), which would otherwise be visible only as an exit code.
-       Deliberately NOT inside the 0700 audit dir: launchd opens it as root and
-       then drops privileges, so the daemon writes through an inherited fd it can
-       neither truncate nor reopen. -->
+       launchd opens it as _maknae, so its directory is _maknae's. -->
   <key>StandardErrorPath</key>
   <string>/usr/local/var/log/maknae/maknaed.err</string>
 
