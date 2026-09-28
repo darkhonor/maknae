@@ -23,9 +23,9 @@ CFG_ATTR = re.compile(r"\s*cfg_attr\b")
 CFG_ATTR_PATH = re.compile(r"[(,]\s*path\s*=")
 INCLUDE = re.compile(r"\binclude\b")
 RAW_PATH = re.compile(r"\br#path\b")
-ATTR_FRAGMENT = re.compile(r"#\s*!?\s*\[\s*\$")
 PUB_REEXPORT = re.compile(r"\bpub\s+(?:use|extern\s+crate)\b[^;]*")
 SYS_TOKEN = re.compile(r"\bmaknae_sys\b")
+CARGO_MANIFEST = re.compile(r"(?:^|/)Cargo\.toml$", re.IGNORECASE)
 CARGO_CONFIG = re.compile(r"(?:^|/)\.cargo/config(?:\.toml)?$", re.IGNORECASE)
 BUILD_DOORS = {"rustc", "rustc-wrapper", "rustc-workspace-wrapper"}
 ENV_DOORS = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC"}
@@ -150,6 +150,18 @@ def config_doors(parsed):
     return found
 
 
+def declares_proc_macro(manifest):
+    lib = manifest.get("lib")
+    if not isinstance(lib, dict):
+        return False
+    crate_types = lib.get("crate-type", lib.get("crate_type", []))
+    return (
+        lib.get("proc-macro") is True
+        or lib.get("proc_macro") is True
+        or (isinstance(crate_types, list) and "proc-macro" in crate_types)
+    )
+
+
 def load_toml(path, what, fails):
     try:
         return tomllib.loads(Path(path).read_text(encoding="utf-8"))
@@ -178,6 +190,7 @@ def main(argv):
         return 1
     files = [f for f in tracked if f.lower().endswith(".rs")]
     configs = [f for f in tracked if CARGO_CONFIG.search(f)]
+    manifests = [f for f in tracked if CARGO_MANIFEST.search(f)]
 
     fails = []
     workspace = load_toml(root / "Cargo.toml", "root Cargo.toml", fails)
@@ -233,6 +246,11 @@ def main(argv):
                 best, best_len = name, len(pdir)
         return best
 
+    for rel in manifests:
+        parsed = load_toml(root / rel, rel, fails)
+        if parsed is not None and declares_proc_macro(parsed):
+            fails.append(f"{rel}: declares a proc-macro crate; no tracked crate may be one, member or not (ADR-0027)")
+
     for rel in configs:
         parsed = load_toml(root / rel, rel, fails)
         if parsed is not None:
@@ -247,12 +265,12 @@ def main(argv):
             fails.append(f"{rel}: cannot be read ({e}); it was not scanned")
             continue
         for start, body in attributes(masked):
+            if "$" in body:
+                fails.append(f"{rel}:{line_of(masked, start)}: macro fragment in attribute position; it can spell #[path] (ADR-0027)")
             if PATH_ATTR.match(body) or (CFG_ATTR.match(body) and CFG_ATTR_PATH.search(body)):
                 fails.append(f"{rel}:{line_of(masked, start)}: #[path] attribute; it compiles a file the scan does not list (ADR-0027)")
         for match in RAW_PATH.finditer(masked):
             fails.append(f"{rel}:{line_of(masked, match.start())}: #[path] attribute (r#path); it compiles a file the scan does not list (ADR-0027)")
-        for match in ATTR_FRAGMENT.finditer(masked):
-            fails.append(f"{rel}:{line_of(masked, match.start())}: macro fragment in attribute position; it can spell #[path] (ADR-0027)")
         for match in INCLUDE.finditer(masked):
             fails.append(f"{rel}:{line_of(masked, match.start())}: include identifier; include! or a route to it compiles a file the scan does not list (ADR-0027)")
         for match in PUB_REEXPORT.finditer(masked):

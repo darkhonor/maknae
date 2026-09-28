@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; source "$here/lib.sh"
-if [ "$#" -ge 1 ]; then
-  root="$1"
-elif ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+usage="usage: unsafe-confinement.sh [--root <dir>]"
+root=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      if [ "$#" -lt 2 ]; then echo "FAIL: unsafe-confinement: --root needs a directory; $usage"; exit 2; fi
+      root="$2"; shift 2 ;;
+    *) echo "FAIL: unsafe-confinement: unknown argument '$1'; $usage"; exit 2 ;;
+  esac
+done
+if [ -z "$root" ] && ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
   echo "FAIL: unsafe-confinement: not inside a git work tree and no root given; nothing was examined"
   exit 1
 fi

@@ -410,7 +410,7 @@ jobs:
           out="$(cargo test --locked -p maknae-sys --lib macos -- --list)"
           printf '%s\n' "$out"
           n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
-          [ "$n" -ge 8 ] || { echo "FAIL: expected the maknae-sys macOS suite, saw $n tests"; exit 1; }
+          [ "$n" -ge 9 ] || { echo "FAIL: expected the maknae-sys macOS suite, saw $n tests"; exit 1; }
           echo "maknae-sys macOS suite present: $n tests"
       - name: Confirm the getattrlist/F_GETPATH agreement test ran
         run: |

@@ -18,8 +18,8 @@ multiple_unsafe_ops_per_block = "forbid"
 
 [dependencies]
 # Floor, not an exact pin. 0.2.189 is what Cargo.lock already resolves (via nix and
-# rustix), and it is the release whose apple/mod.rs declares every item this crate
-# uses: attrlist, attrgroup_t, ATTR_BIT_MAP_COUNT, ATTR_CMN_OBJTYPE,
-# ATTR_CMN_FULLPATH and getattrlist. An `=` pin would hold every libc user in the
-# workspace at this release and block a libc security fix.
+# rustix), and its apple/mod.rs was verified to declare every item this crate uses:
+# attrlist, attrgroup_t, ATTR_BIT_MAP_COUNT, ATTR_CMN_OBJTYPE, ATTR_CMN_FULLPATH and
+# getattrlist. It is not the first release that declares them. An `=` pin would hold
+# every libc user in the workspace at this release and block a libc security fix.
 libc = "0.2.189"
