@@ -359,12 +359,18 @@ REFUSE
             && ok "fresh install: $k = true" || fail "fresh install: $k is not true"
     done
 
-    touch /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err
+    rm -f /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err
+    touch /usr/local/var/log/maknae/maknaed.err
+    ln -s /nonexistent /usr/local/var/log/maknae-egress/maknae-egress.err
+    [ "$(stat -f '%HT %u' /usr/local/var/log/maknae/maknaed.err 2>/dev/null)" = "Regular File 0" ] \
+        && [ -L /usr/local/var/log/maknae-egress/maknae-egress.err ] \
+        && ok "planted a root-owned maknaed.err and a symlinked maknae-egress.err" \
+        || fail "could not plant the .err fixtures, so the upgrade cleanup is untested"
     installer -pkg "$PKG" -target / >/dev/null && ok "upgrade install (2nd pass) succeeded" \
                                                || fail "upgrade install failed"
     for f in /usr/local/var/log/maknae/maknaed.err /usr/local/var/log/maknae-egress/maknae-egress.err; do
-        [ ! -e "$f" ] && ok "upgrade removed the root-owned $f" \
-                      || fail "upgrade left the root-owned $f — launchd could not open it as the job user"
+        [ ! -e "$f" ] && [ ! -L "$f" ] && ok "upgrade removed the planted $f" \
+                      || fail "upgrade left the planted $f — launchd could not open it as the job user"
     done
     for k in $FLAGS; do
         [ "$(plutil -extract "$k" raw -o - "$R" 2>/dev/null)" = "true" ] \
