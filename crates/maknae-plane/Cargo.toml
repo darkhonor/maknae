@@ -10,8 +10,8 @@ rust-version.workspace = true
 
 # NOT optional: Cargo does not apply [workspace.lints] to a member that omits this,
 # and the workspace sets `unsafe_code = "forbid"`. This crate sits in the client-plane
-# read path; exempting it from the project's headline memory-safety control by omission
-# is exactly the silent gap maknae-io's manifest warns about.
+# read path; omitting this would exempt it from the project's headline memory-safety
+# control, and ci/gates/unsafe-confinement.sh fails the build if it does (ADR-0027).
 [lints]
 workspace = true
 

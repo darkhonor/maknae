@@ -164,6 +164,8 @@ jobs:
         run: cargo deny --locked check
       - name: P1 manifest lint
         run: ci/gates/p1-manifest-lint.sh
+      - name: Unsafe confinement (ADR-0027)
+        run: ci/gates/unsafe-confinement.sh
       - name: P2 invert-tree witness
         run: ci/gates/p2-invert-tree.sh
       - name: P2 artifact witness

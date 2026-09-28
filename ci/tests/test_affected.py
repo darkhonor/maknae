@@ -240,6 +240,8 @@ class AffectedTests(unittest.TestCase):
         hook = SELECTOR.parent / 'hooks/pre-push'
         self.write('ci/hooks/pre-push', hook.read_text())
         self.write('ci/gates/coverage-tiers.sh', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RECORD"\n')
+        self.write('ci/gates/unsafe-confinement.sh',
+                   '#!/bin/sh\nprintf "unsafe-confinement %s\\n" "$*" >> "$RECORD"\n')
         for name in ('external-authority-lint.sh', 'isolation-contract-lint.sh'):
             self.write('ci/gates/' + name, (SELECTOR.parent / 'gates' / name).read_text())
         self.write('design/contract.md', 'Local authority.\n')
@@ -275,16 +277,18 @@ class AffectedTests(unittest.TestCase):
         self.write('crates/a/src/lib.rs', '// changed\n')
         self.commit()
         invocations = self.hook(self.base, mutations=True)
-        self.assertEqual(len(invocations), 2)
-        self.assertNotIn('--mutants', invocations[0])
-        self.assertTrue(invocations[1].endswith('--mutants a b'), invocations)
+        self.assertEqual(len(invocations), 3)
+        self.assertTrue(invocations[0].startswith('unsafe-confinement '), invocations)
+        self.assertNotIn('--mutants', invocations[1])
+        self.assertTrue(invocations[2].endswith('--mutants a b'), invocations)
 
     def test_hook_default_does_not_force_mutation(self):
         self.write('crates/c/src/lib.rs', '// changed\n')
         self.commit()
         invocations = self.hook(self.base)
-        self.assertEqual(len(invocations), 1)
-        self.assertNotIn('--mutants', invocations[0])
+        self.assertEqual(len(invocations), 2)
+        self.assertTrue(invocations[0].startswith('unsafe-confinement '), invocations)
+        self.assertNotIn('--mutants', invocations[1])
 
 
 if __name__ == '__main__':

@@ -7,3 +7,5 @@ UNTRUSTED_BIN="maknae"
 # itself carries mint/append transitively); the setup-only tool gets ONLY the compiler. Anything
 # else — incl. maknaed pulling the compiler, or spifc pulling kernel — fails P1.
 TRUST_CONSUMER_ALLOW=("maknaed=maknae-kernel" "maknae-spifc=maknae-spif-compile")
+SYS_CRATE="maknae-sys"
+SYS_CONSUMER_ALLOW=(maknae-io)

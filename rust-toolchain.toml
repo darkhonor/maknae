@@ -2,9 +2,10 @@
 # and not a number (AGENTS.md: an undocumented pin is an unreviewed control):
 #
 # 1. 1.98.0 made the UNSAFE_CODE lint "consistently emitted for all unsafe
-#    attributes". The workspace forbids unsafe_code and "zero unsafe in the TCB"
-#    is a headline property (ADR-0002); before 1.98 the forbid could miss an
-#    unsafe attribute. This is the entry that is ours.
+#    attributes". Every workspace member but maknae-sys forbids unsafe_code, and
+#    confining unsafe to that one crate is a headline property (ADR-0002,
+#    ADR-0027); before 1.98 the forbid could miss an unsafe attribute. This is
+#    the entry that is ours.
 # 2. 1.97.1 is a one-line release: "Fix miscompilation in LLVM optimization".
 #    For a deny-by-default, fail-closed product a miscompiling compiler sits
 #    below every gate, test and review. 1.94.1 predated the fix.

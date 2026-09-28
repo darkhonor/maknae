@@ -4088,6 +4088,306 @@ EOF
     shr "$NC_TMP/no-such-binary"
 fi
 
+uc_fixture() {
+  local d
+  d="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$d/crates/maknae-sys/src" "$d/crates/maknae-io/src"
+  cat > "$d/Cargo.toml" <<'EOF'
+[workspace]
+resolver = "3"
+members = ["crates/maknae-sys", "crates/maknae-io"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+EOF
+  cat > "$d/crates/maknae-sys/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-sys"
+version = "0.0.0"
+edition = "2021"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "forbid"
+multiple_unsafe_ops_per_block = "forbid"
+EOF
+  printf '#[allow(unsafe_code)]\npub fn f() {\n    // SAFETY: an empty block\n    unsafe {}\n}\n' > "$d/crates/maknae-sys/src/lib.rs"
+  cat > "$d/crates/maknae-io/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-io"
+version = "0.0.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-sys = { path = "../maknae-sys" }
+EOF
+  printf '// unsafe in a comment\n/* unsafe in a block */\npub const S: &str = "unsafe in a string";\npub const R: &str = r#"unsafe"#;\npub const C: char = '"'"'u'"'"';\n' > "$d/crates/maknae-io/src/lib.rs"
+  git -C "$d" init -q
+  git -C "$d" add -A
+  printf '%s' "$d"
+}
+
+uc_ok="$(uc_fixture)"
+expect_accept "unsafe-confinement/clean-tree-passes" "unsafe-confinement: ok" \
+  "$here/unsafe-confinement.sh" "$uc_ok"
+expect_reported_count "unsafe-confinement/fixture-source-count" "source files: " "1" \
+  "$here/unsafe-confinement.sh" "$uc_ok"
+expect_reported_count "unsafe-confinement/fixture-package-count" "packages: " "2" \
+  "$here/unsafe-confinement.sh" "$uc_ok"
+
+uc_untracked="$(uc_fixture)"
+printf 'pub fn u() {\n    unsafe {}\n}\n' > "$uc_untracked/crates/maknae-io/src/untracked.rs"
+expect_reported_count "unsafe-confinement/untracked-source-is-not-scanned" "source files: " "1" \
+  "$here/unsafe-confinement.sh" "$uc_untracked"
+
+uc_e="$(uc_fixture)"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-sys", "crates/maknae-io"]\n\n[workspace.lints.rust]\nunsafe_code = "deny"\n' > "$uc_e/Cargo.toml"
+expect_reject_because "unsafe-confinement/e-workspace-forbid-weakened" \
+  'does not set unsafe_code = "forbid"' "$here/unsafe-confinement.sh" "$uc_e"
+
+uc_a="$(uc_fixture)"
+cat > "$uc_a/crates/maknae-io/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-io"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+maknae-sys = { path = "../maknae-sys" }
+EOF
+expect_reject_because "unsafe-confinement/a-member-without-workspace-lints" \
+  "maknae-io: does not declare [lints] workspace = true" "$here/unsafe-confinement.sh" "$uc_a"
+
+uc_af="$(uc_fixture)"
+cat > "$uc_af/crates/maknae-io/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-io"
+version = "0.0.0"
+edition = "2021"
+
+[lints]
+workspace = false
+
+[dependencies]
+maknae-sys = { path = "../maknae-sys" }
+EOF
+expect_reject_because "unsafe-confinement/a-member-workspace-false" \
+  "cargo metadata failed" "$here/unsafe-confinement.sh" "$uc_af"
+
+uc_b="$(uc_fixture)"
+cat > "$uc_b/crates/maknae-sys/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-sys"
+version = "0.0.0"
+edition = "2021"
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "forbid"
+multiple_unsafe_ops_per_block = "forbid"
+EOF
+expect_reject_because "unsafe-confinement/b-sys-lints-weakened" \
+  "maknae-sys: [lints] must be exactly" "$here/unsafe-confinement.sh" "$uc_b"
+
+uc_bx="$(uc_fixture)"
+cat > "$uc_bx/crates/maknae-sys/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-sys"
+version = "0.0.0"
+edition = "2021"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+unused_imports = "allow"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "forbid"
+multiple_unsafe_ops_per_block = "forbid"
+EOF
+expect_reject_because "unsafe-confinement/b-sys-lints-extra-level" \
+  "maknae-sys: [lints] must be exactly" "$here/unsafe-confinement.sh" "$uc_bx"
+
+uc_c="$(uc_fixture)"
+printf 'pub fn g() {\n    unsafe {}\n}\n' >> "$uc_c/crates/maknae-io/src/lib.rs"
+expect_reject_because "unsafe-confinement/c-unsafe-outside-sys" \
+  "crates/maknae-io/src/lib.rs:7: unsafe outside crates/maknae-sys/" "$here/unsafe-confinement.sh" "$uc_c"
+
+uc_cl="$(uc_fixture)"
+printf "fn f<'a>(_: &'a u8) -> char {\n    'x'\n}\n\npub fn g() {\n    unsafe {}\n}\n" > "$uc_cl/crates/maknae-io/src/lib.rs"
+expect_reject_because "unsafe-confinement/c-after-a-lifetime-and-a-char-literal" \
+  "crates/maknae-io/src/lib.rs:6: unsafe outside crates/maknae-sys/" "$here/unsafe-confinement.sh" "$uc_cl"
+
+uc_cn="$(uc_fixture)"
+printf '/* a /* b */ c */\npub fn h() {\n    unsafe {}\n}\n' > "$uc_cn/crates/maknae-io/src/lib.rs"
+expect_reject_because "unsafe-confinement/c-after-a-nested-block-comment" \
+  "crates/maknae-io/src/lib.rs:3: unsafe outside crates/maknae-sys/" "$here/unsafe-confinement.sh" "$uc_cn"
+
+uc_cr="$(uc_fixture)"
+printf 'pub fn r#unsafe() {}\n' > "$uc_cr/crates/maknae-io/src/lib.rs"
+expect_reject_because "unsafe-confinement/c-raw-identifier-is-a-known-false-positive" \
+  "crates/maknae-io/src/lib.rs:1: unsafe outside crates/maknae-sys/" "$here/unsafe-confinement.sh" "$uc_cr"
+
+uc_d="$(uc_fixture)"
+mkdir -p "$uc_d/crates/other/src"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-sys", "crates/maknae-io", "crates/other"]\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_d/Cargo.toml"
+cat > "$uc_d/crates/other/Cargo.toml" <<'EOF'
+[package]
+name = "other"
+version = "0.0.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-sys = { path = "../maknae-sys" }
+EOF
+: > "$uc_d/crates/other/src/lib.rs"
+git -C "$uc_d" add -A
+expect_reject_because "unsafe-confinement/d-unlisted-consumer" \
+  "other: depends on maknae-sys but is not in SYS_CONSUMER_ALLOW" "$here/unsafe-confinement.sh" "$uc_d"
+
+uc_z="$(mktemp -d -p "$NC_TMP")"
+printf '[workspace]\nresolver = "3"\nmembers = []\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_z/Cargo.toml"
+git -C "$uc_z" init -q
+expect_reject_because "unsafe-confinement/zero-packages-is-refused" \
+  "resolved ZERO packages" "$here/unsafe-confinement.sh" "$uc_z"
+
+uc_zf="$(uc_fixture)"
+git -C "$uc_zf" rm -rq --cached crates
+expect_reject_because "unsafe-confinement/zero-source-files-is-refused" \
+  "listed ZERO .rs files" "$here/unsafe-confinement.sh" "$uc_zf"
+
+uc_nm="$(uc_fixture)"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-io"]\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_nm/Cargo.toml"
+printf '[package]\nname = "maknae-io"\nversion = "0.0.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n' > "$uc_nm/crates/maknae-io/Cargo.toml"
+expect_reject_because "unsafe-confinement/sys-not-a-member" \
+  "maknae-sys: not a workspace member" "$here/unsafe-confinement.sh" "$uc_nm"
+
+uc_mf="$(mktemp -d -p "$NC_TMP")"
+printf '[workspace]\nresolver = "3"\nmembers = ["nope"]\n' > "$uc_mf/Cargo.toml"
+git -C "$uc_mf" init -q
+expect_reject_because "unsafe-confinement/metadata-failure-is-not-silent" \
+  "cargo metadata failed" "$here/unsafe-confinement.sh" "$uc_mf"
+
+uc_mv="$(uc_fixture)"
+git -C "$uc_mv" mv crates/maknae-sys crates/sys-elsewhere
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/sys-elsewhere", "crates/maknae-io"]\n\n[workspace.lints.rust]\nunsafe_code = "forbid"\n' > "$uc_mv/Cargo.toml"
+printf '[package]\nname = "maknae-io"\nversion = "0.0.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n\n[dependencies]\nmaknae-sys = { path = "../sys-elsewhere" }\n' > "$uc_mv/crates/maknae-io/Cargo.toml"
+expect_reject_because "unsafe-confinement/sys-manifest-elsewhere" \
+  "not crates/maknae-sys/Cargo.toml" "$here/unsafe-confinement.sh" "$uc_mv"
+
+uc_cq="$(uc_fixture)"
+printf '/* a /* b */ " */\npub fn g() {\n    unsafe {}\n}\n// "\n' > "$uc_cq/crates/maknae-io/src/lib.rs"
+expect_reject_because "unsafe-confinement/c-a-quote-inside-a-nested-comment-hides-nothing" \
+  "crates/maknae-io/src/lib.rs:3: unsafe outside crates/maknae-sys/" "$here/unsafe-confinement.sh" "$uc_cq"
+
+uc_bl="$(uc_fixture)"
+cat > "$uc_bl/crates/maknae-sys/Cargo.toml" <<'EOF'
+[package]
+name = "maknae-sys"
+version = "0.0.0"
+edition = "2021"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "forbid"
+EOF
+expect_reject_because "unsafe-confinement/b-sys-forbid-lowered-to-deny" \
+  "maknae-sys: [lints] must be exactly" "$here/unsafe-confinement.sh" "$uc_bl"
+
+uc_ng="$(uc_fixture)"
+rm -rf "$uc_ng/.git"
+expect_reject_because "unsafe-confinement/git-listing-failure-is-not-silent" \
+  "git ls-files failed" "$here/unsafe-confinement.sh" "$uc_ng"
+
+uc_cfg="$(uc_fixture)"
+mkdir -p "$uc_cfg/.cargo"
+printf '[build]\nrustflags = ["--cap-lints", "warn"]\n' > "$uc_cfg/.cargo/config.toml"
+git -C "$uc_cfg" add -A
+expect_reject_because "unsafe-confinement/f-cargo-config-rustflags" \
+  ".cargo/config.toml: sets rustflags" "$here/unsafe-confinement.sh" "$uc_cfg"
+
+uc_cfg_ok="$(uc_fixture)"
+mkdir -p "$uc_cfg_ok/.cargo"
+printf '[net]\nretry = 2\n' > "$uc_cfg_ok/.cargo/config.toml"
+git -C "$uc_cfg_ok" add -A
+expect_accept "unsafe-confinement/f-cargo-config-without-rustflags-passes" "unsafe-confinement: ok" \
+  "$here/unsafe-confinement.sh" "$uc_cfg_ok"
+
+uc_mx="$(uc_fixture)"
+printf '#[macro_export]\nmacro_rules! m {\n    () => {};\n}\n' >> "$uc_mx/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-exports-a-macro" \
+  "crates/maknae-sys/src/lib.rs:6: #[macro_export] in maknae-sys" "$here/unsafe-confinement.sh" "$uc_mx"
+
+uc_pm="$(uc_fixture)"
+printf '\n[lib]\nproc-macro = true\n' >> "$uc_pm/crates/maknae-sys/Cargo.toml"
+expect_reject_because "unsafe-confinement/sys-is-a-proc-macro-crate" \
+  "maknae-sys: proc-macro = true" "$here/unsafe-confinement.sh" "$uc_pm"
+
+ul_fixture() {
+  local d
+  d="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$d/src"
+  python3 - "$repo_root/crates/maknae-sys/Cargo.toml" "$d/Cargo.toml" <<'LINTS'
+import sys, tomllib
+lints = tomllib.loads(open(sys.argv[1], encoding="utf-8").read())["lints"]
+out = ['[package]', 'name = "unsafe-lint-probe"', 'version = "0.0.0"', 'edition = "2021"', '', '[workspace]', '']
+for table in sorted(lints):
+    out.append(f"[lints.{table}]")
+    out += [f'{key} = "{level}"' for key, level in sorted(lints[table].items())]
+    out.append("")
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))
+LINTS
+  printf '%s' "$d"
+}
+ul_clippy() {
+  local out
+  local toolchain
+  toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo_root/rust-toolchain.toml")"
+  if out="$(CARGO_TARGET_DIR="$1/target" cargo +"$toolchain" clippy --quiet --manifest-path "$1/Cargo.toml" -- -D warnings 2>&1)"; then
+    echo "unsafe-lint-probe: clippy ok"
+  else
+    printf '%s\n' "$out"
+    echo "FAIL: clippy rejected the unsafe-lint probe"
+    return 1
+  fi
+}
+
+ul_ok="$(ul_fixture)"
+printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsafe_code)]\npub fn f() -> u8 {\n    // SAFETY: one() has no preconditions.\n    unsafe { one() }\n}\n' > "$ul_ok/src/lib.rs"
+expect_accept "unsafe-lint/a-documented-single-operation-block-passes" "unsafe-lint-probe: clippy ok" \
+  ul_clippy "$ul_ok"
+
+ul_undoc="$(ul_fixture)"
+printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsafe_code)]\npub fn f() -> u8 {\n    unsafe { one() }\n}\n' > "$ul_undoc/src/lib.rs"
+expect_reject_because "unsafe-lint/an-undocumented-block-is-refused" \
+  "unsafe block missing a safety comment" ul_clippy "$ul_undoc"
+
+ul_two="$(ul_fixture)"
+printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsafe_code)]\npub fn f() -> u8 {\n    // SAFETY: one() has no preconditions.\n    unsafe { one() + one() }\n}\n' > "$ul_two/src/lib.rs"
+expect_reject_because "unsafe-lint/a-two-operation-block-is-refused" \
+  "contains 2 unsafe operations" ul_clippy "$ul_two"
+
+ul_allow="$(ul_fixture)"
+printf '#[allow(unsafe_code)]\nunsafe fn one() -> u8 {\n    1\n}\n\n#[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]\npub fn f() -> u8 {\n    unsafe { one() }\n}\n' > "$ul_allow/src/lib.rs"
+expect_reject_because "unsafe-lint/an-in-source-allow-of-a-forbidden-lint-is-refused" \
+  "incompatible with previous forbid" ul_clippy "$ul_allow"
+
 # The skip count is REPORTED, because `$total` is environment-dependent: probes
 # that need `cargo-auditable`, and the root-guarded ones, drop out silently and
 # a bare `N/N` then looks identical to a full run. CONTRIBUTING tells readers to
