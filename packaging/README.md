@@ -1,23 +1,26 @@
 # Maknae packaging — install & operations guide
 
-> **Retitled 2026-09-12 (#227).** This read *"Maknae **Linux** packaging"*. It is no longer Linux-only: `packaging/macos/` now builds a `.pkg` for Apple Silicon, and macOS is a production target (AGENTS.md), so a Linux-only title would send the next reader to the wrong directory. See `packaging/macos/README.md` for the macOS lifecycle — in particular that config defaults are installed **first-install-only** (macOS has no `conffiles`/`%config(noreplace)`), and that install does **not** enable: `/Library/LaunchDaemons` is boot-scanned, so the job ships `launchctl disable`d and the operator runs `launchctl enable` + `bootstrap` after `maknae enroll`.
-
 This directory builds Linux packages (checksummed; optionally GPG-signed — the
-default build is UNSIGNED, see [Signing](#verifying-signatures)) that install the `maknaed` trust-plane
-daemon and the `maknae` operator CLI, the hardened systemd unit, the MAC policies
+default build is UNSIGNED, see [Verifying artifacts](#verifying-artifacts)) that install the `maknaed` trust-plane
+daemon, the `maknae` operator CLI and the `maknae-egress` egress deputy, their hardened systemd
+units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the MAC policies
 (SELinux on RHEL/Rocky, AppArmor on Debian), the fapolicyd trust fragment, and the
-shipped `/etc/maknae` config defaults.
+shipped `/etc/maknae` config defaults. `packaging/macos/` builds the Apple Silicon `.pkg` under its own
+lifecycle; see [packaging/macos/README.md](macos/README.md) for the macOS lifecycle: config
+defaults first-install-only, both jobs ship `launchctl disable`d, and the operator runs
+`sudo maknae enroll`, creates `/etc/maknae/egress-bounds.yaml`, then starts both jobs.
 
 | Layout | Purpose |
 |---|---|
-| `common/` | Shared assets both formats install (unit, sysusers, SELinux `.te`/`.fc`, AppArmor, fapolicyd trust, shipped `authz.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
+| `common/` | Shared assets both formats install (units, sysusers, SELinux `.te`/`.fc`, fapolicyd trust, shipped `authz.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
 | `rpm/` | `maknae.spec` + `build-rpm.sh` → `dist/maknae-<ver>-1.<dist>.x86_64.rpm` (RHEL/Rocky). |
 | `deb/` | `control` + maintainer scripts + AppArmor profile + `build-deb.sh` → `dist/maknae_<ver>-1_amd64.deb` (Debian). |
 | `sign.sh` | Checksums (`SHA256SUMS`) + optional GPG signing (see [Verifying artifacts](#verifying-artifacts)). |
 | `isolation-contract.md` | Normative isolation contract (property × profile). |
 
-**Scope this release:** Linux only. macOS packaging (#76), OCI images (#81), and the
-Compose/Podman profile are deferred.
+**Scope this release:** Linux (deb, rpm) and macOS on Apple Silicon (a `.pkg`,
+`packaging/macos/`; its install is pending the macOS acceptance run (#76)). OCI images (#81) and
+the Compose/Podman profile are deferred.
 
 ---
 
@@ -28,6 +31,7 @@ Compose/Podman profile are deferred.
 | Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
 | RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
 | RHEL / Rocky 9 | 252 | SELinux | **Packaging + daemon-seal only** — operator `enroll` deferred to #73 (see [RHEL 9 caveat](#rhel-9-caveat)) |
+| macOS 26, Apple Silicon | — (launchd) | none | **Packaging built** — `.pkg` builds and passes smoke phase 1 on the `macos-26` runner; install → enroll → serve pending the macOS acceptance run (#76). See [packaging/macos/README.md](macos/README.md) |
 
 ---
 
@@ -189,7 +193,8 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
 - **Daemon TCP `bind`** — the `.te` grants `maknaed_t` `self:tcp_socket bind` +
   generic-node bind (needed by the Vault client connect as proven on Rocky 10);
   tightening this egress-only daemon to drop listen-capability is future hardening.
-- **macOS / OCI / Compose-Podman** — deferred (#76 / #81 / TBD).
+- **OCI / Compose-Podman** — deferred (#81 / TBD). macOS's platform deltas are stated in
+  [packaging/macos/README.md](macos/README.md).
 
 ## Shipping the audit trail to a SIEM
 

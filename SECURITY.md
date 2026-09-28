@@ -33,7 +33,7 @@ Given Maknae's threat model — the agent runtime is **untrusted by design** and
 - A mediated action that can **escape the reference monitor** (reach a resource without transiting the deny-by-default PDP).
 - A **mandatory constraint that can be bypassed** — an administrative role, a "trusted" subject, or the kernel itself gaining access it is not cleared for (see [ADR-0020](design/adr/ADR-0020-access-control-model-and-vocabulary.md)).
 - A **forged or improperly widened label, authority, or capability** — anything that lets untrusted content authorize itself, or a subject widen its own grants.
-- **At-rest credential exposure** or a break in the HRoT-sealed bootstrap path (see [ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md)).
+- **At-rest credential exposure** or a break in the bootstrap credential's protection: TPM-sealed on Linux, a code-bound System-keychain item on macOS (see [ADR-0018](design/adr/ADR-0018-local-plane-authorization-deployment-model.md) decisions 4 and 6).
 - Supply-chain or CI integrity weaknesses (dependency, build, or workflow tampering).
 
 ## Scope

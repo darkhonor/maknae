@@ -8,6 +8,8 @@
 
 > **Amendment (2026-08-22, via [ADR-0004](ADR-0004-modular-authorization-architecture.md) — Accepted).** Where the Scope boundary and References below defer engine selection to "the Cedar spike, ADR-0003," read that as **ADR-0004**: the concrete authorization architecture is the policy-agnostic `maknae-security` seam with pluggable `maknae-authz-*` backends, which *realize* this ADR's RBAC/ABAC vocabulary and deny-overrides composition. Cedar is one *optional* backend (`maknae-authz-cedar`), not a pending spike; ADR-0003 is superseded.
 
+> **Amendment (2026-09-28, via [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md) decision 6).** On macOS the bootstrap credential is a System-keychain item bound to the signed binary under a root-held key, not a Secure Enclave seal. The trust-anchor row and the bare-metal consequence below are amended in place. Their "Hardware root of trust" label, its "hardware" locus, and the claim "the bare-metal path requires a hardware root of trust" hold on Linux; on macOS the credential is code-bound (decision 6), not hardware-rooted.
+
 ## Context
 
 Maknae's documentation and code have used the terms *DAC*, *MAC*, *RBAC*, *ABAC*, and *DCS* loosely and inconsistently. The cost has been real and recurring: the README described a "Data-Centric Security" design extension the code had already externalized; a refresh over-corrected to "a generic **DAC** access policy," conflating the code's operand name (`DAC`, the `Read` capability grammar in `maknae-config/authz.rs`) with traditional OS file-permission DAC; and reviewers repeatedly flagged apparent contradictions that were really vocabulary drift. A single authoritative vocabulary is needed before the docs harden around the wrong words.
@@ -42,7 +44,7 @@ These axes are independent: a control can be role-based *and* discretionary, or 
    | Classification ceiling — content at or below the declared LEVEL flows, above it is refused; unmarked is the system's lowest level (US `UNCLASSIFIED`, AUS `UNOFFICIAL`) *(added 2026-09-06, #148/#154)* | **MAC**, decided by **ABAC** (degenerate: one attribute over the declared system's level order (ADR-0022; US = the four-level EO 13526 order, AUS = the six-rung PSPF ladder) — compartments/releasability/need-to-know remain external) | trust plane (PDP), **in-repo** — `maknae-kernel::ceiling_authz` | the non-removable `ceiling` field of `Composition` (ADR-0008 decision 1); never `Permit`s; abstains on control plane |
    | SELinux type enforcement | **MAC** | OS | `OS_MAC` |
    | File permissions / ownership | **DAC** | OS | OS-enforced (not an `Authorizer` operand) |
-   | Hardware root of trust | *not access control* — trust anchor | hardware | TPM 2.0 / Secure Enclave (ADR-0018) |
+   | Hardware root of trust | *not access control* — trust anchor | hardware | TPM 2.0 on Linux; on macOS the System keychain, code-bound, not hardware (ADR-0018 decision 6) *(amended 2026-09-28)* |
 
    `DCS_MAC` / `OS_MAC` / `DAC` are the **conceptual operand labels** from `compose.rs`'s composition doc comment, not code symbols; the concrete symbols are the `Authorizer` trait (`maknae-security`) and the backend crates.
 
@@ -62,7 +64,7 @@ This ADR fixes vocabulary, the composition rule, and the no-bypass invariant. It
 ## Consequences
 
 - README and AGENTS.md adopt this vocabulary: no "generic DAC access policy"; instead RBAC-default / ABAC-via-DCS over the `maknae-security` seam, with mandatory clearance never waivable.
-- **The bare-metal path requires a hardware root of trust.** Because ADR-0018 seals the bare-metal bootstrap credential to an HRoT (TPM 2.0 / Secure Enclave), a Raspberry Pi with no TPM is not a bare-metal target. The Kubernetes path uses platform identity (Vault Kubernetes auth) with no secret at rest and needs no HRoT — so this consequence is scoped to bare-metal, not all deployments.
+- **The bare-metal path requires a hardware root of trust.** Because ADR-0018 seals the bare-metal bootstrap credential to an HRoT (TPM 2.0) on Linux, a Raspberry Pi with no TPM is not a bare-metal target; on macOS the credential is code-bound in the System keychain instead (ADR-0018 decision 6) *(amended 2026-09-28)*. The Kubernetes path uses platform identity (Vault Kubernetes auth) with no secret at rest and needs no HRoT — so this consequence is scoped to bare-metal, not all deployments.
 - Positive: a precise, NSS-aligned vocabulary that maps cleanly to NIST AC-3 enhancements. The no-bypass invariant is testable: `combine` structurally enforces mandatory *precedence* once a mandatory `Deny` is present, while the remaining conditions — that a mandatory operand is always composed, and that it fails closed — are kernel/backend construction invariants the acceptance tests hold (`combine`'s untyped `Vec<Verdict>` cannot enforce them on its own).
 - Negative / accepted: the code's **DAC** terminology (`authz.rs`'s "DAC authz policy schema") collides with OS-DAC until the follow-up disambiguation; the collision's meaning is documented here so it does not mislead.
 
