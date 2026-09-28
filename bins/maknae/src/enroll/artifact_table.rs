@@ -52,7 +52,7 @@ pub enum ContentKind {
     /// `transport.socket_path` key (the compiled Linux default cannot exist
     /// there, spec §4.6's `/usr/local/var/run/maknae` row note).
     DaemonYamlWithTransport,
-    /// The CLI's `maknae.yaml` (`core`+`vault`).
+    /// The CLI's `maknae.yaml` (`core`+`vault`; on macOS also `transport.socket_path`).
     CliYaml,
     /// A RoleID text file (`maknaed-approle-id` / `maknae-approle-id`) — a
     /// non-secret identifier, safe to write verbatim.
@@ -115,7 +115,7 @@ fn row(path: PathBuf, owner: Owner, mode: u32, content: ContentKind) -> Artifact
 /// derived home ∥ `--cli-dir`, spec §4.1's path-resolution rule — this function
 /// does not resolve it itself, keeping it pure). `macos` selects the platform
 /// branch (keychain pointer vs. `systemd-creds` `.cred`; Keychain vs. `.cred` for
-/// the CLI; the `transport` section written into the daemon's `maknae.yaml`).
+/// the CLI; the `transport` section written into both `maknae.yaml`s).
 /// `insecure_plaintext` adds the opt-out degraded-plaintext row.
 pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> Vec<Artifact> {
     let etc = Path::new("/etc/maknae");

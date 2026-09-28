@@ -23,6 +23,9 @@ const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
 
+/// The macOS daemon's socket path.
+pub const MACOS_DAEMON_SOCKET_PATH: &str = "/usr/local/var/run/maknae/maknaed.sock";
+
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
 const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 65_536..=16_777_216;
 /// The ceiling on both transport timeouts. Named and exported because the
