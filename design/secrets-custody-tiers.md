@@ -73,7 +73,7 @@ The pattern's contribution is identity chaining, not custody mechanics. Mapped o
 
 - Whether the store contract lives in `maknae-vault` (renamed, since one implementation would not be Vault) or in a new crate behind the existing `maknae-io`-style rule that I/O has one home.
 - Whether OpenBao is a tested target in CI (a container in the Linux lane) or a documented one. The license finding argues for tested.
-- What the macOS tier's principal boundary is for **provider keys** (for the bootstrap SecretID, ADR-0018 decision 6 answers it: the per-binary ACL plus each process's account check, against a non-administrator).
+- What the macOS tier's principal boundary is for **provider keys** (for the bootstrap SecretID, ADR-0018 decision 6 answers it: the per-binary ACL plus each process's account check, against a non-administrator). An administrator can approve a read in a console session, and the boundary depends on signing discipline and artifact custody (ADR-0018 decision 6).
 - Whether the enterprise tier's JWT path replaces AppRole entirely or sits beside it for the CLI, given ADR-0006's direction that clients never reach Vault at all.
 - How the boot evidence names the tier and the source kind, and whether `admin.status` (#214) reports it.
 
