@@ -51,3 +51,20 @@ mutation testing for security-critical crates is a **change-gated CI job**
 (runs on every PR touching a `mutants_crates` path, unconditionally on merge
 to `main`), zero missed mutants required. The SA-11/SA-11(1)/SA-15 mapping is
 unchanged; only the cadence description is superseded.
+
+## Amendment 2026-09-28 — the `unsafe` control is the workspace lint, the confinement gate and native clippy (ADR-0027)
+
+The Consequences bullet "Kernel crates carry `#![forbid(unsafe_code)]`; `unsafe` is confined to vetted dependencies (e.g., the `aws-lc-rs` FFI boundary) and tracked via `cargo-geiger` / `cargo-deny` policy in CI" was wrong in its tracking claim. No CI job ever ran `cargo-geiger`, and no gate tracked `unsafe`. `cargo-deny` is the supply-chain gate. It checks dependencies against the RustSec advisory database, which includes published unsoundness advisories, but it does not measure `unsafe`, and no tool in the repository does.
+
+The control in force is:
+
+- `[workspace.lints.rust] unsafe_code = "forbid"`, inherited by every member except `maknae-sys`. Some crates also carry `#![forbid(unsafe_code)]`.
+- `maknae-sys`, the one crate whose source may hold `unsafe`, under its own lints: `unsafe_code = "deny"` (so each item holding `unsafe` can allow it) and `forbid` for `unsafe_op_in_unsafe_fn`, `clippy::undocumented_unsafe_blocks` and `clippy::multiple_unsafe_ops_per_block`, so none of those can be allowed in source.
+- `ci/gates/unsafe-confinement.sh`. It fails CI if the workspace `forbid` weakens, if a member drops the workspace lints, if `maknae-sys`'s lint levels change, if the token `unsafe` appears in source outside `maknae-sys`, or if an unlisted package depends on it, if `maknae-sys` exports a macro or becomes a proc-macro crate, or if a tracked `.cargo/config` sets `rustflags` or `--cap-lints`.
+- `cargo clippy --locked -p maknae-sys --all-targets -- -D warnings` on the `darwin-native` lane, a required status check on `main`. This makes a missing `// SAFETY:` comment, or a block with more than one unsafe operation, a CI failure on the platform where the crate's `unsafe` compiles.
+
+[ADR-0027](ADR-0027-unsafe-code-is-confined-to-maknae-sys.md) records the decision.
+
+In the memory-safety row above, read "`#![forbid(unsafe_code)]` makes the boundary auditable" as: the workspace `forbid` and these gates make the boundary auditable, and the boundary has one named exception.
+
+In the "two honest boundaries" paragraph, "unsound `unsafe` in dependencies" now also covers `maknae-sys`'s own `unsafe`. Its soundness rests on the SAFETY arguments and ADR-0027's obligations, not on the compiler.
