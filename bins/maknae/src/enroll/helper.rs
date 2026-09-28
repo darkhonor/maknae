@@ -19,10 +19,6 @@ use zeroize::Zeroizing;
 // not flag them as dead_code (CI runs on Linux, where these are never used).
 #[cfg(target_os = "macos")]
 const KEYCHAIN_PROBE_SERVICE: &str = "maknae-enroll-probe";
-#[cfg(target_os = "macos")]
-const KEYCHAIN_CLI_SERVICE: &str = "maknae-cli";
-#[cfg(target_os = "macos")]
-const KEYCHAIN_CLI_ACCOUNT: &str = "maknae-secret-id";
 const PROBE_VALUE: &str = "maknae-enroll-probe-throwaway-value";
 
 pub async fn dispatch(args: HelperArgs) -> Result<(), EnrollError> {
@@ -365,11 +361,14 @@ fn seal_cli_secret_linux(
 #[cfg(target_os = "macos")]
 fn seal_cli_secret_keychain(secret: &Zeroizing<String>, verbose: bool) -> Result<(), EnrollError> {
     if verbose {
-        eprintln!("keychain: set generic password service={KEYCHAIN_CLI_SERVICE}");
+        eprintln!(
+            "keychain: set generic password service={}",
+            maknae_vault::CLI_KEYCHAIN_ITEM.service
+        );
     }
     security_framework::passwords::set_generic_password(
-        KEYCHAIN_CLI_SERVICE,
-        KEYCHAIN_CLI_ACCOUNT,
+        maknae_vault::CLI_KEYCHAIN_ITEM.service,
+        maknae_vault::CLI_KEYCHAIN_ITEM.account,
         secret.as_bytes(),
     )
     .map_err(|e| EnrollError::Command {

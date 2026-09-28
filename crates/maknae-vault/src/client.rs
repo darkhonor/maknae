@@ -1109,8 +1109,8 @@ mod tests {
     /// it — proving the two planes do not share a resolver. Tolerant of platform
     /// (the CLI's own order differs by `cfg!(target_os = "macos")`): on a
     /// non-macOS build with no user-creds file it falls through to the residual
-    /// plaintext file (`PlaintextPath`); on macOS it falls to the (stubbed)
-    /// Keychain and fails closed. Either outcome proves non-use of the Kernel's
+    /// plaintext file (`PlaintextPath`); on macOS it reads the operator's default
+    /// Keychain (#76). Either outcome proves non-use of the Kernel's
     /// `$CREDENTIALS_DIRECTORY` value — a regression that shared the resolver
     /// would instead return `Ok` with `CredentialSourceKind::CredentialsDirectory`
     /// and the KERNEL secret value, matching neither arm below.
@@ -1138,15 +1138,19 @@ mod tests {
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let _ = std::fs::remove_dir_all(&creds_dir);
 
+        let expected = if cfg!(target_os = "macos") {
+            CredentialSourceKind::Keychain
+        } else {
+            CredentialSourceKind::PlaintextPath
+        };
         match result {
             Ok(client) => assert_eq!(
                 client.secret_source(),
-                CredentialSourceKind::PlaintextPath,
-                "non-macOS CLI order must land on the residual plaintext file, not the kernel's $CREDENTIALS_DIRECTORY"
+                expected,
+                "the CLI order must land on its own source, not the kernel's $CREDENTIALS_DIRECTORY"
             ),
-            Err(VaultError::CredentialSource(_)) => {
-                // macOS: fell to the stubbed Keychain — also proves it did not
-                // read $CREDENTIALS_DIRECTORY (which would have succeeded).
+            Err(VaultError::Keychain { .. }) if cfg!(target_os = "macos") => {
+                // No trusted item in this runner's default keychain; $CREDENTIALS_DIRECTORY would have succeeded.
             }
             Err(e) => panic!("unexpected error proving the CLI plane uses its own order: {e:?}"),
         }

@@ -28,18 +28,47 @@ static KEYCHAIN_READ: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(target_os = "macos")]
 fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<String>, VaultError> {
+    read_item_in(Some(keychain), item)
+}
+
+#[cfg(target_os = "macos")]
+fn read_item_in(
+    keychain: Option<&Path>,
+    item: &KeychainItem,
+) -> Result<Zeroizing<String>, VaultError> {
     use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::os::macos::passwords::find_generic_password;
     let status = |e: security_framework::base::Error| VaultError::Keychain { status: e.code() };
     let _serial = KEYCHAIN_READ.lock().unwrap_or_else(|e| e.into_inner());
     let _no_ui = SecKeychain::disable_user_interaction().map_err(status)?;
-    let kc = SecKeychain::open(keychain).map_err(status)?;
+    let kc = keychain
+        .map(SecKeychain::open)
+        .unwrap_or_else(SecKeychain::default)
+        .map_err(status)?;
     let (password, _) =
         find_generic_password(Some(&[kc]), item.service, item.account).map_err(status)?;
     let raw = Zeroizing::new(password.to_vec());
     let text = std::str::from_utf8(&raw)
         .map_err(|_| VaultError::CredentialSource("the keychain item is not UTF-8".to_string()))?;
     Ok(Zeroizing::new(text.trim().to_string()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
+    read_cli_secret_in(None)
+}
+
+// `None` is the default keychain: the helper's `SecItemAdd` names none, so it wrote there.
+#[cfg(target_os = "macos")]
+fn read_cli_secret_in(keychain: Option<&Path>) -> Result<Zeroizing<String>, VaultError> {
+    read_item_in(keychain, &crate::CLI_KEYCHAIN_ITEM)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn read_cli_secret() -> Result<Zeroizing<String>, VaultError> {
+    Err(VaultError::CredentialSource(
+        "the keychain source exists only on macOS".to_string(),
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -173,6 +202,56 @@ mod tests {
         };
         assert!(matches!(
             read_item_from(&kc.path, &item),
+            Err(VaultError::Keychain { status: -25300 })
+        ));
+    }
+
+    fn scratch_with_cli_item(secret: Option<&str>) -> Scratch {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = Scratch {
+            path: dir.path().join("t76-cli.keychain"),
+            _dir: dir,
+        };
+        let p = kc.path.to_str().unwrap();
+        for args in [
+            ["create-keychain", "-p", "t76", p],
+            ["unlock-keychain", "-p", "t76", p],
+        ] {
+            assert!(Command::new("/usr/bin/security")
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        if let Some(s) = secret {
+            security_framework::os::macos::keychain::SecKeychain::open(&kc.path)
+                .unwrap()
+                .add_generic_password(
+                    crate::CLI_KEYCHAIN_ITEM.service,
+                    crate::CLI_KEYCHAIN_ITEM.account,
+                    s.as_bytes(),
+                )
+                .unwrap();
+        }
+        kc
+    }
+
+    #[test]
+    fn the_cli_item_is_read_by_its_service_and_account() {
+        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
+        let kc = scratch_with_cli_item(Some("sentinel-cli-t76"));
+        assert_eq!(
+            read_cli_secret_in(Some(&kc.path)).unwrap().as_str(),
+            "sentinel-cli-t76"
+        );
+    }
+
+    #[test]
+    fn an_unenrolled_cli_is_named() {
+        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
+        let kc = scratch_with_cli_item(None);
+        assert!(matches!(
+            read_cli_secret_in(Some(&kc.path)),
             Err(VaultError::Keychain { status: -25300 })
         ));
     }

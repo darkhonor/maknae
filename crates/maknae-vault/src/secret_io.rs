@@ -38,14 +38,6 @@ fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
     Ok(Zeroizing::new(text.trim().to_string()))
 }
 
-/// macOS Keychain SecretID lookup for the CLI (not yet implemented).
-/// TODO(PR-J2 spec §6.3): real Keychain read.
-fn read_keychain_secret() -> Result<Zeroizing<String>, VaultError> {
-    Err(VaultError::CredentialSource(
-        "macOS Keychain SecretID lookup is not yet implemented (PR-J2 spec §6.3)".to_string(),
-    ))
-}
-
 /// `systemd-creds decrypt --user <path> -` — decrypts a user-scoped credential file
 /// to stdout, captured straight into `Zeroizing` (never touches an intermediate
 /// on-disk plaintext copy). A real Linux implementation (not stubbed): the CLI's
@@ -117,7 +109,7 @@ pub(crate) fn read_egress_secret(
 pub(crate) fn read_cli_secret(src: &CliSecretSource) -> Result<Zeroizing<String>, VaultError> {
     match src {
         CliSecretSource::UserCreds(path) => read_systemd_creds_user(path),
-        CliSecretSource::Keychain => read_keychain_secret(),
+        CliSecretSource::Keychain => crate::keychain::read_cli_secret(),
         CliSecretSource::ResidualFile(path) => read_secret_credential(path).map(Zeroizing::new),
     }
 }
@@ -184,12 +176,21 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn keychain_read_fails_closed() {
         assert!(matches!(
             read_cli_secret(&CliSecretSource::Keychain),
             Err(VaultError::CredentialSource(_))
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_keychain_arm_reads_the_keychain() {
+        if let Err(VaultError::CredentialSource(m)) = read_cli_secret(&CliSecretSource::Keychain) {
+            panic!("the keychain arm refused without reading the keychain: {m}");
+        }
     }
 
     // ---- plaintext branches: gate enforced --------------------------------------
