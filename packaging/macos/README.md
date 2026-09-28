@@ -23,9 +23,9 @@ normative statement; this directory holds the packaging that follows from it.
 | Install/boot/uninstall verification | `smoke.sh phase1` (no root) / `phase2` (root) | phase 1 **green** on the `macos-26` runner (release.yml run 36358466995 on `main`, an ad-hoc signature); phase 2 **pending the macOS acceptance run (#76)** |
 | Signature + notarization | Developer ID Application (code + dylib) → Developer ID Installer (`productsign`) → `notarytool` → `stapler` | **seam built** (`build-pkg.sh`, declared via `MAKNAE_SIGN_IDENTITY` / `MAKNAE_INSTALLER_IDENTITY` / `MAKNAE_NOTARY_PROFILE`; unset = ad-hoc); every packaged Mach-O and the FIPS dylib is read back after signing — Hardened Runtime present, entitlements empty — and the build refuses otherwise (`build-pkg.sh`, `signing-lib.sh`) |
 
-> **`maknae-spifc` is deliberately not packaged.** CI builds three shipped binaries (`ci.yml:145`), but the Linux packages ship two (`build-deb.sh:63-64`, `maknae.spec:65-66`); macOS follows the packaging precedent, not the CI one.
+> **`maknae-spifc` is deliberately not packaged.** One manifest, `packaging/common/packaged-binaries.txt`, names the three binaries every package ships (`maknaed`, `maknae`, `maknae-egress`) and drives both the Linux build lanes (`build-deb.sh:72-75`, `ci/gates/packaged-binaries.sh`) and `build-pkg.sh:70-72`; `maknae-spifc`, a setup-only tool, is deliberately not in it (`packaged-binaries.txt:13`).
 >
-> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `postinstall` runs `launchctl disable` on both jobs on a fresh install. The flow is: install → `sudo maknae enroll` → create `/etc/maknae/egress-bounds.yaml` → start both jobs, as `docs/first-provider.md` step 5 does.
+> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on both jobs on a fresh install, and on the deputy alone on an upgrade from a package that did not ship it (`scripts/postinstall:74-80`). The flow is: install → `sudo maknae enroll` → create `/etc/maknae/egress-bounds.yaml` → start both jobs, as `docs/first-provider.md` step 5 does.
 
 ## Plane secrets: the System keychain
 
@@ -34,9 +34,12 @@ normative statement; this directory holds the packaging that follows from it.
 account `secret-id`), ACL'd to that plane's designated requirement, named by root-owned pointer
 files `private/maknaed-secret-id.keychain` and `egress/maknae-egress-secret-id.keychain` under
 `/etc/maknae`. Each process checks it runs as its own account before reading; the posture this
-gives is `code_bound` — no Secure Enclave route reaches a launchd daemon (ADR-0018 decision 6).
-Enroll checks root-install, Developer ID of one team, Hardened Runtime, no entitlements and a
-strong embedded designated requirement before writing (`keychain_write.rs:284-302`).
+gives is `code_bound` — no Secure Enclave route reaches a launchd daemon
+([ADR-0018](../../design/adr/ADR-0018-local-plane-authorization-deployment-model.md) decision 6).
+Enroll checks, in `bins/maknae/src/enroll/keychain_write.rs`: root-install (`check_install_path`,
+`:315ff`), Developer ID of one team (`own_team`, `:262-282`), and — per plane — Hardened Runtime,
+no entitlements and a strong embedded designated requirement before writing (`verify_release`,
+`:284-302`).
 
 The CLI's own SecretID is separate: a file-based (legacy) item in the operator's default keychain
 (usually login: service `maknae-cli`, account `maknae-secret-id`) — not Data Protection, not
@@ -102,11 +105,10 @@ demanded — and it PASSES.** One Developer ID over both the binary and the FIPS
 identical two files re-signed ad-hoc fail `rc 134` with *"mapping process and mapped file
 (non-platform) have different Team IDs"*, so the check was seen failing before it was trusted
 passing. **Consequence: `com.apple.security.cs.disable-library-validation` never has to exist on
-any path.** `maknae.entitlements`, `maknaed.entitlements` and `maknae-egress.entitlements` stay
-deliberately empty, and no Hardened Runtime exception reaches a shipped artifact. (The files are
-in `packaging/macos/`.) `build-pkg.sh` signs the dylib from the **same** variable as the
-executables, because signing the executables alone produces an artifact that only fails once
-installed.
+any path.** `packaging/macos/`'s `maknae.entitlements`, `maknaed.entitlements` and
+`maknae-egress.entitlements` stay deliberately empty, and no Hardened Runtime exception reaches a
+shipped artifact. `build-pkg.sh` signs the dylib from the **same** variable as the executables,
+because signing the executables alone produces an artifact that only fails once installed.
 
 ## The isolation delta, stated
 
@@ -138,9 +140,9 @@ The deltas that follow from that, stated rather than left implicit:
   (`crates/maknae-kernel/src/egress.rs:88-95,556-561`), not "nothing left". Recorded only; #76
   owes no change.
 - **(g)** `kickstart -k` restarts the definition launchd already holds (**Apple-documented**,
-  `launchctl(1)`). An upgrade that changes a plist needs `bootout` plus `bootstrap`; `postinstall`
-  uses `kickstart -k` (`postinstall:144-157`), so a future package that changes a plist must
-  change `postinstall` too.
+  `launchctl(1)`). An upgrade that changes a plist needs `bootout` plus `bootstrap`;
+  `scripts/postinstall` uses `kickstart -k` (`:144-157`), so a future package that changes a plist
+  must change `postinstall` too.
 - **(h)** The `.err` files are not rotated, and the deputy's can hold up to 4 KiB of conversation
   content per provider error (`docs/configuration.md` §6.2).
 
@@ -185,10 +187,13 @@ a macOS-only cost, and sequencing the two together avoids standing it up twice.
 Set `MAKNAE_SIGN_IDENTITY` / `MAKNAE_INSTALLER_IDENTITY` / `MAKNAE_NOTARY_PROFILE` to build signed
 and notarized; unset means ad-hoc, and a named-but-absent identity refuses rather than falling
 back (`build-pkg.sh:10-19,140-148`). With an identity set, the build also refuses entitled
-`.entitlements` files before signing (`build-pkg.sh:149-152`). `payload-xattr-clean` refuses an
-interactive local build on a SIP-enabled host (`com.apple.provenance`), so a signed package is
-built by a launchd-spawned process on the build host or on the `macos-26` runner
-(`payload-xattr-clean.sh:36-40`, `build-pkg.sh:233-238`).
+`.entitlements` files before signing (`build-pkg.sh:149-152`). `payload-xattr-clean` passes only in
+two measured contexts — a launchd-spawned process, or the `macos-26` GitHub Actions runner — and
+refuses an interactive local build on a SIP-enabled host (`com.apple.provenance`)
+(`payload-xattr-clean.sh:36-40`). That is where the gate passes, not where a **signed** package
+comes from: today only a launchd-spawned process on a build host that holds the identities can
+produce one. The release workflow runs on the runner, which holds no signing secrets, so it builds
+ad-hoc and runs `smoke.sh phase1` (`release.yml:123-128`, `build-pkg.sh:236-240`).
 
 ## Verification status
 
