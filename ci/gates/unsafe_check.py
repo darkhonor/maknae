@@ -9,13 +9,28 @@ SYS_LINTS = {
     "rust": {"unsafe_code": "deny", "unsafe_op_in_unsafe_fn": "forbid"},
     "clippy": {"undocumented_unsafe_blocks": "forbid", "multiple_unsafe_ops_per_block": "forbid"},
 }
+MIN_EDITION = 2021
 TOKEN = re.compile(r"\bunsafe\b")
 CHAR_LITERAL = re.compile(
     r"'(?:\\(?:u\{[0-9a-fA-F_]{1,6}\}|x[0-9a-fA-F]{2}|.)|[^\\'])'", re.DOTALL
 )
-RAW_START = re.compile(r'r(#*)"')
-MACRO_EXPORT = re.compile(r"#\s*\[\s*macro_export\b")
+RAW_START = re.compile(r'[bc]?r(#*)"')
+MACRO_EXPORT = re.compile(r"\bmacro_export\b")
+MACRO_RULES = re.compile(r"\bmacro_rules\s*!")
+ATTR_START = re.compile(r"#\s*!?\s*\[")
+PATH_ATTR = re.compile(r"\s*path\s*=")
+CFG_ATTR = re.compile(r"\s*cfg_attr\b")
+CFG_ATTR_PATH = re.compile(r"[(,]\s*path\s*=")
+INCLUDE = re.compile(r"\binclude\s*!")
+REEXPORT = re.compile(r"\bpub\s+(?:use\s+\{?\s*(?:::\s*)?|extern\s+crate\s+)maknae_sys\b")
+CARGO_CONFIG = re.compile(r"(?:^|/)\.cargo/config(?:\.toml)?$", re.IGNORECASE)
+BUILD_DOORS = {"rustc", "rustc-wrapper", "rustc-workspace-wrapper"}
+ENV_DOORS = {"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC"}
 UNREADABLE = (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, json.JSONDecodeError)
+
+
+def is_ident(ch):
+    return ch.isalnum() or ch == "_"
 
 
 def mask_noncode(source):
@@ -36,7 +51,7 @@ def mask_noncode(source):
                         out[pos] = " "
                 i = end
             else:
-                raw = RAW_START.match(source, i)
+                raw = None if i > 0 and is_ident(source[i - 1]) else RAW_START.match(source, i)
                 if raw:
                     raw_hashes = len(raw.group(1))
                     width = raw.end() - i
@@ -77,6 +92,16 @@ def mask_noncode(source):
     return "".join(out)
 
 
+def attributes(masked):
+    for match in ATTR_START.finditer(masked):
+        depth, i = 1, match.end()
+        while i < len(masked) and depth:
+            if masked[i] == "[": depth += 1
+            elif masked[i] == "]": depth -= 1
+            i += 1
+        yield match.start(), masked[match.end():i]
+
+
 def config_findings(value, where):
     found = []
     if isinstance(value, dict):
@@ -93,6 +118,33 @@ def config_findings(value, where):
     return found
 
 
+def lint_flag(token):
+    return token.startswith(("--cap-lints", "-A", "--allow", "-C"))
+
+
+def config_doors(parsed):
+    found = []
+    build = parsed.get("build")
+    if isinstance(build, dict):
+        for key in build:
+            if key.replace("_", "-") in BUILD_DOORS:
+                found.append(f"sets build.{key}")
+    alias = parsed.get("alias")
+    if isinstance(alias, dict):
+        for name, value in alias.items():
+            tokens = value.split() if isinstance(value, str) else [str(t) for t in value] if isinstance(value, list) else []
+            for token in tokens:
+                if lint_flag(token):
+                    found.append(f"alias.{name} passes a lint flag ({token})")
+    env = parsed.get("env")
+    if isinstance(env, dict):
+        for key in env:
+            upper = key.upper()
+            if upper in ENV_DOORS or upper.startswith("RUSTC_"):
+                found.append(f"sets env.{key}")
+    return found
+
+
 def load_toml(path, what, fails):
     try:
         return tomllib.loads(Path(path).read_text(encoding="utf-8"))
@@ -101,24 +153,26 @@ def load_toml(path, what, fails):
         return None
 
 
+def line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
 def main(argv):
-    root = Path(argv[1])
+    root = Path(argv[1]).resolve()
     sys_crate = argv[2]
     allow = set(argv[3].split())
-    sys_dir = f"crates/{sys_crate}/"
+    sys_label = f"crates/{sys_crate}/"
     try:
         packages = json.loads(Path(argv[4]).read_text(encoding="utf-8"))["packages"]
-        files = [f for f in Path(argv[5]).read_text(encoding="utf-8").split("\0") if f]
-        configs = [f for f in Path(argv[6]).read_text(encoding="utf-8").split("\0") if f]
+        tracked = [f for f in Path(argv[5]).read_text(encoding="utf-8").split("\0") if f]
     except (*UNREADABLE, KeyError) as e:
         print(f"FAIL: the cargo metadata or git listing cannot be parsed ({e}); nothing was examined")
         return 1
     if not packages:
         print("FAIL: cargo metadata resolved ZERO packages; nothing was examined")
         return 1
-    if not files:
-        print("FAIL: git ls-files listed ZERO .rs files; no source was examined")
-        return 1
+    files = [f for f in tracked if f.lower().endswith(".rs")]
+    configs = [f for f in tracked if CARGO_CONFIG.search(f)]
 
     fails = []
     workspace = load_toml(root / "Cargo.toml", "root Cargo.toml", fails)
@@ -128,20 +182,28 @@ def main(argv):
             fails.append('root Cargo.toml: [workspace.lints.rust] does not set unsafe_code = "forbid"')
 
     names = set()
+    package_dirs = {}
     for pkg in packages:
         name = pkg["name"]
         names.add(name)
         manifest = Path(pkg["manifest_path"])
+        try:
+            package_dirs[name] = manifest.resolve().parent.relative_to(root).as_posix()
+        except ValueError:
+            pass
         parsed = load_toml(manifest, f"{name}: {manifest}", fails)
         lints = parsed.get("lints") if parsed is not None else None
+        edition = str(pkg.get("edition", ""))
+        if not edition.isdigit() or int(edition) < MIN_EDITION:
+            fails.append(f"{name}: edition {edition} is below {MIN_EDITION}; the token scan lexes {MIN_EDITION} or later")
+        for target in pkg.get("targets", []):
+            if "proc-macro" in target.get("kind", []):
+                fails.append(f"{name}: target {target.get('name')} is a proc-macro; a macro would carry unsafe past unsafe_code (ADR-0027)")
         if name == sys_crate:
-            if manifest.resolve() != (root / sys_dir / "Cargo.toml").resolve():
-                fails.append(f"{sys_crate}: manifest is {manifest}, not {sys_dir}Cargo.toml")
+            if manifest.resolve() != (root / sys_label / "Cargo.toml").resolve():
+                fails.append(f"{sys_crate}: manifest is {manifest}, not {sys_label}Cargo.toml")
             if parsed is not None and lints != SYS_LINTS:
                 fails.append(f"{sys_crate}: [lints] must be exactly {SYS_LINTS}, found {lints}")
-            lib = (parsed or {}).get("lib", {})
-            if lib.get("proc-macro") is True or lib.get("proc_macro") is True:
-                fails.append(f"{sys_crate}: proc-macro = true; a macro would carry its unsafe past the safe surface (ADR-0027)")
         elif parsed is not None and lints != {"workspace": True}:
             fails.append(f"{name}: does not declare [lints] workspace = true (found {lints})")
         for dep in pkg["dependencies"]:
@@ -150,34 +212,50 @@ def main(argv):
     if sys_crate not in names:
         fails.append(f"{sys_crate}: not a workspace member")
 
+    sys_dir = package_dirs.get(sys_crate)
+    if sys_dir is not None:
+        for name, rel in package_dirs.items():
+            if name != sys_crate and (rel + "/").startswith(sys_dir + "/"):
+                fails.append(f"{name}: workspace member nested under {sys_dir}/; only {sys_crate} may live there")
+
+    def owner(rel):
+        best, best_len = None, -1
+        for name, pdir in package_dirs.items():
+            if (pdir in ("", ".") or rel.startswith(pdir + "/")) and len(pdir) > best_len:
+                best, best_len = name, len(pdir)
+        return best
+
     for rel in configs:
         parsed = load_toml(root / rel, rel, fails)
         if parsed is not None:
-            for finding in config_findings(parsed, ""):
+            for finding in config_findings(parsed, "") + config_doors(parsed):
                 fails.append(f"{rel}: {finding}; lint levels come only from manifests (ADR-0027)")
 
     scanned = 0
     for rel in files:
-        if rel.startswith(sys_dir):
-            try:
-                masked = mask_noncode((root / rel).read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError) as e:
-                fails.append(f"{rel}: cannot be read ({e}); it was not scanned")
-                continue
-            for match in MACRO_EXPORT.finditer(masked):
-                line = masked.count("\n", 0, match.start()) + 1
-                fails.append(f"{rel}:{line}: #[macro_export] in {sys_crate}; an exported macro would carry its unsafe past the safe surface (ADR-0027)")
-            continue
-        scanned += 1
         try:
-            source = (root / rel).read_text(encoding="utf-8")
+            masked = mask_noncode((root / rel).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as e:
             fails.append(f"{rel}: cannot be read ({e}); it was not scanned")
             continue
-        masked = mask_noncode(source)
+        for start, body in attributes(masked):
+            if PATH_ATTR.match(body) or (CFG_ATTR.match(body) and CFG_ATTR_PATH.search(body)):
+                fails.append(f"{rel}:{line_of(masked, start)}: #[path] attribute; it compiles a file the scan does not list (ADR-0027)")
+        for match in INCLUDE.finditer(masked):
+            fails.append(f"{rel}:{line_of(masked, match.start())}: include! macro; it compiles a file the scan does not list (ADR-0027)")
+        for match in REEXPORT.finditer(masked):
+            fails.append(f"{rel}:{line_of(masked, match.start())}: re-exports maknae_sys past SYS_CONSUMER_ALLOW (ADR-0027)")
+        if owner(rel) == sys_crate:
+            for match in MACRO_EXPORT.finditer(masked):
+                fails.append(f"{rel}:{line_of(masked, match.start())}: macro_export in {sys_crate}; an exported macro would carry its unsafe past the safe surface (ADR-0027)")
+            for match in MACRO_RULES.finditer(masked):
+                fails.append(f"{rel}:{line_of(masked, match.start())}: macro_rules! in {sys_crate}; it may define no macro (ADR-0027)")
+            continue
+        scanned += 1
         for match in TOKEN.finditer(masked):
-            line = masked.count("\n", 0, match.start()) + 1
-            fails.append(f"{rel}:{line}: unsafe outside {sys_dir}")
+            fails.append(f"{rel}:{line_of(masked, match.start())}: unsafe outside {sys_label}")
+    if scanned == 0:
+        fails.append(f"git ls-files listed ZERO .rs files outside {sys_label}; no source was examined")
 
     for f in fails:
         print(f"FAIL: {f}")

@@ -124,6 +124,8 @@ jobs:
           cargo install rust-audit-info --version "$RUST_AUDIT_INFO_VERSION" --locked
       - name: fmt
         run: cargo fmt --all --check
+      - name: Unsafe confinement (ADR-0027)
+        run: ci/gates/unsafe-confinement.sh
       - name: Panic strategy must be unwind (maknae-config catch_unwind boundary depends on it)
         run: |
           if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
@@ -164,8 +166,6 @@ jobs:
         run: cargo deny --locked check
       - name: P1 manifest lint
         run: ci/gates/p1-manifest-lint.sh
-      - name: Unsafe confinement (ADR-0027)
-        run: ci/gates/unsafe-confinement.sh
       - name: P2 invert-tree witness
         run: ci/gates/p2-invert-tree.sh
       - name: P2 artifact witness

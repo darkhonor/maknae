@@ -50,7 +50,7 @@ yaml-rust2 = "=0.13.0"
 # No-echo interactive Vault-token prompt (spec §4.1 step 2, `--token-file`-absent path).
 # Decided over a hand-rolled termios-via-nix no-echo read: small, actively maintained,
 # clears `cargo deny`, and keeps `unsafe` out of this crate. rpassword's own src/unix.rs
-# calls libc in `unsafe`; #403 tracks replacing it with a maknae-sys function. PR-J1 Task 8.
+# calls libc in `unsafe`; #403 tracks replacing it with nix's safe termios API. PR-J1 Task 8.
 rpassword = "7"
 
 [target.'cfg(target_os = "macos")'.dependencies]

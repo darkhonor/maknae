@@ -39,9 +39,9 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       descriptors safely. Without it the only paths were an `unsafe` block in precisely
 #       the crate AGENTS.md holds up as the minimal-TCB I/O primitive, where the workspace
 #       forbids it (ADR-0027 confines `unsafe` to maknae-sys), or holding bare RawFds with
-#       hand-rolled close-on-drop — the exact
-#       leak-on-the-refusal-path hazard ADR-0009 names. `default-features = false` keeps
-#       it to "std" + "net"; the fs/process/thread/event APIs are not compiled in.
+#       hand-rolled close-on-drop — the exact leak-on-the-refusal-path hazard ADR-0009
+#       names. `default-features = false` keeps it to "std" + "net"; the
+#       fs/process/thread/event APIs are not compiled in.
 #       Already resolved at 1.1.4 in Cargo.lock (transitively via tempfile), so this
 #       promotes a vetted edge rather than widening the graph.
 #       HELD AT 1.1.4 (2026-09-23). 1.1.5 does not compile under exactly the
