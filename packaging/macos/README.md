@@ -191,10 +191,9 @@ back (`build-pkg.sh:10-19,140-148`). With an identity set, the build also refuse
 two measured contexts — a launchd-spawned process, or the `macos-26` GitHub Actions runner — and
 refuses an interactive local build on a SIP-enabled host (`com.apple.provenance`)
 (`payload-xattr-clean.sh:36-40`). These are the build's constraints, not a procedure: **the
-repository documents no procedure for producing a Developer ID-signed package outside the
-maintainer's build host, and no signed release exists yet.** The release workflow runs on the
-runner, which holds no signing secrets, so it builds ad-hoc and runs `smoke.sh phase1`
-(`release.yml:123-128`, `build-pkg.sh:236-240`).
+repository documents no signed-build procedure, and no signed release exists yet.** The release
+workflow runs on the runner, which holds no signing secrets, so it builds ad-hoc and runs
+`smoke.sh phase1` (`release.yml:123-128`, `build-pkg.sh:236-240`).
 
 ## Verification status
 
