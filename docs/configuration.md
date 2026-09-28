@@ -522,7 +522,7 @@ provider:
 
   What #308 did fix is the *vocabulary*: all three are now mount-relative and `data/`-free, so the first relation is a plain string comparison instead of a transformation between two coordinate systems. What it did **not** fix, and cannot, is that **a Terraform-versus-host mismatch still boots clean and becomes a 403 at the credential read** — that is #307's mechanism and it survives this change, because nothing in the boot path reads the grant.
 - **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has **three** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*`, and since #240b a `vault` block (`addr`, and optionally `approle_mount`) saying where the deputy redeems that grant *(corrected 2026-09-14: this said "exactly two"; **an existing two-key file now stops `maknaed` from booting** on a host with a registered provider, naming the missing block — add it before upgrading)* — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`), if it was read but its parser refused it (`Refused`, naming the reason — a missing `vault` block, an unknown key), or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
-- **The deputy logs in to Vault and reads the key (#240b, 2026-09-14).** *(Superseded: this bullet said "No Vault client is constructed yet — and that is now the ONLY gap", that `main.rs` used `NoCredentialSource`, and that the read waited on #240. All three stopped being true in #240b.)* `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID from `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. There is **no plaintext fallback and no SEP path** for the deputy: without `$CREDENTIALS_DIRECTORY` it refuses to start, naming the reason (macOS custody is #227's). **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **With a `provider` registered, `maknaed` routes every permitted `session.prompt` to the deputy** over the socket §6.2 names, under the deadline §6.2 sets; with none registered the backend is `Unavailable` and nothing leaves *(2026-09-15: the last item on #240; this sentence said it landed separately)*.
+- **The deputy logs in to Vault and reads the key (#240b).** `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID. On Linux that is `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. On macOS it is the System-keychain item that `egress/maknae-egress-secret-id.keychain` names (ADR-0018 decision 6). There is **no plaintext fallback**: with neither source the deputy refuses to start, naming the reason. **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **With a `provider` registered, `maknaed` routes every permitted `session.prompt` to the deputy** over the socket §6.2 names, under the deadline §6.2 sets; with none registered the backend is `Unavailable` and nothing leaves.
 - `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
 
 ### 6.1.1 The user-side `provider` block (`~/.maknae`, #372)
@@ -561,9 +561,10 @@ egress:
 ```
 
 - **`socket_path`** — the Unix socket the deputy accepts on. Linux packaging creates it by
-  socket activation at the default path; macOS (#227) will need the `/usr/local/var/run`
-  spelling here, as `transport.socket_path` does. A non-string or empty value refuses boot
-  (`InvalidEgress`).
+  socket activation at the default path; on macOS the deputy binds
+  `/usr/local/var/run/maknae-egress/egress.sock` itself (its launchd job's `--bind`), and
+  enroll writes that path here and the daemon's own `transport.socket_path`. A non-string
+  or empty value refuses boot (`InvalidEgress`).
 - **`deadline_ms`** — the kernel's outer bound on one send to the deputy. It replaced
   `transport.read_timeout_ms` in that role: five seconds was a frame read timeout, never a
   provider deadline. The default exceeds the deputy's worst-case wall time on one request
@@ -591,24 +592,27 @@ egress:
   non-2xx, the deputy reads at most 4 KiB of the body, masks the provider key wherever it
   appears, escapes everything outside printable ASCII and writes one line:
   `maknae-egress: provider answered 400 (conversation c…): <body>`. On Linux that is
-  `journalctl -u maknae-egress`; the macOS deputy is not packaged yet (#227). Neither the
+  `journalctl -u maknae-egress`; on macOS it is the deputy's stderr file,
+  `/usr/local/var/log/maknae-egress/maknae-egress.err`, which nothing rotates. Neither the
   trail nor the subject's terminal carries the body. **The journal line can carry
   conversation content:** some OpenAI-compatible servers quote the offending request in a
   `400`/`422` body, so up to 4 KiB of the prompt — including file content the agent read —
   may be written to the journal, outside the trail's never-the-content rule. Treat the
   deputy's journal as holding conversation content, and limit who can read it (on Linux,
-  root and the `systemd-journal`, `adm` and — on Enterprise Linux — `wheel` groups). A
-  journal forwarded to syslog (`/var/log/messages` through rsyslog's `imjournal`) or to a
-  remote collector carries the content too.
+  root and the `systemd-journal`, `adm` and — on Enterprise Linux — `wheel` groups; on
+  macOS, root and the `_maknae-egress` group, through the file's `root:_maknae-egress
+  0750` directory). A journal forwarded to syslog (`/var/log/messages` through rsyslog's
+  `imjournal`) or to a remote collector carries the content too.
 - **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
-  by name if the account does not exist or cannot be looked up — on macOS that account
-  arrives with #227's packaging, so until then a registered provider refuses boot there. With no provider the
-  backend is `Unavailable`, the account is never looked up, and the section is parsed but
-  idle. Whether the deputy's socket exists is checked per request (`egress backend not
-  ready` in the trail), not at boot: the socket unit and the daemon start independently —
+  by name if the account does not exist or cannot be looked up — the macOS package creates
+  it (`preinstall`). With no provider the backend is `Unavailable`, the account is never
+  looked up, and the section is parsed but idle. Whether the deputy's socket exists is
+  checked per request (`egress backend not ready` in the trail), not at boot: the socket unit and the daemon start independently —
   and **nothing enables the socket unit for you**: `sudo systemctl enable --now
-  maknae-egress.socket` once `egress-bounds.yaml` is complete, or every permitted prompt is
+  maknae-egress.socket` once `egress-bounds.yaml` is complete (on macOS, `sudo launchctl
+  enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system
+  /Library/LaunchDaemons/io.maknae.maknae-egress.plist`), or every permitted prompt is
   refused as not ready (the install READMEs and enroll's closing hint carry the step).
 - Both keys are disclosed by `admin.config.show`; neither is a credential.
 
@@ -737,7 +741,7 @@ override the base **section-by-section**. Example directory:
 ```
 /etc/maknae/                 # 750, root-owned
 ├── maknae.yaml              # 640, root-owned — core (+ inline sections)
-├── egress-bounds.yaml       # 0644 root:root — NOT a config.d member; read by BOTH daemons (see the banner below)
+├── egress-bounds.yaml       # 0644, root-owned (root:wheel on macOS) — NOT a config.d member; read by BOTH daemons (see the banner below)
 └── config.d/                # 750, root-owned
     └── 10-provider.yaml     # 640, root-owned — the `provider` section (§6.1)
 ```
