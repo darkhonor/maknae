@@ -20,8 +20,8 @@ normative statement; this directory holds the packaging that follows from it.
 | `_maknae` + `_maknae-egress` daemon users | `dscl` in the installer `preinstall` | **authored** (`scripts/preinstall`) |
 | **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped to `/usr/local/lib/maknae`, pinned by **absolute install name** | **shipped** |
 | `.pkg` installer | `pkgbuild` → `productbuild` | **built** (`dist/Maknae-<version>-arm64.pkg`) |
-| Install/boot/uninstall verification | `smoke.sh phase1` (no root) / `phase2` (root) | phase 1 **green** on the `macos-26` runner (release.yml run 36358466995 on `main`, an ad-hoc signature); phase 2 **pending the macOS acceptance run (#76)** |
-| Signature + notarization | Developer ID Application (code + dylib) → Developer ID Installer (`productsign`) → `notarytool` → `stapler` | **seam built** (`build-pkg.sh`, declared via `MAKNAE_SIGN_IDENTITY` / `MAKNAE_INSTALLER_IDENTITY` / `MAKNAE_NOTARY_PROFILE`; unset = ad-hoc); every packaged Mach-O and the FIPS dylib is read back after signing — Hardened Runtime present, entitlements empty — and the build refuses otherwise (`build-pkg.sh`, `signing-lib.sh`) |
+| Install/boot/uninstall verification | `smoke.sh phase1` (no root) / `phase2` (root) | phase 1 **green** on the `macos-26` runner (release.yml run 36358466995 on `main`, an ad-hoc signature); phase 2 **green** on a notarized Developer ID package (0.0.81, macOS 26 on Apple Silicon: 0 failures) |
+| Signature + notarization | Developer ID Application (code + dylib) → Developer ID Installer (`productsign`) → `notarytool` → `stapler` | **built** — a notarized Developer ID package (0.0.81) was built locally with `build-pkg.sh` and installed; no release was published (`build-pkg.sh`, declared via `MAKNAE_SIGN_IDENTITY` / `MAKNAE_INSTALLER_IDENTITY` / `MAKNAE_NOTARY_PROFILE`; unset = ad-hoc); every packaged Mach-O and the FIPS dylib is read back after signing — Hardened Runtime present, entitlements empty — and the build refuses otherwise (`build-pkg.sh`, `signing-lib.sh`) |
 
 > **`maknae-spifc` is deliberately not packaged.** One manifest, `packaging/common/packaged-binaries.txt`, names the three binaries every package ships (`maknaed`, `maknae`, `maknae-egress`) and drives both the Linux build lanes (`build-deb.sh:72-75`, `ci/gates/packaged-binaries.sh`) and `build-pkg.sh:70-72`; `maknae-spifc`, a setup-only tool, is deliberately not in it (`packaged-binaries.txt:13`).
 >
@@ -44,8 +44,8 @@ no entitlements and a strong embedded designated requirement before writing (`ve
 The CLI's own SecretID is separate: a file-based (legacy) item in the operator's default keychain
 (usually login: service `maknae-cli`, account `maknae-secret-id`) — not Data Protection, not
 covered by decision 6 (#116 removes it). `uninstall.sh` deletes only the two plane items
-(`uninstall.sh:61-71`), exiting non-zero if either remains (`uninstall.sh:64,125-127`); its
-root-path run is pending the macOS acceptance run (#76). Remove the CLI item yourself:
+(`uninstall.sh:61-71`), exiting non-zero if either remains (`uninstall.sh:64,125-127`); smoke
+phase 2 runs it as root, and both plane items were removed. Remove the CLI item yourself:
 `security delete-generic-password -s maknae-cli -a maknae-secret-id`.
 
 ## The FIPS module is a dylib on macOS, and the package must carry it

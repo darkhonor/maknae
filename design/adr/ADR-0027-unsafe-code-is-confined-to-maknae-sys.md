@@ -16,7 +16,7 @@ Two calls were measured on macOS 26.6 (Apple Silicon, 2026-09-28), with a `000` 
 - `open(O_SEARCH)` needs search permission on the directory itself, and was refused with `EACCES`.
 - `getattrlist(ATTR_CMN_FULLPATH)` needs search permission on the ancestors only, and succeeded. In every case where both calls succeeded, it returned the same string as `F_GETPATH`, byte for byte. Those cases included `/tmp` → `/private/tmp`, a final-component symlink, and a case-mismatched name.
 
-The real case, `_maknae` resolving another user's `0750` home, is pending the macOS acceptance run (#76).
+The real case, `_maknae` resolving another user's `0750` home, is pending the macOS acceptance run (#76). *(Measured 2026-09-28, #76: on a notarized install, `maknaed` running as `_maknae` resolved the operator's default `0750` home and booted.)*
 
 `nix` 0.31 does not wrap `getattrlist`. `libc` declares it, and calling it is `unsafe`.
 
@@ -80,7 +80,7 @@ The real case, `_maknae` resolving another user's `0750` home, is pending the ma
 ## Consequences
 
 - #368's home half: on macOS, `resolve_dir` needs no permission on the directory it resolves. The regular-file descriptor half of #368 is separate and still open.
-- A real `_maknae` boot against a `0750` home, and an autofs or NFS home, are unmeasured; both are checked at the macOS acceptance run (#76). `open(O_DIRECTORY)` triggers an automount, and whether `getattrlist` does is not known.
+- A real `_maknae` boot against a `0750` home, and an autofs or NFS home, are unmeasured; both are checked at the macOS acceptance run (#76). *(2026-09-28, #76: the `0750` home is measured — `_maknae` booted against it. An autofs or NFS home was not measured and remains unmeasured.)* `open(O_DIRECTORY)` triggers an automount, and whether `getattrlist` does is not known.
 - On macOS, `resolve_dir` and `verify_delegated` now reach the kernel's path by two different calls. Their agreement is held by the test `full_path_agrees_with_f_getpath_byte_for_byte`, not by the two sharing one resolver. That test runs on the `darwin-native` CI lane, which runs whenever Rust changes.
 - The untrusted `maknae` CLI links `maknae-sys` through `maknae-io` on macOS, because `maknae enroll` calls `resolve_dir`. Its only surface there is the safe path query `full_path`; the CLI gains no other entry point into `unsafe` code.
 - **What CI enforces for `macos.rs`.** `darwin-native` runs its tests, checks that they were collected, and runs clippy under decision 2's levels. Its T1 coverage floor is enforced only where `coverage-tiers.sh` runs on a macOS host: the opt-in pre-push hook and local runs. The CI coverage lane is Linux, where the file does not compile, and `coverage-tiers.sh` cannot be scoped to one crate. Mutation testing of `macos.rs` is local only: the CI mutation lane is paused project-wide and runs on Linux, where the file is excluded. The zero-missed evidence is reported in the PR that changes it. The parser, `reply.rs`, is T1-enforced on the Linux CI lane and mutated on the Linux lane when that lane runs.

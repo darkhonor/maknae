@@ -124,9 +124,11 @@ Provisioning and at-rest protection of these SecretIDs is the job of **`maknae e
 (ADR-0018): the daemon's bootstrap SecretID is protected at rest and decrypted only into
 memory at startup: on Linux a `_maknae`-owned credential **sealed to TPM 2.0**; on macOS a
 System-keychain item, under that keychain's root-held key, that only the signed daemon can
-read (an administrator can approve a read in a console session, and root can decrypt it
-off the host (inferred) — ADR-0018 decision 6; a real install is pending the macOS
-acceptance run (#76)).
+read (on a real install the signed daemon reads it, and a read through `/usr/bin/security`
+(not on the item's ACL), in a console session, of the daemon's item as the operator and of
+the deputy's item as `_maknae`, raised an administrator-approval dialog each time; denied, it exited 128 (`errSecUserCanceled`, -128). An
+administrator can approve a read in a console session, and root can decrypt it off the
+host (inferred) — ADR-0018 decision 6).
 The CLI SecretID is operator-owned. **Response-wrapping** (`-wrap-ttl`) is retained only
 where a SecretID crosses an **untrusted delivery channel** (e.g. remote AppRole
 provisioning to another host), not for local bootstrap credentials. (The Kubernetes path

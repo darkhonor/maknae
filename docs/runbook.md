@@ -542,7 +542,7 @@ sudo maknae enroll \
 ```
 
 - **`--vault-addr`** must be `https://` and carry an explicit port.
-- **CA:** give exactly one of `--vault-ca` or `--ca-dir`.
+- **CA:** give exactly one of `--vault-ca` or `--ca-dir`. The `--vault-ca` bundle must hold every certificate needed to anchor Vault's server certificate, and each certificate in it is a trust anchor: if Vault serves only its leaf, include the issuing intermediate as well as the root.
 - **Operator token:** you are prompted for it; `--token-file <path>` reads it from a file instead. `VAULT_TOKEN` is scrubbed from the environment and ignored.
 - **Run it through `sudo`.** Bare root is refused, because enroll takes the operator's identity from `SUDO_UID`/`SUDO_USER`.
 - **Run it from an unconfined session.** On SELinux, `sudo su -l <operator>` from an account mapped to `staff_u` lands in `sysadm_r:sysadm_t`, which is denied `/dev/tpmrm0`, and enroll's seal check fails with `no hardware root of trust available`. Run enroll from a session whose `id -Z` shows `unconfined_u`, such as a direct login as an operator on the default `unconfined_u` mapping. An operator mapped to a confined SELinux user is not supported for enrollment.
@@ -752,7 +752,9 @@ Since #388 the agent replaces an existing file only if it has read that file in 
 
 ### 13. Custody check (manual)
 
-The custody assertion is **not built** (ADR-0023, ADR-0026). Check it by hand:
+The custody assertion is **not built** (ADR-0023, ADR-0026). Check it by hand.
+
+**On Linux:**
 
 ```bash
 id                                                   # the operator: in maknae, not _maknae or _maknae-egress
@@ -773,6 +775,21 @@ sudo -u _maknae test -r /etc/maknae/egress/maknae-egress-approle-id && echo "REA
   - The operator's `not readable` proves only that `/etc/maknae` (`root:_maknae 750`) cannot be traversed. Judge the file modes from the `stat` output. The same holds for `_maknae` and `egress/` (`root:_maknae-egress 750`).
   - The runtime credential exists only once the deputy has started. Run `maknae agent` once, and confirm `runtime credential present` before reading its `test -r` line.
 - **What this check does not cover:** the operator's own `maknae-enroll` token can mint a `maknae-egress` SecretID in Vault. That lies outside the file-custody claim; state it alongside the result.
+
+**On macOS**, run this from a console session:
+
+```bash
+id                                                   # the operator: in maknae, not _maknae or _maknae-egress
+sudo stat -f '%Su:%Sg %Lp %N' /etc/maknae /etc/maknae/private /etc/maknae/egress \
+  /etc/maknae/private/maknaed-secret-id.keychain /etc/maknae/egress/maknae-egress-secret-id.keychain \
+  /etc/maknae/egress/maknae-egress-approle-id
+ls -led /etc/maknae
+sudo -u _maknae security find-generic-password -s io.maknae.maknae-egress -a secret-id -w /Library/Keychains/System.keychain >/dev/null; echo "exit $?"
+security find-generic-password -s io.maknae.maknaed -a secret-id -w /Library/Keychains/System.keychain >/dev/null; echo "exit $?"
+```
+
+- **Expected owners and modes:** `/etc/maknae` and `private/` `root:_maknae 750`; `egress/` `root:_maknae-egress 750`; `maknaed-secret-id.keychain` `root:_maknae 640`; `maknae-egress-secret-id.keychain` and the RoleID `root:_maknae-egress 640`; `ls -led` shows one ACL entry, `user:_maknae-egress allow list,search`.
+- **Expected reads:** each `security` read raises an administrator-approval dialog; deny it, and the command exits 128 (`errSecUserCanceled`, -128). **Deny both dialogs:** an administrator who approves one reads that plane's Vault SecretID (ADR-0018 decision 6); `>/dev/null` keeps it off the terminal. If one was approved, rotate it by running step 3's `sudo maknae enroll` again with the same arguments. The same "does not cover" note applies.
 
 ### 14. SELinux
 
